@@ -4749,7 +4749,6 @@ dependencies = [
 name = "librefang-runtime"
 version = "2026.5.12-beta.11"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bytes",

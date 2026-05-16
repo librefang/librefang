@@ -217,18 +217,100 @@ pub struct ExecutionResult {
 }
 
 /// Errors from sandbox operations.
+///
+/// First concrete migration under the error-contracts effort (#3576):
+/// the inner helpers (`host_call`, `read_guest_bytes`, `write_guest_json`)
+/// used to thread `anyhow::Result` and erase variant info at the host_call
+/// boundary, leaving callers to string-match. They now return typed
+/// `SandboxError` directly.
+///
+/// Source-chain preservation is variant-specific:
+/// - [`SandboxError::Json`] and [`SandboxError::Wasmtime`] use `#[from]`,
+///   so `.source()` returns the wrapped `serde_json::Error` /
+///   `wasmtime::Error` and a `downcast_ref::<_>()` recovers the concrete
+///   cause. These are the host-helper-internal variants and (per their
+///   own doc comments) do not surface past the `host_call` guest-facing
+///   envelope under current code paths.
+/// - The lifecycle-stage variants ([`SandboxError::Compilation`],
+///   [`SandboxError::Instantiation`], [`SandboxError::Execution`],
+///   [`SandboxError::AbiError`]) still flatten to `String` at the
+///   construction site via `.map_err(|e| Variant(e.to_string()))`. This
+///   is deliberate: the cross-crate regression
+///   `librefang-kernel::error::sandbox_error_display_is_unchanged` pins
+///   the Display output of these variants byte-for-byte, so the legacy
+///   stringly-typed shape is preserved on purpose. Their `.source()`
+///   returns `None`; the message is the cause.
+///
+/// `#[non_exhaustive]` is set so future variants can be added without
+/// breaking external `match`es — downstream callers (e.g.
+/// `librefang-kernel::error::KernelError::WasmSandbox`) already handle
+/// unknown variants through an `other => …` arm or a `matches!` shape.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SandboxError {
+    /// WASM module compilation failed (invalid bytes, unsupported feature,
+    /// or wasmtime engine init failed).
     #[error("WASM compilation failed: {0}")]
     Compilation(String),
+
+    /// WASM module instantiation failed (linker missing host imports,
+    /// guest start trap, etc.).
     #[error("WASM instantiation failed: {0}")]
     Instantiation(String),
+
+    /// WASM execution failed at runtime — wraps a trap, host serialization
+    /// failure, or join error. Covers the wall-clock timeout case too
+    /// (preserves the legacy "timed out after Ns" string the kernel-side
+    /// regression in `librefang-kernel::error::sandbox_error_display_is_unchanged`
+    /// pins).
     #[error("WASM execution failed: {0}")]
     Execution(String),
+
+    /// The per-invocation fuel budget was exhausted (`Trap::OutOfFuel`).
+    /// Distinct variant so upstream surfaces a quota error (e.g. HTTP 408)
+    /// instead of a generic 500.
     #[error("Fuel exhausted: skill exceeded CPU budget")]
     FuelExhausted,
+
+    /// The guest violated the host ABI — missing required export, ptr+len
+    /// overflow, out-of-bounds slice, oversized result, or malformed
+    /// guest JSON output.
     #[error("Guest ABI violation: {0}")]
     AbiError(String),
+
+    /// A JSON (de)serialization step inside the host helpers failed.
+    ///
+    /// Captured at host-helper call sites for `?`-ergonomics. The outer
+    /// `host_call` closure (see `register_host_functions`) catches every
+    /// `Err(SandboxError)` and re-wraps it into a guest-facing JSON
+    /// envelope (`{"error": "host_call failed: ..."}`) with `.unwrap_or(0)`,
+    /// so external consumers reaching `SandboxError` via
+    /// `KernelError::WasmSandbox` will not observe this variant under any
+    /// current code path — the host-call boundary is the only place the
+    /// helpers run, and that boundary swallows the typed value into a
+    /// `String` envelope before returning. The typed shape is kept anyway
+    /// to preserve the `serde_json::Error` source chain for future direct-
+    /// surface call sites and for in-crate `tracing::error!(error = %err)`
+    /// logging, which currently sees the full chain.
+    #[error("JSON (de)serialization failed: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// A `wasmtime` API call from the host-side dispatch helpers failed
+    /// (e.g. `TypedFunc::call`, `Caller::get_export`-wrapped lookups).
+    ///
+    /// Same caveat as [`SandboxError::Json`]: only constructed inside
+    /// `host_call` / `write_guest_json`, and the host_call closure
+    /// re-wraps Err into a guest-facing JSON envelope before returning,
+    /// so external consumers via `KernelError::WasmSandbox` will not see
+    /// this variant in current code paths. The typed shape preserves
+    /// the wasmtime error so its Display is recoverable via `.source()`;
+    /// note that `wasmtime::Error` itself does not implement
+    /// `std::error::Error` (it only `Deref`s to `dyn Error + Send +
+    /// Sync`), so a downcast to a wasmtime trap kind has to go through
+    /// the wasmtime-internal type behind that `Deref` rather than the
+    /// `wasmtime::Error` newtype.
+    #[error("wasmtime call failed: {0}")]
+    Wasmtime(#[from] wasmtime::Error),
 }
 
 /// The WASM sandbox engine.
@@ -583,9 +665,32 @@ impl WasmSandbox {
                         Ok(packed) => packed,
                         Err(error) => {
                             tracing::error!(agent = %caller.data().agent_id, error = %error, "host_call failed");
+                            // Preserve the pre-#3576 guest-visible envelope
+                            // text exactly. Before the typed-error migration
+                            // `error` was an `anyhow::Error` whose Display
+                            // was just the bare message ("host_call request
+                            // length invalid: ..."). After migration each
+                            // `SandboxError` variant prepends its own
+                            // category prefix ("Guest ABI violation: ...",
+                            // "WASM execution failed: ...", etc.). For
+                            // the guest-facing envelope we strip that
+                            // category prefix back off so guest-side string
+                            // matching against the JSON `error` field
+                            // continues to work byte-for-byte; the host log
+                            // line above keeps the full typed Display for
+                            // operator visibility.
+                            let guest_msg = match &error {
+                                SandboxError::AbiError(s)
+                                | SandboxError::Compilation(s)
+                                | SandboxError::Instantiation(s)
+                                | SandboxError::Execution(s) => s.clone(),
+                                SandboxError::Json(e) => e.to_string(),
+                                SandboxError::Wasmtime(e) => e.to_string(),
+                                other => other.to_string(),
+                            };
                             Self::write_guest_json(
                                 &mut caller,
-                                &json!({ "error": format!("host_call failed: {error}") }),
+                                &json!({ "error": format!("host_call failed: {guest_msg}") }),
                             )
                             .unwrap_or(0)
                         }
@@ -679,7 +784,7 @@ impl WasmSandbox {
         caller: &mut Caller<'_, GuestState>,
         request_ptr: i32,
         request_len: i32,
-    ) -> anyhow::Result<i64> {
+    ) -> Result<i64, SandboxError> {
         // SECURITY: Reject oversized or negative host_call request payloads
         // before deserialising (Bug #3866). `request_len` is i32 from the
         // guest ABI; a negative value as usize wraps to a huge number. The
@@ -687,13 +792,19 @@ impl WasmSandbox {
         // depth is bounded by serde_json's default RECURSION_LIMIT of 128
         // since we never call `disable_recursion_limit`.
         if request_len < 0 || request_len as usize > MAX_HOST_CALL_REQUEST_BYTES {
-            anyhow::bail!(
-                "host_call request length invalid: {} (max {MAX_HOST_CALL_REQUEST_BYTES})",
-                request_len
-            );
+            return Err(SandboxError::AbiError(format!(
+                "host_call request length invalid: {request_len} (max {MAX_HOST_CALL_REQUEST_BYTES})"
+            )));
         }
         let request_bytes = Self::read_guest_bytes(caller, request_ptr, request_len, "host_call")?;
-        let request: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+        // Attribute the deserialization site explicitly so the guest-facing
+        // envelope and the host log line keep the directional breadcrumb
+        // the pre-#3576 code carried ("host_call request JSON: ..."). The
+        // matching outbound site (~line 604) does the same for the guest's
+        // *result* JSON ("Invalid JSON output from guest: ..."), so the
+        // two sides remain symmetric and distinguishable at a glance.
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes)
+            .map_err(|e| SandboxError::AbiError(format!("host_call request JSON: {e}")))?;
         let method = request
             .get("method")
             .and_then(|m| m.as_str())
@@ -755,19 +866,21 @@ impl WasmSandbox {
         ptr: i32,
         len: i32,
         op: &str,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, SandboxError> {
         let memory = caller
             .get_export("memory")
             .and_then(|e| e.into_memory())
-            .ok_or_else(|| anyhow::anyhow!("{op}: no memory export"))?;
+            .ok_or_else(|| SandboxError::AbiError(format!("{op}: no memory export")))?;
 
         let start = ptr as usize;
         let end = start
             .checked_add(len as usize)
-            .ok_or_else(|| anyhow::anyhow!("{op}: pointer overflow"))?;
+            .ok_or_else(|| SandboxError::AbiError(format!("{op}: pointer overflow")))?;
         let data = memory.data(&mut *caller);
         if end > data.len() {
-            anyhow::bail!("{op}: pointer out of bounds");
+            return Err(SandboxError::AbiError(format!(
+                "{op}: pointer out of bounds"
+            )));
         }
 
         Ok(data[start..end].to_vec())
@@ -776,28 +889,33 @@ impl WasmSandbox {
     fn write_guest_json(
         caller: &mut Caller<'_, GuestState>,
         value: &serde_json::Value,
-    ) -> anyhow::Result<i64> {
+    ) -> Result<i64, SandboxError> {
+        // `serde_json::Error` and `wasmtime::Error` both flow via `#[from]`
+        // into typed `SandboxError` variants — keeps `?` ergonomic without
+        // erasing the source chain the way `anyhow::Error` used to.
         let response_bytes = serde_json::to_vec(value)?;
         let len = response_bytes.len() as i32;
 
         let alloc_fn = caller
             .get_export("alloc")
             .and_then(|e| e.into_func())
-            .ok_or_else(|| anyhow::anyhow!("host_call: no alloc export"))?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: no alloc export".into()))?;
         let alloc_typed = alloc_fn.typed::<i32, i32>(&mut *caller)?;
         let ptr = alloc_typed.call(&mut *caller, len)?;
 
         let memory = caller
             .get_export("memory")
             .and_then(|e| e.into_memory())
-            .ok_or_else(|| anyhow::anyhow!("host_call: no memory export"))?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: no memory export".into()))?;
         let dest_start = ptr as usize;
         let dest_end = dest_start
             .checked_add(response_bytes.len())
-            .ok_or_else(|| anyhow::anyhow!("host_call: response pointer overflow"))?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: response pointer overflow".into()))?;
         let mem_data = memory.data_mut(caller);
         if dest_end > mem_data.len() {
-            anyhow::bail!("host_call: response exceeds memory bounds");
+            return Err(SandboxError::AbiError(
+                "host_call: response exceeds memory bounds".into(),
+            ));
         }
         mem_data[dest_start..dest_end].copy_from_slice(&response_bytes);
 
@@ -1623,6 +1741,136 @@ mod tests {
                     result.output
                 );
             }
+        }
+    }
+
+    /// #3576: every `SandboxError` variant must render a stable, byte-
+    /// identical Display string. The two long-lived variants
+    /// (`Compilation`, `FuelExhausted`) are pinned cross-crate by
+    /// `librefang-kernel::error::sandbox_error_display_is_unchanged` —
+    /// duplicate the assertion here so the kernel test isn't the only
+    /// thing standing between a refactor and a silent log/UI shift.
+    #[test]
+    fn sandbox_error_display_is_stable() {
+        // Long-lived variants that other crates pattern-match on.
+        assert_eq!(
+            SandboxError::Compilation("bad opcode".into()).to_string(),
+            "WASM compilation failed: bad opcode"
+        );
+        assert_eq!(
+            SandboxError::Instantiation("missing import".into()).to_string(),
+            "WASM instantiation failed: missing import"
+        );
+        assert_eq!(
+            SandboxError::Execution("trap".into()).to_string(),
+            "WASM execution failed: trap"
+        );
+        assert_eq!(
+            SandboxError::FuelExhausted.to_string(),
+            "Fuel exhausted: skill exceeded CPU budget"
+        );
+        assert_eq!(
+            SandboxError::AbiError("no memory export".into()).to_string(),
+            "Guest ABI violation: no memory export"
+        );
+
+        // New typed wrapper variants introduced by the anyhow→thiserror
+        // migration. The leading prefix is the contract a downstream
+        // logger / SSE consumer will see, not just the inner Display.
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad")
+            .expect_err("malformed JSON must produce an error");
+        let serde_msg = serde_err.to_string();
+        let sandbox_err: SandboxError = serde_err.into();
+        assert_eq!(
+            sandbox_err.to_string(),
+            format!("JSON (de)serialization failed: {serde_msg}")
+        );
+
+        // `Wasmtime` was missing from the original Display pin (review
+        // feedback on #5077). Construct a `wasmtime::Error` via the
+        // public `Error::msg` constructor — same path the wasmtime
+        // crate documents for hand-built errors — so the test does not
+        // depend on a particular trap kind being exercisable from a
+        // unit test. Pin the byte-for-byte format so the prefix shift
+        // ("wasmtime call failed: …") is visible to a refactorer.
+        let wasm_err = wasmtime::Error::msg("synthetic wasmtime error for display pinning");
+        let wasm_msg = wasm_err.to_string();
+        let sandbox_err: SandboxError = wasm_err.into();
+        assert_eq!(
+            sandbox_err.to_string(),
+            format!("wasmtime call failed: {wasm_msg}")
+        );
+    }
+
+    /// #3576: `#[from]` must preserve the underlying error in the
+    /// `source()` chain so downstream consumers can downcast and branch
+    /// on the original cause without re-parsing Display.
+    #[test]
+    fn sandbox_error_preserves_source_chain() {
+        use std::error::Error;
+
+        // serde_json source chain — one wrap deep.
+        let serde_err = serde_json::from_str::<serde_json::Value>("nonsense")
+            .expect_err("malformed JSON must produce an error");
+        let original_msg = serde_err.to_string();
+        let wrapped: SandboxError = serde_err.into();
+        let src = wrapped.source().expect("Json variant must expose source");
+        // Inner Display matches the original serde error verbatim — proves
+        // the chain is intact, not replaced by a sanitized string.
+        assert_eq!(src.to_string(), original_msg);
+        // Downcast back to the concrete type — structured inspection is
+        // exactly what `anyhow::Error` made awkward; `#[from]` makes it
+        // trivial.
+        assert!(
+            src.downcast_ref::<serde_json::Error>().is_some(),
+            "source() must downcast to serde_json::Error"
+        );
+
+        // wasmtime source chain — same shape as the serde_json case
+        // above, gated separately because the upstream review on #5077
+        // pointed out the chain test only exercised serde_json. The
+        // `Wasmtime` variant uses `#[from] wasmtime::Error`, but
+        // `wasmtime::Error` itself deliberately does NOT implement
+        // `std::error::Error` (see the long coherence comment in
+        // wasmtime/src/error.rs); it only `Deref`s to `dyn Error + Send +
+        // Sync`. Thiserror's `as_dyn_error` therefore lands on the
+        // wasmtime-internal inner type behind that `Deref`, not on
+        // `wasmtime::Error` itself, so a `downcast_ref::<wasmtime::Error>`
+        // would be a no-op by construction. The contract worth pinning
+        // is that `.source()` returns Some and that the inner Display
+        // matches the original `wasmtime::Error::to_string()` — i.e.
+        // the message is not replaced by a sanitized placeholder, which
+        // is what `anyhow::Error` did and what the migration needed to
+        // fix.
+        let wasm_err = wasmtime::Error::msg("synthetic wasmtime error for source-chain test");
+        let original_msg = wasm_err.to_string();
+        let wrapped: SandboxError = wasm_err.into();
+        let src = wrapped
+            .source()
+            .expect("Wasmtime variant must expose source");
+        assert_eq!(src.to_string(), original_msg);
+
+        // Variants without `#[from]` must NOT expose an inner source — a
+        // plain `AbiError(String)` is a leaf, the message is the cause.
+        let leaf = SandboxError::AbiError("missing 'execute' export".into());
+        assert!(
+            leaf.source().is_none(),
+            "AbiError is a leaf variant; source() should be None"
+        );
+        // Same for the other lifecycle-stage variants — they flatten to
+        // String by design (see the `SandboxError` enum doc), and the
+        // kernel-side `sandbox_error_display_is_unchanged` test relies on
+        // that flat shape.
+        for leaf in [
+            SandboxError::Compilation("bad opcode".into()),
+            SandboxError::Instantiation("missing import".into()),
+            SandboxError::Execution("trap".into()),
+            SandboxError::FuelExhausted,
+        ] {
+            assert!(
+                leaf.source().is_none(),
+                "lifecycle-stage variant should be a leaf; source() should be None for {leaf:?}"
+            );
         }
     }
 }
