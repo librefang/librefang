@@ -219,7 +219,7 @@ The daemon command is `start` (not `daemon`).
 - **Message-history trim cap** is configurable per-agent
   (`agent.toml: max_history_messages`) and globally
   (`config.toml: max_history_messages`). Default is
-  `DEFAULT_MAX_HISTORY_MESSAGES = 40`; values below
+  `DEFAULT_MAX_HISTORY_MESSAGES = 60`; values below
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.
