@@ -246,6 +246,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
+    /// Update an agent's schedule mode and restart its background loop so
+    /// the change takes effect immediately, without a daemon restart.
+    /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
+    fn set_agent_schedule(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> KernelResult<()>;
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
@@ -410,6 +418,12 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         name: &str,
         schedule: &librefang_types::agent::ScheduleMode,
     );
+
+    /// Count of currently-running background loops. Exposed for tests that
+    /// need to assert schedule changes actually start / stop the loop (the
+    /// silent-drop regression from #4984). See
+    /// [`LibreFangKernel::background_active_count`].
+    fn background_active_count(&self) -> usize;
 
     // ====================================================================
     // Additional kernel-inherent methods used by API/WS/server.rs.
@@ -870,6 +884,13 @@ impl KernelApi for LibreFangKernel {
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
     }
+    fn set_agent_schedule(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> KernelResult<()> {
+        LibreFangKernel::set_agent_schedule(&self, agent_id, schedule)
+    }
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
@@ -1072,6 +1093,10 @@ impl KernelApi for LibreFangKernel {
         schedule: &librefang_types::agent::ScheduleMode,
     ) {
         LibreFangKernel::start_background_for_agent(&self, agent_id, name, schedule);
+    }
+
+    fn background_active_count(&self) -> usize {
+        LibreFangKernel::background_active_count(self)
     }
 
     // -- Additional inherent methods --

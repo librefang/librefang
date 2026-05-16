@@ -386,11 +386,13 @@ pub struct CompletionResponse {
     /// The provider slot that actually served the request.
     ///
     /// Populated by fallback wrappers ([`crate::LlmDriver`]
-    /// implementations that try multiple providers in sequence) so that
-    /// the billing layer can attribute spend to the slot that *did* the
-    /// work, not the slot the caller nominated. `None` for direct
-    /// driver calls — billing falls back to the original nominator.
-    /// See librefang/librefang#4807 review nit 10.
+    /// implementations that try multiple providers in sequence —
+    /// e.g. `FallbackChain`, `BudgetGatedDriver`) so that the billing
+    /// layer can attribute spend to the slot that *did* the work, not
+    /// the slot the caller nominated. `None` for direct driver calls
+    /// — billing falls back to the original nominator. Always `None`
+    /// on inner leaf drivers; populated by the outermost chain
+    /// wrapper. See librefang/librefang#4807 review nit 10.
     pub actual_provider: Option<String>,
 }
 

@@ -1030,6 +1030,27 @@ fn agent_loop_result_owner_notice_can_be_set() {
     );
 }
 
+// -----------------------------------------------------------------------
+// AgentLoopResult.actual_provider (kernel-side metering reads this)
+// -----------------------------------------------------------------------
+
+#[test]
+fn agent_loop_result_actual_provider_defaults_none() {
+    let r = AgentLoopResult::default();
+    assert!(r.actual_provider.is_none());
+}
+
+#[test]
+fn agent_loop_result_actual_provider_can_be_set() {
+    // The kernel metering path falls back to the configured provider
+    // when this is None, and bills the named provider when set.
+    let r = AgentLoopResult {
+        actual_provider: Some("anthropic-backup".into()),
+        ..AgentLoopResult::default()
+    };
+    assert_eq!(r.actual_provider.as_deref(), Some("anthropic-backup"));
+}
+
 #[test]
 fn resolve_max_history_uses_manifest_when_set() {
     let manifest = AgentManifest {

@@ -522,6 +522,10 @@ pub fn spawn_daemon_stream(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            // The TUI streams over the daemon's SSE bridge, which does
+            // not surface the fallback-chain provider tag. Metering on
+            // the daemon side has already billed against the right
+            // provider; no value to forward here.
             actual_provider: None,
         })));
     });
@@ -570,6 +574,10 @@ fn daemon_fallback(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            // Daemon's `POST /agents/<id>/message` JSON shape does not
+            // include the fallback-chain provider tag. Metering on the
+            // daemon side has already billed against the right
+            // provider; no value to forward here.
             actual_provider: None,
         })
     } else {

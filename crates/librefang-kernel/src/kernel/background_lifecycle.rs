@@ -1235,6 +1235,17 @@ impl LibreFangKernel {
             });
     }
 
+    /// Number of background loops currently registered with the executor.
+    ///
+    /// Exposed for observability (tests asserting loop start / stop semantics
+    /// around schedule changes — see #4984). Counts active loops only:
+    /// `ScheduleMode::Reactive` agents have no loop and are not counted, and
+    /// `ScheduleMode::Proactive` registers triggers (not a loop) so it is
+    /// also not counted.
+    pub fn background_active_count(&self) -> usize {
+        self.workflows.background.active_count()
+    }
+
     /// Gracefully shutdown the kernel.
     ///
     /// This cleanly shuts down in-memory state but preserves persistent agent

@@ -461,6 +461,24 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
+    /// Continuous). Mutates the manifest only — the kernel-level wrapper
+    /// `LibreFangKernel::set_agent_schedule` is what callers should use to
+    /// also stop the prior background loop and start the new one so the
+    /// runtime actually reflects the change without a daemon restart.
+    pub fn update_schedule(
+        &self,
+        id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.schedule = schedule;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
