@@ -39,7 +39,6 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 wasmtime = { workspace = true }
-anyhow = { workspace = true }
 dashmap = { workspace = true }
 regex-lite = { workspace = true }
 rusqlite = { workspace = true }
