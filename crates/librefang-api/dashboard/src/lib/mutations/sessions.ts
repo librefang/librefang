@@ -38,7 +38,12 @@ export function useSetSessionModelOverride() {
       qc.invalidateQueries({ queryKey: sessionKeys.detail(variables.sessionId) });
       if (variables.agentId) {
         qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.session(variables.agentId) });
+        // Use the 3-element snapshot prefix so every cached
+        // (agent, sessionId) snapshot — including ones keyed by an explicit
+        // sessionId — is invalidated. `agentKeys.session(agentId)` resolves
+        // to a 4-element key with `sessionId = null`, which only matches
+        // the "no override" slot and leaves explicit-id snapshots stale.
+        qc.invalidateQueries({ queryKey: agentKeys.sessionSnapshots(variables.agentId) });
       }
     },
   });
