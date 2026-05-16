@@ -1702,4 +1702,141 @@ admin_role = "admin"
         assert_eq!(debug_field.field_type, PluginConfigFieldType::Boolean);
         assert_eq!(debug_field.default, Some(serde_json::Value::Bool(false)));
     }
+
+    // ---------------------------------------------------------------
+    // #5129 — nested `serde(alias)` declarations must stay on the
+    // strict-mode allowlist. Before the fix, schemars' JSON Schema
+    // dropped `alias = "trust_proxy_headers"` on
+    // `TerminalConfig.require_proxy_headers`, so strict_config = true
+    // rejected the legacy spelling even though serde would have
+    // accepted it.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn strict_config_accepts_nested_serde_alias_5129() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            strict_config = true
+
+            [terminal]
+            trust_proxy_headers = true
+            "#,
+        )
+        .expect("toml parse");
+
+        let unknown_top = KernelConfig::detect_unknown_fields(&raw);
+        let unknown_nested = KernelConfig::detect_unknown_nested_fields(&raw);
+        assert!(
+            unknown_top.is_empty(),
+            "top-level rejected: {unknown_top:?}",
+        );
+        assert!(
+            unknown_nested.is_empty(),
+            "nested rejected: {unknown_nested:?} — `trust_proxy_headers` is a serde(alias) for `require_proxy_headers`",
+        );
+
+        // And serde itself must still honour the alias on the way into
+        // the struct — otherwise the allowlist agrees but the value
+        // never lands.
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [terminal]
+            trust_proxy_headers = true
+            "#,
+        )
+        .expect("alias must deserialise");
+        assert!(cfg.terminal.require_proxy_headers);
+    }
+
+    // ---------------------------------------------------------------
+    // #5130 — typos inside repeated tables ([[channels.telegram]],
+    // [[mcp_servers]], …) used to be silently dropped because the
+    // strict-mode walker only descended into single-table paths.
+    // `deny_unknown_fields` on the per-element struct catches them at
+    // serde-deserialize time, regardless of repeated-vs-single shape.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn strict_config_rejects_typo_in_repeated_channel_table_5130() {
+        let toml_src = r#"
+            [[channels.telegram]]
+            bot_token_env = "TG_TOKEN"
+            # Typo: should be `default_agent`. Before #5130, this
+            # silently deserialised into the struct's Default and the
+            # operator's intent was lost.
+            defaul_agent = "research"
+        "#;
+        let err = toml::from_str::<KernelConfig>(toml_src)
+            .err()
+            .expect("typo inside [[channels.telegram]] must be rejected by deny_unknown_fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("defaul_agent") || msg.contains("unknown field"),
+            "error must mention the offending field, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn strict_config_rejects_typo_in_repeated_mcp_servers_table_5130() {
+        let toml_src = r#"
+            [[mcp_servers]]
+            name = "filesystem"
+            # Typo: should be `timeout_secs`.
+            timout_secs = 30
+        "#;
+        let err = toml::from_str::<KernelConfig>(toml_src)
+            .err()
+            .expect("typo inside [[mcp_servers]] must be rejected by deny_unknown_fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timout_secs") || msg.contains("unknown field"),
+            "error must mention the offending field, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn well_formed_repeated_channel_table_still_parses_5130() {
+        // Drift sentinel: deny_unknown_fields must not regress the
+        // happy path. If a future refactor renames a field on
+        // TelegramConfig / DiscordConfig / SlackConfig / WhatsAppConfig
+        // / MattermostConfig / McpServerConfigEntry without updating
+        // this fixture, the test will fail loudly.
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[channels.telegram]]
+            bot_token_env = "TG_TOKEN"
+            default_agent = "research"
+            poll_interval_secs = 2
+
+            [[channels.discord]]
+            bot_token_env = "DISCORD_TOKEN"
+
+            [[channels.slack]]
+            app_token_env = "SLACK_APP"
+            bot_token_env = "SLACK_BOT"
+
+            [[channels.whatsapp]]
+            access_token_env = "WA_TOKEN"
+            verify_token_env = "WA_VERIFY"
+            phone_number_id = "123"
+            webhook_port = 8443
+            gateway_url_env = "WA_GATEWAY"
+
+            [[channels.mattermost]]
+            server_url = "https://mm.example.com"
+            token_env = "MM_TOKEN"
+
+            [[mcp_servers]]
+            name = "filesystem"
+            timeout_secs = 30
+            "#,
+        )
+        .expect("well-formed repeated tables must still parse with deny_unknown_fields");
+        assert_eq!(cfg.channels.telegram.len(), 1);
+        assert_eq!(cfg.channels.discord.len(), 1);
+        assert_eq!(cfg.channels.slack.len(), 1);
+        assert_eq!(cfg.channels.whatsapp.len(), 1);
+        assert_eq!(cfg.channels.mattermost.len(), 1);
+        assert_eq!(cfg.mcp_servers.len(), 1);
+    }
 }
