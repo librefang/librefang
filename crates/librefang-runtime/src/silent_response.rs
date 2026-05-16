@@ -160,25 +160,24 @@ const PROMPT_LEAK_HEADER_THRESHOLD: usize = 2;
 ///
 /// **Drift hazard**: this list mirrors section names emitted by
 /// `prompt_builder.rs`. Adding or renaming a section there without
-/// updating this list silently weakens the regurgitation guard. A
-/// follow-up should either bind both to a shared const, or add a
-/// regression test that builds a stub system prompt and asserts every
-/// keyword still appears as a real header.
-const PROMPT_LEAK_HEADER_KEYWORDS: &[&str] = &[
-    "sender",
-    "today",
-    "calendar",
-    "tasks",
-    "memory",
-    "memories",
-    "persona",
-    "tools",
-    "current date",
-    "context",
-    "skills",
-    "agents",
-    "operational",
-];
+/// updating this list silently weakens the regurgitation guard.
+/// Pinned by `keywords_match_real_prompt_headers` below, which runs
+/// `build_system_prompt` against a maximally-populated context and
+/// asserts every keyword is the case-insensitive prefix of at least
+/// one `## <header>` line in the rendered output. That test fails the
+/// moment a `## Memory` becomes `## Memory Bank` (or vanishes) without
+/// the corresponding keyword update here.
+///
+/// Keywords are deliberately tight: only entries that actually match a
+/// header `prompt_builder.rs` emits today are listed. Aspirational
+/// entries (`sender`, `today`, `calendar`, `tasks`, `memories`,
+/// `tools`, `context`, `agents`) were dropped because no header in
+/// `build_system_prompt` starts with those strings — they could never
+/// fire the prefix match in `is_prompt_leak` and only added review
+/// noise. If a real section is added with one of those prefixes, add
+/// the keyword back and the pinned test will keep it honest.
+const PROMPT_LEAK_HEADER_KEYWORDS: &[&str] =
+    &["memory", "persona", "current date", "skills", "operational"];
 
 /// Classify a response as a system-prompt leak: the model regurgitated
 /// chunks of its own context (memory bullets, dynamic sections, persona
@@ -458,14 +457,19 @@ mod tests {
     #[test]
     fn system_prompt_shaped_headers_are_dropped() {
         // The shape we observed in the 2026-05-06 incident: model
-        // regurgitates dynamic system-prompt sections verbatim.
+        // regurgitates dynamic system-prompt sections verbatim. The
+        // headers used here mirror real `prompt_builder.rs` section
+        // names (Memory / Persona / Skills / Operational Guidelines),
+        // so the fixture is anchored to keywords that
+        // `keywords_match_real_prompt_headers` independently pins as
+        // present in `build_system_prompt`.
         assert!(is_prompt_leak(
-            "## Sender\nMessage from: X\n## Today\nWednesday\n## Calendar\nNo events.\n## Tasks\npending\n"
+            "## Memory\nrecalled: X\n## Persona\nbutler\n## Skills\nfoo\n## Operational Guidelines\nbar\n"
         ));
         // Two distinct prompt-shaped headers is enough to flag.
-        assert!(is_prompt_leak("## Sender\nfoo\n## Calendar\nbar"));
+        assert!(is_prompt_leak("## Memory\nfoo\n## Persona\nbar"));
         // Case-insensitive on the header text.
-        assert!(is_prompt_leak("## SENDER\nfoo\n## tasks\nbar"));
+        assert!(is_prompt_leak("## MEMORY\nfoo\n## persona\nbar"));
     }
 
     #[test]
@@ -486,9 +490,9 @@ mod tests {
         assert!(!is_prompt_leak("Subito, Signore."));
         assert!(!is_prompt_leak("Ho registrato la spesa."));
         assert!(!is_prompt_leak("## Update\nFatto."));
-        // Even one prompt-shaped header alone is allowed (legit "## Tasks"
+        // Even one prompt-shaped header alone is allowed (legit "## Memory"
         // section in a status reply); two are required.
-        assert!(!is_prompt_leak("## Sender\nfoo"));
+        assert!(!is_prompt_leak("## Memory\nfoo"));
     }
 
     #[test]
@@ -520,6 +524,87 @@ mod tests {
             let s = serde_json::to_string(&r).unwrap();
             let back: SilentReason = serde_json::from_str(&s).unwrap();
             assert_eq!(r, back);
+        }
+    }
+
+    /// Drift pin: every entry in `PROMPT_LEAK_HEADER_KEYWORDS` must be
+    /// the case-insensitive prefix of at least one `## <header>` line
+    /// in a maximally-populated `build_system_prompt` output. If a
+    /// section is renamed in `prompt_builder.rs` (e.g. `## Memory` →
+    /// `## Memory Bank`) without updating the keyword list here, the
+    /// regurgitation guard silently weakens; this test catches that
+    /// before merge instead of waiting for the next prompt-leak
+    /// incident in production.
+    ///
+    /// The match logic mirrors `is_prompt_leak` (line ~222 above): a
+    /// keyword fires when `header[..keyword.len()]` is
+    /// case-insensitively equal to the keyword. Therefore the
+    /// assertion is also case-insensitive prefix, not substring.
+    #[test]
+    fn keywords_match_real_prompt_headers() {
+        use crate::prompt_builder::{build_system_prompt, PromptContext};
+
+        // Populate every Option/Vec field so the conditional sections
+        // in `build_system_prompt` actually fire. The exact values
+        // don't matter — only the resulting `## <header>` shapes do.
+        let ctx = PromptContext {
+            agent_name: "ambrogio".to_string(),
+            agent_description: "butler".to_string(),
+            base_system_prompt: "You are Ambrogio.".to_string(),
+            granted_tools: vec!["file_read".to_string()],
+            recalled_memories: vec![("k".to_string(), "v".to_string())],
+            skill_summary: "skill-a\nskill-b".to_string(),
+            skill_count: 2,
+            skill_prompt_context: String::new(),
+            skill_config_section: String::new(),
+            mcp_summary: "mempalace: 19 tools".to_string(),
+            workspace_path: Some("/tmp/ws".to_string()),
+            soul_md: Some("Be helpful.".to_string()),
+            user_md: Some("Signore.".to_string()),
+            memory_md: Some("notes".to_string()),
+            canonical_context: Some("ctx".to_string()),
+            user_name: Some("Signore".to_string()),
+            channel_type: Some("telegram".to_string()),
+            sender_display_name: Some("Signore".to_string()),
+            sender_user_id: Some("123".to_string()),
+            is_group: false,
+            was_mentioned: false,
+            is_subagent: false,
+            is_autonomous: false,
+            agents_md: Some("agents".to_string()),
+            bootstrap_md: Some("bootstrap".to_string()),
+            workspace_context: Some("ws ctx".to_string()),
+            identity_md: Some("identity".to_string()),
+            heartbeat_md: Some("heartbeat".to_string()),
+            tools_md: Some("tools".to_string()),
+            peer_agents: vec![("peer".to_string(), "Idle".to_string(), "haiku".to_string())],
+            current_date: Some("Friday, 2026-05-16".to_string()),
+            active_goals: vec![("goal".to_string(), "in_progress".to_string(), 50)],
+            context_md: Some("ctx-md".to_string()),
+            dynamic_sections: Vec::new(),
+        };
+
+        let prompt = build_system_prompt(&ctx);
+        let headers: Vec<&str> = prompt
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("## "))
+            .collect();
+
+        for kw in PROMPT_LEAK_HEADER_KEYWORDS {
+            let kw_bytes = kw.as_bytes();
+            let matched = headers.iter().any(|h| {
+                let h_bytes = h.as_bytes();
+                h_bytes.len() >= kw_bytes.len()
+                    && h_bytes[..kw_bytes.len()].eq_ignore_ascii_case(kw_bytes)
+            });
+            assert!(
+                matched,
+                "PROMPT_LEAK_HEADER_KEYWORDS entry {kw:?} no longer prefixes any \
+                 `## <header>` emitted by build_system_prompt. \
+                 Either rename the keyword to match the new section name, \
+                 drop it from the list, or re-add the missing section in \
+                 prompt_builder.rs. Headers seen: {headers:?}",
+            );
         }
     }
 }

@@ -18,11 +18,13 @@
 # Existing rows still need a one-shot cleanup — that's what this script does.
 #
 # Usage:
-#   sweep_placeholder_memory.sh [--apply] [--db <path>]
+#   sweep_placeholder_memory.sh [--apply [--yes]] [--db <path>]
 #
 # Default mode is dry-run: prints how many rows MATCH but does not modify the
 # database. Pass --apply to soft-delete (memories.deleted = 1) the matching
-# rows. The matching predicate is intentionally narrow:
+# rows. `--apply` requires either an interactive TTY (which prompts for
+# confirmation) or `--yes` to commit non-interactively. The matching
+# predicate is intentionally narrow:
 #
 #   * scope = 'episodic'
 #   * deleted = 0
@@ -44,6 +46,7 @@ set -euo pipefail
 
 DB="${LIBREFANG_DB:-./data/librefang.db}"
 APPLY=0
+YES=0
 
 usage() {
     cat <<'USAGE'
@@ -51,10 +54,16 @@ sweep_placeholder_memory.sh — soft-delete placeholder-leak rows from the
 LibreFang episodic memory bank.
 
 Usage:
-  sweep_placeholder_memory.sh [--apply] [--db <path>]
+  sweep_placeholder_memory.sh [--apply [--yes]] [--db <path>]
 
   --apply       Commit the soft-delete (memories.deleted = 1). Default is
-                dry-run: report counts only.
+                dry-run: report counts only. Requires an interactive TTY
+                for confirmation, or `--yes` for non-interactive runs.
+  --yes         Skip the interactive confirmation prompt that --apply
+                otherwise requires. Useful for cron / scripted invocations;
+                exposes the operator to the foot-gun of a stale
+                $LIBREFANG_DB pointing at the wrong bank, so leave unset
+                whenever a human is in the loop.
   --db <path>   Database path. Defaults to ./data/librefang.db (local
                 checkout). On the Lazycat NAS, run via the live-pivot
                 snippet at the top of this file or pass --db /data/librefang.db.
@@ -69,6 +78,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --apply)  APPLY=1; shift ;;
+        --yes)    YES=1; shift ;;
         --db)     DB="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *)
@@ -89,7 +99,11 @@ if [[ ! -f "$DB" ]]; then
 fi
 
 # No user input is ever interpolated into the SQL so the only risk
-# is operator typo in this file — keep the predicate one place.
+# is operator typo in this file — keep the predicate one place. Every
+# branch is anchored to the agent-side `I responded: ` prefix so that
+# legitimate user content that happens to contain `</answer>` or
+# `</response>` (e.g. a memory of someone asking "what does
+# </response> mean in HTML?") is NOT swept.
 PREDICATE="
     scope = 'episodic'
     AND deleted = 0
@@ -99,8 +113,8 @@ PREDICATE="
         OR content LIKE '%I responded: <silent>%'
         OR content LIKE '%I responded: <no_reply>%'
         OR content LIKE '%I responded: <answer>%'
-        OR content LIKE '%</answer>%'
-        OR content LIKE '%</response>%'
+        OR content LIKE '%I responded: %</answer>%'
+        OR content LIKE '%I responded: %</response>%'
     )
 "
 
@@ -130,6 +144,28 @@ fi
 if [[ "$MATCH_COUNT" -eq 0 ]]; then
     echo "Nothing to do."
     exit 0
+fi
+
+# Confirmation gate. `--apply` is destructive (soft-delete, but still a
+# write) and `$LIBREFANG_DB` can resolve to a stale or unintended path
+# under a deploy / debug pivot. Require an interactive ack OR an
+# explicit `--yes`; refuse otherwise. The backup-first behaviour below
+# is still good defence-in-depth, but a typo-during-pivot deserves a
+# stop before we touch the bank at all.
+if [[ "$YES" -eq 0 ]]; then
+    if [[ -t 0 ]]; then
+        printf 'About to soft-delete %s row(s) in %s. Proceed? [y/N] ' \
+            "$MATCH_COUNT" "$DB"
+        read -r REPLY
+        case "$REPLY" in
+            y|Y|yes|YES) ;;
+            *) echo "Aborted." >&2; exit 6 ;;
+        esac
+    else
+        echo "Refusing to --apply non-interactively without --yes." >&2
+        echo "Re-run with --yes, or pipe a 'y' on stdin." >&2
+        exit 6
+    fi
 fi
 
 BACKUP="${DB}.bak.$(date +%Y%m%d-%H%M%S)"
