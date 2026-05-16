@@ -555,6 +555,12 @@ impl LibreFangKernel {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -567,7 +573,7 @@ impl LibreFangKernel {
                     "channel_type": sender_context.map(|s| s.channel.clone()),
                     "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
                     "is_subagent": is_subagent_flag,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -589,10 +595,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
-                granted_tool_hints: librefang_runtime::prompt_builder::build_granted_tool_hints(
-                    &tools,
-                ),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![], // Recalled in agent_loop, not here
                 skill_summary: skill_meta
                     .as_ref()

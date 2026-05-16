@@ -124,10 +124,7 @@ pub struct PromptContext {
     /// Empty by default for backwards compatibility with the legacy
     /// names-only catalog.
     ///
-    /// `BTreeMap` because anything that reaches the LLM prompt must iterate
-    /// deterministically (#3298). Today the catalog iterates `granted_tools`
-    /// directly, but using a `BTreeMap` here keeps the map's own iteration
-    /// order stable in case future call sites surface it directly.
+    /// `BTreeMap` so future direct iterations stay deterministic (#3298).
     pub granted_tool_hints: std::collections::BTreeMap<String, String>,
     /// Recalled memories as (key, content) pairs.
     pub recalled_memories: Vec<(String, String)>,
@@ -1227,6 +1224,11 @@ pub fn tool_hint(name: &str) -> &'static str {
 /// render time so this map's values for them are ignored.
 ///
 /// Skips tools whose description is empty so the map stays cheap to clone.
+///
+/// Duplicate `name` entries: `BTreeMap::insert` is last-write-wins, so when
+/// two `ToolDefinition`s share a name the latter's description survives. The
+/// names `Vec` returned by [`collect_granted_tool_names_and_hints`] still
+/// preserves both occurrences in input order — only the hint map dedupes.
 pub fn build_granted_tool_hints(
     tools: &[librefang_types::tool::ToolDefinition],
 ) -> std::collections::BTreeMap<String, String> {
@@ -1238,6 +1240,31 @@ pub fn build_granted_tool_hints(
         out.insert(t.name.clone(), t.description.clone());
     }
     out
+}
+
+/// Single-pass companion to [`build_granted_tool_hints`] that produces both
+/// the `granted_tools` name list and the `granted_tool_hints` map in one
+/// walk over `tools`. Kernel call sites use this to avoid walking the slice
+/// twice per send (once for the `PromptContext::granted_tools` `Vec`, once
+/// for the description map).
+///
+/// The returned `Vec<String>` preserves the input order of `tools` (including
+/// duplicates); the `BTreeMap` is last-write-wins on duplicate names, matching
+/// [`build_granted_tool_hints`] semantics. Tools with an empty description
+/// are still listed in the names `Vec` but skipped in the hints map so the
+/// catalog renderer falls through to bare-name rendering for them.
+pub fn collect_granted_tool_names_and_hints(
+    tools: &[librefang_types::tool::ToolDefinition],
+) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let mut names = Vec::with_capacity(tools.len());
+    let mut hints = std::collections::BTreeMap::new();
+    for t in tools {
+        names.push(t.name.clone());
+        if !t.description.is_empty() {
+            hints.insert(t.name.clone(), t.description.clone());
+        }
+    }
+    (names, hints)
 }
 
 /// Maximum length of a description hint pulled from `granted_tool_hints`
@@ -1283,7 +1310,12 @@ fn resolve_tool_hint(
     if first_clause.is_empty() {
         return String::new();
     }
-    cap_str(first_clause, TOOL_HINT_MAX_CHARS)
+    // Collapse embedded `\n` / `\r` into spaces so a multi-line marketplace
+    // description renders as a single-line catalog hint. Without this, a CR
+    // or LF inside the first clause would break the `name (hint)` row visual
+    // grouping and inflate the prompt's effective line count.
+    let single_line = first_clause.replace(['\n', '\r'], " ");
+    cap_str(&single_line, TOOL_HINT_MAX_CHARS)
 }
 
 // ---------------------------------------------------------------------------
