@@ -20,11 +20,47 @@ const DEFAULT_MODEL: &str = "eleven_multilingual_v2";
 /// Default voice ID (Rachel).
 const DEFAULT_VOICE_ID: &str = "21m00Tcm4TlvDq8ikWAM";
 
+/// Documented length of an ElevenLabs voice_id. Every voice in the
+/// public ElevenLabs OpenAPI spec uses exactly 20 ASCII-alphanumeric
+/// characters as the voice_id (e.g. Rachel above); enforcing the shape
+/// closes the URL-path-injection vector for the
+/// `/v1/text-to-speech/{voice_id}` segment.
+///
+/// Verified against the spec at
+/// <https://elevenlabs.io/docs/api-reference/voices/get-all>
+/// (snapshot date 2026-05-16). Re-check on schedule — if ElevenLabs
+/// ever lengthens the voice_id format, this constant and the docs in
+/// `librefang_runtime::tool_runner::definitions` (text_to_speech
+/// `voice` field description) both need to be updated together.
+const VOICE_ID_LEN: usize = 20;
+
+/// Cap on how much of a malformed user-supplied voice_id we echo back
+/// in `MediaError::InvalidRequest`. A 10kB voice_id should not produce
+/// a 10kB error string. Tight cap because a valid voice_id is exactly
+/// `VOICE_ID_LEN` (20) chars; 64 bytes is comfortably above that while
+/// still bounded.
+const VOICE_ID_ERROR_ECHO_MAX_BYTES: usize = 64;
+
 /// Max audio response size (25 MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 25 * 1024 * 1024;
 
 pub struct ElevenLabsMediaDriver {
     base_url: String,
+}
+
+/// Reject voice_id values that would either break the API contract or
+/// allow path traversal / query-string injection at the URL boundary.
+fn validate_voice_id(voice_id: &str) -> Result<(), MediaError> {
+    if voice_id.len() != VOICE_ID_LEN || !voice_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        // Cap the echo so a malicious 10kB voice_id doesn't echo 10kB
+        // back through the error chain.
+        let echoed = crate::safe_truncate_str(voice_id, VOICE_ID_ERROR_ECHO_MAX_BYTES);
+        return Err(MediaError::InvalidRequest(format!(
+            "Invalid ElevenLabs voice_id {echoed:?}: expected {VOICE_ID_LEN} ASCII alphanumeric characters. \
+             Find valid IDs at https://elevenlabs.io/app/voice-library."
+        )));
+    }
+    Ok(())
 }
 
 impl ElevenLabsMediaDriver {
@@ -68,9 +104,14 @@ impl MediaDriver for ElevenLabsMediaDriver {
     ) -> Result<MediaTtsResult, MediaError> {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
-        let api_key = Self::api_key()?;
+        // Validate voice_id BEFORE reading the API key so that, when
+        // both are wrong, the LLM agent sees the actionable
+        // `InvalidRequest` rather than a generic `MissingKey`. Both
+        // errors remain pre-network — no HTTP request has been issued.
         let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
         let voice_id = request.voice.as_deref().unwrap_or(DEFAULT_VOICE_ID);
+        validate_voice_id(voice_id)?;
+        let api_key = Self::api_key()?;
         let format = request.format.as_deref().unwrap_or("mp3_44100_128");
 
         let mut body = serde_json::json!({
@@ -239,5 +280,183 @@ mod tests {
         };
         let result = driver.submit_video(&req).await;
         assert!(matches!(result, Err(MediaError::NotSupported(_))));
+    }
+
+    #[test]
+    fn default_voice_id_matches_shape_invariant() {
+        // Compile-time-ish guarantee: the hardcoded default must pass the
+        // same validation we apply to user input, otherwise a request
+        // with `voice: None` would 400 before it ever hit the wire.
+        assert!(validate_voice_id(DEFAULT_VOICE_ID).is_ok());
+        assert_eq!(DEFAULT_VOICE_ID.len(), VOICE_ID_LEN);
+    }
+
+    #[test]
+    fn validate_voice_id_accepts_known_good_id() {
+        // Rachel — present as an example in the ElevenLabs OpenAPI spec.
+        assert!(validate_voice_id("21m00Tcm4TlvDq8ikWAM").is_ok());
+        // Second documented sample shape.
+        assert!(validate_voice_id("VW7YKqPnjY4h39yTbx2L").is_ok());
+    }
+
+    #[test]
+    fn validate_voice_id_rejects_wrong_length() {
+        // 19 characters — the exact failure mode in the closed PR #5039.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8ikWA"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // 21 characters.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8ikWAMx"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // Empty.
+        assert!(matches!(
+            validate_voice_id(""),
+            Err(MediaError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_voice_id_rejects_url_injection() {
+        // Path traversal — would resolve to a different ElevenLabs route.
+        assert!(matches!(
+            validate_voice_id("../../voices/aaaaa"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // Trailing slash — would append a path segment to the URL.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8ikWA/"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // Query-string smuggling.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8?x=y"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // Whitespace.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8ikWA "),
+            Err(MediaError::InvalidRequest(_))
+        ));
+        // Non-ASCII.
+        assert!(matches!(
+            validate_voice_id("21m00Tcm4TlvDq8ikWAé"),
+            Err(MediaError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(elevenlabs_api_key)]
+    async fn synthesize_speech_rejects_malformed_voice_id_before_network() {
+        // Critical: set ELEVENLABS_API_KEY so the validator (NOT the
+        // api_key() check) is the gate this test actually drives.
+        // Without this, `api_key()?` would short-circuit and we'd be
+        // observing `MissingKey` while pretending to test the
+        // validator — see #5078 review.
+        //
+        // The #[serial(elevenlabs_api_key)] guard prevents racing with
+        // any other test that mutates this env var concurrently.
+        let prior = std::env::var("ELEVENLABS_API_KEY").ok();
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("ELEVENLABS_API_KEY", "test-elevenlabs-key");
+        }
+
+        let driver = ElevenLabsMediaDriver::new(None);
+        let req = MediaTtsRequest {
+            text: "hello".into(),
+            provider: None,
+            model: None,
+            voice: Some("not-a-voice".into()),
+            format: None,
+            speed: None,
+            language: None,
+            pitch: None,
+        };
+
+        let result = driver.synthesize_speech(&req).await;
+
+        // Restore env BEFORE asserting so a failed assert doesn't
+        // poison subsequent tests.
+        // SAFETY: same as the set_var above.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("ELEVENLABS_API_KEY", v),
+                None => std::env::remove_var("ELEVENLABS_API_KEY"),
+            }
+        }
+
+        let err = result.expect_err("expected synthesize_speech to reject malformed voice_id");
+        match err {
+            MediaError::InvalidRequest(msg) => {
+                // Sanity-check that the error came from the voice_id
+                // validator, not e.g. `request.validate()`.
+                assert!(
+                    msg.contains("voice_id"),
+                    "InvalidRequest should mention voice_id, got: {msg}"
+                );
+            }
+            other => {
+                panic!("expected MediaError::InvalidRequest from voice_id validator, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(elevenlabs_api_key)]
+    async fn synthesize_speech_truncates_oversized_voice_id_in_error() {
+        // A multi-kilobyte voice_id must not echo verbatim through the
+        // error chain. Cap is `VOICE_ID_ERROR_ECHO_MAX_BYTES` (64).
+        let prior = std::env::var("ELEVENLABS_API_KEY").ok();
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("ELEVENLABS_API_KEY", "test-elevenlabs-key");
+        }
+
+        let oversized = "A".repeat(10_000);
+        let driver = ElevenLabsMediaDriver::new(None);
+        let req = MediaTtsRequest {
+            text: "hello".into(),
+            provider: None,
+            model: None,
+            voice: Some(oversized),
+            format: None,
+            speed: None,
+            language: None,
+            pitch: None,
+        };
+
+        let result = driver.synthesize_speech(&req).await;
+
+        // SAFETY: same as the set_var above.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("ELEVENLABS_API_KEY", v),
+                None => std::env::remove_var("ELEVENLABS_API_KEY"),
+            }
+        }
+
+        let err = result.expect_err("oversized voice_id must be rejected");
+        match err {
+            MediaError::InvalidRequest(msg) => {
+                // Whole error message stays small even though input
+                // was 10kB; the echoed voice_id slice is capped to
+                // VOICE_ID_ERROR_ECHO_MAX_BYTES, plus quoting +
+                // surrounding template text comfortably under 512.
+                assert!(
+                    msg.len() < 512,
+                    "InvalidRequest message should be bounded, got {} bytes",
+                    msg.len()
+                );
+                // Must not echo the entire 10kB input verbatim.
+                assert!(
+                    !msg.contains(&"A".repeat(VOICE_ID_ERROR_ECHO_MAX_BYTES + 1)),
+                    "echo should be truncated at VOICE_ID_ERROR_ECHO_MAX_BYTES"
+                );
+            }
+            other => panic!("expected MediaError::InvalidRequest, got {other:?}"),
+        }
     }
 }

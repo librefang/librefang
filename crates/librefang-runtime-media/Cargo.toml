@@ -23,5 +23,11 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
 
+[dev-dependencies]
+# Serialises the env-mutating ElevenLabs voice_id validator tests so
+# they cannot race with one another over `ELEVENLABS_API_KEY`. Same
+# version pin as the rest of the workspace (`librefang-runtime`).
+serial_test = "3"
+
 [lints]
 workspace = true
