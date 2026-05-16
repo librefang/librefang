@@ -159,26 +159,13 @@ impl std::fmt::Display for WorkflowId {
 }
 
 /// Unique identifier for a running workflow instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WorkflowRunId(pub Uuid);
-
-impl WorkflowRunId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for WorkflowRunId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for WorkflowRunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+///
+/// Canonical definition lives in `librefang_types::task::WorkflowRunId`
+/// (re-exported here for source compatibility with pre-#4983 call sites).
+/// `librefang-types` sits at the bottom of the crate DAG so the kernel can
+/// re-use the same `Uuid`-shaped newtype that step 1 (PR #5033) introduced
+/// for the async-task tracker. One type, not two. Refs #4983.
+pub use librefang_types::task::WorkflowRunId;
 
 /// A workflow definition — a named sequence of steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1842,17 +1829,23 @@ impl WorkflowEngine {
     ///
     /// Called once at boot. Any run whose `started_at` age exceeds `stale_timeout` is
     /// transitioned to `Failed` with a "Interrupted by daemon restart" error message.
-    /// Returns the number of runs recovered. A `stale_timeout` of zero is
-    /// treated as "feature disabled" and returns `0` without inspecting any
-    /// runs — kernel boot guards on this anyway, but keeping the no-op here
-    /// means a future direct caller can't accidentally fail every run.
-    pub fn recover_stale_running_runs(&self, stale_timeout: std::time::Duration) -> usize {
+    /// Returns the list of `WorkflowRunId`s that were demoted so the caller can
+    /// drive any downstream side-effects (e.g. the async task tracker hook
+    /// `LibreFangKernel::synthesize_task_failures_for_recovered_runs` — #5033).
+    /// A `stale_timeout` of zero is treated as "feature disabled" and returns
+    /// an empty `Vec` without inspecting any runs — kernel boot guards on
+    /// this anyway, but keeping the no-op here means a future direct caller
+    /// can't accidentally fail every run.
+    pub fn recover_stale_running_runs(
+        &self,
+        stale_timeout: std::time::Duration,
+    ) -> Vec<WorkflowRunId> {
         if stale_timeout.is_zero() {
-            return 0;
+            return Vec::new();
         }
         let now = Utc::now();
         let stale_secs = stale_timeout.as_secs() as i64;
-        let mut recovered = 0usize;
+        let mut recovered: Vec<WorkflowRunId> = Vec::new();
         // DashMap's `iter_mut` takes a per-shard write lock as the iterator
         // visits each entry — no global write lock and no awaiting required.
         for mut entry in self.runs.iter_mut() {
@@ -1886,7 +1879,7 @@ impl WorkflowEngine {
             if self.store.is_some() {
                 self.upsert_run_to_store(run);
             }
-            recovered += 1;
+            recovered.push(run.id);
         }
         recovered
     }

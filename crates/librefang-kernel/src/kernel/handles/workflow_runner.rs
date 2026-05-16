@@ -7,6 +7,18 @@ use librefang_runtime::kernel_handle;
 
 use super::super::LibreFangKernel;
 
+/// Render the operator-facing timeout text the async-task tracker emits
+/// when an `async_tasks.default_timeout_secs` elapses on a workflow run.
+///
+/// Pulled out as a free function so the format can be pinned by a
+/// string-equality test (refs #5033 review: the operator log-scraper
+/// contract claims the text is stable; without a regression test for the
+/// exact bytes, a renderer change ship-broke the contract silently).
+/// Format: `workflow run timed out after Ns (agent-side default_timeout_secs)`.
+pub(crate) fn render_workflow_timeout_text(timeout_secs: u64) -> String {
+    format!("workflow run timed out after {timeout_secs}s (agent-side default_timeout_secs)")
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::WorkflowRunner for LibreFangKernel {
     async fn run_workflow(
@@ -99,8 +111,26 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         workflow_id: &str,
         input: &str,
     ) -> Result<String, kernel_handle::KernelOpError> {
+        // Forward to the tracker-aware variant with no caller context.
+        // Historical call sites (cron, triggers) that don't carry an
+        // `(agent, session)` keep their previous behaviour — the
+        // async-task tracker simply does not register an entry, so no
+        // `TaskCompletionEvent` is injected. Refs #4983.
+        self.start_workflow_async_tracked(workflow_id, input, None, None)
+            .await
+    }
+
+    async fn start_workflow_async_tracked(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+        caller_session_id: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
         use crate::workflow::WorkflowId;
         use kernel_handle::KernelOpError;
+        use librefang_types::agent::{AgentId, SessionId};
+        use librefang_types::task::{TaskKind, TaskStatus};
 
         // Resolve workflow_id (UUID or name) — same logic as run_workflow.
         let wf_id = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
@@ -123,6 +153,47 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .create_run(wf_id, input.to_string())
             .await
             .ok_or_else(|| KernelOpError::Internal("Workflow not found".to_string()))?;
+
+        // Async task tracker registration (#4983). Only register
+        // when both pieces of caller context were supplied AND parse
+        // successfully; otherwise spawn the workflow without tracking so
+        // historical cron / trigger callers keep working unchanged.
+        //
+        // Also pull the caller agent's `[async_tasks]` manifest block
+        // while we have the `AgentId` so the spawned
+        // task below can honour `default_timeout_secs` /
+        // `notify_on_timeout`. Cached here (rather than re-fetched in
+        // the spawned closure) because the agent registry lookup is a
+        // sync DashMap op and we want it to fail fast at registration
+        // time if the agent disappears mid-flight.
+        let (task_id, async_cfg) = match (caller_agent_id, caller_session_id) {
+            (Some(aid), Some(sid)) => match (aid.parse::<AgentId>(), sid.parse::<SessionId>()) {
+                (Ok(agent_id), Ok(session_id)) => {
+                    let handle = self.register_async_task(
+                        agent_id,
+                        session_id,
+                        TaskKind::Workflow { run_id },
+                    );
+                    let cfg = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .map(|entry| entry.manifest.async_tasks.clone())
+                        .unwrap_or_default();
+                    (Some(handle.id), Some(cfg))
+                }
+                _ => {
+                    tracing::debug!(
+                        caller_agent_id = %aid,
+                        caller_session_id = %sid,
+                        run_id = %run_id,
+                        "start_workflow_async_tracked: caller context failed to parse; skipping registry registration"
+                    );
+                    (None, None)
+                }
+            },
+            _ => (None, None),
+        };
 
         // Spawn execution in the background via self_handle (same pattern as
         // trigger dispatch — upgrade the stored Weak<LibreFangKernel> so the
@@ -192,19 +263,81 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                     .map_err(|e| format!("{e}"))
                 }
             };
+            // (#4983) honour the caller's `[async_tasks]
+            // default_timeout_secs` so a workflow that hangs gets
+            // cancelled and surfaced to the agent as a Failed
+            // completion. None → run unbounded (timeout ownership is
+            // agent-side, per the module-level design).
+            let timeout = async_cfg
+                .as_ref()
+                .and_then(|c| c.default_timeout_secs)
+                .map(std::time::Duration::from_secs);
+            let notify_on_timeout = async_cfg
+                .as_ref()
+                .map(|c| c.notify_on_timeout)
+                .unwrap_or(true);
+
             // Don't swallow the result — without a log the agent that
             // called workflow_start has no way to learn the run failed
             // except by polling get_workflow_run for the Failed state.
-            if let Err(e) = kernel_arc
+            let exec_fut = kernel_arc
                 .workflows
                 .engine
-                .execute_run(run_id, resolver, send_message)
-                .await
-            {
-                tracing::warn!(
+                .execute_run(run_id, resolver, send_message);
+            let exec_result: Result<Result<String, String>, ()> = match timeout {
+                Some(d) => match tokio::time::timeout(d, exec_fut).await {
+                    Ok(inner) => Ok(inner),
+                    Err(_elapsed) => Err(()),
+                },
+                None => Ok(exec_fut.await),
+            };
+
+            // Async task tracker delivery (#4983). Only emit a
+            // completion event if a registration happened above.
+            if let Some(task_id) = task_id {
+                let terminal_status = match &exec_result {
+                    Ok(Ok(output)) => TaskStatus::Completed(serde_json::json!({
+                        "run_id": run_id.0.to_string(),
+                        "output": output,
+                    })),
+                    Ok(Err(e)) => TaskStatus::Failed(format!("workflow run failed: {e}")),
+                    Err(()) => {
+                        let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
+                        TaskStatus::Failed(render_workflow_timeout_text(secs))
+                    }
+                };
+
+                // `notify_on_timeout = false` suppresses ONLY the
+                // timeout-specific Failed event; success / non-timeout
+                // failures still surface as today. Step-3 design
+                // decision: operationally meaningful only for batch
+                // agents whose sessions are never read by a human.
+                let suppress = matches!(exec_result, Err(())) && !notify_on_timeout;
+                if !suppress {
+                    if let Err(err) = kernel_arc
+                        .complete_async_task(task_id, terminal_status)
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            run_id = %run_id,
+                            "Failed to inject TaskCompletionEvent: {err}"
+                        );
+                    }
+                }
+            }
+
+            match &exec_result {
+                Ok(Err(e)) => tracing::warn!(
                     run_id = %run_id,
                     "Async workflow execution failed: {e}"
-                );
+                ),
+                Err(()) => tracing::warn!(
+                    run_id = %run_id,
+                    "Async workflow execution timed out after {}s",
+                    timeout.map(|d| d.as_secs()).unwrap_or(0)
+                ),
+                Ok(Ok(_)) => {}
             }
         });
 
@@ -230,5 +363,28 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                     KernelOpError::Internal(format!("cannot cancel: run is already {state}"))
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the operator-facing timeout text format. Operators scrape
+    /// for `"workflow run timed out after"` and pull the seconds field;
+    /// any drift in this string is a breaking change to the contract
+    /// the PR explicitly locks in. If you need to change the format,
+    /// announce it in the changelog under a breaking-change bullet and
+    /// update this assertion.
+    #[test]
+    fn workflow_timeout_text_format_is_stable() {
+        assert_eq!(
+            render_workflow_timeout_text(30),
+            "workflow run timed out after 30s (agent-side default_timeout_secs)"
+        );
+        assert_eq!(
+            render_workflow_timeout_text(0),
+            "workflow run timed out after 0s (agent-side default_timeout_secs)"
+        );
     }
 }

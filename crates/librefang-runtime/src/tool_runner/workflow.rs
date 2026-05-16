@@ -93,6 +93,8 @@ pub(super) async fn tool_workflow_status(
 pub(super) async fn tool_workflow_start(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    caller_session_id: Option<librefang_types::agent::SessionId>,
 ) -> Result<String, String> {
     let workflow_id = input["workflow_id"]
         .as_str()
@@ -108,8 +110,20 @@ pub(super) async fn tool_workflow_start(
     };
 
     let kh = require_kernel(kernel)?;
+
+    // Forward caller context so the kernel can register the workflow on
+    // its async-task tracker (#4983) and inject a `TaskCompletionEvent`
+    // into the originating session when the run finishes. Falls back to
+    // the historical fire-and-forget behaviour when either id is
+    // missing (legacy / test call sites that don't carry context).
+    let session_id_str = caller_session_id.map(|sid| sid.0.to_string());
     let run_id = kh
-        .start_workflow_async(workflow_id, &input_str)
+        .start_workflow_async_tracked(
+            workflow_id,
+            &input_str,
+            caller_agent_id,
+            session_id_str.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())?;
 

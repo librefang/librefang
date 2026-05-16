@@ -1037,7 +1037,9 @@ pub async fn execute_tool_raw(
         "workflow_run" => tool_workflow_run(input, *kernel).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,
-        "workflow_start" => tool_workflow_start(input, *kernel).await,
+        "workflow_start" => {
+            tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
+        }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
 
         // Browser automation tools

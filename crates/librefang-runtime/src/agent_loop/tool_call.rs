@@ -838,6 +838,15 @@ pub(super) fn handle_mid_turn_signal(
                 None
             }
         }
+        AgentLoopSignal::TaskCompleted { event } => {
+            // Async task tracker (#4983). Step 2 wires the kernel-side
+            // registration and injection; the runtime currently surfaces the
+            // completion as a `[System] [ASYNC_RESULT] …` message that the
+            // LLM can read on the same turn (mid-turn) or on the next turn
+            // (idle). Step 3 adds typed handling, `[async_tasks]` config,
+            // and the wake-idle path.
+            Some(super::format_task_completion_text(&event))
+        }
     };
     if let Some(text) = injected_text {
         let inject_msg = Message::user(&text);

@@ -2150,14 +2150,32 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel
+                let recovered_run_ids = kernel
                     .workflows
                     .engine
                     .recover_stale_running_runs(stale_timeout);
-                if recovered > 0 {
+                if !recovered_run_ids.is_empty() {
                     info!(
-                        "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
+                        "Recovered {} stale workflow run(s) interrupted by daemon restart",
+                        recovered_run_ids.len()
                     );
+                    // (#5033 review fix.) For each demoted run, drain any
+                    // async-task tracker entry that was still pointing at
+                    // it and synthesize a `Failed` completion event so
+                    // the originating agent does not wait forever for an
+                    // event that will never fire. At fresh boot the
+                    // registry is empty (it's in-memory, repopulated by
+                    // live agents), so this is a no-op on a clean cold
+                    // start; the hook exists to (a) cover the
+                    // hypothetical future where the registry is
+                    // persisted, and (b) cover any caller that re-runs
+                    // the recovery sweep mid-runtime with live
+                    // registrations present. Synchronous: builds the
+                    // `Failed` events and pushes them into the kernel's
+                    // injection senders without spawning an LLM turn —
+                    // the wake-idle path is deliberately skipped because
+                    // `self_handle` is not yet set at this point in boot.
+                    kernel.synthesize_task_failures_for_recovered_runs(&recovered_run_ids);
                 }
             }
         }

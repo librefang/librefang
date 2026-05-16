@@ -1240,6 +1240,21 @@ pub struct AgentManifest {
     /// source of truth.
     #[serde(default)]
     pub reconcile_orphans: OrphanPolicy,
+    /// Async task tracker (#4983) per-agent settings. Controls how
+    /// long the agent is willing to wait on a `workflow_start`
+    /// (and, later, `agent_send_async` / external-webhook) operation
+    /// before the kernel cancels it on the agent's behalf, and
+    /// whether a timeout cancellation surfaces as a synthetic
+    /// `TaskCompletionEvent` in the agent's session (so the agent
+    /// can apologise to the user / retry / escalate) or is silently
+    /// dropped.
+    ///
+    /// Defaults are conservative: no global timeout, notification
+    /// on timeout = `true`. Step-1 / step-2 design decision: timeout
+    /// ownership stays with the agent that spawned the task — the
+    /// kernel does not impose a hard ceiling.
+    #[serde(default)]
+    pub async_tasks: AsyncTasksConfig,
 }
 
 /// Per-agent override for the kernel-global `[compaction]` configuration
@@ -1441,6 +1456,48 @@ impl Default for AgentManifest {
             compaction: None,
             triggers: Vec::new(),
             reconcile_orphans: OrphanPolicy::default(),
+            async_tasks: AsyncTasksConfig::default(),
+        }
+    }
+}
+
+/// Per-agent async-task tracker settings (#4983).
+///
+/// Lives on `AgentManifest.async_tasks`, deserialised from the
+/// `[async_tasks]` table in `agent.toml`. Both fields default to the
+/// safest values: no timeout (the agent's spawn caller passes the
+/// deadline if one is needed) and notify-on-timeout enabled (so a
+/// timeout cancellation surfaces in the session rather than being
+/// silently dropped).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AsyncTasksConfig {
+    /// Default wall-clock timeout in seconds applied to async tasks
+    /// the agent spawns when its own call site does not pass an
+    /// explicit deadline. `None` means no kernel-imposed default —
+    /// the task runs until the underlying executor (workflow engine,
+    /// peer agent) returns. This default matches the step-1
+    /// "timeout ownership is agent-side" decision.
+    ///
+    /// Operators that want a safety net on a chatty agent can set
+    /// e.g. `default_timeout_secs = 600` to make sure no async task
+    /// silently hangs forever.
+    pub default_timeout_secs: Option<u64>,
+    /// Whether to inject a synthetic `TaskCompletionEvent`
+    /// (with `TaskStatus::Failed("timeout after Ns")`) into the
+    /// originating session when a task hits the timeout above.
+    /// Default `true`: timeouts are user-visible so the agent can
+    /// react (apologise, retry, escalate). Setting to `false`
+    /// drops the event silently — operationally meaningful only
+    /// for batch agents whose sessions are never read by a human.
+    pub notify_on_timeout: bool,
+}
+
+impl Default for AsyncTasksConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: None,
+            notify_on_timeout: true,
         }
     }
 }

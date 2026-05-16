@@ -161,6 +161,44 @@ fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) ->
     }
 }
 
+/// Render a `TaskCompletionEvent` as the human-readable system text the
+/// agent loop injects into the session when the kernel reports an async
+/// task is done. Refs #4983 (step 2).
+pub(super) fn format_task_completion_text(
+    event: &librefang_types::task::TaskCompletionEvent,
+) -> String {
+    use librefang_types::task::{TaskKind, TaskStatus};
+    let kind_str = match &event.handle.kind {
+        TaskKind::Workflow { run_id } => format!("workflow (run {run_id})"),
+        TaskKind::Delegation { agent_id, .. } => format!("delegation to agent {agent_id}"),
+    };
+    let status_str = match &event.status {
+        TaskStatus::Completed(value) => {
+            let rendered = value.to_string();
+            let preview = librefang_types::truncate_str(&rendered, 300);
+            format!("completed. Output: {preview}")
+        }
+        TaskStatus::Failed(msg) => {
+            let preview = librefang_types::truncate_str(msg, 300);
+            format!("failed: {preview}")
+        }
+        TaskStatus::Cancelled => "cancelled".to_string(),
+        // The kernel only emits Completed / Failed / Cancelled in
+        // `TaskCompletionEvent`s; Pending / Running stay on the registry
+        // side and are observable via separate query APIs. Surface them
+        // here as a defensive fallback rather than panicking — a future
+        // additive variant in the executor should not blow up the loop.
+        TaskStatus::Pending => "pending (unexpected in completion event)".to_string(),
+        TaskStatus::Running => "running (unexpected in completion event)".to_string(),
+    };
+    format!(
+        "[System] [ASYNC_RESULT] task {id} ({kind}) {status}",
+        id = event.handle.id,
+        kind = kind_str,
+        status = status_str,
+    )
+}
+
 fn fire_hook_best_effort(
     hook_reg: Option<&crate::hooks::HookRegistry>,
     ctx: &crate::hooks::HookContext<'_>,
