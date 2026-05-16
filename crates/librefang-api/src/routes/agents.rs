@@ -4413,15 +4413,58 @@ pub async fn patch_agent(
         }
     }
 
-    // Persist updated entry to SQLite
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
-            tracing::warn!("Failed to persist agent state: {e}");
+    // Track whether `set_agent_schedule` already persisted (SQLite + disk).
+    // Branches above only mutate the in-memory registry, so the generic
+    // persist block at the end of this handler is required for them. The
+    // schedule branch, however, routes through `set_agent_schedule` which
+    // saves to SQLite and writes `agent.toml` internally — picking up any
+    // earlier partial updates already applied to the registry entry. Calling
+    // `save_agent` + `persist_manifest_to_disk` again here would be a
+    // redundant double-write on every schedule PATCH.
+    let mut schedule_persisted = false;
+    if let Some(schedule_val) = body.get("schedule") {
+        match serde_json::from_value::<librefang_types::agent::ScheduleMode>(schedule_val.clone()) {
+            Ok(schedule) => {
+                // Go through `set_agent_schedule` (not `agent_registry()
+                // .update_schedule`) so the background loop is stopped /
+                // restarted to match — otherwise a Reactive→Continuous
+                // (or Continuous→Reactive) toggle from the dashboard
+                // would return 200 but the runtime would keep running
+                // the previous schedule until the daemon restarts
+                // (#4984).
+                if let Err(e) = state.kernel.clone().set_agent_schedule(agent_id, schedule) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                        ),
+                    );
+                }
+                schedule_persisted = true;
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
         }
+    }
 
-        // Write updated manifest to agent.toml on disk so disk doesn't override
-        // dashboard changes on next boot (#996, #1018).
-        state.kernel.persist_manifest_to_disk(agent_id);
+    // Persist updated entry to SQLite (skipped when the schedule branch
+    // already handled it — see `schedule_persisted` above).
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if !schedule_persisted {
+            if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
+                tracing::warn!("Failed to persist agent state: {e}");
+            }
+
+            // Write updated manifest to agent.toml on disk so disk doesn't override
+            // dashboard changes on next boot (#996, #1018).
+            state.kernel.persist_manifest_to_disk(agent_id);
+        }
 
         (
             StatusCode::OK,

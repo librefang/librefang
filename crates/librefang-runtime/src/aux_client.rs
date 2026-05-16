@@ -34,6 +34,7 @@
 //! means the metering layer sees them. The aux client never bypasses the
 //! billing pipeline — it just picks a cheaper model.
 
+use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
 use librefang_llm_driver::{DriverConfig, LlmDriver};
 use librefang_llm_drivers::drivers::{
     create_driver,
@@ -63,6 +64,11 @@ pub struct AuxClient {
     /// is normally the primary driver chain so callers see no change in
     /// behaviour relative to the pre-aux baseline.
     primary: Arc<dyn LlmDriver>,
+    /// Shared provider-exhaustion store (#4807). When set, every
+    /// [`FallbackChain`] resolved from this client honours the same
+    /// exhaustion view so a slot that 429'd on the primary path is also
+    /// skipped on aux paths within the back-off window — and vice versa.
+    exhaustion_store: Option<ProviderExhaustionStore>,
 }
 
 impl AuxClient {
@@ -77,6 +83,7 @@ impl AuxClient {
             config: config.llm.auxiliary.clone(),
             kernel_config: config,
             primary,
+            exhaustion_store: None,
         }
     }
 
@@ -90,7 +97,18 @@ impl AuxClient {
             config: AuxiliaryConfig::empty(),
             kernel_config: Arc::new(KernelConfig::default()),
             primary,
+            exhaustion_store: None,
         }
+    }
+
+    /// Attach a shared exhaustion store (#4807). Every chain returned by
+    /// [`Self::resolve`] from this point on routes its skip-decisions
+    /// through this store, so an exhaustion observed on one task's chain
+    /// is honoured by the next task's chain as well. Cheap-clone — pass
+    /// the same store the metering engine was wired with.
+    pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
+        self.exhaustion_store = Some(store);
+        self
     }
 
     /// Resolve the chain for `task`.
@@ -153,7 +171,11 @@ impl AuxClient {
             };
         }
 
-        let chain: Arc<dyn LlmDriver> = Arc::new(FallbackChain::new(entries));
+        let mut chain = FallbackChain::new(entries);
+        if let Some(store) = self.exhaustion_store.clone() {
+            chain = chain.with_exhaustion_store(store);
+        }
+        let chain: Arc<dyn LlmDriver> = Arc::new(chain);
         AuxResolution {
             driver: chain,
             resolved: resolved_pairs,
@@ -341,6 +363,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
+                actual_provider: None,
             })
         }
 

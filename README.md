@@ -130,9 +130,7 @@ librefang-llm-driver        LLM driver trait and shared types for LibreFang
 librefang-llm-drivers       Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing librefang-llm-driver trait
 librefang-runtime-mcp       MCP (Model Context Protocol) client for LibreFang runtime
 librefang-kernel-handle     KernelHandle trait for in-process callers into the LibreFang kernel
-librefang-runtime-wasm      WASM skill sandbox for LibreFang runtime
 librefang-kernel-router     Hand/Template routing engine for the LibreFang kernel
-librefang-runtime-oauth     OAuth flows (ChatGPT, GitHub Copilot) for LibreFang runtime drivers
 librefang-kernel-metering   Cost metering, quota enforcement for the LibreFang kernel
 xtask                       Build automation
 ```

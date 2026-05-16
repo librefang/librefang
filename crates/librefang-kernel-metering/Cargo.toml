@@ -9,7 +9,9 @@ description = "Cost metering and quota enforcement for the LibreFang kernel"
 librefang-types = { path = "../librefang-types" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-runtime = { path = "../librefang-runtime" }
+librefang-llm-driver = { path = "../librefang-llm-driver" }
 serde = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

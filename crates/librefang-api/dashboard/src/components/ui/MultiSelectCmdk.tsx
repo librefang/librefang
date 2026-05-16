@@ -9,6 +9,23 @@ interface MultiSelectCmdkProps {
   onChange: (next: string[] | ((prev: string[]) => string[])) => void;
   placeholder?: string;
   disabled?: boolean;
+  /**
+   * Optional metadata for each option. When provided, the entry's
+   * `description` is rendered as a secondary line in the dropdown and
+   * is also matched against the search query (so users can find an
+   * item by what it does, not just by its identifier). Unknown keys
+   * are silently ignored — the component still falls back to showing
+   * just the option name.
+   */
+  optionMeta?: Record<string, { description?: string }>;
+  /**
+   * When true, pressing Enter on a search string that doesn't match
+   * any catalog option still commits that string as a chip. This lets
+   * users reference identifiers that exist on the backend but aren't
+   * in the in-memory catalog yet (e.g. a tool from a not-yet-loaded
+   * plugin). Default false to preserve the strict catalog-only flow.
+   */
+  allowFreeText?: boolean;
 }
 
 export function MultiSelectCmdk({
@@ -17,6 +34,8 @@ export function MultiSelectCmdk({
   onChange,
   placeholder = "Search…",
   disabled = false,
+  optionMeta,
+  allowFreeText = false,
 }: MultiSelectCmdkProps) {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
@@ -29,10 +48,14 @@ export function MultiSelectCmdk({
   const filteredOptions = useMemo(() => {
     const selected = new Set(value);
     const searchLower = search.toLowerCase();
-    return options.filter(
-      (o) => !selected.has(o) && o.toLowerCase().includes(searchLower),
-    );
-  }, [options, value, search]);
+    return options.filter((o) => {
+      if (selected.has(o)) return false;
+      if (!searchLower) return true;
+      if (o.toLowerCase().includes(searchLower)) return true;
+      const desc = optionMeta?.[o]?.description?.toLowerCase();
+      return desc ? desc.includes(searchLower) : false;
+    });
+  }, [options, value, search, optionMeta]);
 
   const focusInput = useCallback(() => {
     inputRef.current?.focus();
@@ -97,8 +120,26 @@ export function MultiSelectCmdk({
       if (e.key === "Backspace" && search === "" && value.length > 0) {
         remove(value[value.length - 1]);
       }
+      // Free-text commit: only kick in when the catalog has no
+      // candidates for the current query AND the caller opted in.
+      // When candidates exist, cmdk's own Enter handler selects the
+      // highlighted item — don't fight it.
+      if (
+        allowFreeText &&
+        e.key === "Enter" &&
+        search.trim() &&
+        filteredOptions.length === 0
+      ) {
+        e.preventDefault();
+        const cleaned = search.trim();
+        if (!value.includes(cleaned)) {
+          select(cleaned);
+        } else {
+          setSearch("");
+        }
+      }
     },
-    [search, value, remove],
+    [search, value, remove, allowFreeText, filteredOptions.length, select],
   );
 
   const handleInputFocus = useCallback(() => {
@@ -136,7 +177,12 @@ export function MultiSelectCmdk({
             </button>
           </span>
         ))}
-        <Command className="flex flex-1 items-center min-w-[120px]">
+        {/* shouldFilter=false: we do our own filtering in `filteredOptions`
+            so we can also match against description metadata (#5049).
+            Letting cmdk re-filter the already-filtered list strips out
+            description-only matches because cmdk only looks at the Item's
+            `value` prop. */}
+        <Command className="flex flex-1 items-center min-w-[120px]" shouldFilter={false}>
           <Command.Input
             ref={inputRef}
             value={search}
@@ -158,20 +204,39 @@ export function MultiSelectCmdk({
               onMouseDown={(e) => e.preventDefault()}
             >
               <Command.Empty className="px-3 py-4 text-center text-xs text-text-dim">
-                {t("common.no_results", { defaultValue: "No results" })}
+                {allowFreeText && search.trim() ? (
+                  <span>
+                    {t("common.no_results", { defaultValue: "No results" })}
+                    {" — "}
+                    {t("common.press_enter_to_add", {
+                      defaultValue: "press Enter to add \"{{value}}\"",
+                      value: search.trim(),
+                    })}
+                  </span>
+                ) : (
+                  t("common.no_results", { defaultValue: "No results" })
+                )}
               </Command.Empty>
-              {filteredOptions.map((option) => (
-                <Command.Item
-                  key={option}
-                  value={option}
-                  role="option"
-                  aria-selected={false}
-                  onSelect={select}
-                  className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
-                >
-                  <span className="truncate">{option}</span>
-                </Command.Item>
-              ))}
+              {filteredOptions.map((option) => {
+                const description = optionMeta?.[option]?.description;
+                return (
+                  <Command.Item
+                    key={option}
+                    value={option}
+                    role="option"
+                    aria-selected={false}
+                    onSelect={select}
+                    className="flex cursor-pointer flex-col items-start gap-0.5 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
+                  >
+                    <span className="truncate font-mono text-text">{option}</span>
+                    {description && (
+                      <span className="line-clamp-2 text-[11px] text-text-dim/70">
+                        {description}
+                      </span>
+                    )}
+                  </Command.Item>
+                );
+              })}
             </Command.List>
           )}
         </Command>

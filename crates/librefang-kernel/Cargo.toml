@@ -47,6 +47,10 @@ regex-lite = { workspace = true }
 regex = { workspace = true }
 cron = "0.16"
 parking_lot = "0.12"
+# Tera — workflow `Transform` operator (#4980 step 3). Sandboxed
+# Jinja2-style templating; no I/O, no shell escape. Used to render
+# previous-step output into a formatted string without an LLM call.
+tera = { workspace = true }
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
 sha2 = { workspace = true }

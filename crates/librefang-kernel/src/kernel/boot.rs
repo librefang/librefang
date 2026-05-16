@@ -511,11 +511,15 @@ impl LibreFangKernel {
             }
         }
 
-        // Add fallback providers to the chain (with model names for cross-provider fallback)
+        // Add fallback providers to the chain (with model names for cross-provider fallback).
+        // We also track provider names per slot so the FallbackDriver can
+        // participate in the shared ProviderExhaustionStore (#4807).
         let mut model_chain: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+        let mut provider_chain: Vec<String> = Vec::new();
         // Primary driver uses empty model name (uses the request's model field as-is)
         for d in &driver_chain {
             model_chain.push((d.clone(), String::new()));
+            provider_chain.push(config.default_model.provider.clone());
         }
         for fb in &config.fallback_providers {
             let fb_api_key = if !fb.api_key_env.is_empty() {
@@ -553,6 +557,7 @@ impl LibreFangKernel {
                     );
                     driver_chain.push(d.clone());
                     model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
+                    provider_chain.push(fb.provider.clone());
                 }
                 Err(e) => {
                     warn!(
@@ -564,9 +569,29 @@ impl LibreFangKernel {
             }
         }
 
+        // Shared provider-exhaustion store (#4807). Built before the
+        // primary driver so we can attach it to `FallbackDriver`; the
+        // same handle is later forwarded into `MeteringEngine` and
+        // `AuxClient` so all three layers observe a coherent skip view.
+        // Cheap-clone (internal Arc).
+        let exhaustion_store = ProviderExhaustionStore::new();
+
         // Use the chain, or create a stub driver if everything failed
         let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
-            Arc::new(librefang_runtime::drivers::fallback::FallbackDriver::with_models(model_chain))
+            // Zip model_chain with provider_chain so each slot's
+            // provider name lands in `FallbackDriver`'s exhaustion-store
+            // keys. The two vectors are built in lock-step above.
+            let triples: Vec<(Arc<dyn LlmDriver>, String, String)> = model_chain
+                .into_iter()
+                .zip(provider_chain.iter())
+                .map(|((d, m), p)| (d, m, p.clone()))
+                .collect();
+            let fb =
+                librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
+                    triples,
+                )
+                .with_exhaustion_store(exhaustion_store.clone());
+            Arc::new(fb)
         } else if let Some(single) = driver_chain.into_iter().next() {
             single
         } else {
@@ -576,10 +601,16 @@ impl LibreFangKernel {
             Arc::new(StubDriver) as Arc<dyn LlmDriver>
         };
 
-        // Initialize metering engine (shares the same SQLite connection as the memory substrate)
-        let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.pool()),
-        )));
+        // Initialize metering engine (shares the same SQLite connection as the memory substrate).
+        // The metering engine carries the same exhaustion store so a
+        // per-provider budget gate trip records a skip the LLM
+        // fallback chain honours on the next dispatch (#4807).
+        let metering = Arc::new(
+            MeteringEngine::new(Arc::new(librefang_memory::usage::UsageStore::new(
+                memory.pool(),
+            )))
+            .with_exhaustion_store(exhaustion_store.clone()),
+        );
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
@@ -1187,10 +1218,16 @@ impl LibreFangKernel {
         // can clone the snapshot without re-loading from the swap. The
         // primary driver is shared by `Arc::clone` so failover behaviour
         // matches the kernel's main `default_driver`.
+        //
+        // The aux client carries the SAME `ProviderExhaustionStore` that
+        // the primary driver and metering engine were wired with, so an
+        // exhaustion on the main path (rate limit, operator budget cap)
+        // is honoured by every aux chain — and vice versa (#4807).
         let initial_aux_client = librefang_runtime::aux_client::AuxClient::new(
             std::sync::Arc::new(config.clone()),
             Arc::clone(&driver),
-        );
+        )
+        .with_exhaustion_store(exhaustion_store.clone());
         // Pre-parse `config.toml` once at boot so the per-message hot path
         // never has to re-read it (#3722). Errors here are non-fatal — the
         // skill config injection layer treats a missing/invalid file as an
@@ -1896,6 +1933,65 @@ impl LibreFangKernel {
             }
         }
 
+        // Reconcile declarative `[[triggers]]` from each restored agent's
+        // manifest against the runtime trigger store loaded earlier from
+        // `trigger_jobs.json` (#5014).
+        //
+        // Runs once after the full registry is populated so that
+        // `target_agent` lookups by name see every restored agent. The
+        // reconcile is idempotent — restarting a daemon with unchanged
+        // manifests is a no-op (no writes to the persist file, no log
+        // spam beyond a single "registered/updated" line per drift).
+        {
+            let snapshot: Vec<(AgentId, librefang_types::agent::AgentManifest)> = kernel
+                .agents
+                .registry
+                .list()
+                .into_iter()
+                .map(|e| (e.id, e.manifest.clone()))
+                .collect();
+            let mut any_change = false;
+            for (agent_id, manifest) in snapshot {
+                if manifest.triggers.is_empty()
+                    && matches!(
+                        manifest.reconcile_orphans,
+                        librefang_types::agent::OrphanPolicy::Keep
+                    )
+                {
+                    continue;
+                }
+                let report = kernel.workflows.triggers.reconcile_manifest_triggers(
+                    agent_id,
+                    &manifest.triggers,
+                    manifest.reconcile_orphans,
+                    |target_name| {
+                        kernel
+                            .agents
+                            .registry
+                            .find_by_name(target_name)
+                            .map(|e| e.id)
+                    },
+                );
+                if report.mutated() {
+                    any_change = true;
+                    info!(
+                        agent_id = %agent_id,
+                        created = report.created,
+                        updated = report.updated,
+                        deleted = report.deleted,
+                        skipped = report.skipped,
+                        orphans_kept = report.orphans_kept,
+                        "Reconciled manifest triggers on boot"
+                    );
+                }
+            }
+            if any_change {
+                if let Err(e) = kernel.workflows.triggers.persist() {
+                    tracing::warn!("Failed to persist trigger reconcile on boot: {e}");
+                }
+            }
+        }
+
         // One-time webui → canonical session migration.
         //
         // Before the unify fix, the dashboard WS wrote to
@@ -2054,14 +2150,32 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel
+                let recovered_run_ids = kernel
                     .workflows
                     .engine
                     .recover_stale_running_runs(stale_timeout);
-                if recovered > 0 {
+                if !recovered_run_ids.is_empty() {
                     info!(
-                        "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
+                        "Recovered {} stale workflow run(s) interrupted by daemon restart",
+                        recovered_run_ids.len()
                     );
+                    // (#5033 review fix.) For each demoted run, drain any
+                    // async-task tracker entry that was still pointing at
+                    // it and synthesize a `Failed` completion event so
+                    // the originating agent does not wait forever for an
+                    // event that will never fire. At fresh boot the
+                    // registry is empty (it's in-memory, repopulated by
+                    // live agents), so this is a no-op on a clean cold
+                    // start; the hook exists to (a) cover the
+                    // hypothetical future where the registry is
+                    // persisted, and (b) cover any caller that re-runs
+                    // the recovery sweep mid-runtime with live
+                    // registrations present. Synchronous: builds the
+                    // `Failed` events and pushes them into the kernel's
+                    // injection senders without spawning an LLM turn —
+                    // the wake-idle path is deliberately skipped because
+                    // `self_handle` is not yet set at this point in boot.
+                    kernel.synthesize_task_failures_for_recovered_runs(&recovered_run_ids);
                 }
             }
         }
