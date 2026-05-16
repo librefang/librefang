@@ -4676,7 +4676,6 @@ dependencies = [
  "futures",
  "librefang-http",
  "librefang-llm-driver",
- "librefang-runtime-oauth",
  "librefang-types",
  "metrics",
  "rand 0.10.1",
@@ -4754,6 +4753,7 @@ dependencies = [
 name = "librefang-runtime"
 version = "2026.5.12-beta.11"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -4774,9 +4774,10 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
+ "librefang-runtime-audit",
  "librefang-runtime-mcp",
- "librefang-runtime-oauth",
- "librefang-runtime-wasm",
+ "librefang-runtime-media",
+ "librefang-runtime-sandbox-docker",
  "librefang-skills",
  "librefang-types",
  "metrics",
@@ -4787,6 +4788,7 @@ dependencies = [
  "proptest",
  "r2d2",
  "r2d2_sqlite",
+ "rand 0.10.1",
  "regex-lite",
  "reqwest",
  "rusqlite",
@@ -4809,8 +4811,28 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "wasmtime",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-audit"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "chrono",
+ "hex",
+ "librefang-types",
+ "metrics",
+ "r2d2",
+ "r2d2_sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4838,39 +4860,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "librefang-runtime-oauth"
+name = "librefang-runtime-media"
 version = "2026.5.12-beta.11"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "chrono",
+ "dashmap",
  "hex",
  "librefang-http",
  "librefang-types",
- "rand 0.10.1",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
- "zeroize",
+ "url",
+ "uuid",
 ]
 
 [[package]]
-name = "librefang-runtime-wasm"
+name = "librefang-runtime-sandbox-docker"
 version = "2026.5.12-beta.11"
 dependencies = [
- "anyhow",
- "async-trait",
- "librefang-http",
- "librefang-kernel-handle",
+ "chrono",
+ "dashmap",
  "librefang-types",
  "serde_json",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
- "wasmtime",
 ]
 
 [[package]]

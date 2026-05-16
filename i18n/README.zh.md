@@ -130,9 +130,7 @@ librefang-llm-driver        的 LLM 驱动程序 trait 及共享类型
 librefang-llm-drivers       trait 的具体 LLM 提供商驱动程序（anthropic、openai、gemini 等）
 librefang-runtime-mcp       运行时的 MCP（Model Context Protocol）客户端
 librefang-kernel-handle     内核进行进程内调用的 KernelHandle trait
-librefang-runtime-wasm      运行时的 WASM 技能沙盒（sandbox）
 librefang-kernel-router     内核的 Hand/Template 路由引擎
-librefang-runtime-oauth     运行时驱动程序的 OAuth 流程（ChatGPT、GitHub Copilot）
 librefang-kernel-metering   内核的成本计量和配额执行
 xtask                       构建自动化
 ```
