@@ -730,14 +730,16 @@ mod tests {
     /// at the source rather than letting the next caller fail with an
     /// opaque `aead::Error`.
     ///
-    /// Uses the unnamed `serial` group so it serialises against every
-    /// other vault-test in this crate that mutates `LIBREFANG_VAULT_KEY`
-    /// (notably `kernel::tests::vault_cache_reuses_unlocked_handle_across_calls`
-    /// and friends, which use the same unnamed group). Concurrent
-    /// env-var mutation would otherwise race with our init's resolve →
-    /// save → verify sequence and the verification would spuriously fire.
+    /// Uses the named `serial(librefang_vault_key)` group — the same
+    /// group every other vault-key-touching test in this crate
+    /// (including `kernel::tests::vault_cache_reuses_unlocked_handle_across_calls`
+    /// and `install_integration_writes_through_cached_vault_handle`,
+    /// migrated alongside this change) sits in. Two disjoint serial
+    /// groups in the same crate that both mutate the process-global
+    /// `LIBREFANG_VAULT_KEY` would race init's resolve → save → verify
+    /// sequence and the verification would spuriously fire.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(librefang_vault_key)]
     fn vault_set_twice_round_trips_via_env_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
