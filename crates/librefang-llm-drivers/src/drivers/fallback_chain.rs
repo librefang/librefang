@@ -223,7 +223,17 @@ impl LlmDriver for FallbackChain {
             }
 
             match self.try_entry(entry, request.clone()).await {
-                Ok(resp) => return Ok(resp),
+                Ok(mut resp) => {
+                    // Stamp the slot that actually served the request
+                    // so the metering layer attributes spend correctly
+                    // (review nit 10). Preserve any stamp set by a
+                    // wrapped FallbackChain / FallbackDriver lower in
+                    // the stack.
+                    if resp.actual_provider.is_none() {
+                        resp.actual_provider = Some(entry.provider_name.clone());
+                    }
+                    return Ok(resp);
+                }
                 Err(e) => {
                     let reason = e.failover_reason();
                     warn!(
@@ -260,8 +270,14 @@ impl LlmDriver for FallbackChain {
                             last_error = Some(e);
                             continue;
                         }
-                        // Propagate immediately.
-                        FailoverReason::ContextTooLong | FailoverReason::Unknown => {
+                        // Propagate immediately. `ChainExhausted`
+                        // means a *nested* FallbackChain (e.g. an
+                        // aux client inside the primary chain)
+                        // already exhausted its own slots — there's
+                        // no point retrying the same wrapped chain.
+                        FailoverReason::ContextTooLong
+                        | FailoverReason::ChainExhausted
+                        | FailoverReason::Unknown => {
                             return Err(e);
                         }
                     }
@@ -269,19 +285,28 @@ impl LlmDriver for FallbackChain {
             }
         }
 
-        // Every entry refused or was pre-skipped. When an exhaustion
-        // store is attached we synthesize the typed
-        // `AllProvidersExhausted` variant unconditionally so callers
-        // can react to "chain is dry" without parsing a generic Api
+        // Every entry refused or was pre-skipped. With a store
+        // attached and *every* slot accounted for as an exhaustion-
+        // class outcome (pre-skipped via the store OR attempted and
+        // failed with a rate-limit / quota / auth reason), synthesize
+        // the typed `AllProvidersExhausted` variant so callers can
+        // react to "chain is dry" without parsing a generic Api
         // message (#4807). The most recent underlying provider error
-        // (if any slot was actually attempted) rides along on the
-        // `cause` field, which `thiserror`'s `#[source]` attribute
-        // exposes through `std::error::Error::source` — preserving the
+        // (if any slot was actually attempted) rides along on
+        // `cause`, which `thiserror`'s `#[source]` attribute exposes
+        // through `std::error::Error::source` — preserving the
         // upstream chain per the trait-crate's source-chain rule
-        // (#3745). Legacy callers that did not opt into the store keep
-        // the historical `Api { message, ... }` error so any downcast
-        // they perform continues to match.
-        if self.exhaustion_store.is_some() {
+        // (#3745).
+        //
+        // Critically, when at least one slot failed with a NON-
+        // exhaustion reason (e.g. genuine HTTP 500, transport error),
+        // we propagate that last error verbatim instead of wrapping
+        // it in `AllProvidersExhausted`. The chain isn't actually
+        // "dry" in that case — the slot is broken, not exhausted —
+        // and callers depend on the distinction to route the failure
+        // (a 500 reaches the human; an exhaustion event reaches the
+        // operator). Review blocking issue #5.
+        if self.exhaustion_store.is_some() && skip_reasons.len() == self.entries.len() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
                     .into_iter()
@@ -372,10 +397,16 @@ impl LlmDriver for FallbackChain {
             // Stream does not get rate-limit retry (streaming mid-response retry
             // is not supported); any error here triggers the skip/propagate logic.
             match entry.driver.stream(req, intercept_tx).await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     // Wait for the relay to drain all buffered events so they
                     // are not silently dropped when the handle is discarded.
                     let _ = relay_handle.await;
+                    // Stamp the slot that actually served the stream
+                    // (review nit 10). Preserve any stamp from a nested
+                    // wrapper.
+                    if resp.actual_provider.is_none() {
+                        resp.actual_provider = Some(entry.provider_name.clone());
+                    }
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -423,7 +454,9 @@ impl LlmDriver for FallbackChain {
                             last_error = Some(e);
                             continue;
                         }
-                        FailoverReason::ContextTooLong | FailoverReason::Unknown => {
+                        FailoverReason::ContextTooLong
+                        | FailoverReason::ChainExhausted
+                        | FailoverReason::Unknown => {
                             return Err(e);
                         }
                     }
@@ -431,13 +464,14 @@ impl LlmDriver for FallbackChain {
             }
         }
 
-        // Streaming path mirrors the non-streaming policy above (#4807,
-        // #3745): with a store attached, synthesize the typed variant
-        // unconditionally and carry the last underlying error on
-        // `cause` so the source chain survives; without a store, fall
-        // back to the historical `Api { message, ... }` for legacy
-        // downcasters.
-        if self.exhaustion_store.is_some() {
+        // Streaming path mirrors the non-streaming policy above
+        // (#4807, #3745, review blocking #5): synthesize the typed
+        // `AllProvidersExhausted` variant only when *every* slot was
+        // accounted for as an exhaustion-class outcome. A non-
+        // exhaustion failure (e.g. genuine 500) propagates verbatim
+        // so the caller can distinguish "chain dry" from "slot
+        // broken".
+        if self.exhaustion_store.is_some() && skip_reasons.len() == self.entries.len() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
                     .into_iter()
@@ -468,7 +502,11 @@ impl LlmDriver for FallbackChain {
 /// fine), unknown (could not classify), and the transient
 /// `ModelUnavailable` / `HttpError` / `Timeout` paths where a single
 /// failure isn't evidence the slot is durably down.
-fn exhaustion_reason_for(failover: &FailoverReason) -> Option<ExhaustionReason> {
+///
+/// `pub(crate)` so the sibling [`super::fallback::FallbackDriver`] can
+/// share the same exhaustion-classification policy without duplicating
+/// the mapping (#4807, Blocker 2).
+pub(crate) fn exhaustion_reason_for(failover: &FailoverReason) -> Option<ExhaustionReason> {
     match failover {
         FailoverReason::RateLimit(_) => Some(ExhaustionReason::RateLimited),
         FailoverReason::CreditExhausted => Some(ExhaustionReason::QuotaExceeded),
@@ -482,6 +520,7 @@ fn exhaustion_reason_for(failover: &FailoverReason) -> Option<ExhaustionReason> 
         | FailoverReason::Timeout
         | FailoverReason::HttpError
         | FailoverReason::ContextTooLong
+        | FailoverReason::ChainExhausted
         | FailoverReason::Unknown => None,
     }
 }
@@ -500,7 +539,10 @@ const MIN_RATE_LIMIT_EXHAUSTION_BACKOFF: Duration = Duration::from_secs(30);
 /// (parsed from `LlmError::RateLimited.retry_after_ms` / `Overloaded`)
 /// floored at [`MIN_RATE_LIMIT_EXHAUSTION_BACKOFF`]; the hard-action
 /// variants (quota, auth) use [`DEFAULT_LONG_BACKOFF`].
-fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) -> Option<Instant> {
+///
+/// `pub(crate)` so the sibling [`super::fallback::FallbackDriver`] can
+/// reuse the same back-off policy (#4807, Blocker 2).
+pub(crate) fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) -> Option<Instant> {
     let now = Instant::now();
     match failover {
         FailoverReason::RateLimit(Some(ms)) if *ms > 0 => {
@@ -553,6 +595,7 @@ mod tests {
                 output_tokens: 3,
                 ..Default::default()
             },
+            actual_provider: None,
         }
     }
 
@@ -1262,6 +1305,102 @@ mod tests {
         );
     }
 
+    // Review blocking #5: when at least one slot fails with a
+    // NON-exhaustion reason (genuine 500, transport error), the chain
+    // must propagate THAT error verbatim instead of wrapping it in
+    // `AllProvidersExhausted`. The chain isn't actually "dry" — the
+    // slot is broken — and callers depend on the distinction.
+    #[tokio::test]
+    async fn non_exhaustion_failure_propagates_raw_error() {
+        // Driver that returns a plain HTTP 500 — failover_reason
+        // classifies it as HttpError, which is transient and not
+        // exhaustion-class, so the chain must NOT mark the slot in
+        // the store and must NOT wrap into AllProvidersExhausted.
+        struct ServerErrorDriver;
+
+        #[async_trait]
+        impl LlmDriver for ServerErrorDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::Api {
+                    status: 500,
+                    message: "internal server error".to_string(),
+                    code: None,
+                })
+            }
+        }
+
+        let store = ProviderExhaustionStore::new();
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(ServerErrorDriver), "p1"),
+            entry(Arc::new(ServerErrorDriver), "p2"),
+        ])
+        .with_exhaustion_store(store.clone());
+
+        let err = chain.complete(test_request()).await.unwrap_err();
+        match &err {
+            LlmError::Api { status, .. } => assert_eq!(*status, 500),
+            other => panic!("expected raw Api(500), got {other:?}"),
+        }
+        // Neither slot should be marked in the store — HTTP 500 is
+        // transient, the slot may serve the next request fine.
+        assert!(
+            store.is_exhausted("p1").is_none(),
+            "p1 must not be flagged exhausted on a transient HTTP 500"
+        );
+        assert!(
+            store.is_exhausted("p2").is_none(),
+            "p2 must not be flagged exhausted on a transient HTTP 500"
+        );
+    }
+
+    // Review blocking #5: when slot 1 was pre-skipped (in the store)
+    // and slot 2 was attempted-and-rate-limited (exhaustion-class),
+    // EVERY slot is accounted for as an exhaustion-class outcome, so
+    // the chain returns `AllProvidersExhausted` with `cause` = slot 2's
+    // RateLimited error.
+    #[tokio::test]
+    async fn skip_plus_rate_limit_yields_typed_variant_with_cause() {
+        let store = ProviderExhaustionStore::new();
+        // Pre-mark p1.
+        let until = Instant::now() + Duration::from_secs(60);
+        store.mark_exhausted("p1", ExhaustionReason::QuotaExceeded, Some(until));
+
+        let p2_driver = Arc::new(RateLimitedCountingDriver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            retry_after_ms: 1,
+        });
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(OkDriver("should-not-reach")), "p1"),
+            ChainEntry {
+                driver: p2_driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p2".to_string(),
+            },
+        ])
+        .with_rate_limit_sleep_ms(0)
+        .with_exhaustion_store(store);
+
+        let err = chain.complete(test_request()).await.unwrap_err();
+        match err {
+            LlmError::AllProvidersExhausted { details, cause } => {
+                assert_eq!(details.len(), 2);
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::QuotaExceeded);
+                assert_eq!(details[1].provider_id, "p2");
+                assert_eq!(details[1].reason, ExhaustionReason::RateLimited);
+                let inner = cause.expect("attempted slot must contribute a cause");
+                assert!(
+                    matches!(*inner, LlmError::RateLimited { .. }),
+                    "cause should be the rate-limit failure from p2, got {inner:?}",
+                );
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn legacy_no_store_chain_preserves_old_error_shape() {
         // Without a store attached: the chain falls back to the historical
@@ -1308,6 +1447,10 @@ mod tests {
         // mark the slot — the slot is fine.
         assert_eq!(exhaustion_reason_for(&FailoverReason::ContextTooLong), None);
         assert_eq!(exhaustion_reason_for(&FailoverReason::Unknown), None);
+        // ChainExhausted is a terminal classification — the caller
+        // *is* the chain that already exhausted, so we do not mark
+        // its own slot in the parent store.
+        assert_eq!(exhaustion_reason_for(&FailoverReason::ChainExhausted), None);
     }
 
     #[test]

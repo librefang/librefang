@@ -222,10 +222,13 @@ impl LlmError {
             // layer failures before the API even responded.
             LlmError::Http(_) => FailoverReason::HttpError,
 
-            // The chain has nothing left to try. Classify as Unknown so the
-            // caller propagates instead of looping further; the variant is
-            // already a *terminal* error, not a switching hint.
-            LlmError::AllProvidersExhausted { .. } => FailoverReason::Unknown,
+            // The chain has nothing left to try. Classify as
+            // `ChainExhausted` — a dedicated terminal reason
+            // distinct from `Unknown` (the latter is "could not
+            // classify"; here we know precisely what happened).
+            // Callers propagate instead of looping further. Review
+            // nit 7.
+            LlmError::AllProvidersExhausted { .. } => FailoverReason::ChainExhausted,
         }
     }
 }
@@ -380,6 +383,15 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
     /// Token usage statistics.
     pub usage: TokenUsage,
+    /// The provider slot that actually served the request.
+    ///
+    /// Populated by fallback wrappers ([`crate::LlmDriver`]
+    /// implementations that try multiple providers in sequence) so that
+    /// the billing layer can attribute spend to the slot that *did* the
+    /// work, not the slot the caller nominated. `None` for direct
+    /// driver calls — billing falls back to the original nominator.
+    /// See librefang/librefang#4807 review nit 10.
+    pub actual_provider: Option<String>,
 }
 
 impl CompletionResponse {
@@ -730,6 +742,20 @@ mod tests {
         assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
     }
 
+    // Review nit 7: `AllProvidersExhausted` must classify as the
+    // dedicated terminal reason `ChainExhausted`, not the generic
+    // `Unknown` that means "could not classify".
+    #[test]
+    fn all_providers_exhausted_classifies_as_chain_exhausted() {
+        use crate::llm_errors::FailoverReason;
+
+        let err = LlmError::AllProvidersExhausted {
+            details: vec![],
+            cause: None,
+        };
+        assert_eq!(err.failover_reason(), FailoverReason::ChainExhausted);
+    }
+
     // #4807 / #3745 — `AllProvidersExhausted` MUST preserve the
     // upstream provider error via `Error::source()`. The trait crate's
     // own `AGENTS.md` rule is that no variant introduced for fallback
@@ -782,6 +808,7 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],
             usage: TokenUsage::default(),
+            actual_provider: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -923,6 +950,7 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -988,6 +1016,7 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    actual_provider: None,
                 })
             }
         }
