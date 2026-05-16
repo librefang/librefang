@@ -217,7 +217,26 @@ pub struct ExecutionResult {
 }
 
 /// Errors from sandbox operations.
+///
+/// Per-crate typed error type for `librefang-runtime-wasm`, established as the
+/// first concrete code wedge for the error-contracts effort (#3576). The
+/// variants partition the WASM sandbox's failure modes by the recovery
+/// strategy a caller would apply:
+///
+/// * `Compilation` — bad WASM bytes / engine misconfiguration; not retryable.
+/// * `Instantiation` — linker / import wiring; not retryable without code
+///   change.
+/// * `Execution` — generic host-side execution failure (JSON serialization,
+///   `spawn_blocking` join failure, wall-clock timeout, …); may be retryable.
+/// * `FuelExhausted` — guest blew its CPU budget. Quota-recoverable.
+/// * `AbiError` — guest violated the host-guest ABI contract (missing exports,
+///   bad pointers, oversized payloads, malformed JSON). Not retryable.
+///
+/// Marked `#[non_exhaustive]` so future variants (e.g. a typed
+/// `MemoryLimitExceeded`) can be added without a breaking-change bump on
+/// downstream crates that match on the enum.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SandboxError {
     #[error("WASM compilation failed: {0}")]
     Compilation(String),
@@ -679,7 +698,7 @@ impl WasmSandbox {
         caller: &mut Caller<'_, GuestState>,
         request_ptr: i32,
         request_len: i32,
-    ) -> anyhow::Result<i64> {
+    ) -> Result<i64, SandboxError> {
         // SECURITY: Reject oversized or negative host_call request payloads
         // before deserialising (Bug #3866). `request_len` is i32 from the
         // guest ABI; a negative value as usize wraps to a huge number. The
@@ -687,13 +706,14 @@ impl WasmSandbox {
         // depth is bounded by serde_json's default RECURSION_LIMIT of 128
         // since we never call `disable_recursion_limit`.
         if request_len < 0 || request_len as usize > MAX_HOST_CALL_REQUEST_BYTES {
-            anyhow::bail!(
-                "host_call request length invalid: {} (max {MAX_HOST_CALL_REQUEST_BYTES})",
-                request_len
-            );
+            return Err(SandboxError::AbiError(format!(
+                "host_call request length invalid: {request_len} \
+                 (max {MAX_HOST_CALL_REQUEST_BYTES})"
+            )));
         }
         let request_bytes = Self::read_guest_bytes(caller, request_ptr, request_len, "host_call")?;
-        let request: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes)
+            .map_err(|e| SandboxError::AbiError(format!("host_call request JSON: {e}")))?;
         let method = request
             .get("method")
             .and_then(|m| m.as_str())
@@ -755,19 +775,21 @@ impl WasmSandbox {
         ptr: i32,
         len: i32,
         op: &str,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, SandboxError> {
         let memory = caller
             .get_export("memory")
             .and_then(|e| e.into_memory())
-            .ok_or_else(|| anyhow::anyhow!("{op}: no memory export"))?;
+            .ok_or_else(|| SandboxError::AbiError(format!("{op}: no memory export")))?;
 
         let start = ptr as usize;
         let end = start
             .checked_add(len as usize)
-            .ok_or_else(|| anyhow::anyhow!("{op}: pointer overflow"))?;
+            .ok_or_else(|| SandboxError::AbiError(format!("{op}: pointer overflow")))?;
         let data = memory.data(&mut *caller);
         if end > data.len() {
-            anyhow::bail!("{op}: pointer out of bounds");
+            return Err(SandboxError::AbiError(format!(
+                "{op}: pointer out of bounds"
+            )));
         }
 
         Ok(data[start..end].to_vec())
@@ -776,28 +798,35 @@ impl WasmSandbox {
     fn write_guest_json(
         caller: &mut Caller<'_, GuestState>,
         value: &serde_json::Value,
-    ) -> anyhow::Result<i64> {
-        let response_bytes = serde_json::to_vec(value)?;
+    ) -> Result<i64, SandboxError> {
+        let response_bytes = serde_json::to_vec(value)
+            .map_err(|e| SandboxError::Execution(format!("host_call: JSON serialize: {e}")))?;
         let len = response_bytes.len() as i32;
 
         let alloc_fn = caller
             .get_export("alloc")
             .and_then(|e| e.into_func())
-            .ok_or_else(|| anyhow::anyhow!("host_call: no alloc export"))?;
-        let alloc_typed = alloc_fn.typed::<i32, i32>(&mut *caller)?;
-        let ptr = alloc_typed.call(&mut *caller, len)?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: no alloc export".into()))?;
+        let alloc_typed = alloc_fn
+            .typed::<i32, i32>(&mut *caller)
+            .map_err(|e| SandboxError::AbiError(format!("host_call: alloc typed: {e}")))?;
+        let ptr = alloc_typed
+            .call(&mut *caller, len)
+            .map_err(|e| SandboxError::Execution(format!("host_call: alloc call failed: {e}")))?;
 
         let memory = caller
             .get_export("memory")
             .and_then(|e| e.into_memory())
-            .ok_or_else(|| anyhow::anyhow!("host_call: no memory export"))?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: no memory export".into()))?;
         let dest_start = ptr as usize;
         let dest_end = dest_start
             .checked_add(response_bytes.len())
-            .ok_or_else(|| anyhow::anyhow!("host_call: response pointer overflow"))?;
+            .ok_or_else(|| SandboxError::AbiError("host_call: response pointer overflow".into()))?;
         let mem_data = memory.data_mut(caller);
         if dest_end > mem_data.len() {
-            anyhow::bail!("host_call: response exceeds memory bounds");
+            return Err(SandboxError::AbiError(
+                "host_call: response exceeds memory bounds".into(),
+            ));
         }
         mem_data[dest_start..dest_end].copy_from_slice(&response_bytes);
 
@@ -1360,6 +1389,70 @@ mod tests {
     fn test_size_caps_are_one_mib() {
         assert_eq!(MAX_HOST_CALL_REQUEST_BYTES, 1024 * 1024);
         assert_eq!(MAX_GUEST_RESULT_BYTES, 1024 * 1024);
+    }
+
+    /// Display formatting regression for every `SandboxError` variant
+    /// (#3576 wedge). The migration from `anyhow` to typed
+    /// `SandboxError` must keep the Display text stable: the kernel
+    /// boundary wraps `SandboxError` with `#[error("WASM execution
+    /// failed: {0}")]`, and downstream log / UI consumers rely on the
+    /// exact prefix + variant suffix shape. A separate
+    /// `librefang-kernel::error::tests::sandbox_error_display_is_unchanged`
+    /// pins the wrapped form; this test pins the inner Display so the
+    /// two halves stay in lock-step.
+    #[test]
+    fn sandbox_error_display_format_per_variant() {
+        assert_eq!(
+            SandboxError::Compilation("bad opcode".into()).to_string(),
+            "WASM compilation failed: bad opcode",
+        );
+        assert_eq!(
+            SandboxError::Instantiation("missing import".into()).to_string(),
+            "WASM instantiation failed: missing import",
+        );
+        assert_eq!(
+            SandboxError::Execution("trap at 0x42".into()).to_string(),
+            "WASM execution failed: trap at 0x42",
+        );
+        assert_eq!(
+            SandboxError::FuelExhausted.to_string(),
+            "Fuel exhausted: skill exceeded CPU budget",
+        );
+        assert_eq!(
+            SandboxError::AbiError("no memory export".into()).to_string(),
+            "Guest ABI violation: no memory export",
+        );
+    }
+
+    /// `SandboxError` participates in the standard `std::error::Error`
+    /// trait without an inner `#[source]` chain — the existing variants
+    /// flatten upstream `wasmtime::Error` / `serde_json::Error` into a
+    /// `String` payload so the byte-exact Display text the kernel's
+    /// regression suite asserts on stays stable across the migration.
+    /// Verify that contract explicitly: `Error::source()` returns
+    /// `None` for every variant, and the typed value still composes
+    /// through `Box<dyn std::error::Error>` (the trait-object bound
+    /// the kernel's `#[from] SandboxError` ultimately relies on).
+    #[test]
+    fn sandbox_error_source_chain_is_intentionally_flat() {
+        use std::error::Error as _;
+
+        assert!(SandboxError::Compilation("e".into()).source().is_none());
+        assert!(SandboxError::Instantiation("e".into()).source().is_none());
+        assert!(SandboxError::Execution("e".into()).source().is_none());
+        assert!(SandboxError::FuelExhausted.source().is_none());
+        assert!(SandboxError::AbiError("e".into()).source().is_none());
+
+        // Round-trip one variant through `Box<dyn Error + Send + Sync>`
+        // — the very property the kernel's `#[from] SandboxError`
+        // wrapper depends on. If a future change accidentally removes
+        // `std::error::Error` (e.g. by dropping `thiserror::Error`),
+        // this line stops compiling.
+        let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(SandboxError::FuelExhausted);
+        assert_eq!(
+            boxed.to_string(),
+            "Fuel exhausted: skill exceeded CPU budget"
+        );
     }
 
     /// Per-store interrupt semantics (Bug #3864): the

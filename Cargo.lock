@@ -4856,7 +4856,6 @@ dependencies = [
 name = "librefang-runtime-wasm"
 version = "2026.5.12-beta.11"
 dependencies = [
- "anyhow",
  "async-trait",
  "librefang-http",
  "librefang-kernel-handle",
