@@ -1583,3 +1583,112 @@ async fn test_mid_turn_signal_preserves_partial_hard_failure_results_for_classif
     assert_eq!(hard_error_count, 1);
     assert_eq!(consecutive_all_failed, 2);
 }
+
+// ── tool-result spill ordering: spill BEFORE sanitize (#PR-upstream) ─────────
+
+fn extract_artifact_handle(stub: &str) -> &str {
+    let start = stub
+        .find("read_artifact(\"")
+        .expect("stub must contain a read_artifact(\"…\") reference")
+        + "read_artifact(\"".len();
+    let rest = &stub[start..];
+    let end = rest.find('"').expect("unterminated handle in stub");
+    &rest[..end]
+}
+
+#[test]
+fn oversized_tool_result_spills_before_sanitize_preserves_full_bytes() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let threshold: u64 = 16_384; // ToolResultsConfig::default().spill_threshold_bytes
+    let max_artifact = crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES;
+
+    // 54_000 bytes of plain text: over the 16 KiB spill threshold and
+    // over the per-result truncation cap (0.6 * 20_000-token window =
+    // 12_000 chars), but under artifact_store::MAX_READ_LENGTH (64 KiB)
+    // so a single `read` call verifies the full payload was preserved.
+    let raw = "lorem ipsum dolor sit amet ".repeat(2_000);
+
+    // Step 1 (the fix): spill the FULL raw bytes first.
+    let stub = crate::artifact_store::maybe_spill(
+        "mcp_some_server.some_tool",
+        raw.as_bytes(),
+        threshold,
+        max_artifact,
+        dir.path(),
+    )
+    .expect("oversized result must spill to an artifact stub");
+    assert!(
+        stub.contains("sha256:") && stub.contains("read_artifact(\""),
+        "stub must carry a retrievable artifact reference, got: {stub}"
+    );
+    assert!(
+        stub.len() < raw.len(),
+        "stub must be compact relative to the original"
+    );
+
+    // Step 2: sanitize runs on the small stub. It may further compact the
+    // inline preview (strip_tool_result_details), but the crucial
+    // read_artifact recovery reference and handle must survive intact so
+    // the LLM can still fetch the full content.
+    let handle = extract_artifact_handle(&stub).to_string();
+    let budget = ContextBudget::new(20_000);
+    let after = sanitize_tool_result_content(&stub, &budget, None, 20_000);
+    assert!(
+        after.contains("read_artifact(\"") && after.contains(&handle),
+        "sanitize must preserve the read_artifact recovery reference on \
+         the spilled stub, got: {after}"
+    );
+    assert!(
+        after.len() < raw.len(),
+        "the post-spill result stays compact relative to the original"
+    );
+
+    // The full original bytes are retrievable from the artifact store.
+    let fetched = crate::artifact_store::read(&handle, 0, raw.len(), dir.path())
+        .expect("artifact must be readable");
+    assert_eq!(
+        fetched,
+        raw.as_bytes(),
+        "artifact must preserve the full original result, untruncated"
+    );
+
+    // Contrast — the OLD (buggy) order: sanitize the raw result first.
+    // It is destructively truncated and carries no artifact reference,
+    // i.e. the original bytes would be permanently lost.
+    let truncated_first = sanitize_tool_result_content(&raw, &budget, None, 20_000);
+    assert!(
+        truncated_first.len() < raw.len() && !truncated_first.contains("read_artifact("),
+        "sanitizing raw content first loses data with no recovery handle — \
+         this is exactly what spilling-before-sanitize prevents"
+    );
+}
+
+#[test]
+fn small_or_already_spilled_result_passes_through_without_double_spill() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let threshold: u64 = 16_384;
+    let max_artifact = crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES;
+
+    // A web tool already produced a compact stub at execution time. It is
+    // far below the spill threshold, so the chokepoint spill is a no-op
+    // pass-through (`None`) — no second artifact, no nested stub.
+    let web_stub = "[tool_result: web_fetch | sha256:".to_string()
+        + &"0".repeat(64)
+        + " | 1048576 bytes | preview:]\nsome page text\n-- truncated. \
+           Use read_artifact(\"sha256:"
+        + &"0".repeat(64)
+        + "\", offset, length) to fetch the rest.";
+    assert!(web_stub.len() < threshold as usize);
+
+    let spilled = crate::artifact_store::maybe_spill(
+        "web_fetch",
+        web_stub.as_bytes(),
+        threshold,
+        max_artifact,
+        dir.path(),
+    );
+    assert!(
+        spilled.is_none(),
+        "an already-compact web stub must NOT be re-spilled (no double-spill)"
+    );
+}
