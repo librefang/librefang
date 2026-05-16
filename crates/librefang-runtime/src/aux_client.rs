@@ -363,6 +363,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
+                actual_provider: None,
             })
         }
 

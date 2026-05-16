@@ -7602,6 +7602,7 @@ mod try_summarize_trim_tests {
                     output_tokens: 10,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }

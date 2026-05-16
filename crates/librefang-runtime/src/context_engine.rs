@@ -5075,6 +5075,7 @@ ingest = "hooks/ingest.py"
                         output_tokens: 20,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }

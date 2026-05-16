@@ -983,6 +983,7 @@ impl LlmDriver for AnthropicDriver {
                 stop_reason,
                 tool_calls,
                 usage,
+                actual_provider: None,
             });
         }
 
@@ -1364,6 +1365,7 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
             cache_creation_input_tokens: api.usage.cache_creation_input_tokens,
             cache_read_input_tokens: api.usage.cache_read_input_tokens,
         },
+        actual_provider: None,
     }
 }
 
