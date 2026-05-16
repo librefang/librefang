@@ -49,7 +49,7 @@ Lives in the sibling `librefang-kernel-handle` crate (NOT here). Kernel implemen
 
 - No `librefang-kernel` import. Use `KernelHandle`.
 - No `librefang-api` import. API consumes runtime, not the other way.
-- No new `agent_loop.rs` or `tool_runner.rs` file additions; both files are slated to shrink, not grow (#3710).
+- Don't grow `agent_loop/` or `tool_runner/` (#3710 keeps them at their current shape — new tool kinds get their own sibling file in `tool_runner/`, not a chunk in `mod.rs`).
 - No `unwrap()` / `panic!()` on values that come off the wire.
 - No mocking the kernel by faking `KernelHandle` inline — use `librefang-testing::MockKernelBuilder`.
 - No raw `cargo build`; use `cargo check --workspace --lib`. Real builds run in CI.
