@@ -1,4 +1,11 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
+//!
+//! The dependency on `librefang-llm-driver` is intentionally narrow:
+//! we only pull in [`ProviderExhaustionStore`] and the
+//! [`ExhaustionReason`] / [`DEFAULT_LONG_BACKOFF`] types so a budget
+//! gate-trip on this engine can flag the offending provider in the
+//! same exhaustion view the LLM fallback chain reads from (#4807).
+//! Nothing else from the driver crate is used here.
 
 use librefang_llm_driver::exhaustion::{
     ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,

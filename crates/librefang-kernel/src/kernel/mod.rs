@@ -27,6 +27,7 @@ use librefang_runtime::drivers;
 #[cfg(test)]
 use librefang_runtime::kernel_handle;
 use librefang_runtime::kernel_handle::prelude::*;
+use librefang_runtime::llm_driver::exhaustion::ProviderExhaustionStore;
 use librefang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
 };
