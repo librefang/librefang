@@ -217,7 +217,17 @@ zeroize = { version = "1", features = ["derive"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 
 # JWT validation
-jsonwebtoken = "10"
+#
+# `jsonwebtoken` 10.x defers RSA / EC signature operations to a
+# process-level `CryptoProvider` and panics at `decode::<_>` time if no
+# provider feature is enabled. The default features only enable PEM
+# parsing, so we explicitly turn on `aws_lc_rs` to match the rustls
+# provider that `librefang-cli` installs at startup
+# (`aws_lc_rs::default_provider().install_default()`). Without this,
+# any real OIDC token validation (`/api/auth/introspect`, the OAuth
+# callback's ID-token path, and the `oidc_auth_middleware`) panics in
+# production. Discovered while landing the #5128 `sub`-required tests.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 # Rate limiting
 governor = "0.10.4"
