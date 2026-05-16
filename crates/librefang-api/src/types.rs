@@ -314,6 +314,7 @@ impl ApiErrorResponse {
 
 /// Request to spawn an agent from a TOML manifest string or a template name.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnRequest {
     /// Agent manifest as TOML string (optional if `template` is provided).
     #[serde(default)]
@@ -356,6 +357,7 @@ pub struct ParticipantRefSchema {
 
 /// A file attachment reference (from a prior upload).
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttachmentRef {
     pub file_id: String,
     #[serde(default)]
@@ -366,6 +368,7 @@ pub struct AttachmentRef {
 
 /// Request to send a message to an agent.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MessageRequest {
     pub message: String,
     /// Optional file attachments (uploaded via /upload endpoint).
@@ -477,6 +480,7 @@ pub struct MessageResponse {
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InjectMessageRequest {
     /// The message to inject between tool calls.
     pub message: String,
@@ -494,6 +498,7 @@ pub struct InjectMessageResponse {
 
 /// Request to install a skill from the marketplace.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SkillInstallRequest {
     pub name: String,
     /// Install into a specific hand's workspace instead of globally.
@@ -503,12 +508,14 @@ pub struct SkillInstallRequest {
 
 /// Request to uninstall a skill.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SkillUninstallRequest {
     pub name: String,
 }
 
 /// Request to change an agent's operational mode.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetModeRequest {
     #[schema(value_type = String)]
     pub mode: librefang_types::agent::AgentMode,
@@ -516,6 +523,7 @@ pub struct SetModeRequest {
 
 /// Request to run a migration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MigrateRequest {
     pub source: String,
     pub source_dir: String,
@@ -526,12 +534,14 @@ pub struct MigrateRequest {
 
 /// Request to scan a directory for migration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MigrateScanRequest {
     pub path: String,
 }
 
 /// Request to install a skill from ClawHub.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
@@ -546,6 +556,7 @@ pub struct ClawHubInstallRequest {
 
 /// Request to create multiple agents at once.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkCreateRequest {
     pub agents: Vec<SpawnRequest>,
 }
@@ -565,6 +576,7 @@ pub struct BulkCreateResult {
 
 /// Request containing a list of agent IDs for bulk operations (delete/start/stop).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkAgentIdsRequest {
     pub agent_ids: Vec<String>,
 }
@@ -582,6 +594,7 @@ pub struct BulkActionResult {
 
 /// Request to install an extension (integration).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionInstallRequest {
     /// Extension/integration ID (e.g., "github", "slack").
     pub name: String,
@@ -589,6 +602,7 @@ pub struct ExtensionInstallRequest {
 
 /// Request to uninstall an extension (integration).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionUninstallRequest {
     /// Extension/integration ID to remove.
     pub name: String,
@@ -688,6 +702,7 @@ impl PaginationQuery {
 
 /// Request to push a proactive outbound message from an agent to a channel.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PushMessageRequest {
     /// Channel adapter name (e.g., "telegram", "slack", "discord").
     pub channel: String,

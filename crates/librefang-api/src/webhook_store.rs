@@ -334,6 +334,7 @@ fn is_link_local(ip: std::net::IpAddr) -> bool {
 
 /// Request body for creating a webhook.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateWebhookRequest {
     pub name: String,
     pub url: String,
@@ -346,6 +347,7 @@ pub struct CreateWebhookRequest {
 
 /// Request body for updating a webhook.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateWebhookRequest {
     #[serde(default)]
     pub name: Option<String>,

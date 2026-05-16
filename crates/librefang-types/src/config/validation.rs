@@ -29,6 +29,22 @@ const MANUAL_TOP_LEVEL_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
+/// Nested aliases honoured by `#[serde(alias = …)]` on fields of nested
+/// config structs. Each entry is a `(dotted_path, alias)` pair where
+/// `dotted_path` is the section that owns the aliased field (e.g.
+/// `"terminal"` for `TerminalConfig`) and `alias` is the legacy name still
+/// accepted on the wire.
+///
+/// schemars (0.8) drops `serde(alias)` declarations when generating the
+/// JSON Schema, so strict-mode rejected the legacy name even though serde
+/// would happily deserialise it (#5129). Keep this list in sync with the
+/// `alias = "…"` attributes on nested struct fields in `types.rs`.
+const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
+    // TerminalConfig.require_proxy_headers was renamed from
+    // `trust_proxy_headers`; the old name stays accepted via serde(alias).
+    ("terminal", "trust_proxy_headers"),
+];
+
 /// Cached allowlists derived once from the schemars-emitted JSON Schema
 /// for `KernelConfig`. Built on first use and reused for the rest of the
 /// process.
@@ -83,6 +99,16 @@ fn build_allowlists() -> DerivedAllowlists {
                 &mut nested,
                 &mut HashSet::new(),
             );
+        }
+    }
+    // Add `#[serde(alias)]` declarations that schemars dropped (#5129).
+    // Only insert into paths the schema actually surfaced — that way a
+    // stale entry in `MANUAL_NESTED_ALIASES` (e.g. a section that was
+    // later removed) doesn't silently widen the allowlist.
+    for (path, alias) in MANUAL_NESTED_ALIASES {
+        if let Some(entry) = nested.get_mut(*path) {
+            let leaked: &'static str = Box::leak((*alias).to_string().into_boxed_str());
+            entry.insert(leaked);
         }
     }
 

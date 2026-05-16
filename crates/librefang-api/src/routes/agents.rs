@@ -3944,6 +3944,7 @@ pub async fn get_agent_tools(
 
 /// Request body for updating an agent's tool configuration.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetAgentToolsRequest {
     /// Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted.
     pub capabilities_tools: Option<Vec<String>>,
@@ -4511,6 +4512,7 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
 
 /// Request body for updating agent visual identity.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateIdentityRequest {
     pub emoji: Option<String>,
     pub avatar_url: Option<String>,
@@ -4615,6 +4617,7 @@ pub async fn update_agent_identity(
 
 /// Request body for patching agent config (name, description, prompt, identity, model).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
@@ -5133,6 +5136,7 @@ pub async fn delete_hand_agent_runtime_config(
 
 /// Request body for cloning an agent.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CloneAgentRequest {
     pub new_name: String,
     /// Whether to copy skills from the source agent (default: true).
@@ -5565,6 +5569,7 @@ pub async fn get_agent_file(
 
 /// Request body for writing a workspace identity file.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetAgentFileRequest {
     pub content: String,
 }
