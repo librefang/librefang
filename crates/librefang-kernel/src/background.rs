@@ -897,7 +897,7 @@ mod tests {
             let tc = tick_clone.clone();
             tokio::spawn(async move {
                 let n = tc.fetch_add(1, Ordering::SeqCst);
-                if n % 2 == 0 {
+                if n.is_multiple_of(2) {
                     TickOutcome::RateLimited
                 } else {
                     TickOutcome::Ok
