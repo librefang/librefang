@@ -569,6 +569,75 @@ pub enum OperatorTimeoutAction {
 /// future channel-dispatch table agree on the supported set.
 const OPERATOR_NOTIFY_SCHEMES: &[&str] = &["telegram", "email", "dashboard", "slack", "webhook"];
 
+/// One pending operator-step pause awaiting a human response. Returned by
+/// [`WorkflowEngine::get_run`]-style inspection helpers so the HTTP layer
+/// (#5133) can render the artifact + allowed actions, and used as the
+/// argument shape the resolve path validates against. Per #4977 step 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorPause {
+    /// Index of the operator step itself (the step that paused the run).
+    pub operator_step_index: usize,
+    /// Name of the operator step (for log / UI correlation).
+    pub step_name: String,
+    /// The artifact the operator must act on — the output of the step that
+    /// ran immediately before the operator step.
+    pub artifact: String,
+    /// Actions the workflow author authorised at this step. The resolve
+    /// path rejects any action not present here.
+    pub actions: Vec<OperatorAction>,
+}
+
+/// Channel-bridge sink for delivering operator-step notifications. Defined
+/// in the kernel (not the runtime/extensions) and implemented on the
+/// concrete kernel so `WorkflowEngine` stays decoupled from the channel
+/// adapters — same trait-injection shape as the `send_message` closure
+/// `execute_run` already takes. Per #5135.
+#[async_trait::async_trait]
+pub trait OperatorNotifier: Send + Sync {
+    /// Deliver one operator-step notification to a single `scheme:target`
+    /// recipient (e.g. `telegram:@pakman`). `message` already contains the
+    /// artifact preview + the allowed-action instructions. Implementations
+    /// must be best-effort: a single recipient failing must not abort the
+    /// pause (the run is already Paused and resumable via the HTTP layer).
+    async fn notify_operator(&self, recipient: &str, message: &str) -> Result<(), String>;
+}
+
+/// Kernel-side driver that re-enters `resolve_operator_step` with the
+/// kernel-built `agent_resolver` + `send_message` closures. The timeout
+/// watchdog (#5134) runs inside a detached tokio task with no access to
+/// those closures, so it delegates the actual resume through this trait —
+/// implemented on the concrete kernel and installed post-boot, same shape
+/// as [`OperatorNotifier`]. Keeps `WorkflowEngine` decoupled from the
+/// kernel's agent registry / message-send path.
+#[async_trait::async_trait]
+pub trait OperatorResumeDriver: Send + Sync {
+    /// Apply `outcome` (Approve/Edit/Input → Continue, Reject/Fail → Fail)
+    /// to the paused operator step `operator_step_index` on `run_id`,
+    /// driving any subsequent steps to completion. Best-effort; errors are
+    /// logged by the implementation.
+    async fn drive_operator_timeout(
+        &self,
+        run_id: WorkflowRunId,
+        operator_step_index: usize,
+        timeout_action: OperatorTimeoutAction,
+    );
+}
+
+/// Outcome the resolve path applies to a paused operator step. Produced by
+/// translating an [`OperatorAction`] (HTTP, #5133) or an
+/// [`OperatorTimeoutAction`] (watchdog, #5134) into a concrete decision the
+/// run state machine can act on without knowing which source triggered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OperatorOutcome {
+    /// Continue the run; the operator step's output is `output` (the
+    /// original artifact for Approve, the operator-supplied payload for
+    /// Edit / ProvideInput / FreeformInput).
+    Continue { output: String },
+    /// Halt the run with `Failed`. `reason` distinguishes operator reject
+    /// from auto-fail / timeout so the dashboard can label it.
+    Fail { reason: String },
+}
+
 /// Whether `mode` is one of the operator-node variants (#4980 +
 /// #4977). Used by [`Workflow::validate`] to fail-closed on
 /// operator-node + DAG combinations, since the DAG executor
@@ -1152,6 +1221,30 @@ pub struct WorkflowEngine {
     /// on the entry for `run_id` so that retry sleeps can wake up immediately
     /// instead of blocking for the full backoff duration.
     cancel_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
+    /// Channel-bridge sink for operator-step notifications (#5135). Empty
+    /// in tests and until the kernel installs the real notifier post-boot
+    /// via [`Self::set_operator_notifier`] — when absent the operator step
+    /// degrades to the pre-#5135 log-only behaviour so existing callers and
+    /// the ~30 `execute_run` test sites are unaffected. `OnceLock` (not a
+    /// plain field) because the kernel installs it from `set_self_handle`
+    /// through `&self` — the engine is already behind `Arc<Kernel>` by
+    /// then, so a `&mut` setter is impossible (same reason the kernel's own
+    /// `self_handle` is a `OnceLock`). `Arc` so the engine stays `Clone`
+    /// and every clone shares the one slot.
+    operator_notifier: Arc<std::sync::OnceLock<Arc<dyn OperatorNotifier>>>,
+    /// Kernel-side resume driver used by the timeout watchdog (#5134) to
+    /// re-enter `resolve_operator_step` with kernel-built closures. Empty
+    /// in tests / pre-boot — when absent the watchdog still applies the
+    /// terminal `Fail`/Reject outcomes itself (no subsequent steps to
+    /// drive) and logs that auto-`Approve` of the rest of the pipeline was
+    /// skipped. Same `Arc<OnceLock<_>>` reasoning as `operator_notifier`.
+    operator_resume_driver: Arc<std::sync::OnceLock<Arc<dyn OperatorResumeDriver>>>,
+    /// Per-run resume signal for operator-step timeout watchdogs (#5134).
+    /// The watchdog `select!`s on this notifier vs the timeout sleep; the
+    /// resolve path fires `notify_waiters()` on the entry so an in-time
+    /// operator response cancels the watchdog before it applies
+    /// `timeout_action`. `Arc` so the engine stays `Clone`.
+    operator_resume_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
 }
 
 /// Format the error returned when a workflow step's `agent_resolver` returns
@@ -1398,6 +1491,9 @@ impl WorkflowEngine {
             workflows_dir: None,
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
+            operator_notifier: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
 
@@ -1414,6 +1510,9 @@ impl WorkflowEngine {
             workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
+            operator_notifier: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
 
@@ -1432,7 +1531,29 @@ impl WorkflowEngine {
             workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
+            operator_notifier: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            operator_resume_notify: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Install the channel-bridge-backed operator notifier (#5135) and the
+    /// timeout-resume driver (#5134).
+    ///
+    /// Called once by the kernel from `set_self_handle` — after the kernel
+    /// is wrapped in `Arc`, since both hold a kernel handle (the notifier
+    /// reaches `send_channel_message`; the driver re-enters `resume_run`
+    /// with kernel-built closures). Takes `&self`: the engine is already
+    /// behind `Arc<Kernel>` at that point. `OnceLock::set` makes a second
+    /// call a silent no-op — the kernel only calls it once; hot-reload
+    /// rebuilds the engine wholesale.
+    pub fn set_operator_hooks(
+        &self,
+        notifier: Arc<dyn OperatorNotifier>,
+        resume_driver: Arc<dyn OperatorResumeDriver>,
+    ) {
+        let _ = self.operator_notifier.set(notifier);
+        let _ = self.operator_resume_driver.set(resume_driver);
     }
 
     // -- Token hashing --------------------------------------------------------
@@ -2884,6 +3005,533 @@ impl WorkflowEngine {
         result
     }
 
+    // ====================================================================
+    // #4977 step 2 — HITL operator-step: notify dispatch (#5135),
+    // timeout watchdog (#5134), action → resume resolution (#5133).
+    // ====================================================================
+
+    /// Render the operator-step notification body. Mirrors the
+    /// approval-notification shape (`push_approval_interactive`): a short
+    /// header, the artifact preview (truncated via the same helper the
+    /// trace uses), the allowed actions, and the timeout disposition so an
+    /// operator can act from the channel message alone.
+    fn render_operator_notification(
+        step_name: &str,
+        actions: &[OperatorAction],
+        artifact: &str,
+        timeout_secs: Option<u64>,
+        timeout_action: &OperatorTimeoutAction,
+    ) -> String {
+        // Sorted so the rendered string is byte-identical across input
+        // orders (deterministic-prompt-ordering rule, #3298 — this string
+        // can reach an LLM via a downstream channel-summarising agent).
+        let mut action_labels: Vec<&str> = actions
+            .iter()
+            .map(|a| match a {
+                OperatorAction::Approve => "approve",
+                OperatorAction::Reject => "reject",
+                OperatorAction::Edit => "edit",
+                OperatorAction::ProvideInput { .. } => "provide_input",
+                OperatorAction::FreeformInput => "freeform_input",
+            })
+            .collect();
+        action_labels.sort_unstable();
+        action_labels.dedup();
+        let timeout_line = match (timeout_secs, timeout_action) {
+            (Some(s), OperatorTimeoutAction::Approve) => {
+                format!("\nAuto-approves in {s}s if no response.")
+            }
+            (Some(s), OperatorTimeoutAction::Reject) => {
+                format!("\nAuto-rejects in {s}s if no response.")
+            }
+            (Some(s), OperatorTimeoutAction::Fail) => {
+                format!("\nAuto-fails in {s}s if no response.")
+            }
+            _ => String::new(),
+        };
+        format!(
+            "Operator review needed — step '{}'.\n\n--- artifact ---\n{}\n--- end ---\n\nActions: {}{}",
+            step_name,
+            Self::truncate_operator_input_trace(artifact),
+            action_labels.join(", "),
+            timeout_line,
+        )
+    }
+
+    /// #5135 — push the artifact + allowed-action instructions to every
+    /// configured `notify` recipient through the installed notifier.
+    ///
+    /// Best-effort: a single recipient failing is logged at WARN but never
+    /// aborts the pause (the run is already Paused + persisted and
+    /// resumable via the HTTP layer regardless). When no notifier is
+    /// installed (tests / pre-boot) this degrades to the pre-#5135
+    /// behaviour of logging which recipients *would* have been notified.
+    async fn dispatch_operator_notifications(
+        &self,
+        run_id: WorkflowRunId,
+        step_name: &str,
+        notify: &[String],
+        message: &str,
+    ) {
+        let Some(notifier) = self.operator_notifier.get() else {
+            info!(
+                run_id = %run_id,
+                step = %step_name,
+                recipients = ?notify,
+                "Operator notify: no notifier installed — would have notified \
+                 these recipients (log-only fallback)"
+            );
+            return;
+        };
+        let mut ok = 0usize;
+        let mut failed = 0usize;
+        for recipient in notify {
+            match notifier.notify_operator(recipient, message).await {
+                Ok(()) => ok += 1,
+                Err(e) => {
+                    failed += 1;
+                    warn!(
+                        run_id = %run_id,
+                        step = %step_name,
+                        recipient = %recipient,
+                        error = %e,
+                        "Operator notify: delivery to recipient failed"
+                    );
+                }
+            }
+        }
+        info!(
+            run_id = %run_id,
+            step = %step_name,
+            delivered = ok,
+            failed,
+            "Operator notify dispatched"
+        );
+    }
+
+    /// #5134 — spawn a detached watchdog that auto-resolves the pause with
+    /// `timeout_action` after `timeout_secs`, unless an operator response
+    /// arrives first.
+    ///
+    /// The task `select!`s on a per-run resume notifier vs the timeout
+    /// sleep. `resolve_operator_step` fires `notify_waiters()` on the same
+    /// notifier the instant a human responds, so an in-time response wins
+    /// the race and the watchdog exits without applying `timeout_action`
+    /// (no leaked task — the task always terminates on whichever arm wins;
+    /// run cancellation also wakes it via the same notifier in
+    /// `resolve_operator_step`'s caller path).
+    fn spawn_operator_timeout_watchdog(
+        &self,
+        run_id: WorkflowRunId,
+        operator_step_index: usize,
+        timeout_secs: u64,
+        timeout_action: OperatorTimeoutAction,
+    ) {
+        let notify = self
+            .operator_resume_notify
+            .entry(run_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .clone();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let notified = notify.notified();
+            tokio::select! {
+                _ = notified => {
+                    // Operator responded (or the run was resolved/cancelled
+                    // by another path) before the budget elapsed. Nothing
+                    // to do — exit cleanly.
+                    debug!(
+                        run_id = %run_id,
+                        "Operator timeout watchdog cancelled — resolved in time"
+                    );
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                    // Budget elapsed. Re-check the run is still Paused at
+                    // the operator step before applying — a resume that
+                    // raced us (resolved between the sleep waking and this
+                    // arm running) must win.
+                    let still_paused = engine
+                        .runs
+                        .get(&run_id)
+                        .map(|r| r.state.is_paused())
+                        .unwrap_or(false);
+                    if !still_paused {
+                        debug!(
+                            run_id = %run_id,
+                            "Operator timeout fired but run no longer paused — skipping"
+                        );
+                        return;
+                    }
+                    info!(
+                        run_id = %run_id,
+                        operator_step_index,
+                        timeout_secs,
+                        "Operator timeout elapsed — applying timeout_action"
+                    );
+                    if let Some(driver) = engine.operator_resume_driver.get() {
+                        // Driver re-enters resolve with kernel-built
+                        // closures so any downstream steps actually run.
+                        driver
+                            .drive_operator_timeout(
+                                run_id,
+                                operator_step_index,
+                                timeout_action,
+                            )
+                            .await;
+                    } else {
+                        // No driver (tests / pre-boot): we can still apply
+                        // the terminal Reject/Fail outcomes directly (no
+                        // subsequent steps to drive). Approve/Continue
+                        // would need to run the rest of the pipeline,
+                        // which requires the resolver/sender — log that
+                        // it was skipped rather than silently dropping it.
+                        match timeout_action {
+                            OperatorTimeoutAction::Reject => {
+                                engine
+                                    .fail_operator_run(
+                                        run_id,
+                                        "operator step rejected: timeout elapsed",
+                                    )
+                                    .await;
+                            }
+                            OperatorTimeoutAction::Fail => {
+                                engine
+                                    .fail_operator_run(
+                                        run_id,
+                                        "operator step failed: timeout elapsed",
+                                    )
+                                    .await;
+                            }
+                            OperatorTimeoutAction::Approve
+                            | OperatorTimeoutAction::Continue => {
+                                warn!(
+                                    run_id = %run_id,
+                                    "Operator timeout=approve elapsed but no resume \
+                                     driver installed — run left Paused (cannot drive \
+                                     downstream steps without kernel closures)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Wake (and drop) the per-run timeout watchdog notifier. Called from
+    /// every resolve path so an in-time operator response, an HTTP
+    /// resolve, or a cancel cancels the watchdog before it can apply
+    /// `timeout_action`.
+    fn cancel_operator_timeout_watchdog(&self, run_id: WorkflowRunId) {
+        if let Some((_, n)) = self.operator_resume_notify.remove(&run_id) {
+            n.notify_waiters();
+        }
+    }
+
+    /// Mark a paused operator run `Failed` with `reason`. Shared by the
+    /// Reject action and the timeout Reject/Fail dispositions. Persists
+    /// immediately (same SIGKILL-safety reasoning as the loop-top gate)
+    /// and clears the pause snapshot so a Failed run carries no ghost
+    /// resume state.
+    async fn fail_operator_run(&self, run_id: WorkflowRunId, reason: &str) {
+        if let Some(mut r) = self.runs.get_mut(&run_id) {
+            if !r.state.is_paused() {
+                // Lost the race to another resolve / cancel — leave it.
+                return;
+            }
+            r.state = WorkflowRunState::Failed;
+            r.error = Some(reason.to_string());
+            r.completed_at = Some(Utc::now());
+            r.clear_pause_state();
+        }
+        if let Some(run) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&run);
+        }
+        if let Err(e) = self.persist_runs_async().await {
+            warn!(run_id = %run_id, error = %e, "Failed to persist Failed operator run");
+        }
+        self.cancel_operator_timeout_watchdog(run_id);
+        info!(run_id = %run_id, reason = %reason, "Operator step resolved → run Failed");
+    }
+
+    /// Inspect a paused run and, if it is paused at an operator step,
+    /// return the [`OperatorPause`] describing the artifact + allowed
+    /// actions. Returns `None` when the run is unknown, not paused, or the
+    /// pause is not an operator-step pause (so the HTTP layer can 404 /
+    /// 409 appropriately). Per #5133.
+    pub async fn inspect_operator_pause(&self, run_id: WorkflowRunId) -> Option<OperatorPause> {
+        let run = self.runs.get(&run_id)?;
+        if !run.state.is_paused() {
+            return None;
+        }
+        // The operator step sits immediately before the resume index
+        // (`paused_step_index` points at the NEXT step; the executor set
+        // it to operator_index + 1). The artifact is `paused_current_input`
+        // (the output of the step before the operator step).
+        let resume_idx = run.paused_step_index?;
+        if resume_idx == 0 {
+            return None;
+        }
+        let operator_step_index = resume_idx - 1;
+        let workflow_id = run.workflow_id;
+        let artifact = run.paused_current_input.clone().unwrap_or_default();
+        drop(run);
+        let workflow = self.get_workflow(workflow_id).await?;
+        let step = workflow.steps.get(operator_step_index)?;
+        match &step.mode {
+            StepMode::Operator { actions, .. } => Some(OperatorPause {
+                operator_step_index,
+                step_name: step.name.clone(),
+                artifact,
+                actions: actions.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// #5133 — resolve a paused operator step with an [`OperatorAction`]
+    /// and drive the workflow forward.
+    ///
+    /// Maps the action to a step output (Approve → the original artifact;
+    /// Edit / ProvideInput / FreeformInput → the operator-supplied
+    /// `payload`; Reject → terminal Failed), cancels the timeout watchdog,
+    /// then either marks the run Failed (Reject) or re-enters the
+    /// sequential executor at the step after the operator step with the
+    /// resolved output as `{{input}}` (Approve / Edit / Input).
+    ///
+    /// `payload` is required for Edit / ProvideInput / FreeformInput and
+    /// ignored for Approve / Reject.
+    ///
+    /// Errors mirror [`ResumeRunError`] so the HTTP layer maps them to the
+    /// same status codes the resume endpoint already uses. An action not
+    /// present in the step's authorised `actions` is rejected as
+    /// `ExecutionFailed` (the workflow author never allowed it).
+    pub async fn resolve_operator_step<F, Fut>(
+        &self,
+        run_id: WorkflowRunId,
+        action: OperatorAction,
+        payload: Option<String>,
+        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        send_message: F,
+    ) -> Result<String, ResumeRunError>
+    where
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+    {
+        let pause = self
+            .inspect_operator_pause(run_id)
+            .await
+            .ok_or(ResumeRunError::NotPaused {
+                run_id,
+                state: "not an operator-step pause",
+            })?;
+
+        // Authorisation: the action must be one the workflow author
+        // allowed at this step. `ProvideInput`'s `field` is part of the
+        // declared shape, so match by discriminant, not full equality.
+        let authorised = pause
+            .actions
+            .iter()
+            .any(|a| std::mem::discriminant(a) == std::mem::discriminant(&action));
+        if !authorised {
+            return Err(ResumeRunError::ExecutionFailed {
+                run_id,
+                detail: format!(
+                    "operator action {action:?} is not authorised at step \
+                     '{}' (allowed: {:?})",
+                    pause.step_name, pause.actions
+                ),
+            });
+        }
+
+        let outcome = match &action {
+            OperatorAction::Approve => OperatorOutcome::Continue {
+                // Approve → the original artifact flows to the next step.
+                output: pause.artifact.clone(),
+            },
+            OperatorAction::Reject => OperatorOutcome::Fail {
+                reason: "operator step rejected by operator".to_string(),
+            },
+            OperatorAction::Edit
+            | OperatorAction::FreeformInput
+            | OperatorAction::ProvideInput { .. } => {
+                let body = payload.ok_or_else(|| ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: format!("operator action {action:?} requires a payload"),
+                })?;
+                OperatorOutcome::Continue { output: body }
+            }
+        };
+
+        self.apply_operator_outcome(
+            run_id,
+            pause.operator_step_index,
+            outcome,
+            &agent_resolver,
+            &send_message,
+        )
+        .await
+    }
+
+    /// #5134 — resolve a paused operator step from the timeout watchdog.
+    ///
+    /// Maps `timeout_action` to an outcome (Approve → Continue with the
+    /// original artifact; Reject → Failed; Fail → Failed with a distinct
+    /// "timeout" reason; Continue → no-op, the run stays Paused) and
+    /// applies it through the same `apply_operator_outcome` path the HTTP
+    /// resolve uses, so an auto-resolve produces a byte-identical run state
+    /// to an operator clicking the equivalent button. The kernel-side
+    /// driver supplies the resolver/sender so downstream steps run.
+    pub async fn resolve_operator_timeout<F, Fut>(
+        &self,
+        run_id: WorkflowRunId,
+        operator_step_index: usize,
+        timeout_action: OperatorTimeoutAction,
+        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        send_message: F,
+    ) -> Result<String, ResumeRunError>
+    where
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+    {
+        // The artifact is the operator step's pre-pause `current_input`,
+        // already snapshotted as `paused_current_input`. Approve flows it
+        // unchanged to the next step.
+        let artifact = self
+            .runs
+            .get(&run_id)
+            .and_then(|r| r.paused_current_input.clone())
+            .unwrap_or_default();
+        let outcome = match timeout_action {
+            OperatorTimeoutAction::Approve => OperatorOutcome::Continue { output: artifact },
+            OperatorTimeoutAction::Reject => OperatorOutcome::Fail {
+                reason: "operator step rejected: timeout elapsed".to_string(),
+            },
+            OperatorTimeoutAction::Fail => OperatorOutcome::Fail {
+                reason: "operator step failed: timeout elapsed".to_string(),
+            },
+            OperatorTimeoutAction::Continue => {
+                // Default disposition — leave the run Paused. The watchdog
+                // is never spawned for `Continue` (see the executor), so
+                // this branch is defensive only.
+                return Ok(artifact);
+            }
+        };
+        self.apply_operator_outcome(
+            run_id,
+            operator_step_index,
+            outcome,
+            &agent_resolver,
+            &send_message,
+        )
+        .await
+    }
+
+    /// Apply a resolved [`OperatorOutcome`] to a paused operator run.
+    ///
+    /// `Fail` → mark the run Failed and return `ExecutionFailed` with the
+    /// reason (terminal; no resume). `Continue` → write the resolved
+    /// output into the pause snapshot (and into `output_var` when the
+    /// operator step declared one), cancel the watchdog, then re-enter the
+    /// sequential executor exactly like `resume_run` does — minus the
+    /// token check, since the caller (HTTP auth layer / timeout watchdog)
+    /// is the security boundary for operator resolution, not a resume
+    /// token. Shared by the HTTP path (#5133) and the timeout driver
+    /// (#5134) so both produce byte-identical run states.
+    async fn apply_operator_outcome<F, Fut>(
+        &self,
+        run_id: WorkflowRunId,
+        operator_step_index: usize,
+        outcome: OperatorOutcome,
+        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+        send_message: &F,
+    ) -> Result<String, ResumeRunError>
+    where
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+    {
+        let resolved_output = match outcome {
+            OperatorOutcome::Fail { reason } => {
+                self.fail_operator_run(run_id, &reason).await;
+                return Err(ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: reason,
+                });
+            }
+            OperatorOutcome::Continue { output } => output,
+        };
+
+        // Snapshot what we need, mutate the pause snapshot so the resumed
+        // next step sees the resolved output as `{{input}}`, flip to
+        // Running, drop the shard lock before the await-heavy re-entry.
+        let workflow = {
+            let workflow_id = {
+                let mut run = self
+                    .runs
+                    .get_mut(&run_id)
+                    .ok_or(ResumeRunError::NotFound(run_id))?;
+                if !run.state.is_paused() {
+                    return Err(ResumeRunError::NotPaused {
+                        run_id,
+                        state: "not paused",
+                    });
+                }
+                run.paused_current_input = Some(resolved_output.clone());
+                run.state = WorkflowRunState::Running;
+                run.pause_request = None;
+                run.workflow_id
+            };
+            self.workflows
+                .read()
+                .await
+                .get(&workflow_id)
+                .cloned()
+                .ok_or_else(|| ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: format!("Workflow definition {workflow_id} not found"),
+                })?
+        };
+
+        // If the operator step declared an `output_var`, rebind it to the
+        // resolved output so `{{var}}` references downstream see the
+        // operator's response, not the pre-pause artifact.
+        if let Some(step) = workflow.steps.get(operator_step_index) {
+            if let Some(var) = &step.output_var {
+                if let Some(mut run) = self.runs.get_mut(&run_id) {
+                    run.paused_variables
+                        .insert(var.clone(), resolved_output.clone());
+                }
+            }
+        }
+
+        // Operator response received → cancel the watchdog before driving
+        // the resume so a racing timeout cannot also fire.
+        self.cancel_operator_timeout_watchdog(run_id);
+
+        let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
+        let result = if has_dag_deps {
+            Err(ResumeRunError::DagUnsupported { run_id })
+        } else {
+            self.execute_run_sequential(run_id, &workflow, "", agent_resolver, send_message)
+                .await
+                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
+        };
+        self.cleanup_terminal_pause_state(run_id).await;
+        if let Err(persist_err) = self.persist_runs_async().await {
+            return Err(match result {
+                Ok(_) => ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: persist_err,
+                },
+                Err(run_err) => ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: format!("{run_err}; additionally: {persist_err}"),
+                },
+            });
+        }
+        result
+    }
+
     /// Execute a workflow run step-by-step.
     ///
     /// This method takes a closure that sends messages to agents,
@@ -4135,41 +4783,24 @@ impl WorkflowEngine {
                     timeout_secs,
                     timeout_action,
                 } => {
-                    // #4977 step 1/N — skeleton executor.
+                    // #4977 step 2 — full HITL operator-step executor.
                     //
-                    // What runs today: record a synthetic StepResult
-                    // under the `_operator:operator` agent name
-                    // (matching the `_operator:` namespace from
-                    // #5035), log the configuration for observability,
-                    // and request a pause on the run via the existing
-                    // `pause_request` mechanism. The pause is honored
-                    // by the pause-request gate at the *next* iteration
-                    // of the while loop, so the run transitions to
-                    // `Paused` with a fresh resume token before any
-                    // downstream step executes. Operators / dashboards
-                    // resume the run via the existing `resume_run`
-                    // API once the human has acted.
+                    // Pause mechanics are unchanged from the #4977 step 1
+                    // skeleton: record a synthetic `_operator:operator`
+                    // StepResult, lodge a `pause_request`, advance `i` past
+                    // this step, then drive the pause snapshot inline so
+                    // the resume re-enters at the NEXT step with the
+                    // resolved operator output as `{{input}}`.
                     //
-                    // TODO(#4977 step 2): dispatch channel
-                    // notifications via the channel bridge so the
-                    // configured `notify` recipients actually receive
-                    // the artifact + action buttons. Today the
-                    // skeleton only logs which recipients *would*
-                    // have been notified.
-                    //
-                    // TODO(#4977 step 2): spawn a timeout watchdog
-                    // honouring `timeout_secs` + `timeout_action` so
-                    // a `OperatorTimeoutAction::Approve` / `Reject` /
-                    // `Fail` resolves the pause automatically when
-                    // the budget elapses. Today `timeout_action` is
-                    // recorded on the trace but not enforced.
-                    //
-                    // TODO(#4977 step 2): wire the operator HTTP
-                    // actions endpoint so an operator's
-                    // `OperatorAction::Approve` / `Reject` / `Edit`
-                    // / `ProvideInput` / `FreeformInput` response
-                    // translates into a `resume_run` call with the
-                    // appropriate step output.
+                    // On top of that this arm now (a) dispatches the
+                    // artifact + allowed-action instructions to every
+                    // configured `notify` recipient via the channel-bridge
+                    // notifier (#5135), and (b) spawns a timeout watchdog
+                    // that auto-resolves the pause with `timeout_action`
+                    // when `timeout_secs` elapses without an operator
+                    // response (#5134). The HTTP actions endpoint
+                    // (#5133) resolves the pause via
+                    // `resolve_operator_step`, which cancels the watchdog.
                     let input_trace = Self::truncate_operator_input_trace(&current_input);
                     let notify_count = notify.len();
                     let action_count = actions.len();
@@ -4218,18 +4849,13 @@ impl WorkflowEngine {
                         action_count,
                         timeout_secs = ?timeout_secs,
                         timeout_action = %timeout_action_label,
-                        "Operator step entered — pausing run for human-in-the-loop (#4977 skeleton)"
+                        "Operator step entered — pausing run for human-in-the-loop (#4977)"
                     );
 
-                    // Lodge a pause request. The pause-request gate at
-                    // the top of the next loop iteration atomically
-                    // takes this request, snapshots state, and
-                    // transitions the run to Paused with a resume
-                    // token. We advance `i` past this step *before*
-                    // pausing so the resume picks up at the NEXT
-                    // step, treating the operator's response as the
-                    // operator step's output (already recorded
-                    // above).
+                    // Lodge a pause request, then drive the snapshot
+                    // inline (mirrors the loop-top gate exactly so the
+                    // last-step case can't fall through to Completed with
+                    // an orphan pause).
                     let reason = format!(
                         "operator step '{}' awaiting human response ({} recipient(s), {} action(s))",
                         step.name, notify_count, action_count,
@@ -4237,11 +4863,10 @@ impl WorkflowEngine {
                     let token = Uuid::new_v4();
                     let hash = Self::hash_resume_token(&token);
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
-                        // Only lodge if no caller-driven pause is
-                        // already pending — the operator step's
-                        // pause is implicit and must not clobber a
-                        // pre-existing one (idempotency parity with
-                        // `pause_run`).
+                        // Only lodge if no caller-driven pause is already
+                        // pending — the operator step's pause is implicit
+                        // and must not clobber a pre-existing one
+                        // (idempotency parity with `pause_run`).
                         if r.pause_request.is_none() {
                             r.pause_request = Some(PauseRequest {
                                 reason: reason.clone(),
@@ -4249,32 +4874,18 @@ impl WorkflowEngine {
                             });
                         }
                     }
-                    // The plaintext token is not returned to the
-                    // caller of `execute_run` today — it is recorded
-                    // in the structured log + step result trace so
-                    // operators can retrieve it via the dashboard /
-                    // API. The follow-up issue will surface the token
-                    // through a dedicated operator-step event.
                     info!(
                         run_id = %run_id,
                         step = i + 1,
                         resume_token = %token,
-                        "Operator step pause token generated (capture from logs until step 2 lands)"
+                        "Operator step pause token generated"
                     );
 
-                    // Advance the cursor so the pause snapshot
-                    // points at the *next* step. We then drive the
-                    // pause snapshot inline — relying on the
-                    // pause-request gate at the top of the next
-                    // iteration is unsound when the operator step is
-                    // the last step in the workflow: the `while i <
-                    // workflow.steps.len()` condition would fail
-                    // before the gate runs, and the function would
-                    // fall through to the Completed transition with
-                    // an orphan `pause_request` (caught by
-                    // `execute_run_operator_step_pauses_with_resume_token`).
-                    // Mirror the gate's atomic take-and-snapshot
-                    // exactly so the two paths stay in lockstep.
+                    // The operator step itself is at the CURRENT `i`. The
+                    // resume must re-enter at the NEXT step with the
+                    // resolved operator output as `{{input}}`, so capture
+                    // the operator-step index before advancing.
+                    let operator_step_index = i;
                     i += 1;
                     let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                         if let Some(pause) = run.pause_request.take() {
@@ -4308,13 +4919,50 @@ impl WorkflowEngine {
                             reason = %pause.reason,
                             "Workflow run paused at operator step boundary"
                         );
+
+                        // #5135 — dispatch the artifact + allowed actions
+                        // to every configured recipient. Best-effort: a
+                        // failed send is logged but never aborts the
+                        // pause (the run is already Paused + persisted and
+                        // resumable via the HTTP layer regardless).
+                        let notify_message = Self::render_operator_notification(
+                            &step.name,
+                            actions,
+                            &current_input,
+                            *timeout_secs,
+                            timeout_action,
+                        );
+                        self.dispatch_operator_notifications(
+                            run_id,
+                            &step.name,
+                            notify,
+                            &notify_message,
+                        )
+                        .await;
+
+                        // #5134 — spawn the timeout watchdog. `Continue`
+                        // (the default) leaves the run Paused forever, so
+                        // there is nothing to wait for; only Approve /
+                        // Reject / Fail need a watchdog. Skipped entirely
+                        // when `timeout_secs` is None (wait-forever).
+                        if let (Some(secs), true) = (
+                            *timeout_secs,
+                            !matches!(timeout_action, OperatorTimeoutAction::Continue),
+                        ) {
+                            self.spawn_operator_timeout_watchdog(
+                                run_id,
+                                operator_step_index,
+                                secs,
+                                timeout_action.clone(),
+                            );
+                        }
                         return Ok(current_input);
                     }
-                    // No pause was actually lodged (idempotency
-                    // branch above declined because a caller-driven
-                    // pause was already pending). Continue so the
-                    // loop-top gate handles that pre-existing pause
-                    // on the next iteration.
+                    // No pause was actually lodged (idempotency branch
+                    // above declined because a caller-driven pause was
+                    // already pending). Continue so the loop-top gate
+                    // handles that pre-existing pause on the next
+                    // iteration.
                     continue;
                 }
             }
@@ -10484,6 +11132,469 @@ name = "topic"
                 .any(|r| r.agent_name == "_operator:operator"),
             "expected a _operator:operator step result; got: {:?}",
             run.step_results
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #4977 step 2 — notify dispatch (#5135), timeout watchdog (#5134),
+    // action → resume resolution (#5133).
+    // -----------------------------------------------------------------
+
+    /// Recording notifier: captures every (recipient, message) the engine
+    /// dispatches so a test can assert the configured recipients were
+    /// actually targeted. Real behaviour assertion — no mock of the
+    /// engine, just the channel-bridge boundary the engine is decoupled
+    /// from by design.
+    #[derive(Default)]
+    struct RecordingNotifier {
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OperatorNotifier for RecordingNotifier {
+        async fn notify_operator(&self, recipient: &str, message: &str) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((recipient.to_string(), message.to_string()));
+            Ok(())
+        }
+    }
+
+    /// Resume driver that does nothing — used only to satisfy
+    /// `set_operator_hooks`'s two-arg contract for the notify test (which
+    /// never triggers a timeout).
+    struct NoopResumeDriver;
+
+    #[async_trait::async_trait]
+    impl OperatorResumeDriver for NoopResumeDriver {
+        async fn drive_operator_timeout(
+            &self,
+            _run_id: WorkflowRunId,
+            _operator_step_index: usize,
+            _timeout_action: OperatorTimeoutAction,
+        ) {
+        }
+    }
+
+    /// Build a producer → operator → consumer workflow. The producer
+    /// (Sequential) emits the artifact, the operator step pauses on it,
+    /// the consumer (Sequential) receives whatever the operator step
+    /// resolves to as `{{input}}`.
+    fn producer_operator_consumer_workflow(actions: Vec<OperatorAction>) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: "producer-operator-consumer".to_string(),
+            description: "hitl test".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "produce".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "producer".to_string(),
+                    },
+                    prompt_template: "{{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+                WorkflowStep {
+                    name: "review".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "_op".to_string(),
+                    },
+                    prompt_template: "{{input}}".to_string(),
+                    mode: StepMode::Operator {
+                        notify: vec!["telegram:@reviewer".to_string()],
+                        actions,
+                        timeout_secs: None,
+                        timeout_action: OperatorTimeoutAction::Continue,
+                    },
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+                WorkflowStep {
+                    name: "consume".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "consumer".to_string(),
+                    },
+                    prompt_template: "{{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        }
+    }
+
+    /// #5135 — entering an operator step dispatches the artifact + allowed
+    /// actions to every configured `notify` recipient through the
+    /// installed notifier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_step_dispatches_notifications_to_configured_recipients() {
+        let engine = WorkflowEngine::new();
+        let notifier = Arc::new(RecordingNotifier::default());
+        engine.set_operator_hooks(notifier.clone(), Arc::new(NoopResumeDriver));
+
+        let mut wf = workflow_with_operator_step();
+        // Two recipients so we assert per-recipient dispatch, not just one.
+        wf.steps[0].mode = StepMode::Operator {
+            notify: vec!["telegram:@alice".to_string(), "slack:#ops".to_string()],
+            actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+            timeout_secs: None,
+            timeout_action: OperatorTimeoutAction::Continue,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "the-artifact".to_string())
+            .await
+            .expect("create_run");
+
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("operator pause returns Ok");
+
+        let calls = notifier.calls.lock().unwrap().clone();
+        let recipients: Vec<&str> = calls.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(
+            recipients.contains(&"telegram:@alice") && recipients.contains(&"slack:#ops"),
+            "both configured recipients must be notified; got: {recipients:?}"
+        );
+        // The artifact must appear in the delivered message body.
+        assert!(
+            calls.iter().all(|(_, m)| m.contains("the-artifact")),
+            "every notification must carry the artifact; got: {calls:?}"
+        );
+    }
+
+    /// #5134 — the timeout watchdog fires `timeout_action=Reject` after
+    /// `timeout_secs` when no operator responds, transitioning the run to
+    /// `Failed`. Uses a 1s budget; no resume driver needed (Reject is
+    /// terminal, applied directly by the watchdog).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_timeout_watchdog_fires_reject_after_budget() {
+        let engine = WorkflowEngine::new();
+        let mut wf = workflow_with_operator_step();
+        wf.steps[0].mode = StepMode::Operator {
+            notify: vec!["telegram:@op".to_string()],
+            actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+            timeout_secs: Some(1),
+            timeout_action: OperatorTimeoutAction::Reject,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "artifact".to_string())
+            .await
+            .expect("create_run");
+
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("operator pause returns Ok");
+
+        // Immediately Paused.
+        assert!(
+            engine.get_run(run_id).await.unwrap().state.is_paused(),
+            "run must be Paused right after the operator step"
+        );
+
+        // Within the budget it must still be Paused (watchdog not fired).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            engine.get_run(run_id).await.unwrap().state.is_paused(),
+            "run must remain Paused before the timeout elapses"
+        );
+
+        // After the budget the watchdog must have failed the run.
+        let mut failed = false;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if matches!(
+                engine.get_run(run_id).await.unwrap().state,
+                WorkflowRunState::Failed
+            ) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "watchdog must transition the run to Failed after timeout; state={:?}",
+            engine.get_run(run_id).await.unwrap().state
+        );
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            run.error.as_deref().unwrap_or("").contains("timeout"),
+            "Failed reason must mention timeout; got: {:?}",
+            run.error
+        );
+    }
+
+    /// #5133 + #5134 — an in-time operator resolve cancels the timeout
+    /// watchdog: `resolve_operator_step(Approve)` before the budget
+    /// elapses must let the workflow continue (run does NOT get
+    /// timeout-failed), and the per-run watchdog notifier must be gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_resolve_in_time_cancels_timeout_watchdog() {
+        let engine = WorkflowEngine::new();
+        let mut wf = producer_operator_consumer_workflow(vec![OperatorAction::Approve]);
+        // Give the watchdog a real (but short) budget so the cancel race
+        // is meaningful.
+        wf.steps[1].mode = StepMode::Operator {
+            notify: vec!["telegram:@op".to_string()],
+            actions: vec![OperatorAction::Approve],
+            timeout_secs: Some(2),
+            timeout_action: OperatorTimeoutAction::Reject,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed".to_string())
+            .await
+            .expect("create_run");
+
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
+                Ok(("produced".to_string(), 1u64, 1u64))
+            })
+            .await
+            .expect("pauses at operator step");
+        assert!(engine.get_run(run_id).await.unwrap().state.is_paused());
+
+        // Resolve Approve well within the 2s budget.
+        let out = engine
+            .resolve_operator_step(
+                run_id,
+                OperatorAction::Approve,
+                None,
+                mock_resolver,
+                |_id, _p, _m| async { Ok(("consumed".to_string(), 1u64, 1u64)) },
+            )
+            .await
+            .expect("approve resolves and resumes");
+        assert_eq!(
+            out, "consumed",
+            "consumer step must run after Approve and produce its output"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Completed),
+            "run must Complete after Approve, not be timeout-failed; state={:?}",
+            run.state
+        );
+
+        // Watchdog notifier entry must have been removed by the resolve.
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_none(),
+            "resolve must cancel + drop the watchdog notifier"
+        );
+
+        // Wait past the original 2s budget and confirm the (now cancelled)
+        // watchdog never flipped the completed run to Failed.
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        assert!(
+            matches!(
+                engine.get_run(run_id).await.unwrap().state,
+                WorkflowRunState::Completed
+            ),
+            "completed run must stay Completed — cancelled watchdog must not fire"
+        );
+    }
+
+    /// #5133 — `resolve_operator_step(Approve)` flows the original
+    /// artifact into the next step as `{{input}}`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_resolve_approve_flows_artifact_to_next_step() {
+        let engine = WorkflowEngine::new();
+        let wf = producer_operator_consumer_workflow(vec![
+            OperatorAction::Approve,
+            OperatorAction::Reject,
+        ]);
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed".to_string())
+            .await
+            .expect("create_run");
+
+        // Producer emits "ARTIFACT"; the consumer echoes whatever input it
+        // receives back so we can assert what flowed through.
+        // `mock_resolver_no_inherit` so the consumer prompt is exactly
+        // `{{input}}` (no parent-context preamble) — keeps the assertion
+        // an exact equality on the resolved operator output.
+        let sender = |_id: AgentId, prompt: String, _m: Option<SessionMode>| async move {
+            // The consumer's prompt_template is `{{input}}`, so the prompt
+            // it receives IS the resolved operator output.
+            if prompt.contains("seed") {
+                Ok(("ARTIFACT".to_string(), 1u64, 1u64))
+            } else {
+                Ok((format!("consumed:{prompt}"), 1u64, 1u64))
+            }
+        };
+        engine
+            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .await
+            .expect("pauses at operator step");
+
+        let final_out = engine
+            .resolve_operator_step(
+                run_id,
+                OperatorAction::Approve,
+                None,
+                mock_resolver_no_inherit,
+                sender,
+            )
+            .await
+            .expect("approve resolves");
+        assert_eq!(
+            final_out, "consumed:ARTIFACT",
+            "Approve must pass the producer's artifact to the consumer verbatim"
+        );
+        assert!(matches!(
+            engine.get_run(run_id).await.unwrap().state,
+            WorkflowRunState::Completed
+        ));
+    }
+
+    /// #5133 — `resolve_operator_step(Reject)` marks the run `Failed` and
+    /// does NOT run any downstream step.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_resolve_reject_fails_run_without_downstream() {
+        let engine = WorkflowEngine::new();
+        let wf = producer_operator_consumer_workflow(vec![
+            OperatorAction::Approve,
+            OperatorAction::Reject,
+        ]);
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed".to_string())
+            .await
+            .expect("create_run");
+
+        let consumer_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cr = consumer_ran.clone();
+        let sender = move |_id: AgentId, prompt: String, _m: Option<SessionMode>| {
+            let cr = cr.clone();
+            async move {
+                if !prompt.contains("seed") {
+                    cr.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(("out".to_string(), 1u64, 1u64))
+            }
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender.clone())
+            .await
+            .expect("pauses at operator step");
+
+        let res = engine
+            .resolve_operator_step(run_id, OperatorAction::Reject, None, mock_resolver, sender)
+            .await;
+        assert!(res.is_err(), "Reject must surface as an error (terminal)");
+        assert!(matches!(
+            engine.get_run(run_id).await.unwrap().state,
+            WorkflowRunState::Failed
+        ));
+        assert!(
+            !consumer_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "consumer step must NOT run after Reject"
+        );
+    }
+
+    /// #5133 — `resolve_operator_step(Edit, payload)` makes the
+    /// operator-supplied payload (not the original artifact) the operator
+    /// step's output, flowing into the next step.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_resolve_edit_substitutes_payload_as_step_output() {
+        let engine = WorkflowEngine::new();
+        let wf = producer_operator_consumer_workflow(vec![OperatorAction::Edit]);
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed".to_string())
+            .await
+            .expect("create_run");
+
+        // `mock_resolver_no_inherit` so the consumer prompt is exactly the
+        // resolved operator output (no parent-context preamble).
+        let sender = |_id: AgentId, prompt: String, _m: Option<SessionMode>| async move {
+            if prompt.contains("seed") {
+                Ok(("ORIGINAL".to_string(), 1u64, 1u64))
+            } else {
+                Ok((format!("consumed:{prompt}"), 1u64, 1u64))
+            }
+        };
+        engine
+            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .await
+            .expect("pauses at operator step");
+
+        let final_out = engine
+            .resolve_operator_step(
+                run_id,
+                OperatorAction::Edit,
+                Some("EDITED-BY-OPERATOR".to_string()),
+                mock_resolver_no_inherit,
+                sender,
+            )
+            .await
+            .expect("edit resolves");
+        assert_eq!(
+            final_out, "consumed:EDITED-BY-OPERATOR",
+            "Edit must replace the artifact with the operator payload"
+        );
+    }
+
+    /// #5133 — an action not authorised at the step is rejected without
+    /// touching run state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_resolve_rejects_unauthorised_action() {
+        let engine = WorkflowEngine::new();
+        // Only Approve is authorised; the operator tries Reject.
+        let wf = producer_operator_consumer_workflow(vec![OperatorAction::Approve]);
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed".to_string())
+            .await
+            .expect("create_run");
+        engine
+            .execute_run(run_id, mock_resolver, |_i, _p, _m| async {
+                Ok(("ARTIFACT".to_string(), 1u64, 1u64))
+            })
+            .await
+            .expect("pauses");
+
+        let res = engine
+            .resolve_operator_step(
+                run_id,
+                OperatorAction::Reject,
+                None,
+                mock_resolver,
+                |_i, _p, _m| async { Ok(("x".to_string(), 0, 0)) },
+            )
+            .await;
+        assert!(res.is_err(), "unauthorised action must error");
+        assert!(
+            engine.get_run(run_id).await.unwrap().state.is_paused(),
+            "run must stay Paused when the action was not authorised"
         );
     }
 }
