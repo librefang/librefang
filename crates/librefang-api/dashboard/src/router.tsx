@@ -108,7 +108,13 @@ function LazyRouteBoundary({ children }: { children: React.ReactNode }) {
 }
 
 const rootRoute = createRootRoute({
-  component: App
+  component: App,
+  // Explicit handler for notFound() bubbling to `__root__` (unmatched
+  // URLs, or notFound thrown in a loader/beforeLoad). Without this the
+  // router falls back to its generic `<p>Not Found</p>` and logs a dev
+  // warning; `defaultNotFoundComponent` below is the global fallback,
+  // this is the root-route-level handler the warning asks for.
+  notFoundComponent: NotFound,
 });
 
 const indexRoute = createRoute({
