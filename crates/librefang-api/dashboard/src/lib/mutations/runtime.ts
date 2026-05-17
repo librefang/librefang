@@ -12,20 +12,7 @@ import {
   retryTask,
   cleanupSessions,
 } from "../../api";
-import {
-  agentKeys,
-  channelKeys,
-  configKeys,
-  memoryKeys,
-  overviewKeys,
-  runtimeKeys,
-  scheduleKeys,
-  sessionKeys,
-  skillKeys,
-  triggerKeys,
-  cronKeys,
-  handKeys,
-} from "../queries/keys";
+import { runtimeKeys, sessionKeys } from "../queries/keys";
 
 type ShutdownResult = { status: string };
 
@@ -48,36 +35,25 @@ export function useCreateBackup() {
   });
 }
 
-// A backup restore overwrites the entire ~/.librefang data directory
-// (agents, memory, sessions, config, channels, schedules, triggers,
-// cron, skills, hands). Every cached domain is therefore potentially
-// stale — this is the legitimate "cache reset" case for `.all` keys
-// described in AGENTS.md, not the narrow per-id default. Without this,
-// every page navigated after a restore shows pre-restore state until a
-// manual refresh (#5140).
-const RESTORE_DIRTIED_KEYS = [
-  agentKeys.all,
-  memoryKeys.all,
-  sessionKeys.all,
-  configKeys.all,
-  channelKeys.all,
-  scheduleKeys.all,
-  triggerKeys.all,
-  cronKeys.all,
-  skillKeys.all,
-  handKeys.all,
-  runtimeKeys.all,
-  overviewKeys.all,
-] as const;
-
+// A backup restore overwrites the entire ~/.librefang data directory:
+// workflows/, data/ (the SQLite substrate backing approvals, usage,
+// budgets, mcp, plugins, totp, peers, network, audit, a2a, media,
+// users, permission policies, authz), data/custom_models.json, and
+// config.toml (which carries provider config). Every cached domain in
+// the dashboard is therefore potentially stale. Enumerating each
+// domain key here repeatedly drifted from what backup.rs actually
+// archives (#5182), so we treat this as a daemon-restart level cache
+// reset and nuke the entire query cache in one call — this is the
+// legitimate "cache reset" case for blanket invalidation described in
+// AGENTS.md, not the narrow per-id default. Without this, every page
+// navigated after a restore shows pre-restore state until a manual
+// refresh (#5140).
 export function useRestoreBackup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: restoreBackup,
     onSuccess: () => {
-      for (const queryKey of RESTORE_DIRTIED_KEYS) {
-        qc.invalidateQueries({ queryKey });
-      }
+      qc.invalidateQueries();
     },
   });
 }

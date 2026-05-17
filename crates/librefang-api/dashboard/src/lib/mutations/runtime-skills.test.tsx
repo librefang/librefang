@@ -19,21 +19,12 @@ import {
 } from "./skills";
 import {
   runtimeKeys,
-  overviewKeys,
   skillKeys,
   fanghubKeys,
   clawhubKeys,
   clawhubCnKeys,
   skillhubKeys,
   sessionKeys,
-  agentKeys,
-  memoryKeys,
-  configKeys,
-  channelKeys,
-  scheduleKeys,
-  triggerKeys,
-  cronKeys,
-  handKeys,
 } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
@@ -81,25 +72,13 @@ function expectAllSurfacesInvalidated(spy: ReturnType<typeof vi.spyOn>) {
 }
 
 describe("useRestoreBackup", () => {
-  // A backup restore overwrites the entire data directory, so every
-  // cached domain is stale — not just backups + the overview snapshot
-  // (#5140). The mutation must invalidate every domain `.all` root.
-  const RESTORE_DIRTIED_KEYS = [
-    agentKeys.all,
-    memoryKeys.all,
-    sessionKeys.all,
-    configKeys.all,
-    channelKeys.all,
-    scheduleKeys.all,
-    triggerKeys.all,
-    cronKeys.all,
-    skillKeys.all,
-    handKeys.all,
-    runtimeKeys.all,
-    overviewKeys.all,
-  ] as const;
-
-  it("invalidates every dirtied domain .all key after restore (#5140)", async () => {
+  // A backup restore overwrites the entire ~/.librefang data directory
+  // — workflows/, the SQLite substrate under data/, custom_models.json,
+  // and config.toml (provider config). Enumerating each domain `.all`
+  // key drifted from what backup.rs actually archives (#5182 follow-up
+  // to #5140), so the mutation now performs a daemon-restart level
+  // cache reset via a single argument-less `invalidateQueries()` call.
+  it("performs a full cache reset after restore (#5140, #5182)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -110,9 +89,10 @@ describe("useRestoreBackup", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    for (const queryKey of RESTORE_DIRTIED_KEYS) {
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
-    }
+    // Single, argument-less invalidate covers every cached domain — no
+    // query-key allowlist to drift against backup.rs.
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith();
   });
 });
 

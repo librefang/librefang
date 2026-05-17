@@ -1106,12 +1106,20 @@ export function ConfigPage({ category }: { category: string }) {
                     fieldType === "string_map" ||
                     fieldType === "number_map" ||
                     fieldType === "struct_list";
+                  // Composite editors (object / string_map / number_map /
+                  // struct_list) render multiple controls, so the row
+                  // label cannot resolve to a single labelable target via
+                  // <label htmlFor>. For those we expose the label via
+                  // aria-labelledby on a role="group" wrapper instead
+                  // (#5182).
+                  const isComposite = isCollection || fieldType === "object";
                   const useRootSemantics = desc.root_level || isCollection;
                   const path = useRootSemantics ? fieldKey : `${sKey}.${fieldKey}`;
                   // DOM-safe, stable per-field id for label↔control
                   // association (#5140). `path` is unique within a
                   // section render; non-word chars → '-'.
                   const fieldInputId = `cfg-${path.replace(/[^\w-]/g, "-")}`;
+                  const fieldLabelId = `${fieldInputId}-label`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
                     : getNestedValue(config, sKey, fieldKey, useRootSemantics);
@@ -1142,9 +1150,15 @@ export function ConfigPage({ category }: { category: string }) {
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
                       <div className="w-44 shrink-0 pt-1">
-                        <label htmlFor={fieldInputId} className="block text-xs font-semibold leading-tight">
-                          <Highlight text={fieldLabel} query={q} />
-                        </label>
+                        {isComposite ? (
+                          <span id={fieldLabelId} className="block text-xs font-semibold leading-tight">
+                            <Highlight text={fieldLabel} query={q} />
+                          </span>
+                        ) : (
+                          <label htmlFor={fieldInputId} className="block text-xs font-semibold leading-tight">
+                            <Highlight text={fieldLabel} query={q} />
+                          </label>
+                        )}
                         <div className="flex items-center gap-1 mt-0.5">
                           <p className="text-[10px] text-text-dim font-mono leading-tight">
                             <Highlight text={fieldKey} query={q} />
@@ -1156,19 +1170,37 @@ export function ConfigPage({ category }: { category: string }) {
                         </div>
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
-                        <ConfigFieldInput
-                          inputId={fieldInputId}
-                          fieldKey={fieldKey}
-                          fieldType={fieldType}
-                          options={options}
-                          min={min}
-                          max={max}
-                          step={step}
-                          value={currentValue}
-                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
-                          itemSchema={itemSchema}
-                          schemaRoot={schemaRoot}
-                        />
+                        {isComposite ? (
+                          <div role="group" aria-labelledby={fieldLabelId}>
+                            <ConfigFieldInput
+                              inputId={fieldInputId}
+                              fieldKey={fieldKey}
+                              fieldType={fieldType}
+                              options={options}
+                              min={min}
+                              max={max}
+                              step={step}
+                              value={currentValue}
+                              onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
+                              itemSchema={itemSchema}
+                              schemaRoot={schemaRoot}
+                            />
+                          </div>
+                        ) : (
+                          <ConfigFieldInput
+                            inputId={fieldInputId}
+                            fieldKey={fieldKey}
+                            fieldType={fieldType}
+                            options={options}
+                            min={min}
+                            max={max}
+                            step={step}
+                            value={currentValue}
+                            onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
+                            itemSchema={itemSchema}
+                            schemaRoot={schemaRoot}
+                          />
+                        )}
                         {fieldDesc && (
                           <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
                         )}
