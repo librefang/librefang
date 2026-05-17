@@ -5369,6 +5369,7 @@ pub enum McpTransportEntry {
 /// auth_url = "https://my-server.com/oauth/authorize"
 /// token_url = "https://my-server.com/oauth/token"
 /// client_id = "my-client-id"
+/// client_secret_env = "MY_SERVER_CLIENT_SECRET"
 /// scopes = ["read", "write"]
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -5379,6 +5380,19 @@ pub struct McpOAuthConfig {
     pub token_url: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Name of the environment variable holding the OAuth client secret.
+    /// The secret itself is never stored in `config.toml`. Required when the
+    /// upstream provider treats the client as confidential (e.g. Google Workspace
+    /// MCP servers reject the refresh request without `client_secret`, even for
+    /// Desktop/Installed OAuth client types). Leave unset for purely public
+    /// PKCE clients (Notion, ChatGPT, etc.) — the OAuth flow is unchanged.
+    ///
+    /// Resolved once at `auth_start`; the resolved value is persisted in the
+    /// credential vault under the `client_secret` field alongside
+    /// `refresh_token`, so it survives daemon restarts and is reused on every
+    /// refresh.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
     /// Slack-style user scopes, appended to the authorization URL as

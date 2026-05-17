@@ -11,6 +11,7 @@ async fn test_discover_fallback_to_config() {
         auth_url: Some("https://example.com/auth".into()),
         token_url: Some("https://example.com/token".into()),
         client_id: Some("test-id".into()),
+        client_secret_env: None,
         scopes: vec!["read".into()],
         user_scopes: Vec::new(),
     };

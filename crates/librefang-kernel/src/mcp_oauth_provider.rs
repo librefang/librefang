@@ -42,6 +42,7 @@ const ALL_VAULT_FIELDS: &[&str] = &[
     "expires_at",
     "token_endpoint",
     "client_id",
+    "client_secret",
     "pkce_verifier",
     "pkce_state",
     "redirect_uri",
@@ -163,6 +164,7 @@ impl KernelOAuthProvider {
         }
 
         let client_id = self.vault_get_or_warn(&Self::vault_key(server_url, "client_id"));
+        let client_secret = self.vault_get_or_warn(&Self::vault_key(server_url, "client_secret"));
 
         let client = librefang_extensions::http_client::new_client();
         let mut params = vec![
@@ -171,6 +173,14 @@ impl KernelOAuthProvider {
         ];
         if let Some(cid) = &client_id {
             params.push(("client_id", cid.clone()));
+        }
+        // Confidential clients (e.g. Google Workspace MCP) require
+        // `client_secret` even for refresh; public PKCE clients leave it
+        // unset and Google-style providers ignore the field. The secret
+        // was persisted to the vault at `auth_start` when
+        // `McpOAuthConfig::client_secret_env` was configured.
+        if let Some(secret) = &client_secret {
+            params.push(("client_secret", secret.clone()));
         }
 
         let resp = client
@@ -814,6 +824,7 @@ mod tests {
             "expires_at",
             "token_endpoint",
             "client_id",
+            "client_secret",
             "pkce_verifier",
             "pkce_state",
             "redirect_uri",
@@ -826,7 +837,7 @@ mod tests {
         }
         assert_eq!(
             fields.len(),
-            8,
+            9,
             "Unexpected field count in ALL_VAULT_FIELDS — update this assertion if new fields are intentionally added"
         );
     }
