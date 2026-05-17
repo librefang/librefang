@@ -759,8 +759,48 @@ impl LibreFangKernel {
     /// [`SessionInterrupt`] so a parent session's `/stop` can cascade into
     /// this subagent's loop (issue #3044). Used by `tool_agent_send` when
     /// the caller agent's own interrupt should gate the callee.
+    ///
+    /// Thin wrapper that establishes the task-local held-`agent_msg_locks`
+    /// registry (`held_agent_locks::scope`) around the real work in
+    /// [`Self::send_message_full_inner`]. The registry must span the whole
+    /// body — the per-agent lock is held across the entire agent loop, and
+    /// the re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126)
+    /// tool paths run *inside* that loop on the same task. `scope` is
+    /// idempotent, so a transitively re-entered inner frame shares the
+    /// outer frame's set rather than masking it with a fresh one.
     #[allow(clippy::too_many_arguments)]
     async fn send_message_full_with_upstream(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Arc<dyn KernelHandle>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+        incognito: bool,
+    ) -> KernelResult<AgentLoopResult> {
+        librefang_runtime::held_agent_locks::scope(self.send_message_full_inner(
+            agent_id,
+            message,
+            kernel_handle,
+            content_blocks,
+            sender_context,
+            session_mode_override,
+            thinking_override,
+            session_id_override,
+            upstream_interrupt,
+            incognito,
+        ))
+        .await
+    }
+
+    /// Real implementation of [`Self::send_message_full_with_upstream`].
+    /// Always invoked under `held_agent_locks::scope`; do not call directly.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_full_inner(
         &self,
         agent_id: AgentId,
         message: &str,
@@ -790,25 +830,80 @@ impl LibreFangKernel {
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
 
+        // Reject same-task re-entrant acquisition of `agent_msg_locks[agent_id]`
+        // (#5125). When this resolves to the agent-scoped lock (no
+        // `session_id_override`) and the current task *already* holds that
+        // agent's lock, acquiring `lock.lock().await` below would block the
+        // task on itself forever — `tokio::sync::Mutex` is not reentrant and
+        // there is no other task to release it. This is exactly the
+        // transitive `A -> B -> A` `agent_send` cycle: the depth limiter
+        // (`max_agent_call_depth`) permits it, and the direct
+        // `caller == agent_id` guard in `tool_agent_send` only catches the
+        // 1-hop case. Detect it *before* the lock acquisition (the only
+        // place that cannot itself deadlock) and fail loudly with the held
+        // chain so operators can see which agents form the cycle, instead
+        // of silently parking the worker thread. The session-scoped
+        // (`session_id_override`) path is a different key space that the
+        // re-entrant tool paths never take, so it is exempt.
+        if session_id_override.is_none() && librefang_runtime::held_agent_locks::is_held(agent_id) {
+            let mut chain: Vec<String> = librefang_runtime::held_agent_locks::held_snapshot()
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect();
+            chain.push(agent_id.to_string());
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                format!(
+                    "agent_send: re-entrant message to agent {} would deadlock its \
+                     per-agent message lock (transitive A->B->A cycle). Currently-held \
+                     agent locks on this task: [{}]. Break the cycle or use the task \
+                     queue for the callback.",
+                    agent_id,
+                    chain.join(" -> "),
+                ),
+            )));
+        }
+
         // When the caller supplies an explicit session_id, scope the lock to that
         // session so concurrent messages to *different* sessions of the same agent
         // are not serialized against each other (multi-tab / multi-session UIs).
         // Without an override, fall back to the per-agent lock to preserve the
         // existing serialization guarantee for single-session agents.
-        let lock = if let Some(sid) = session_id_override {
-            self.agents
-                .session_msg_locks
-                .entry(sid)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+        let (lock, agent_scoped) = if let Some(sid) = session_id_override {
+            (
+                self.agents
+                    .session_msg_locks
+                    .entry(sid)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                false,
+            )
         } else {
-            self.agents
-                .agent_msg_locks
-                .entry(agent_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+            (
+                self.agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                true,
+            )
         };
         let _guard = lock.lock().await;
+        // Record that this task now holds `agent_msg_locks[agent_id]` so the
+        // re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126)
+        // tool paths — which run inside the agent loop below on this same
+        // task — can detect the self-re-entry instead of deadlocking on a
+        // non-reentrant `tokio::sync::Mutex`. Only the agent-scoped lock is
+        // tracked: the session-scoped (`session_id_override`) lock is a
+        // different key space that those two paths never re-acquire, and
+        // tracking it by `agent_id` would risk a false-positive rejection.
+        // Declared *after* `_guard` so drop order is registry-then-mutex:
+        // while the entry is registered the mutex is provably still held,
+        // never the inverse. Drop is panic-safe (RAII unwinds destructors).
+        let _held_guard = if agent_scoped {
+            Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
+        } else {
+            None
+        };
 
         // Pre-call global budget reservation (#3616). Estimate cost from
         // the model's max output tokens and reserve it on the in-memory
