@@ -274,6 +274,26 @@ impl HookRegistry {
             }
         }
 
+        // Prompt-cache determinism (#3298, #5143). These sections render
+        // into Section 16 of the system prompt
+        // (`prompt_builder.rs`), which is part of the Anthropic/OpenAI
+        // prompt-cache key. `self.handlers` is a `Vec` inside a `DashMap`
+        // whose contents are appended in *registration* order. No
+        // production code registers a `BeforePromptBuild` handler today,
+        // but a future handler wired in via filesystem walk or plugin
+        // manifest discovery would otherwise carry its non-deterministic
+        // registration order straight into the prompt and silently
+        // invalidate the cache. Sort by the stable `(provider, heading)`
+        // key here — the boundary that produces the order — so the
+        // invariant is enforced regardless of how/when handlers register.
+        // `provider` is a stable slug identifier; `heading` is the
+        // tiebreaker (it may be empty or duplicated across providers).
+        sections.sort_by(|a, b| {
+            a.provider
+                .cmp(&b.provider)
+                .then_with(|| a.heading.cmp(&b.heading))
+        });
+
         sections
     }
 
@@ -485,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_prompt_sections_returns_in_registration_order() {
+    fn test_collect_prompt_sections_returns_sorted_by_provider() {
         let registry = HookRegistry::new();
         registry.register(
             HookEvent::BeforePromptBuild,
@@ -508,6 +528,59 @@ mod tests {
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].provider, "alpha");
         assert_eq!(sections[1].provider, "beta");
+    }
+
+    // Issue #5143 — `BeforePromptBuild` handlers feed Section 16 of the
+    // system prompt, which is part of the provider prompt-cache key.
+    // Handlers register into a `Vec` inside a `DashMap` in registration
+    // order; a future handler wired in via filesystem/plugin discovery
+    // would otherwise leak that non-deterministic order into the prompt.
+    // `collect_prompt_sections` sorts by `(provider, heading)` to enforce
+    // determinism. This pins byte-identical output across two different
+    // registration orders, mirroring
+    // `mcp_summary_is_byte_identical_across_input_orders`.
+    #[test]
+    fn collect_prompt_sections_is_deterministic_across_registration_orders() {
+        fn collected(order: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+            let registry = HookRegistry::new();
+            for (provider, heading, body) in order {
+                registry.register(
+                    HookEvent::BeforePromptBuild,
+                    Arc::new(SectionHandler {
+                        provider: (*provider).into(),
+                        heading: (*heading).into(),
+                        body: (*body).into(),
+                    }),
+                );
+            }
+            let ctx = make_ctx(HookEvent::BeforePromptBuild);
+            registry
+                .collect_prompt_sections(&ctx)
+                .into_iter()
+                .map(|s| (s.provider, s.heading, s.body))
+                .collect()
+        }
+
+        let forward = collected(&[
+            ("active-memory", "Recalled", "m"),
+            ("diffs-guidance", "Diffs", "d"),
+            ("zeta-provider", "Zeta", "z"),
+        ]);
+        let reversed = collected(&[
+            ("zeta-provider", "Zeta", "z"),
+            ("diffs-guidance", "Diffs", "d"),
+            ("active-memory", "Recalled", "m"),
+        ]);
+        assert_eq!(
+            forward, reversed,
+            "collect_prompt_sections must yield byte-identical output across registration orders (#5143)"
+        );
+        let providers: Vec<&str> = forward.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(
+            providers,
+            vec!["active-memory", "diffs-guidance", "zeta-provider"],
+            "sections must be sorted by provider"
+        );
     }
 
     #[test]
