@@ -48,7 +48,13 @@ pub struct ProcessInfo {
 
 /// Manager for persistent agent processes.
 pub struct ProcessManager {
-    processes: DashMap<ProcessId, ManagedProcess>,
+    // `Arc` so a detached reaper task (spawned per process in `start`)
+    // can hold a clone and evict the entry the moment the child exits
+    // on its own — `kill()` only reaps explicitly-killed processes, and
+    // `cleanup()` evicts by uptime, so without this a long-lived daemon
+    // running many short-lived process tools accumulates zombie
+    // `ManagedProcess` records forever (#5144).
+    processes: Arc<DashMap<ProcessId, ManagedProcess>>,
     max_per_agent: usize,
     next_id: std::sync::atomic::AtomicU64,
 }
@@ -57,7 +63,7 @@ impl ProcessManager {
     /// Create a new process manager.
     pub fn new(max_per_agent: usize) -> Self {
         Self {
-            processes: DashMap::new(),
+            processes: Arc::new(DashMap::new()),
             max_per_agent,
             next_id: std::sync::atomic::AtomicU64::new(1),
         }
@@ -111,8 +117,10 @@ impl ProcessManager {
         let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        // Spawn background readers for stdout/stderr
-        if let Some(out) = stdout {
+        // Spawn background readers for stdout/stderr. We keep the join
+        // handles so the per-process reaper can await pipe drain before
+        // evicting the registry entry (#5144).
+        let stdout_reader = stdout.map(|out| {
             let buf = stdout_buf.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(out);
@@ -125,10 +133,10 @@ impl ProcessManager {
                     }
                     b.push(line);
                 }
-            });
-        }
+            })
+        });
 
-        if let Some(err) = stderr {
+        let stderr_reader = stderr.map(|err| {
             let buf = stderr_buf.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(err);
@@ -140,8 +148,8 @@ impl ProcessManager {
                     }
                     b.push(line);
                 }
-            });
-        }
+            })
+        });
 
         let id = format!(
             "proc_{}",
@@ -169,6 +177,36 @@ impl ProcessManager {
                 started_at: std::time::Instant::now(),
             },
         );
+
+        // Per-process reaper: a child that exits on its own closes both
+        // pipes (the readers above hit EOF and their tasks finish). Once
+        // both readers are done, confirm the child has actually exited
+        // via the registry entry's `child.wait()` and evict it, so
+        // naturally-exited processes don't linger as zombie records
+        // until `cleanup()`'s uptime sweep or an explicit `kill()`
+        // (#5144). If a `kill()` removed the entry first this is a
+        // harmless no-op.
+        let processes = self.processes.clone();
+        let reap_id = id.clone();
+        tokio::spawn(async move {
+            if let Some(h) = stdout_reader {
+                let _ = h.await;
+            }
+            if let Some(h) = stderr_reader {
+                let _ = h.await;
+            }
+            // Both pipes drained → the child has exited. Remove the
+            // registry entry first (releasing the DashMap shard lock
+            // immediately — never hold a `get_mut` guard across the
+            // `child.wait()` await, or a concurrent `kill()` would
+            // block on the same shard), then reap the owned child to
+            // collect its exit status and avoid a zombie. If `kill()`
+            // already removed the entry this is a harmless no-op.
+            if let Some((_, mut proc)) = processes.remove(&reap_id) {
+                let _ = proc.child.wait().await;
+                debug!(process_id = %reap_id, "Reaped naturally-exited process");
+            }
+        });
 
         Ok(id)
     }
@@ -353,5 +391,71 @@ mod tests {
         let pm = ProcessManager::default();
         assert_eq!(pm.max_per_agent, 5);
         assert_eq!(pm.count(), 0);
+    }
+
+    /// A short-lived command that exits on its own (no explicit `kill`).
+    fn short_lived_proc() -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd", vec!["/C".to_string(), "exit".to_string()])
+        } else {
+            ("true", vec![])
+        }
+    }
+
+    /// Regression (#5144): a managed child that exits on its own must
+    /// have its registry entry reaped automatically by the per-process
+    /// reaper. Before the fix only `kill()` (explicit) or `cleanup()`
+    /// (uptime-based) removed entries, so naturally-exited short-lived
+    /// process tools accumulated as zombie `ManagedProcess` records.
+    #[tokio::test]
+    async fn naturally_exited_process_is_reaped() {
+        let pm = ProcessManager::new(5);
+        let (cmd, args) = short_lived_proc();
+        let id = pm.start("agent1", cmd, &args).await.unwrap();
+        assert_eq!(pm.count(), 1, "entry present right after start");
+
+        // The reaper awaits both pipe readers then `child.wait()`; for a
+        // process that exits immediately this happens quickly. Poll with
+        // a bounded budget rather than a fixed sleep to stay robust on
+        // slow CI without flaking.
+        let mut reaped = false;
+        for _ in 0..100 {
+            if pm.count() == 0 {
+                reaped = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            reaped,
+            "naturally-exited process entry was not reaped (count still {})",
+            pm.count()
+        );
+
+        // A late `kill` of the already-reaped id is a harmless error,
+        // not a panic / double-free.
+        assert!(pm.kill(&id).await.is_err());
+    }
+
+    /// The reaper must not fight an explicit `kill()`: killing a
+    /// long-running process still removes exactly one entry and leaves
+    /// the manager consistent (no double-remove panic, count == 0).
+    #[tokio::test]
+    async fn explicit_kill_still_reaps_exactly_once() {
+        let pm = ProcessManager::new(5);
+        let (cmd, args) = long_running_proc();
+        let id = pm.start("agent1", cmd, &args).await.unwrap();
+        assert_eq!(pm.count(), 1);
+        pm.kill(&id).await.unwrap();
+
+        // After kill the pipes EOF and the reaper runs; either path
+        // converges on count == 0 with no panic.
+        for _ in 0..100 {
+            if pm.count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(pm.count(), 0, "manager must be empty after kill + reap");
     }
 }
