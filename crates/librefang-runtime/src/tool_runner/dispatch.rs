@@ -860,9 +860,9 @@ pub async fn execute_tool_raw(
         "agent_kill" => tool_agent_kill(input, *kernel),
 
         // Shared memory tools (peer-scoped when sender_id is present)
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
-        "memory_list" => tool_memory_list(*kernel, *sender_id),
+        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_recall" => tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id),
+        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id),
 
         // Memory wiki tools (issue #3329)
         "wiki_get" => tool_wiki_get(input, *kernel),
@@ -1414,7 +1414,7 @@ pub async fn execute_tool(
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
         {
-            let agent_id_str = caller_agent_id.unwrap_or("unknown");
+            let agent_id_str = caller_agent_id.unwrap_or("");
             let input_str = input.to_string();
             let summary = format!(
                 "{}: {}",

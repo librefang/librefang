@@ -268,10 +268,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 "required": ["agent_id"]
             }),
         },
-        // --- Shared memory tools ---
+        // --- Memory tools (per-agent) ---
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "Store a value in shared memory accessible by all agents. Use for cross-agent coordination and data sharing.".to_string(),
+            description: "Store a value in the agent's memory. Each agent has its own isolated memory namespace. Use for persisting data across sessions.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -283,7 +283,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         },
         ToolDefinition {
             name: "memory_recall".to_string(),
-            description: "Recall a value from shared memory by key.".to_string(),
+            description: "Recall a value from the agent's memory by key.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -294,7 +294,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         },
         ToolDefinition {
             name: "memory_list".to_string(),
-            description: "List all keys stored in shared memory.".to_string(),
+            description: "List all keys in the agent's memory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},

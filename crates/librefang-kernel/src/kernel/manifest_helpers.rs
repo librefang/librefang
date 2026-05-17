@@ -233,8 +233,11 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
     }
 }
 
-/// A well-known agent ID used for shared memory operations across agents.
-/// This is a fixed UUID so all agents read/write to the same namespace.
+/// A well-known agent ID used for the legacy shared memory namespace.
+/// This is a fixed UUID. Pre-#5070, all agents read/wrote to this single
+/// namespace. Post-#5070, LLM-facing tools use per-agent scoping; this ID
+/// remains for internal kernel subsystems and backward compatibility.
+
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
 /// Try to extract an `AgentManifest` from a `hand.toml` file (HandDefinition format).
 ///

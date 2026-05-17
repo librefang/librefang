@@ -1376,10 +1376,10 @@ impl LibreFangKernel {
             Ok(u) => AgentId(u),
             Err(e) => {
                 warn!(
-                    "handle_approval_resolution: invalid agent_id '{}': {e}",
+                    "handle_approval_resolution: invalid agent_id '{}': {e}, falling back to shared_memory_agent_id",
                     deferred.agent_id
                 );
-                return;
+                shared_memory_agent_id()
             }
         };
 
@@ -1441,7 +1441,9 @@ impl LibreFangKernel {
             // Deferred resume path has no live agent-loop context, so the
             // lazy-load meta-tools fall back to the builtin catalog.
             available_tools: None,
-            caller_agent_id: Some(deferred.agent_id.as_str()),
+            caller_agent_id: uuid::Uuid::parse_str(&deferred.agent_id)
+                .ok()
+                .map(|_| deferred.agent_id.as_str()),
             skill_registry: Some(skill_snapshot),
             // Deferred tools have already passed the approval gate; skill
             // allowlist is not available here so we skip the check (None).
