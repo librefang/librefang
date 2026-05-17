@@ -257,6 +257,23 @@ pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution,
         return Err("Only http:// and https:// URLs are allowed".to_string());
     }
 
+    // Reject userinfo (`user[:pass]@host`) in the authority. Defense in
+    // depth (issue #5141): `extract_host` splits on `://` then `/`, so
+    // `http://allowed.example.com@127.0.0.1/` yields the host
+    // `allowed.example.com@127.0.0.1` and today merely fails DNS — but
+    // that is one parser tweak away from exploitable (the #3527 shape).
+    // `is_ssrf_target` on the WASM path and the MCP-OAuth path both reject
+    // userinfo explicitly; align this path so the policy is uniform and
+    // the URL never reaches reqwest's connection-pool key with credentials
+    // embedded. Scope the `@` scan to the authority only (a `?query=a@b`
+    // or `#frag@x` is legitimate and must not be rejected).
+    if let Some((_, rest)) = url.split_once("://") {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if rest[..authority_end].contains('@') {
+            return Err("SSRF blocked: URLs with userinfo are not permitted".to_string());
+        }
+    }
+
     let host = extract_host(url);
     // For IPv6 bracket notation like [::1]:80, extract [::1] as hostname
     let hostname = if host.starts_with('[') {
@@ -337,7 +354,7 @@ pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution,
 /// Covers:
 /// - `169.254.0.0/16` — link-local / AWS EC2 metadata
 /// - `100.64.0.0/10`  — CGNAT (also used by Alibaba Cloud IMDS at 100.100.100.200)
-fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
     match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -361,7 +378,7 @@ fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
 ///
 /// Custom NAT64 prefixes (RFC 6052 §2.2) are NOT handled — those are
 /// per-environment configuration and would need an explicit setting.
-fn canonical_ip(ip: &IpAddr) -> IpAddr {
+pub(crate) fn canonical_ip(ip: &IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -378,7 +395,7 @@ fn canonical_ip(ip: &IpAddr) -> IpAddr {
 
 /// Extract the embedded IPv4 from an address in the NAT64 well-known
 /// prefix `64:ff9b::/96` (RFC 6052). Returns `None` for any other address.
-fn extract_nat64_well_known(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+pub(crate) fn extract_nat64_well_known(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     let segments = v6.segments();
     // 96-bit prefix: 0064:ff9b:0000:0000:0000:0000::/96
     if segments[0] != 0x0064
@@ -485,7 +502,7 @@ fn cidr_contains(cidr: &str, ip: &IpAddr) -> Result<bool, ()> {
 }
 
 /// Check if an IP address is in a private range.
-fn is_private_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
     match canonical_ip(ip) {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
@@ -592,6 +609,44 @@ mod tests {
         assert!(check_ssrf("file:///etc/passwd", &[]).is_err());
         assert!(check_ssrf("ftp://internal.corp/data", &[]).is_err());
         assert!(check_ssrf("gopher://evil.com", &[]).is_err());
+    }
+
+    // --- #5141: userinfo rejection (defense-in-depth, #3527 shape) ---
+    #[test]
+    fn test_ssrf_rejects_userinfo() {
+        // ATTACK: host-confusion via userinfo. `extract_host` splits on
+        // `://` then `/`, so the host would be
+        // `allowed.example.com@127.0.0.1` — today that merely fails DNS,
+        // but it must be rejected explicitly so a future parser change
+        // can't make it exploitable, and so credentials never reach
+        // reqwest's connection-pool key.
+        let err = match check_ssrf("http://allowed.example.com@127.0.0.1/", &[]) {
+            Err(e) => e,
+            Ok(_) => panic!("userinfo URL must be rejected"),
+        };
+        assert!(err.contains("userinfo"), "got: {err}");
+        assert!(check_ssrf("http://user:pass@169.254.169.254/", &[]).is_err());
+        assert!(check_ssrf("https://a@b@evil.example.com/", &[]).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_userinfo_check_does_not_false_positive_on_query_or_fragment() {
+        // POSITIVE: an `@` in the path / query / fragment is legitimate
+        // and must NOT be treated as userinfo. (DNS for example.com may
+        // fail in CI sandboxes, so only assert it is not the userinfo
+        // rejection.)
+        for u in [
+            "http://example.com/path?email=a@b.com",
+            "http://example.com/#section@2",
+            "http://example.com/users/a@b",
+        ] {
+            if let Err(e) = check_ssrf(u, &[]) {
+                assert!(
+                    !e.contains("userinfo"),
+                    "URL {u} wrongly rejected as userinfo: {e}"
+                );
+            }
+        }
     }
 
     #[test]

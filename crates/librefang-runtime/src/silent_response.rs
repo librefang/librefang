@@ -51,6 +51,11 @@ pub(crate) const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Stranger]", "[Forwar
 
 /// Prompt section headers that, when paired with a structural marker,
 /// indicate cascade scaffolding regurgitation.
+///
+/// `## Today` / `## Calendar` / `## Tasks` are *ambiguous* — a legitimate
+/// "what does my day look like" help reply produces these freely, so 2+ of
+/// them alone is intentionally NOT a leak (houko-flagged false positive,
+/// guarded by `thematic_headers_alone_are_legitimate`).
 const THEMATIC_HEADERS: &[&str] = &[
     "## Sender",
     "## Today",
@@ -58,6 +63,19 @@ const THEMATIC_HEADERS: &[&str] = &[
     "## Tasks",
     "## Response Style",
 ];
+
+/// Subset of [`THEMATIC_HEADERS`] that describe the *prompt frame itself*,
+/// not reply content. An agent never legitimately emits `## Sender`
+/// (it does not narrate who messaged it back to the user) or
+/// `## Response Style` (a meta-instruction block, never reply prose) in a
+/// genuine reply — these only appear when the model regurgitates the
+/// scaffolding verbatim. They are therefore as diagnostic as a structural
+/// turn-frame marker. This closes the all-thematic bypass
+/// (`## Sender\n…\n## Today\n…\n## Tasks` — three thematic, zero structural)
+/// flagged in issue #5141 without regressing the legitimate day-summary
+/// reply (which only ever uses the ambiguous `## Today`/`## Calendar`/
+/// `## Tasks` subset).
+const SCAFFOLD_ONLY_HEADERS: &[&str] = &["## Sender", "## Response Style"];
 
 /// Structural turn-frame markers that almost never appear in legitimate
 /// agent replies.
@@ -68,7 +86,13 @@ const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past 
 /// produce.
 ///
 /// Trip condition: **2+ structural** OR **1 structural + 1 thematic**.
-/// `2+ thematic alone` is intentionally NOT a leak.
+/// `2+ *ambiguous* thematic alone` is intentionally NOT a leak (legitimate
+/// day-summary replies). The scaffold-only headers (`## Sender`,
+/// `## Response Style` — see [`SCAFFOLD_ONLY_HEADERS`]) count toward the
+/// structural tally because no genuine reply emits them, so the
+/// all-thematic regurgitation `## Sender\n…\n## Today\n…\n## Tasks`
+/// (issue #5141) now trips: `## Sender` is structural-equivalent, and it
+/// pairs with the `## Today`/`## Tasks` thematic hits.
 ///
 /// Used both by the assembled-response guard (non-streaming and streaming
 /// EndTurn) and by the incremental streaming abort path.
@@ -79,6 +103,7 @@ pub fn is_cascade_leak(text: &str) -> bool {
         .iter()
         .chain(ENVELOPE_LINE_PREFIXES.iter())
         .chain(ENVELOPE_STANDALONE_MARKERS.iter())
+        .chain(SCAFFOLD_ONLY_HEADERS.iter())
     {
         if text.contains(m) {
             structural_hits += 1;
@@ -91,7 +116,17 @@ pub fn is_cascade_leak(text: &str) -> bool {
     if structural_hits == 0 {
         return false;
     }
-    THEMATIC_HEADERS.iter().any(|m| text.contains(m))
+    // Pair the structural hit with an *ambiguous* thematic header only.
+    // Scaffold-only headers are already counted as structural above —
+    // re-counting them here would let a single `## Response Style` (1
+    // structural + itself as "thematic") trip on a legitimate one-section
+    // reply. The ambiguous subset (## Today / ## Calendar / ## Tasks) is
+    // exactly the day-summary content a real reply pairs with scaffolding
+    // when the model regurgitates the frame.
+    THEMATIC_HEADERS
+        .iter()
+        .filter(|h| !SCAFFOLD_ONLY_HEADERS.contains(h))
+        .any(|m| text.contains(m))
 }
 
 /// Env-flag rollback hatch: setting `LIBREFANG_SILENT_V2=off` reverts to
@@ -111,16 +146,44 @@ fn v2_enabled() -> bool {
     })
 }
 
-/// Legacy detector — bit-for-bit equivalent to the pre-Phase-2 `is_no_reply`
-/// helper that lived in `agent_loop.rs`. Used when `LIBREFANG_SILENT_V2=off`.
+/// Legacy detector — used when `LIBREFANG_SILENT_V2=off`. Historically this
+/// was bit-for-bit `t == S || t.ends_with(S)` for each sentinel, but the
+/// unbounded `ends_with` let adversarial sender input coerce the LLM into
+/// appending `NO_REPLY` *directly after a side-effecting tool's output*
+/// (e.g. `...deleted 200 rowsNO_REPLY`) to suppress the user-visible reply
+/// while the tool already ran (issue #5141). The trailing-suffix form now
+/// requires a boundary (the char before the sentinel must not be
+/// alphanumeric / `_`) — mirroring the v2 [`ends_with_canonical`] boundary
+/// rule — so `xNO_REPLY` no longer matches but `x. NO_REPLY` /
+/// `x\nNO_REPLY` (legitimate trailing-token prompts) still do. Exact-match
+/// behaviour is unchanged.
 fn legacy_is_silent(text: &str) -> bool {
     let t = text.trim();
     t == "NO_REPLY"
-        || t.ends_with("NO_REPLY")
+        || legacy_ends_with_boundary(t, "NO_REPLY")
         || t == "[no reply needed]"
-        || t.ends_with("[no reply needed]")
+        || legacy_ends_with_boundary(t, "[no reply needed]")
         || t == "no reply needed"
-        || t.ends_with("no reply needed")
+        || legacy_ends_with_boundary(t, "no reply needed")
+}
+
+/// True iff `t` ends with `needle` AND the character immediately before
+/// `needle` is a non-word boundary (whitespace, punctuation, bracket, …)
+/// or `needle` is at the start. Prevents `...rowsNO_REPLY` /
+/// `NO_REPLYING` from suppressing a reply while preserving the legacy
+/// "context.\nNO_REPLY" trailing-token tolerance.
+fn legacy_ends_with_boundary(t: &str, needle: &str) -> bool {
+    let Some(cut) = t.len().checked_sub(needle.len()) else {
+        return false;
+    };
+    if !t.ends_with(needle) {
+        return false;
+    }
+    if cut == 0 {
+        return true;
+    }
+    let prev = t[..cut].chars().next_back().unwrap();
+    !(prev.is_alphanumeric() || prev == '_')
 }
 
 /// Reason classification for a silent decision. Used in structured logs
@@ -337,6 +400,41 @@ mod tests {
         ));
     }
 
+    // --- #5141: legacy detector trailing-NO_REPLY boundary ---
+    // Tested against `legacy_is_silent` directly: `is_silent_response`
+    // routes here only when `LIBREFANG_SILENT_V2=off`, and `v2_enabled()`
+    // memoises the env read in a process-wide `OnceLock`, so going through
+    // the public entrypoint would be order-dependent / flaky.
+    #[test]
+    fn legacy_rejects_glued_no_reply_after_tool_output() {
+        // ATTACK: adversarial sender input coerces the LLM to append
+        // NO_REPLY directly after a side-effecting tool's output so the
+        // user never sees that the tool ran. No boundary before the
+        // sentinel → must NOT be treated as silent.
+        assert!(!legacy_is_silent("deleted 200 rowsNO_REPLY"));
+        assert!(!legacy_is_silent(
+            "Transferred $5000 to account 12345NO_REPLY"
+        ));
+        assert!(!legacy_is_silent("doneno reply needed"));
+        // Alphanumeric / `_` immediately before sentinel: still not silent.
+        assert!(!legacy_is_silent("xNO_REPLY"));
+        assert!(!legacy_is_silent("foo_NO_REPLY"));
+        assert!(!legacy_is_silent("NO_REPLYING"));
+    }
+
+    #[test]
+    fn legacy_still_accepts_bounded_trailing_no_reply() {
+        // POSITIVE: legitimate trailing-token prompts (the historical
+        // behaviour we cannot regress) must still be silent.
+        assert!(legacy_is_silent("NO_REPLY"));
+        assert!(legacy_is_silent("all good. NO_REPLY"));
+        assert!(legacy_is_silent("Let me think.\nNO_REPLY"));
+        assert!(legacy_is_silent("[no reply needed]"));
+        assert!(legacy_is_silent("Some context. [no reply needed]"));
+        assert!(legacy_is_silent("no reply needed"));
+        assert!(legacy_is_silent("done; no reply needed"));
+    }
+
     // --- SilentReason serialization ---
     #[test]
     fn silent_reason_serializes_snake_case() {
@@ -380,11 +478,17 @@ mod tests {
     }
 
     #[test]
-    fn cascade_leak_thematic_headers_alone_are_legitimate() {
-        // 2+ thematic headers alone must NOT trigger the guard —
-        // legitimate markdown help replies use these freely.
+    fn cascade_leak_ambiguous_thematic_headers_alone_are_legitimate() {
+        // 2+ *ambiguous* thematic headers alone must NOT trigger the guard
+        // — legitimate "what does my day look like" replies use these
+        // freely. NOTE (#5141): the previous version of this test asserted
+        // `"## Sender …\n## Response Style …"` was also legitimate. That
+        // was the vulnerability: `## Sender` / `## Response Style` are
+        // pure scaffolding (a genuine reply never narrates the sender or a
+        // meta response-style block), so that exact shape is now correctly
+        // a leak — see `cascade_leak_scaffold_only_headers_trip_*`.
         assert!(!is_cascade_leak(
-            "## Sender\nAlice\n\n## Today\n2024-01-01\n\n## Response Style\nFormal"
+            "## Today\n2024-01-01\n\n## Calendar\nstandup 9am\n\n## Tasks\nreview"
         ));
         assert!(!is_cascade_leak(
             "## Tasks\n- buy milk\n\n## Calendar\nTuesday"
@@ -398,6 +502,45 @@ mod tests {
         assert!(!is_cascade_leak(
             "Here is a summary:\n\n1. Point one\n2. Point two"
         ));
+    }
+
+    // --- #5141: all-thematic scaffolding-regurgitation bypass ---
+
+    #[test]
+    fn cascade_leak_scaffold_only_headers_trip_without_structural() {
+        // ATTACK: the LLM is coerced into regurgitating the system-prompt
+        // scaffolding with zero structural markers and only thematic
+        // headers — `## Sender` + `## Today` + `## Tasks`. Before the fix
+        // this had 0 structural hits → not a leak → fully delivered to the
+        // user. `## Sender` is a scaffold-only header (no genuine reply
+        // emits it), so it now counts toward the structural tally and the
+        // leak trips.
+        assert!(is_cascade_leak(
+            "## Sender\nAlice (+15551234567)\n\n## Today\n2024-01-01\n\n## Tasks\n- review PR"
+        ));
+        // `## Response Style` is the other scaffold-only header; two
+        // scaffold-only headers alone (2 structural-equiv) also trip.
+        assert!(is_cascade_leak(
+            "## Sender\nBob\n\n## Response Style\nFormal, concise."
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_ambiguous_thematic_alone_still_legitimate() {
+        // REGRESSION GUARD: the houko-flagged false positive must stay
+        // fixed — a legitimate "what does my day look like" reply uses the
+        // *ambiguous* thematic headers (## Today/## Calendar/## Tasks) and
+        // must NOT be classified as a leak. Crucially these contain NO
+        // scaffold-only header.
+        assert!(!is_cascade_leak(
+            "## Today\nWednesday\n\n## Calendar\nno events\n\n## Tasks\npending"
+        ));
+        assert!(!is_cascade_leak(
+            "## Calendar\n- meeting at 5pm\n\n## Tasks\n- send follow-up"
+        ));
+        // Single scaffold-only header alone is not enough (needs a 2nd
+        // structural OR a thematic to pair with).
+        assert!(!is_cascade_leak("## Response Style\nBe brief."));
     }
 
     #[test]
