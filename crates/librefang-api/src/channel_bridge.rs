@@ -497,13 +497,20 @@ where
                         }
                     }
                 }
-                // Only surface failures — successes are followed by the
-                // model's next prose iteration which is signal enough.
+                // Surface failures for all tools.
+                // Surface successes only for tools whose outcome the user
+                // needs to see (channel_send: file delivery confirmation).
                 StreamEvent::ToolExecutionResult { name, is_error, .. }
-                    if show_progress && is_error && !name.is_empty() =>
+                    if show_progress
+                        && !name.is_empty()
+                        && (is_error || name == "channel_send") =>
                 {
                     let pretty = prettify_tool_name(&name);
-                    let line = format!("\n\n⚠️ {pretty} {failed_word}\n\n");
+                    let line = if is_error {
+                        format!("\n\n⚠️ {pretty} {failed_word}\n\n")
+                    } else {
+                        format!("\n\n✅ {pretty}\n\n")
+                    };
                     if tx.send(line).await.is_err() {
                         break;
                     }
@@ -548,14 +555,22 @@ where
     tokio::spawn(async move {
         let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
             Err(e) => {
+                let is_cancelled = e.is_cancelled();
                 error!("Streaming kernel task panicked: {e}");
-                (
-                    Some(
-                        "Sorry, something went wrong on my end. Please try again in a moment."
-                            .to_string(),
-                    ),
-                    Err(format!("kernel task panicked: {e}")),
-                )
+                if is_cancelled {
+                    // Silent: when the user sends a new message the old
+                    // task is aborted. No notification needed — the new
+                    // message is already being processed.
+                    (None, Ok(()))
+                } else {
+                    (
+                        Some(
+                            "Sorry, something went wrong on my end. Please try again in a moment."
+                                .to_string(),
+                        ),
+                        Err(format!("kernel task panicked: {e}")),
+                    )
+                }
             }
             Ok(Err(e)) => {
                 let err_str = e.to_string();
