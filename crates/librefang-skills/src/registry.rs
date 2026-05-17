@@ -356,9 +356,23 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
-    /// List all installed skills.
+    /// List all installed skills, sorted by skill name.
+    ///
+    /// The sort is load-bearing for prompt-cache determinism (#3298,
+    /// #5143). `self.skills` is a `HashMap`, whose iteration order varies
+    /// across processes. Every current prompt-bound caller
+    /// (`sorted_enabled_skills`, `all_tool_definitions`) already sorts
+    /// downstream, but the bare `list()` is also reachable from the API
+    /// (`routes/commands.rs`) and CLI (`main.rs`). Sorting here makes the
+    /// determinism invariant enforced at the source rather than
+    /// sustained-by-convention at every callsite, so a future prompt-side
+    /// caller that picks up `.list()` directly cannot silently reorder the
+    /// tool/skill list sent to the LLM. The API/CLI consumers are
+    /// order-insensitive, so the sort is a no-op for them.
     pub fn list(&self) -> Vec<&InstalledSkill> {
-        self.skills.values().collect()
+        let mut skills: Vec<&InstalledSkill> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+        skills
     }
 
     /// Remove a skill by name.
@@ -964,6 +978,49 @@ input_schema = {{ type = "object" }}
         assert_eq!(
             tools_a,
             vec!["alpha_tool".to_string(), "gamma_tool".to_string()]
+        );
+    }
+
+    // Issue #5143 — `list()` is the source-of-truth ordering for skills.
+    // It backs prompt-bound callers (via `sorted_enabled_skills`) as well
+    // as the API/CLI. Sorting must happen inside `list()` so a future
+    // prompt-side caller picking up `.list()` directly cannot silently
+    // reorder the skill/tool list and invalidate the provider prompt
+    // cache. This pins byte-identical output across insertion orders,
+    // mirroring `all_tool_definitions_is_deterministic_across_insertion_orders`.
+    #[test]
+    fn list_is_deterministic_across_insertion_orders() {
+        let dir_a = TempDir::new().unwrap();
+        let mut reg_a = SkillRegistry::new(dir_a.path().to_path_buf());
+        install_with_tool(&mut reg_a, "alpha", "alpha_tool");
+        install_with_tool(&mut reg_a, "beta", "beta_tool");
+        install_with_tool(&mut reg_a, "gamma", "gamma_tool");
+
+        let dir_b = TempDir::new().unwrap();
+        let mut reg_b = SkillRegistry::new(dir_b.path().to_path_buf());
+        // Reverse insertion order — `list()` output MUST still match.
+        install_with_tool(&mut reg_b, "gamma", "gamma_tool");
+        install_with_tool(&mut reg_b, "beta", "beta_tool");
+        install_with_tool(&mut reg_b, "alpha", "alpha_tool");
+
+        let names_a: Vec<String> = reg_a
+            .list()
+            .into_iter()
+            .map(|s| s.manifest.skill.name.clone())
+            .collect();
+        let names_b: Vec<String> = reg_b
+            .list()
+            .into_iter()
+            .map(|s| s.manifest.skill.name.clone())
+            .collect();
+        assert_eq!(
+            names_a, names_b,
+            "list() must yield byte-identical output across insertion orders (#5143)"
+        );
+        assert_eq!(
+            names_a,
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+            "list() must be sorted by skill name"
         );
     }
 
