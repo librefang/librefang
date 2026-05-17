@@ -3,6 +3,13 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+// The in-process agent loop's deeply-nested async future chain — now
+// carrying the per-task held-agent-lock `scope` layer (#5125/#5126) —
+// exceeds the default type-recursion limit when this binary crate is
+// monomorphised. Matches the `librefang-kernel` / `librefang-api` crate
+// roots.
+#![recursion_limit = "256"]
+
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

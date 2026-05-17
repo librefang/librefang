@@ -8039,3 +8039,279 @@ fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// #5125 / #5126: same-task re-entrant `agent_msg_locks` acquisition.
+//
+// Both issues are the same root cause — the same async task re-acquires
+// `agent_msg_locks[agent_id]` (a non-reentrant `tokio::sync::Mutex`) that an
+// outer `send_message_full` frame already holds, silently parking the worker
+// thread. The fix tracks held locks in a task-local registry
+// (`librefang_runtime::held_agent_locks`) populated at the single agent-scoped
+// acquisition site in `send_message_full_inner`, so:
+//   - #5125: the transitive `A -> B -> A` `agent_send` cycle is rejected with
+//     an error *before* the second `lock.lock().await`, instead of hanging.
+//   - #5126: `append_to_session`'s `block_in_place(blocking_lock)` is skipped
+//     in favour of a lockless write when this task already holds the lock,
+//     instead of self-deadlocking; the mirror write still lands.
+// The fix must NOT relax cross-task mutual exclusion (third test).
+//
+// Each test runs the deadlock-prone work under `tokio::time::timeout`: without
+// the fix the future never resolves and the timeout fires (test fails); with
+// the fix it resolves promptly.
+// ---------------------------------------------------------------------------
+
+/// Build a kernel + one spawned agent for the re-entrancy tests.
+fn reentrant_test_kernel() -> (Arc<LibreFangKernel>, AgentId) {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::mem::forget(dir); // keep tempdir alive until process exit
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    // `send_message_full` builds its kernel-handle arg via `kernel_handle()`,
+    // which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+    let agent_id = kernel
+        .spawn_agent(test_manifest("reentrant-a", "agent A", vec![]))
+        .expect("spawn A should succeed");
+    (kernel, agent_id)
+}
+
+/// #5125: a transitive `A -> B -> A` cycle must be rejected, not deadlock.
+///
+/// We simulate the outer turn for A exactly as `send_message_full_inner` does:
+/// inside `held_agent_locks::scope`, acquire the real `agent_msg_locks[A]`
+/// guard and register A in the task-local held set. Then call
+/// `send_message_full(A, ...)` on the *same task* — the inner re-entrant
+/// acquisition. With the fix it returns the cycle-rejection error before the
+/// (would-be deadlocking) `lock.lock().await`. Without the fix the inner call
+/// blocks forever on the held mutex and the timeout fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5125_transitive_cycle_is_rejected_not_deadlocked() {
+    let (kernel, agent_a) = reentrant_test_kernel();
+    let lock_a = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent_a)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let kernel_clone = Arc::clone(&kernel);
+    let fut = librefang_runtime::held_agent_locks::scope(async move {
+        // Outer turn for A: hold the lock + register, like the real site.
+        let _outer_guard = lock_a.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
+        assert!(
+            librefang_runtime::held_agent_locks::is_held(agent_a),
+            "A's lock must be registered as held on this task"
+        );
+
+        // Inner re-entrant send to A (the B->A leg of A->B->A), same task.
+        kernel_clone
+            .send_message_full(
+                agent_a,
+                "callback into A",
+                kernel_clone.kernel_handle(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+    });
+
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+    let inner = res.expect(
+        "re-entrant send_message_full(A) must NOT hang — without the fix this \
+         times out because the task self-deadlocks on agent_msg_locks[A]",
+    );
+    let err = inner.expect_err("re-entrant send must be rejected, not succeed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("re-entrant") && msg.contains("deadlock"),
+        "rejection must name the re-entrant deadlock; got: {msg}"
+    );
+    assert!(
+        msg.contains(&agent_a.to_string()),
+        "rejection must name the cycle agent {agent_a}; got: {msg}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5126: `channel_send`'s mirror (`append_to_session`) from inside the
+/// channel owner's own turn must complete (lockless write) and persist the
+/// message, not deadlock on the already-held `agent_msg_locks[owner]`.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let (kernel, owner) = reentrant_test_kernel();
+    let lock_owner = kernel
+        .agents
+        .agent_msg_locks
+        .entry(owner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    // Mirror session id, derived exactly like mirror_channel_send_to_session.
+    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-42"));
+    let mirror_msg = Message {
+        role: Role::User,
+        content: MessageContent::Text("{\"mirror_from\":\"owner\",\"body\":\"reply\"}".to_string()),
+        pinned: false,
+        timestamp: Some(chrono::Utc::now()),
+    };
+
+    let kernel_clone = Arc::clone(&kernel);
+    let owner_copy = owner;
+    let sid_copy = channel_sid;
+    let msg_copy = mirror_msg.clone();
+    let fut = librefang_runtime::held_agent_locks::scope(async move {
+        // Outer turn for `owner` holds agent_msg_locks[owner] + registered.
+        let _outer_guard = lock_owner.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
+
+        // Mirror path resolves owner == caller -> append_to_session. Without
+        // the fix this block_in_place(blocking_lock)s the held mutex on this
+        // same task and never returns. `append_to_session` is sync; running
+        // it on a blocking thread keeps the runtime healthy while still
+        // exercising the same task-local (block_in_place stays on-task).
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
+        });
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+        .await
+        .expect(
+            "owner-caller mirror append must NOT hang — without the fix this \
+             times out because block_in_place re-locks the held agent_msg_lock",
+        );
+
+    // The mirror write must actually be present (lockless-write, not skip).
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(channel_sid)
+        .expect("get_session must not error")
+        .expect("mirror session row must exist after append_to_session");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the mirrored channel_send message must be persisted, not silently dropped"
+    );
+
+    kernel.shutdown();
+}
+
+/// The fix must ONLY relax SAME-task re-entry. Two DIFFERENT tasks must still
+/// serialize on the same agent's `agent_msg_locks` entry. Task 1 holds the
+/// real lock (with no held-set scope — it is a plain cross-task holder); Task 2
+/// calls `append_to_session` for the same agent. Task 2 must block until Task 1
+/// releases (proving the `block_in_place(blocking_lock)` path is still taken
+/// across tasks), then complete.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_task_serialization_on_agent_msg_lock_is_preserved() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (kernel, agent) = reentrant_test_kernel();
+
+    // Sanity: `is_held` is false outside any scope and across tasks — the
+    // task-local never bleeds between tasks, so the cross-task path always
+    // takes the real lock.
+    assert!(
+        !librefang_runtime::held_agent_locks::is_held(agent),
+        "is_held must be false outside any held_agent_locks::scope"
+    );
+
+    let lock = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let holder_released = Arc::new(AtomicBool::new(false));
+    let writer_started = Arc::new(AtomicBool::new(false));
+
+    // Task 1: hold the real lock for 400ms (NOT in a held-set scope, so this
+    // is a genuine cross-task holder the writer must wait behind).
+    let lock_t1 = Arc::clone(&lock);
+    let released_t1 = Arc::clone(&holder_released);
+    let writer_started_t1 = Arc::clone(&writer_started);
+    let holder = tokio::spawn(async move {
+        let _g = lock_t1.lock().await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // The writer must NOT have completed while we still hold the lock; it
+        // may have *started* (spawned) but its blocking_lock must be parked.
+        assert!(
+            writer_started_t1.load(Ordering::SeqCst),
+            "writer task should have started while holder held the lock"
+        );
+        released_t1.store(true, Ordering::SeqCst);
+    });
+
+    // Give the holder time to acquire the lock first.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Task 2: a different task calls append_to_session for the SAME agent. It
+    // must block on the real mutex until Task 1 releases.
+    let kernel_w = Arc::clone(&kernel);
+    let sid = SessionId::for_sender_scope(agent, "telegram", Some("c1"));
+    let released_w = Arc::clone(&holder_released);
+    let writer_started_w = Arc::clone(&writer_started);
+    let writer = tokio::spawn(async move {
+        writer_started_w.store(true, Ordering::SeqCst);
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(
+                &*kernel_w,
+                sid,
+                agent,
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("cross-task".to_string()),
+                    pinned: false,
+                    timestamp: Some(chrono::Utc::now()),
+                },
+            );
+        });
+        // By the time the writer acquires the lock, the holder must have
+        // already released it — proving mutual exclusion held.
+        assert!(
+            released_w.load(Ordering::SeqCst),
+            "cross-task writer acquired agent_msg_lock before holder released \
+             it — cross-task mutual exclusion was wrongly relaxed"
+        );
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        holder.await.expect("holder task");
+        writer.await.expect("writer task");
+    })
+    .await
+    .expect("cross-task path must complete once the holder releases");
+
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(sid)
+        .expect("get_session")
+        .expect("session row must exist");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "cross-task write must still land after serialized acquisition"
+    );
+
+    kernel.shutdown();
+}

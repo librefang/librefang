@@ -4,6 +4,12 @@
 //! The last test (`test_six_agent_fleet`) is a live LLM integration test
 //! that only runs when GROQ_API_KEY is set.
 
+// `send_message_full` now nests its body inside `held_agent_locks::scope`
+// (#5125/#5126), deepening the monomorphized future-type layout. Match the
+// crate-root limit (`librefang-kernel/src/lib.rs:3`) and the other heavy
+// integration-test binaries (`audit_retention_test`, `workflow_integration_test`).
+#![recursion_limit = "256"]
+
 use librefang_kernel::triggers::TriggerPattern;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
