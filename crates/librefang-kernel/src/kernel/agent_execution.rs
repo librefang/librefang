@@ -526,14 +526,27 @@ impl LibreFangKernel {
             let peer_id = sender_context
                 .map(|s| s.user_id.as_str())
                 .filter(|s| !s.is_empty());
-            let user_name_key = peer_scoped_key("user_name", peer_id);
-            let user_name = self
-                .memory
-                .substrate
-                .structured_get(shared_id, &user_name_key)
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            // peer_scoped_key now rejects colon-bearing / empty peer_ids
+            // (#5119); on a malformed peer_id we skip the user_name lookup
+            // with a WARN so prompt assembly stays best-effort rather than
+            // failing the turn.
+            let user_name = match peer_scoped_key("user_name", peer_id) {
+                Ok(user_name_key) => self
+                    .memory
+                    .substrate
+                    .structured_get(shared_id, &user_name_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from)),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = ?peer_id,
+                        error = %e,
+                        "skipping user_name lookup: invalid peer_id namespace"
+                    );
+                    None
+                }
+            };
 
             let peer_agents: Vec<(String, String, String)> =
                 self.agents.registry.peer_agents_summary();
