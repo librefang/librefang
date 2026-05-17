@@ -2159,7 +2159,16 @@ export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {
   return get<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
 
-export async function runWorkflow(workflowId: string, input: string): Promise<ApiActionResponse> {
+// `input` may be a plain string (free-text `{{input}}`) or an object whose
+// keys bind to `{{key}}` placeholders in step prompts — the backend
+// serialises an object body so the engine's per-key seeding resolves
+// declared parameters (e.g. `{{challenge}}`) at run time.
+export type WorkflowRunInput = string | Record<string, unknown>;
+
+export async function runWorkflow(
+  workflowId: string,
+  input: WorkflowRunInput,
+): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
   }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
@@ -2235,7 +2244,10 @@ export interface DryRunResult {
  * Validate a workflow without making any LLM calls.
  * Returns per-step previews with resolved prompts and agent resolution status.
  */
-export async function dryRunWorkflow(workflowId: string, input: string): Promise<DryRunResult> {
+export async function dryRunWorkflow(
+  workflowId: string,
+  input: WorkflowRunInput,
+): Promise<DryRunResult> {
   return post<DryRunResult>(
     `/api/workflows/${encodeURIComponent(workflowId)}/dry-run`,
     { input },
