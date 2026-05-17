@@ -774,6 +774,17 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "Missing 'key' parameter"}),
     };
+    // SECURITY (#5120): defense-in-depth. Guest KV keys are stored as
+    // `<agent_id>:<key>` (see `namespaced_key` below), so the agent-id prefix
+    // already makes it impossible for a guest to land a *clean*
+    // `peer:victim:...` row in the shared substrate — that prefix is what
+    // actually neutralizes the impersonation vector here, not this check.
+    // Rejecting a `peer:`-prefixed key anyway keeps the guest API consistent
+    // with the kernel-handle boundary and stops a confusing
+    // `<agent_id>:peer:...` row from ever being written.
+    if key.starts_with("peer:") {
+        return json!({"error": "Memory key must not start with reserved 'peer:' prefix"});
+    }
     if let Err(e) = check_capability(
         &state.capabilities,
         &Capability::MemoryRead(key.to_string()),
@@ -823,6 +834,17 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "Missing 'key' parameter"}),
     };
+    // SECURITY (#5120): defense-in-depth. Guest KV keys are stored as
+    // `<agent_id>:<key>` (see `namespaced_key` below), so the agent-id prefix
+    // already makes it impossible for a guest to land a *clean*
+    // `peer:victim:...` row in the shared substrate — that prefix is what
+    // actually neutralizes the impersonation vector here, not this check.
+    // Rejecting a `peer:`-prefixed key anyway keeps the guest API consistent
+    // with the kernel-handle boundary and stops a confusing
+    // `<agent_id>:peer:...` row from ever being written.
+    if key.starts_with("peer:") {
+        return json!({"error": "Memory key must not start with reserved 'peer:' prefix"});
+    }
     // SECURITY (#3866): cap key length before storing.
     if key.len() > MAX_KV_KEY_BYTES {
         return json!({"error": format!(

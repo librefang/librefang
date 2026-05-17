@@ -1737,19 +1737,53 @@ fn test_evaluate_condition_unknown_format() {
 
 #[test]
 fn test_peer_scoped_key() {
-    // With peer_id: key is namespaced
+    use librefang_runtime::kernel_handle::KernelOpError;
+
+    // With a colon-free, non-empty peer_id: key is namespaced.
     assert_eq!(
-        peer_scoped_key("car", Some("user-123")),
+        peer_scoped_key("car", Some("user-123")).expect("colon-free peer_id ok"),
         "peer:user-123:car"
     );
+
+    // Without peer_id: key is unchanged (global scope).
     assert_eq!(
-        peer_scoped_key("prefs.color", Some("u:456")),
-        "peer:u:456:prefs.color"
+        peer_scoped_key("car", None).expect("None peer_id ok"),
+        "car"
+    );
+    assert_eq!(
+        peer_scoped_key("global_setting", None).expect("None peer_id ok"),
+        "global_setting"
     );
 
-    // Without peer_id: key is unchanged
-    assert_eq!(peer_scoped_key("car", None), "car");
-    assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+    // SECURITY (#5119): peer_id containing ':' is rejected — the historical
+    // `peer:{pid}:{key}` framing is only injective when pid is colon-free.
+    assert!(matches!(
+        peer_scoped_key("prefs.color", Some("u:456")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("car", Some("T1:U2")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5119 / review #3): an empty peer_id is rejected — `peer::{key}`
+    // is ambiguous with a `None`-scope key literally named `:{key}` and would
+    // split / shadow a namespace.
+    assert!(matches!(
+        peer_scoped_key("car", Some("")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5120): key starting with reserved `peer:` prefix is rejected
+    // so an LLM-supplied key cannot collide with the internal namespace.
+    assert!(matches!(
+        peer_scoped_key("peer:victim:user_name", None),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("peer:anything", Some("alice")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -7942,6 +7976,65 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
         kernel.config_ref().default_model.provider,
         post_boot_provider,
         "live default_model.provider must be preserved when the on-disk file is unparseable"
+    );
+
+    kernel.shutdown();
+}
+
+// ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
+
+/// Happy-path regression for #5117: `kill_agent_with_purge` previously
+/// discarded the substrate `remove_agent` result with `let _ = …`, so a DB
+/// failure (lock contention, schema drift, FS error) would silently leave the
+/// row on disk and the agent would resurrect on next daemon boot. After the
+/// fix, the error is propagated as `KernelError::LibreFang(LibreFangError)`.
+/// This test pins the success path so the refactor cannot regress the
+/// common case: kill returns `Ok(())` AND the SQLite `agents` row is
+/// scrubbed.
+#[test]
+fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-5117-happy");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let manifest = AgentManifest {
+        name: "agent-5117".to_string(),
+        description: "agent for #5117 regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent before kill")
+            .is_some(),
+        "agent row must exist in SQLite before kill"
+    );
+
+    kernel
+        .kill_agent_with_purge(agent_id, true)
+        .expect("kill_agent_with_purge should succeed on happy path");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent after kill")
+            .is_none(),
+        "agent row must be gone from SQLite after successful kill_agent_with_purge (#5117)"
     );
 
     kernel.shutdown();
