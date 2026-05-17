@@ -4732,6 +4732,9 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-types",
  "metrics",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry_sdk",
  "rand 0.10.1",
  "reqwest",
  "serde",
@@ -4741,6 +4744,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
  "wiremock",
  "zeroize",
@@ -6030,6 +6035,18 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "opentelemetry-http"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7a6d09a73194e6b66df7c8f1b680f156d916a1a942abf2de06823dd02b7855d"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "opentelemetry",
 ]
 
 [[package]]
