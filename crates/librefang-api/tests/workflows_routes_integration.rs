@@ -1248,10 +1248,11 @@ async fn schedule_update_rejects_ssrf_webhook_in_delivery_targets() {
 ///
 /// `dry-run` is used as the probe because it computes `resolved_prompt`
 /// through the exact same `seed_input_vars_from_json` + `expand_variables`
-/// path a real run uses, but without needing LLM credentials. Both the
-/// object shape (binds) and the legacy string shape (does not bind, by
-/// the documented #4982 contract) are pinned so a future refactor can't
-/// silently regress either direction.
+/// path a real run uses, but without needing LLM credentials. The step
+/// prompt deliberately uses BOTH a named placeholder (`{{challenge}}`)
+/// and the free-text `{{input}}` so the cases below also pin that a
+/// parameterised workflow can still receive readable free-form context
+/// via `{{input}}` instead of a JSON blob.
 #[tokio::test(flavor = "multi_thread")]
 async fn dry_run_binds_object_input_keys_to_template_vars() {
     let h = boot().await;
@@ -1264,7 +1265,8 @@ async fn dry_run_binds_object_input_keys_to_template_vars() {
         Some(serde_json::json!({
             "name": "brainstorm-repro",
             "steps": [
-                {"name": "ideate", "agent_id": agent_id, "prompt": "Brainstorm: {{challenge}}"}
+                {"name": "ideate", "agent_id": agent_id,
+                 "prompt": "Brainstorm: {{challenge}} | Context: {{input}}"}
             ]
         })),
     )
@@ -1275,7 +1277,30 @@ async fn dry_run_binds_object_input_keys_to_template_vars() {
         .expect("workflow_id")
         .to_string();
 
-    // Object-shaped input: the `challenge` key binds to `{{challenge}}`.
+    // Object input with a named key + a free-text `input` key: the named
+    // key binds `{{challenge}}` and the string `input` key renders as
+    // `{{input}}` (NOT a `{...}` JSON dump). This is the dashboard
+    // parameter-form + additional-context shape.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({
+            "input": { "challenge": "reduce churn", "input": "q3 notes" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["steps"][0]["resolved_prompt"], "Brainstorm: reduce churn | Context: q3 notes",
+        "named key binds {{{{challenge}}}} and the string `input` key \
+         renders as {{{{input}}}} free-text, not a JSON blob: {body:?}"
+    );
+
+    // Object input WITHOUT a string `input` key: `{{challenge}}` still
+    // binds; `{{input}}` falls back to the raw blob (the pre-existing
+    // #4982 whole-input contract — agent `workflow_run` callers rely on
+    // this, so it must stay unchanged).
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -1284,15 +1309,18 @@ async fn dry_run_binds_object_input_keys_to_template_vars() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(
-        body["steps"][0]["resolved_prompt"], "Brainstorm: reduce churn",
-        "object input key must substitute the named placeholder: {body:?}"
+    let resolved = body["steps"][0]["resolved_prompt"]
+        .as_str()
+        .expect("resolved_prompt");
+    assert!(
+        resolved.starts_with("Brainstorm: reduce churn | Context: {"),
+        "no `input` key → {{{{challenge}}}} binds, {{{{input}}}} is the raw \
+         blob (unchanged #4982 contract): {resolved}"
     );
 
-    // Legacy string input: the placeholder stays literal (documented
-    // #4982 contract — a plain string is the whole-blob `{{input}}`,
-    // not a per-key binding source). This is the pre-fix behaviour and
-    // pins the contract boundary.
+    // Legacy plain string: named placeholders never bind (a string is
+    // the whole-blob `{{input}}`, not a per-key source). Pins the
+    // string-vs-object boundary.
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -1302,7 +1330,7 @@ async fn dry_run_binds_object_input_keys_to_template_vars() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(
-        body["steps"][0]["resolved_prompt"], "Brainstorm: {{challenge}}",
+        body["steps"][0]["resolved_prompt"], "Brainstorm: {{challenge}} | Context: reduce churn",
         "a plain-string input must NOT bind named placeholders: {body:?}"
     );
 }
