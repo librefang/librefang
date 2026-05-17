@@ -46,6 +46,23 @@ fn reject_peer_prefix_in_key(key: &str) -> Result<(), kernel_handle::KernelOpErr
     Ok(())
 }
 
+/// Reject an empty memory key at the kernel-handle boundary (#5138).
+///
+/// `memory_store(key="", ...)` would otherwise land a row at
+/// `(shared_agent, "")` and `memory_list(None)` would then surface a
+/// nameless `""` entry. Mirrors the empty-`peer_id` rejection shape from
+/// #5119 / #5071 so the substrate boundary uniformly refuses ambiguous
+/// addressing.
+fn reject_empty_key(key: &str) -> Result<(), kernel_handle::KernelOpError> {
+    use kernel_handle::KernelOpError;
+    if key.is_empty() {
+        return Err(KernelOpError::InvalidInput(
+            "memory key must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl kernel_handle::MemoryAccess for LibreFangKernel {
     fn memory_store(
         &self,
@@ -54,22 +71,29 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         peer_id: Option<&str>,
     ) -> Result<(), kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
+        reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id)?;
-        // Check whether key already exists to determine Created vs Updated
+        // Derive Created vs Updated from the same transaction that performs
+        // the write (#5138). The old `structured_get` pre-read then
+        // `structured_set` raced: two concurrent first-time writes both saw
+        // `had_old=false` and both published `Created`, and a write that
+        // lost the SQLite race still announced its own value as `Created`
+        // with no payload while triggers read the *other* writer's value.
+        // `set_returning_existed` checks existence and writes atomically,
+        // so the published operation reflects the committed transition. It
+        // also enforces `MAX_KV_VALUE_BYTES`, surfacing an over-limit blob
+        // as `InvalidInput` (#5138) before it can wedge the substrate.
         let had_old = self
             .memory
             .substrate
-            .structured_get(agent_id, &scoped)
-            .ok()
-            .flatten()
-            .is_some();
-        self.memory
-            .substrate
-            .structured_set(agent_id, &scoped, value)
-            .map_err(|e| KernelOpError::Internal(format!("Memory store failed: {e}")))?;
+            .structured_set_returning_existed(agent_id, &scoped, value)
+            .map_err(|e| match e {
+                KernelOpError::InvalidInput(_) => e,
+                other => KernelOpError::Internal(format!("Memory store failed: {other}")),
+            })?;
 
         tracing::debug!(
             key = %scoped,
@@ -117,6 +141,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
+        reject_empty_key(key)?;
         reject_peer_prefix_in_key(key)?;
         reject_bad_peer_id(peer_id)?;
         let agent_id = shared_memory_agent_id();

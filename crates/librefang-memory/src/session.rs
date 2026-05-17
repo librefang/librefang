@@ -261,7 +261,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -270,11 +270,19 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            Ok((agent_str, messages_blob, tokens, label, model_override))
+            let messages_generation: i64 = row.get(5).unwrap_or(0);
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                model_override,
+                messages_generation,
+            ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, model_override)) => {
+            Ok((agent_str, messages_blob, tokens, label, model_override, messages_generation)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -287,7 +295,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label,
                     model_override,
-                    messages_generation: 0,
+                    messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                 }))
             }
@@ -303,7 +311,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -313,6 +321,7 @@ impl SessionStore {
             let label: Option<String> = row.get(3).unwrap_or(None);
             let created_at: String = row.get(4)?;
             let model_override: Option<String> = row.get(5).unwrap_or(None);
+            let messages_generation: i64 = row.get(6).unwrap_or(0);
             Ok((
                 agent_str,
                 messages_blob,
@@ -320,11 +329,20 @@ impl SessionStore {
                 label,
                 created_at,
                 model_override,
+                messages_generation,
             ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, created_at, model_override)) => {
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                created_at,
+                model_override,
+                messages_generation,
+            )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -338,7 +356,7 @@ impl SessionStore {
                         context_window_tokens: tokens as u64,
                         label,
                         model_override,
-                        messages_generation: 0,
+                        messages_generation: messages_generation.max(0) as u64,
                         last_repaired_generation: None,
                     },
                     created_at,
@@ -371,7 +389,12 @@ impl SessionStore {
     /// When truncation does fire, `save_session` emits a `warn!` log with
     /// `agent_id`, `session_id`, `requested_count`, and `cap` so operators
     /// are not blind to silent context loss.
-    const MAX_PERSISTED_MESSAGES: usize = 2000;
+    ///
+    /// The value is sourced from
+    /// [`librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES`] (#5138)
+    /// so the substrate enforcement and the config-load warning for
+    /// `cron_session_max_messages` cannot drift apart.
+    const MAX_PERSISTED_MESSAGES: usize = librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES;
 
     /// Save a session to the database and update the FTS5 index.
     ///
@@ -426,10 +449,15 @@ impl SessionStore {
         // derived by decoding the blob.
         let message_count = messages_to_persist.len() as i64;
 
+        // Persist `messages_generation` (#5138) so the repair-skip
+        // optimisation in the runtime survives a reload. Without the
+        // column, every cold load reset the counter to 0 and forced a
+        // full repair pass on the first post-load save even when the
+        // stored blob was already repaired.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, updated_at = ?7",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, updated_at = ?8",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -437,6 +465,7 @@ impl SessionStore {
                 session.context_window_tokens as i64,
                 session.label.as_deref(),
                 message_count,
+                session.messages_generation as i64,
                 now,
             ],
         )
@@ -1061,7 +1090,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -1072,11 +1101,19 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let lbl: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            Ok((id_str, messages_blob, tokens, lbl, model_override))
+            let messages_generation: i64 = row.get(5).unwrap_or(0);
+            Ok((
+                id_str,
+                messages_blob,
+                tokens,
+                lbl,
+                model_override,
+                messages_generation,
+            ))
         });
 
         match result {
-            Ok((id_str, messages_blob, tokens, lbl, model_override)) => {
+            Ok((id_str, messages_blob, tokens, lbl, model_override, messages_generation)) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
                     .map_err(LibreFangError::memory)?;
@@ -1089,7 +1126,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label: lbl,
                     model_override,
-                    messages_generation: 0,
+                    messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                 }))
             }
@@ -1812,6 +1849,39 @@ mod tests {
         let store = setup();
         let result = store.get_session(SessionId::new()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn messages_generation_round_trips_across_reload_5138() {
+        // #5138: the generation counter must survive a save/load cycle
+        // so the runtime's repair-skip optimisation does not pay a full
+        // repair pass on every cold load.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.push_message(Message::user("a"));
+        session.push_message(Message::assistant("b"));
+        session.mark_messages_mutated();
+        let gen_before = session.messages_generation;
+        assert!(gen_before > 0, "counter should have advanced");
+        store.save_session(&session).unwrap();
+
+        // get_session
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.messages_generation, gen_before,
+            "messages_generation must persist (get_session)"
+        );
+
+        // get_session_with_created_at
+        let (loaded2, _created) = store
+            .get_session_with_created_at(session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded2.messages_generation, gen_before,
+            "messages_generation must persist (get_session_with_created_at)"
+        );
     }
 
     #[test]

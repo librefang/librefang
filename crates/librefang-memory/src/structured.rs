@@ -6,6 +6,27 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+/// Hard ceiling on a single serialized KV value, enforced inside
+/// [`StructuredStore::set`] / [`StructuredStore::modify`] /
+/// [`StructuredStore::set_returning_existed`] so no call path can land an
+/// unbounded blob (#5138). 256 KiB comfortably holds the largest legitimate
+/// structured payloads (goal arrays, peer KV) while keeping worst-case row
+/// size, WAL replay, and cold-load RAM bounded. An over-limit write is
+/// rejected with [`LibreFangError::InvalidInput`] *before* the INSERT runs,
+/// so a coerced agent cannot wedge the substrate with a 100 MB array.
+pub const MAX_KV_VALUE_BYTES: usize = 256 * 1024;
+
+/// Reject a serialized value that exceeds [`MAX_KV_VALUE_BYTES`].
+fn check_value_size(blob: &[u8], key: &str) -> LibreFangResult<()> {
+    if blob.len() > MAX_KV_VALUE_BYTES {
+        return Err(LibreFangError::InvalidInput(format!(
+            "memory value for key '{key}' is {} bytes, exceeds the {MAX_KV_VALUE_BYTES}-byte limit",
+            blob.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Structured store backed by SQLite for key-value operations and agent storage.
 #[derive(Clone)]
 pub struct StructuredStore {
@@ -48,6 +69,7 @@ impl StructuredStore {
     ) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
+        check_value_size(&blob, key)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
@@ -56,6 +78,110 @@ impl StructuredStore {
         )
         .map_err(LibreFangError::memory)?;
         Ok(())
+    }
+
+    /// Atomic read-modify-write of a single KV key under a `BEGIN IMMEDIATE`
+    /// write transaction (#5138).
+    ///
+    /// Loads the current value (or `None`), hands it to `f`, and persists the
+    /// returned value — all inside one SQLite write lock, so two concurrent
+    /// `modify` calls on the same key serialize instead of clobbering each
+    /// other (the lost-update / last-writer-wins race that the goals routes
+    /// and `goal_update` previously had with a plain `get` → mutate → `set`).
+    /// `BEGIN IMMEDIATE` escalates to a write lock immediately, mirroring the
+    /// proven `SessionStore::append_canonical` shape for the identical
+    /// single-shared-blob pattern.
+    ///
+    /// `f` may return an error to abort the transaction without writing; the
+    /// error is propagated and the row is left unchanged. `f`'s `Ok` payload
+    /// is also returned to the caller so handlers can echo the mutated entity
+    /// without a second read.
+    pub fn modify<T>(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        f: impl FnOnce(Option<serde_json::Value>) -> LibreFangResult<(serde_json::Value, T)>,
+    ) -> LibreFangResult<T> {
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+
+        let current: Option<serde_json::Value> = {
+            let mut stmt = tx
+                .prepare("SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2")
+                .map_err(LibreFangError::memory)?;
+            let row = stmt.query_row(rusqlite::params![agent_id.0.to_string(), key], |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                Ok(blob)
+            });
+            match row {
+                Ok(blob) => {
+                    Some(serde_json::from_slice(&blob).map_err(LibreFangError::serialization)?)
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(LibreFangError::memory(e)),
+            }
+        };
+
+        let (new_value, out) = f(current)?;
+        let blob = serde_json::to_vec(&new_value).map_err(LibreFangError::serialization)?;
+        check_value_size(&blob, key)?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
+             ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
+            rusqlite::params![agent_id.0.to_string(), key, blob, now],
+        )
+        .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(out)
+    }
+
+    /// Set a value and report whether the key already existed, atomically
+    /// (#5138).
+    ///
+    /// The existence check and the write run inside one `BEGIN IMMEDIATE`
+    /// transaction, so the returned `bool` reflects the state the write
+    /// actually replaced — not a pre-read that could race with a concurrent
+    /// first-time write. `memory_store` uses this to publish
+    /// `MemoryUpdate{Created|Updated}` based on the committed transition
+    /// rather than a stale `had_old` snapshot.
+    ///
+    /// Returns `true` if a prior value was overwritten, `false` if this
+    /// created the key.
+    pub fn set_returning_existed(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        value: serde_json::Value,
+    ) -> LibreFangResult<bool> {
+        let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
+        check_value_size(&blob, key)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+        let existed: bool = tx
+            .query_row(
+                "SELECT 1 FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+                rusqlite::params![agent_id.0.to_string(), key],
+                |_| Ok(()),
+            )
+            .map(|_| true)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                other => Err(LibreFangError::memory(other)),
+            })?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
+             ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
+            rusqlite::params![agent_id.0.to_string(), key, blob, now],
+        )
+        .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(existed)
     }
 
     /// Delete a value from the key-value store.
@@ -175,21 +301,16 @@ impl StructuredStore {
             serde_json::to_string(&entry.state).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
 
-        // Add session_id column if it doesn't exist yet (migration compat)
-        let _ = conn.execute(
-            "ALTER TABLE agents ADD COLUMN session_id TEXT DEFAULT ''",
-            [],
-        );
-        // Add identity column (migration compat)
-        let _ = conn.execute(
-            "ALTER TABLE agents ADD COLUMN identity TEXT DEFAULT '{}'",
-            [],
-        );
-        // Add source_toml_path column (migration compat)
-        let _ = conn.execute(
-            "ALTER TABLE agents ADD COLUMN source_toml_path TEXT DEFAULT NULL",
-            [],
-        );
+        // NOTE(#5138): the `session_id` / `identity` / `source_toml_path`
+        // columns are NO LONGER added here. They were previously fired as
+        // three `let _ = ALTER TABLE agents ADD COLUMN ...` on every
+        // `save_agent`, swallowing the "duplicate column" error on the
+        // common path. That bypassed the migration ladder entirely — the
+        // columns never appeared in any `migrate_vN`, so `user_version` and
+        // the `migrations` audit trail never reflected them, and deleting an
+        // `ALTER` in a refactor would silently break fresh installs that
+        // never had the column. They are now declared in `migrate_v40`,
+        // which runs once at substrate boot inside the laddered transaction.
 
         let identity_json =
             serde_json::to_string(&entry.identity).map_err(LibreFangError::serialization)?;
@@ -623,6 +744,131 @@ mod tests {
             .unwrap();
         run_migrations(&pool.get().unwrap()).unwrap();
         StructuredStore::new(pool)
+    }
+
+    /// File-backed store with a multi-connection pool so two threads can
+    /// genuinely contend for the SQLite write lock. An in-memory
+    /// `:memory:` DB with `max_size(1)` cannot exercise the race the
+    /// transactional `modify` fixes.
+    fn setup_file_backed(path: &std::path::Path) -> StructuredStore {
+        let pool = Pool::builder()
+            .max_size(8)
+            .build(SqliteConnectionManager::file(path))
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            run_migrations(&conn).unwrap();
+        }
+        StructuredStore::new(pool)
+    }
+
+    #[test]
+    fn modify_concurrent_appends_lose_no_writes_5138() {
+        // Regression for #5138: a plain get -> mutate -> set on a single
+        // shared key drops one of two concurrent appends (last writer
+        // wins). `modify` runs the RMW under BEGIN IMMEDIATE so both
+        // appends must survive.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("kv.db");
+        let store = setup_file_backed(&db);
+        let agent = AgentId::new();
+        store.set(agent, "arr", serde_json::json!([])).unwrap();
+
+        let n = 24usize;
+        std::thread::scope(|s| {
+            for i in 0..n {
+                let store = store.clone();
+                s.spawn(move || {
+                    store
+                        .modify(agent, "arr", |cur| {
+                            let mut v = match cur {
+                                Some(serde_json::Value::Array(a)) => a,
+                                _ => Vec::new(),
+                            };
+                            v.push(serde_json::json!(i));
+                            Ok((serde_json::Value::Array(v), ()))
+                        })
+                        .unwrap();
+                });
+            }
+        });
+
+        let final_arr = match store.get(agent, "arr").unwrap() {
+            Some(serde_json::Value::Array(a)) => a,
+            other => panic!("expected array, got {other:?}"),
+        };
+        assert_eq!(
+            final_arr.len(),
+            n,
+            "every concurrent append must persist; lost-update race not fixed"
+        );
+        let mut seen: Vec<u64> = final_arr.iter().map(|v| v.as_u64().unwrap()).collect();
+        seen.sort_unstable();
+        let expected: Vec<u64> = (0..n as u64).collect();
+        assert_eq!(seen, expected, "no individual write may be clobbered");
+    }
+
+    #[test]
+    fn modify_error_aborts_without_writing_5138() {
+        let store = setup();
+        let agent = AgentId::new();
+        store.set(agent, "k", serde_json::json!("orig")).unwrap();
+        let err = store.modify(agent, "k", |_cur| {
+            Err::<(serde_json::Value, ()), _>(LibreFangError::InvalidInput("nope".into()))
+        });
+        assert!(matches!(err, Err(LibreFangError::InvalidInput(_))));
+        // Row unchanged — the aborted tx must not have written.
+        assert_eq!(
+            store.get(agent, "k").unwrap(),
+            Some(serde_json::json!("orig"))
+        );
+    }
+
+    #[test]
+    fn set_returning_existed_reports_atomic_transition_5138() {
+        let store = setup();
+        let agent = AgentId::new();
+        // First write: key did not exist -> false (Created).
+        assert!(!store
+            .set_returning_existed(agent, "k", serde_json::json!(1))
+            .unwrap());
+        // Second write: key existed -> true (Updated).
+        assert!(store
+            .set_returning_existed(agent, "k", serde_json::json!(2))
+            .unwrap());
+        assert_eq!(store.get(agent, "k").unwrap(), Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn kv_value_size_cap_rejects_oversized_blob_5138() {
+        let store = setup();
+        let agent = AgentId::new();
+        // Build a value whose serialized form exceeds MAX_KV_VALUE_BYTES.
+        let big = "x".repeat(MAX_KV_VALUE_BYTES + 1);
+        let v = serde_json::json!(big);
+        let err = store.set(agent, "k", v.clone());
+        assert!(
+            matches!(err, Err(LibreFangError::InvalidInput(_))),
+            "oversized set must be rejected, got {err:?}"
+        );
+        // The over-limit write must not have landed a row.
+        assert_eq!(store.get(agent, "k").unwrap(), None);
+        // Same guard via modify and set_returning_existed.
+        assert!(matches!(
+            store.modify(agent, "k", |_| Ok((v.clone(), ()))),
+            Err(LibreFangError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            store.set_returning_existed(agent, "k", v),
+            Err(LibreFangError::InvalidInput(_))
+        ));
+        // A value at exactly the limit is accepted.
+        let ok_blob_str = "y".repeat(MAX_KV_VALUE_BYTES - 16);
+        store
+            .set(agent, "k2", serde_json::json!(ok_blob_str))
+            .expect("value within the cap must be accepted");
     }
 
     #[test]
