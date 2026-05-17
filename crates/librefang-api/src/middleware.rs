@@ -767,7 +767,16 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::prefix_get("/api/budget/agents/"),
     PublicRoute::exact_get("/api/channels"),
     PublicRoute::exact_get("/api/config"),
-    PublicRoute::prefix_get("/api/cron/"),
+    // SECURITY #5139 (parity with #3367/#3941 for /api/approvals/*):
+    // `/api/cron/` is intentionally absent. `GET /api/cron/jobs` and
+    // `GET /api/cron/jobs/{id}` serialise the FULL `CronJob` — including the
+    // user-authored prompt (`CronAction::AgentTurn.message` /
+    // `SystemEvent.text`) and per-job `session_mode`. Leaving it in the
+    // pre-auth dashboard-read group meant an operator who exposed 4545
+    // remotely without `require_auth_for_reads = true` (the default) handed
+    // every user-authored cron prompt to anyone reachable on the bind. The
+    // dashboard attaches credentials on every request via its api helper, so
+    // gating these reads is not a UX regression.
     PublicRoute::exact_get("/api/hands"),
     PublicRoute::exact_get("/api/hands/active"),
     PublicRoute::prefix_get("/api/hands/"),
@@ -2726,6 +2735,64 @@ mod tests {
                 "{path} must be auth-gated (returns action_summary)"
             );
         }
+    }
+
+    /// Regression: #5139 — `GET /api/cron/jobs` and
+    /// `GET /api/cron/jobs/{id}` used to be publicly readable via the
+    /// `/api/cron/` prefix in `PUBLIC_ROUTES_DASHBOARD_READS`. Those
+    /// endpoints serialise the FULL `CronJob`, including the user-authored
+    /// prompt (`CronAction::AgentTurn.message` / `SystemEvent.text`) and
+    /// per-job `session_mode`. Same exposure class as the #3367/#3941
+    /// approvals carve-out, so the entire `/api/cron/*` read surface must
+    /// require auth even when `require_auth_for_reads` is off.
+    #[tokio::test]
+    async fn cron_reads_require_auth() {
+        // api_key configured, require_auth_for_reads OFF — the exploitable
+        // default scenario the audit flagged.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/cron/jobs", get(|| async { "cron jobs + prompts" }))
+            .route(
+                "/api/cron/jobs/{id}",
+                get(|| async { "cron job detail + prompt_template" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        for path in &["/api/cron/jobs", "/api/cron/jobs/job-abc-123"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must be auth-gated (leaks user-authored cron prompts)"
+            );
+        }
+    }
+
+    /// `/api/cron/` must not be present in the dashboard-reads allowlist —
+    /// pins the data-level invariant so a future re-add is caught even if
+    /// the routing test above is refactored.
+    #[test]
+    fn cron_prefix_absent_from_dashboard_reads() {
+        assert!(
+            !PUBLIC_ROUTES_DASHBOARD_READS.iter().any(|r| matches!(
+                r.match_kind,
+                PublicMatch::Prefix if r.path == "/api/cron/"
+            )),
+            "/api/cron/ must stay out of PUBLIC_ROUTES_DASHBOARD_READS (#5139)"
+        );
     }
 
     /// Regression for #4860: the inline login page must redirect to `/`

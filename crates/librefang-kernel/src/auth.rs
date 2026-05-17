@@ -1025,15 +1025,20 @@ fn default_memory_acl(role: UserRole) -> UserMemoryAccess {
             export_allowed: true,
             delete_allowed: true,
         },
+        // `wiki` is the single shared knowledge-vault namespace gated by the
+        // `wiki_*` tools (#5139). It is granted at the role defaults so the
+        // pre-#5139 "every attributed user may use the wiki" behaviour is
+        // preserved — an operator who sets an explicit `memory_access` block
+        // can still restrict it, exactly like `kv:*`.
         UserRole::User => UserMemoryAccess {
-            readable_namespaces: vec!["proactive".into(), "kv:*".into()],
-            writable_namespaces: vec!["kv:*".into()],
+            readable_namespaces: vec!["proactive".into(), "kv:*".into(), "wiki".into()],
+            writable_namespaces: vec!["kv:*".into(), "wiki".into()],
             pii_access: false,
             export_allowed: false,
             delete_allowed: false,
         },
         UserRole::Viewer => UserMemoryAccess {
-            readable_namespaces: vec!["proactive".into()],
+            readable_namespaces: vec!["proactive".into(), "wiki".into()],
             writable_namespaces: vec![],
             pii_access: false,
             export_allowed: false,

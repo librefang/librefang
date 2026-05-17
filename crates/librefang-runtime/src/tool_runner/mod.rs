@@ -126,5 +126,82 @@ pub(super) fn require_kernel(
     })
 }
 
+/// The memory-namespace operation a memory / wiki tool is about to perform.
+/// Maps onto [`librefang_memory::namespace_acl::MemoryNamespaceGuard`]'s
+/// `check_read` / `check_write`.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum MemoryAclOp {
+    Read,
+    Write,
+}
+
+/// Enforce the per-user `UserMemoryAccess` ACL at the tool dispatch boundary
+/// (#5139).
+///
+/// The shared-KV (`memory_*`) and wiki (`wiki_*`) tools previously reached the
+/// substrate without ever consulting the per-user RBAC ACL — only the
+/// proactive-retrieval path in `agent_loop::prompt` did. A user whose
+/// `UserMemoryAccess.writable_namespaces` is restricted (or empty, e.g. the
+/// `viewer` role default) could still drive `tool_memory_store` /
+/// `tool_wiki_write` and reach cross-user shared state.
+///
+/// This resolves the ACL from the attributed sender + channel via
+/// [`librefang_kernel_handle::MemoryAccess::memory_acl_for_sender`] — the SAME
+/// resolver the proactive path uses — builds a `MemoryNamespaceGuard`, and
+/// returns `Err` (which the dispatcher surfaces to the model as a tool error,
+/// so the underlying substrate call never runs) when the requested op is
+/// denied for the requested namespace.
+///
+/// `Ok(())` when the kernel reports `None` (RBAC disabled or sender not
+/// attributed to a registered user) — that preserves the existing
+/// single-user / RBAC-off behaviour, exactly as the proactive path does.
+pub(super) fn enforce_memory_acl(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    sender_id: Option<&str>,
+    channel: Option<&str>,
+    op: MemoryAclOp,
+    namespace: &str,
+) -> Result<(), String> {
+    let kh = match kernel {
+        Some(kh) => kh,
+        // No kernel handle (legacy / test call sites): nothing to enforce
+        // against. The substrate-boundary peer-key guards (#5119/#5120)
+        // still apply downstream.
+        None => return Ok(()),
+    };
+    let Some(acl) = kh.memory_acl_for_sender(sender_id, channel) else {
+        // RBAC disabled or sender unattributed — no per-user restriction.
+        return Ok(());
+    };
+    let guard = librefang_memory::namespace_acl::MemoryNamespaceGuard::new(acl);
+    let gate = match op {
+        MemoryAclOp::Read => guard.check_read(namespace),
+        MemoryAclOp::Write => guard.check_write(namespace),
+    };
+    match gate {
+        librefang_memory::namespace_acl::NamespaceGate::Allow => Ok(()),
+        librefang_memory::namespace_acl::NamespaceGate::Deny(reason) => Err(format!(
+            "Access denied: your user policy does not permit this memory operation \
+             on namespace '{namespace}' ({reason})."
+        )),
+    }
+}
+
+/// Map a shared-KV peer scope to the ACL namespace string.
+///
+/// The shared-KV tools store under `peer:{peer_id}:{key}` (see
+/// `kernel::peer_scoped_key`). The per-user ACL namespace mirrors that scope as
+/// `kv:{peer_id}` so the role-default patterns (`kv:*` for `user`, none for
+/// `viewer`) gate it the way the audit (#5139) and the existing
+/// `default_memory_acl` intend. An unscoped call (`peer_id = None`) maps to the
+/// bare `kv` global bucket — but in practice the ACL is only consulted when the
+/// sender was attributed, in which case `peer_id` is always `Some`.
+pub(super) fn kv_acl_namespace(peer_id: Option<&str>) -> String {
+    match peer_id {
+        Some(pid) => format!("kv:{pid}"),
+        None => "kv".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests;
