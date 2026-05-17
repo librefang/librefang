@@ -44,6 +44,15 @@ pub struct JobMeta {
     /// Only auto-disabled jobs are re-enabled on agent reassignment.
     #[serde(default)]
     pub auto_disabled: bool,
+    /// Number of consecutive times the scheduler had to fall back to the
+    /// `+1h` retry path because `compute_next_run_after` could not produce
+    /// a real next fire (parse failure or schedule with no future match,
+    /// e.g. `"0 0 30 2 *"`). Reset on a successful schedule advance, a
+    /// successful execution, or an explicit user re-enable. When this
+    /// reaches [`MAX_CONSECUTIVE_ERRORS`] the job is auto-disabled — see
+    /// issue #5113.
+    #[serde(default)]
+    pub consecutive_fallbacks: u32,
 }
 
 impl JobMeta {
@@ -55,6 +64,7 @@ impl JobMeta {
             last_status: None,
             consecutive_errors: 0,
             auto_disabled: false,
+            consecutive_fallbacks: 0,
         }
     }
 }
@@ -193,6 +203,23 @@ impl CronScheduler {
         job.validate_with_home(agent_count, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
 
+        // Defense against silently-wedged cron expressions (#5113). The
+        // librefang-types `validate_cron_expr` only checks field count and
+        // character set; semantically impossible expressions like
+        // `"0 0 30 2 *"` (Feb 30 — never fires) pass that check but cause
+        // `compute_next_run_after` to return `None` on every tick, falling
+        // back to a `+1h` retry that burns LLM tokens forever. Probe the
+        // schedule once at insert and reject if no real fire exists. Only
+        // `Cron` is gated — `At`/`Every` always produce a concrete time.
+        if let CronSchedule::Cron { .. } = &job.schedule {
+            if compute_next_run_after_opt(&job.schedule, Utc::now()).is_none() {
+                return Err(LibreFangError::InvalidInput(format!(
+                    "cron schedule has no future fire time: {:?}",
+                    &job.schedule
+                )));
+            }
+        }
+
         // Compute initial next_run
         job.next_run = Some(compute_next_run(&job.schedule));
 
@@ -225,6 +252,7 @@ impl CronScheduler {
                 meta.auto_disabled = false;
                 if enabled {
                     meta.consecutive_errors = 0;
+                    meta.consecutive_fallbacks = 0;
                     meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
                 }
                 Ok(())
@@ -333,6 +361,7 @@ impl CronScheduler {
                     meta.auto_disabled = false;
                     if enabled {
                         meta.consecutive_errors = 0;
+                        meta.consecutive_fallbacks = 0;
                     }
                 }
                 meta.job = candidate;
@@ -408,6 +437,7 @@ impl CronScheduler {
                 // Reset consecutive errors so the job gets a fresh start
                 // with the new agent.
                 entry.value_mut().consecutive_errors = 0;
+                entry.value_mut().consecutive_fallbacks = 0;
                 if !entry.value().job.enabled && entry.value().auto_disabled {
                     // Re-enable only jobs that were auto-disabled by the scheduler
                     // (stale agent ID → repeated failures). Jobs the user deliberately
@@ -521,7 +551,46 @@ impl CronScheduler {
                 // Pre-advance next_run so the job won't fire again on the next
                 // tick while it's still executing. Use `now` as the base so the
                 // next fire time is computed strictly after the current moment.
-                meta.job.next_run = Some(compute_next_run_after(&meta.job.schedule, now));
+                //
+                // Detect the silent-wedge condition (#5113): if the schedule
+                // cannot produce a concrete next fire (parse failure or no
+                // future match), tick the fallback counter and auto-disable
+                // once it reaches `MAX_CONSECUTIVE_ERRORS`, mirroring
+                // `record_failure`. Otherwise the daemon would spin on a `+1h`
+                // retry forever, burning LLM tokens for the lifetime of the
+                // process.
+                match compute_next_run_after_opt(&meta.job.schedule, now) {
+                    Some(next) => {
+                        meta.job.next_run = Some(next);
+                        meta.consecutive_fallbacks = 0;
+                    }
+                    None => {
+                        meta.consecutive_fallbacks = meta.consecutive_fallbacks.saturating_add(1);
+                        if meta.consecutive_fallbacks >= MAX_CONSECUTIVE_ERRORS {
+                            warn!(
+                                job_id = %meta.job.id,
+                                fallbacks = meta.consecutive_fallbacks,
+                                schedule = ?meta.job.schedule,
+                                "Auto-disabling cron job: schedule has no future fire time \
+                                 after repeated fallbacks (issue #5113)"
+                            );
+                            meta.job.enabled = false;
+                            meta.auto_disabled = true;
+                            // Push next_run far into the future so the disabled
+                            // job is never even considered on subsequent ticks
+                            // (matches the `At` far-future convention).
+                            meta.job.next_run = Some(now + Duration::days(36500));
+                            meta.last_status = Some(
+                                "auto-disabled: cron schedule produces no future fire time"
+                                    .to_string(),
+                            );
+                        } else {
+                            // Hourly retry preserves the historical behaviour
+                            // while we accumulate the fallback signal.
+                            meta.job.next_run = Some(now + Duration::hours(1));
+                        }
+                    }
+                }
             }
         }
         due
@@ -618,6 +687,7 @@ impl CronScheduler {
                 meta.job.last_run = Some(Utc::now());
                 meta.last_status = Some("ok".to_string());
                 meta.consecutive_errors = 0;
+                meta.consecutive_fallbacks = 0;
                 // one_shot jobs get removed; recurring jobs keep the next_run
                 // already pre-advanced by due_jobs() — no recompute needed.
                 meta.one_shot
@@ -683,7 +753,16 @@ impl CronScheduler {
                 meta.auto_disabled = true;
                 false
             } else {
-                meta.job.next_run = Some(compute_next_run_after(&meta.job.schedule, Utc::now()));
+                // Use the opt-returning variant so a wedged cron schedule
+                // (#5113) does not silently re-fire on the `+1h` retry path
+                // every hour. due_jobs() already tracks the fallback counter,
+                // so here we just preserve `next_run` advancement and let the
+                // next due_jobs tick observe the same `None` and increment.
+                let now = Utc::now();
+                meta.job.next_run = Some(
+                    compute_next_run_after_opt(&meta.job.schedule, now)
+                        .unwrap_or(now + Duration::hours(1)),
+                );
                 false
             }
         } else {
@@ -733,6 +812,27 @@ pub fn compute_next_run_after(
     schedule: &CronSchedule,
     after: chrono::DateTime<Utc>,
 ) -> chrono::DateTime<Utc> {
+    // Delegate to the opt-returning variant and fall back to a `+1h` retry
+    // if no concrete next fire could be computed. Callers that need to
+    // detect the fallback (e.g. `due_jobs` for #5113 auto-disable) should
+    // call `compute_next_run_after_opt` directly.
+    compute_next_run_after_opt(schedule, after).unwrap_or_else(|| after + Duration::hours(1))
+}
+
+/// Same as [`compute_next_run_after`] but returns `None` when the
+/// schedule could not be advanced — either a `Cron` expression that
+/// failed to parse or one that has no future fire time matching its
+/// constraints (e.g. `"0 0 30 2 *"`, Feb 30 never exists).
+///
+/// `At` and `Every` schedules always produce a concrete next time so
+/// this never returns `None` for those variants; the distinction is
+/// reserved for `Cron`. Issue #5113 uses this to detect the silent
+/// wedge condition where the scheduler would otherwise spin on a
+/// `+1h` retry forever, burning LLM tokens.
+pub fn compute_next_run_after_opt(
+    schedule: &CronSchedule,
+    after: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
     match schedule {
         // For `at` schedules, return the original time only if it's still
         // in the future. Otherwise the scheduler would see `next_run <= now`
@@ -741,12 +841,12 @@ pub fn compute_next_run_after(
         // fires again. Issue #2337.
         CronSchedule::At { at } => {
             if *at > after {
-                *at
+                Some(*at)
             } else {
-                after + Duration::days(36500)
+                Some(after + Duration::days(36500))
             }
         }
-        CronSchedule::Every { every_secs } => after + Duration::seconds(*every_secs as i64),
+        CronSchedule::Every { every_secs } => Some(after + Duration::seconds(*every_secs as i64)),
         CronSchedule::Cron { expr, tz } => {
             // Convert standard 5/6-field cron to 7-field for the `cron` crate.
             // Standard 5-field: min hour dom month dow
@@ -819,11 +919,17 @@ pub fn compute_next_run_after(
                         }
                         _ => sched.after(&base).next(),
                     };
-                    next_utc.unwrap_or_else(|| after + Duration::hours(1))
+                    if next_utc.is_none() {
+                        warn!(
+                            expr = %expr,
+                            "Cron expression parsed but has no future fire time"
+                        );
+                    }
+                    next_utc
                 }
                 Err(e) => {
                     warn!("Failed to parse cron expression '{}': {}", expr, e);
-                    after + Duration::hours(1)
+                    None
                 }
             }
         }
@@ -1214,6 +1320,135 @@ mod tests {
         assert!(
             meta.last_status.as_ref().unwrap().starts_with("error:"),
             "last_status should record the error"
+        );
+    }
+
+    // -- #5113 — pre-validate cron expression at insert ---------------------
+
+    /// Issue #5113: a syntactically valid 5-field cron expression that
+    /// nevertheless can never fire (Feb 30 doesn't exist) must be rejected
+    /// at `add_job` time, NOT silently accepted and then re-fired hourly
+    /// via the `+1h` fallback retry path inside `compute_next_run_after`.
+    #[test]
+    fn test_add_job_rejects_cron_with_no_future_fire() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        // 5-field cron asking for Feb 30 — passes the librefang-types
+        // `validate_cron_expr` field/character check but never fires.
+        job.schedule = CronSchedule::Cron {
+            expr: "0 0 30 2 *".into(),
+            tz: None,
+        };
+
+        let err = sched.add_job(job, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no future fire time"),
+            "Expected #5113 no-future-fire rejection, got: {msg}"
+        );
+        assert_eq!(sched.total_jobs(), 0, "Bad job must not have been stored");
+    }
+
+    /// Issue #5113: a malformed cron expression (4 fields instead of 5)
+    /// is already rejected by `validate_with_home` via the
+    /// librefang-types `validate_cron_expr` field-count check. This test
+    /// pins that contract from the scheduler side so a regression at
+    /// either layer surfaces here.
+    #[test]
+    fn test_add_job_rejects_malformed_cron_expression() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        // Only 4 fields — must be rejected before the schedule probe even
+        // runs.
+        job.schedule = CronSchedule::Cron {
+            expr: "0 0 * *".into(),
+            tz: None,
+        };
+
+        let err = sched.add_job(job, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("5 fields"),
+            "Expected malformed-cron rejection mentioning '5 fields', got: {msg}"
+        );
+        assert_eq!(sched.total_jobs(), 0, "Bad job must not have been stored");
+    }
+
+    /// Issue #5113: when a cron job's schedule slips into an unreachable
+    /// state at runtime (caller forced an `expr` that never fires, by
+    /// going around `add_job`), the `due_jobs` tick path must count
+    /// consecutive fallbacks and auto-disable the job once
+    /// `MAX_CONSECUTIVE_ERRORS` is reached — mirroring `record_failure`
+    /// — instead of re-firing on the `+1h` retry forever and burning LLM
+    /// tokens.
+    #[test]
+    fn test_due_jobs_auto_disables_after_repeated_fallbacks() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let job = make_job(agent);
+        let id = sched.add_job(job, false).unwrap();
+
+        // Inject a wedged schedule directly into the stored job. We
+        // bypass add_job's pre-validation gate on purpose — this models
+        // a job that became unfireable AFTER insert (e.g. persisted to
+        // disk by an older daemon, or future code path that mutates
+        // schedule without re-validating).
+        if let Some(mut meta) = sched.jobs.get_mut(&id) {
+            meta.job.schedule = CronSchedule::Cron {
+                expr: "0 0 30 2 *".into(), // Feb 30 — never fires
+                tz: None,
+            };
+            // Force next_run into the past so due_jobs picks it up.
+            meta.job.next_run = Some(Utc::now() - Duration::seconds(10));
+        }
+
+        // The first MAX_CONSECUTIVE_ERRORS-1 ticks should keep the job
+        // enabled and increment the fallback counter.
+        for i in 0..(MAX_CONSECUTIVE_ERRORS - 1) {
+            let due = sched.due_jobs();
+            assert_eq!(due.len(), 1, "Job should still be due on tick {}", i + 1);
+            let meta = sched.get_meta(id).unwrap();
+            assert!(
+                meta.job.enabled,
+                "Job should still be enabled after {} fallback(s)",
+                i + 1
+            );
+            assert_eq!(meta.consecutive_fallbacks, i + 1);
+            // Force next_run back to the past for the next tick — the
+            // production fallback path schedules next_run = now + 1h, which
+            // would otherwise keep the test in the future for an hour.
+            if let Some(mut meta) = sched.jobs.get_mut(&id) {
+                meta.job.next_run = Some(Utc::now() - Duration::seconds(10));
+            }
+        }
+
+        // The MAX_CONSECUTIVE_ERRORS-th tick must auto-disable the job.
+        let _ = sched.due_jobs();
+        let meta = sched.get_meta(id).unwrap();
+        assert!(
+            !meta.job.enabled,
+            "Job should be auto-disabled after {MAX_CONSECUTIVE_ERRORS} fallbacks"
+        );
+        assert!(
+            meta.auto_disabled,
+            "auto_disabled flag should be set so reassign_agent_jobs can re-enable"
+        );
+        assert_eq!(meta.consecutive_fallbacks, MAX_CONSECUTIVE_ERRORS);
+        assert!(
+            meta.last_status
+                .as_ref()
+                .is_some_and(|s| s.contains("auto-disabled")),
+            "last_status should mention the auto-disable reason, got: {:?}",
+            meta.last_status
+        );
+
+        // Subsequent ticks must NOT re-fire the disabled job.
+        let due = sched.due_jobs();
+        assert!(
+            due.is_empty(),
+            "Auto-disabled job must not be returned by due_jobs"
         );
     }
 
