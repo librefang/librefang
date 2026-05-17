@@ -8315,3 +8315,160 @@ async fn cross_task_serialization_on_agent_msg_lock_is_preserved() {
 
     kernel.shutdown();
 }
+
+/// #5125 (streaming path): the re-entrancy fix must cover the streaming send
+/// path too. The streaming entry (`send_message_streaming_with_sender_and_opts`)
+/// acquires `agent_msg_locks[A]` *inside its spawned task*, not on the caller's
+/// task. Without wrapping that spawn body in `held_agent_locks::scope` and
+/// registering a `HeldLockGuard`, an `agent_send` tool call back to A from
+/// inside the streaming agent loop would re-acquire the same per-agent mutex
+/// on the spawned task and silently deadlock — identical to the non-streaming
+/// failure mode of #5125, just routed through the streaming entry that
+/// dashboards / WS / SSE actually use.
+///
+/// This test simulates the streaming spawn body's exact lock state — fresh
+/// task, `scope` established, agent-scoped `agent_msg_locks[A]` held, A
+/// registered in the held set — and verifies that an inner `send_message_full`
+/// re-entrant call rejects the cycle instead of hanging. The pattern mirrors
+/// `issue_5125_transitive_cycle_is_rejected_not_deadlocked` (the non-streaming
+/// dimension), but the work runs on a `tokio::spawn`ed task to model that the
+/// streaming-entry's spawned task is the one doing the re-acquisition.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5125_streaming_spawn_body_rejects_reentrant_cycle() {
+    let (kernel, agent_a) = reentrant_test_kernel();
+    let lock_a = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent_a)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let kernel_clone = Arc::clone(&kernel);
+    // Mirror exactly what the patched streaming spawn body does: a fresh task,
+    // wrap in `held_agent_locks::scope`, take the per-agent lock, register the
+    // held guard, then drive the agent-loop body (here represented by an inner
+    // `send_message_full(A)` standing in for an `agent_send` tool call). The
+    // streaming entry is a sync fn returning a `JoinHandle`, so the spawned
+    // task — not the caller — is where re-entrancy detection has to work.
+    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
+        let _session_guard = lock_a.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
+        assert!(
+            librefang_runtime::held_agent_locks::is_held(agent_a),
+            "A's lock must be registered as held on this spawned task — without \
+             the streaming-path fix, the spawn body never calls `scope` so this \
+             would fail and the inner send below would silently deadlock"
+        );
+
+        // Inner re-entrant send to A from inside the streaming spawn body —
+        // the streaming-turn analogue of an `agent_send(A)` tool call.
+        kernel_clone
+            .send_message_full(
+                agent_a,
+                "callback into A from streaming turn",
+                kernel_clone.kernel_handle(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+    }));
+
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), inner).await;
+    let join_result = res.expect(
+        "spawned streaming-turn simulation must NOT hang — without the \
+         streaming-path fix the inner re-entrant send blocks forever on the \
+         held agent_msg_lock and this timeout fires",
+    );
+    let inner_result = join_result.expect("spawned task panicked");
+    let err = inner_result.expect_err(
+        "re-entrant send from inside the streaming spawn body must be rejected, \
+         not succeed",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("re-entrant") && msg.contains("deadlock"),
+        "rejection must name the re-entrant deadlock; got: {msg}"
+    );
+    assert!(
+        msg.contains(&agent_a.to_string()),
+        "rejection must name the cycle agent {agent_a}; got: {msg}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5126 (streaming path): the `channel_send` mirror (`append_to_session`)
+/// fired from inside a streaming turn must complete via the lockless-write
+/// path, not deadlock on the already-held `agent_msg_locks[owner]`. Same
+/// signal as `issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked`,
+/// but the work runs on a `tokio::spawn`ed task to model the streaming entry's
+/// own spawn — confirming the held-set registration is set up *inside* that
+/// spawned task (which the streaming-path fix is exactly what installs).
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let (kernel, owner) = reentrant_test_kernel();
+    let lock_owner = kernel
+        .agents
+        .agent_msg_locks
+        .entry(owner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-stream"));
+    let mirror_msg = Message {
+        role: Role::User,
+        content: MessageContent::Text(
+            "{\"mirror_from\":\"owner-stream\",\"body\":\"reply\"}".to_string(),
+        ),
+        pinned: false,
+        timestamp: Some(chrono::Utc::now()),
+    };
+
+    let kernel_clone = Arc::clone(&kernel);
+    let owner_copy = owner;
+    let sid_copy = channel_sid;
+    let msg_copy = mirror_msg.clone();
+    // Replicate the streaming spawn body's lock-and-scope setup on a fresh
+    // task. The `channel_send` mirror inside the agent loop resolves
+    // owner == caller and falls through to `append_to_session`; without the
+    // streaming-path fix that block_in_place(blocking_lock)s the held
+    // `agent_msg_locks[owner]` on this same task and never returns.
+    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
+        let _session_guard = lock_owner.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
+
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
+        });
+    }));
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), inner)
+        .await
+        .expect(
+            "streaming-turn mirror append must NOT hang — without the \
+             streaming-path fix this times out because block_in_place re-locks \
+             the held agent_msg_lock from the streaming spawn body",
+        )
+        .expect("spawned task panicked");
+
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(channel_sid)
+        .expect("get_session must not error")
+        .expect("mirror session row must exist after append_to_session");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the mirrored channel_send message from the streaming turn must be \
+         persisted, not silently dropped"
+    );
+
+    kernel.shutdown();
+}

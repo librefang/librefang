@@ -2409,18 +2409,31 @@ impl LibreFangKernel {
 
         // Acquire the same session/agent lock as the non-streaming path so concurrent
         // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
-        let session_lock = if session_id_override.is_some() {
-            self.agents
-                .session_msg_locks
-                .entry(effective_session_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+        // `agent_scoped` tracks whether we are taking the per-agent lock (vs. a
+        // per-session lock for session_id_override callers): only the agent-scoped
+        // branch needs the task-local `held_agent_locks` registration so the
+        // re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126) tool
+        // paths can observe this streaming turn's holding of agent_msg_locks
+        // and skip / reject as appropriate. Mirrors the non-streaming site at
+        // `send_message_full_inner` (~L871-906).
+        let (session_lock, agent_scoped) = if session_id_override.is_some() {
+            (
+                self.agents
+                    .session_msg_locks
+                    .entry(effective_session_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                false,
+            )
         } else {
-            self.agents
-                .agent_msg_locks
-                .entry(agent_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+            (
+                self.agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                true,
+            )
         };
 
         // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
@@ -2439,12 +2452,27 @@ impl LibreFangKernel {
 
         // Reload session after acquiring the lock so we never act on a stale
         // snapshot captured before a concurrent turn's writes landed.
-        let handle = tokio::spawn(async move {
+        let handle = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
             // Acquire the session/agent serialization lock for the duration of
             // this streaming turn.  This matches the non-streaming path and
             // prevents concurrent streaming + non-streaming writes from
             // producing last-write-wins data loss on session history.
             let _session_guard = session_lock.lock().await;
+            // Record that this task now holds `agent_msg_locks[agent_id]` so the
+            // re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126)
+            // tool paths — which run inside `run_agent_loop_streaming` below on
+            // this same task — can detect the self-re-entry instead of
+            // deadlocking on the non-reentrant `tokio::sync::Mutex`. Only the
+            // agent-scoped lock is tracked: the session-scoped
+            // (`session_id_override`) lock is a different key space those two
+            // paths never re-acquire. Mirrors the non-streaming site at
+            // `send_message_full_inner` (~L890-906); declared *after*
+            // `_session_guard` so drop order is registry-then-mutex.
+            let _held_guard = if agent_scoped {
+                Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
+            } else {
+                None
+            };
 
             // Reload session under the lock; keep the placeholder on miss.
             match memory.get_session(effective_session_id) {
@@ -2936,7 +2964,7 @@ impl LibreFangKernel {
                     Err(KernelError::LibreFang(e))
                 }
             }
-        });
+        }));
 
         // Store abort handle for cancellation support. Fork turns skip —
         // registering the fork's handle under the parent's `(agent, session)`
