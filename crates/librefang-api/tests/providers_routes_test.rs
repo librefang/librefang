@@ -1249,3 +1249,32 @@ async fn set_default_provider_when_config_toml_absent_creates_it_with_default_mo
         Some("gpt-4o-mini")
     );
 }
+
+/// #5137: `set_default_provider` now surfaces a per-agent partial-failure
+/// list from `sync_default_model_agents` and returns 207 Multi-Status when
+/// any agent could not be migrated. On the happy path (every eligible
+/// agent migrates cleanly) it MUST still return 200 OK and MUST NOT
+/// include a `sync_failures` key — proving the new partial-failure branch
+/// is correctly gated and did not regress the success contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_provider_happy_path_has_no_sync_failures_and_is_200() {
+    let h = boot();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openai/default",
+        Some(serde_json::json!({ "model": "gpt-4o-mini" })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "happy-path provider switch must stay 200, not 207; body: {body}"
+    );
+    assert!(
+        body.get("sync_failures").is_none(),
+        "no sync_failures key when every eligible agent migrated cleanly (#5137); body: {body}"
+    );
+}

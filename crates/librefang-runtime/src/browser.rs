@@ -351,9 +351,15 @@ impl BrowserSession {
 
         let cdp = CdpConnection::connect(&page_ws).await?;
 
-        // Enable required domains
-        let _ = cdp.send("Page.enable", serde_json::json!({})).await;
-        let _ = cdp.send("Runtime.enable", serde_json::json!({})).await;
+        // Enable required domains. If these fail, downstream navigation /
+        // eval fails with no signal pointing back here — abort the session
+        // now with a clear error instead (#5137).
+        cdp.send("Page.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Page.enable failed: {e}"))?;
+        cdp.send("Runtime.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Runtime.enable failed: {e}"))?;
 
         Ok(Self {
             process: Some(child),
@@ -412,9 +418,15 @@ impl BrowserSession {
 
         let cdp = Self::connect_with_auth(&page_ws, auth_token).await?;
 
-        // Enable required domains (same as launch)
-        let _ = cdp.send("Page.enable", serde_json::json!({})).await;
-        let _ = cdp.send("Runtime.enable", serde_json::json!({})).await;
+        // Enable required domains (same as launch). Abort on failure so the
+        // caller gets a clear error rather than a later opaque nav/eval
+        // failure (#5137).
+        cdp.send("Page.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Page.enable failed: {e}"))?;
+        cdp.send("Runtime.enable", serde_json::json!({}))
+            .await
+            .map_err(|e| format!("CDP Runtime.enable failed: {e}"))?;
 
         Ok(Self {
             process: None,
@@ -971,11 +983,33 @@ impl BrowserManager {
                     let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
                     let base = cdp_endpoint.trim_end_matches('/');
                     let close_url = format!("{base}/json/close/{target_id}");
-                    let _ = crate::http_client::new_client()
+                    match crate::http_client::new_client()
                         .get(&close_url)
                         .send()
-                        .await;
-                    debug!(agent_id, target_id, "Closed remote CDP tab");
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            debug!(agent_id, target_id, "Closed remote CDP tab");
+                        }
+                        Ok(resp) => {
+                            // Tab-leak accumulates on remote Chrome — don't
+                            // log a success that didn't happen (#5137).
+                            warn!(
+                                agent_id,
+                                target_id,
+                                status = %resp.status(),
+                                "Remote CDP tab close returned non-2xx; tab may leak"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                agent_id,
+                                target_id,
+                                error = %e,
+                                "Failed to close remote CDP tab; tab may leak"
+                            );
+                        }
+                    }
                 }
             }
             drop(session);

@@ -1764,3 +1764,91 @@ fn effective_capabilities_for_resolves_by_alias() {
         .expect("alias should resolve");
     assert!(!eff.supports_vision);
 }
+
+// ---------------------------------------------------------------------------
+// #5137: malformed user config files must be skipped per-file (and logged),
+// not silently revert the whole catalog / clobber existing state.
+// ---------------------------------------------------------------------------
+
+/// A syntactically broken provider TOML must not take down the sibling
+/// valid providers in the same directory. Before #5137 the parse used
+/// `if let Ok(...)` and a broken file just vanished with no log; the valid
+/// providers still loaded, but a single malformed registry file could
+/// previously mask which file was at fault. This pins the per-file skip
+/// behaviour so a future refactor can't regress to all-or-nothing.
+#[test]
+fn malformed_provider_toml_is_skipped_valid_ones_still_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    let providers_dir = tmp.path().join("providers");
+    std::fs::create_dir_all(&providers_dir).unwrap();
+
+    std::fs::write(
+        providers_dir.join("good.toml"),
+        r#"[provider]
+id = "goodprov"
+display_name = "Good Provider"
+api_key_env = "GOOD_API_KEY"
+base_url = "https://good.test"
+"#,
+    )
+    .unwrap();
+    // Deliberately broken TOML (unterminated string / bad table).
+    std::fs::write(providers_dir.join("broken.toml"), "[provider\nid = \"oops").unwrap();
+
+    let catalog = ModelCatalog::new_from_dir_with_registry(&providers_dir, None);
+    assert!(
+        catalog.get_provider("goodprov").is_some(),
+        "valid provider must still load even though a sibling file is malformed"
+    );
+}
+
+/// `load_suppressed` on a malformed JSON file must NOT wipe the in-memory
+/// suppressed set. Before #5137 the nested `if let Ok(...)` meant a parse
+/// error left the set untouched only by accident; a refactor that moved the
+/// assignment out would have silently un-suppressed every provider. This
+/// pins the contract explicitly.
+#[test]
+fn load_suppressed_keeps_existing_set_on_parse_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("suppressed.json");
+    std::fs::write(&path, "{ this is not json }").unwrap();
+
+    let mut catalog = test_catalog();
+    catalog.suppress_provider("openai");
+    assert!(catalog.is_suppressed("openai"));
+
+    catalog.load_suppressed(&path);
+
+    assert!(
+        catalog.is_suppressed("openai"),
+        "a malformed suppressed.json must not silently un-suppress providers (#5137)"
+    );
+}
+
+/// Same contract for `load_overrides`: a malformed overrides.json must not
+/// silently drop the operator's per-model tuning.
+#[test]
+fn load_overrides_keeps_existing_on_parse_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("overrides.json");
+    std::fs::write(&path, "not-valid-json").unwrap();
+
+    let mut catalog = test_catalog();
+    let entry = catalog.find_model("sonnet").unwrap().clone();
+    let key = format!("{}:{}", entry.provider, entry.id);
+    catalog.set_overrides(
+        key.clone(),
+        ModelOverrides {
+            supports_vision: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(catalog.get_overrides(&key).is_some());
+
+    catalog.load_overrides(&path);
+
+    assert!(
+        catalog.get_overrides(&key).is_some(),
+        "a malformed overrides.json must not silently drop existing overrides (#5137)"
+    );
+}

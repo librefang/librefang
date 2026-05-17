@@ -8039,3 +8039,148 @@ fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
 
     kernel.shutdown();
 }
+
+/// #5137: `suspend_agent` / `resume_agent` previously discarded the
+/// `set_state` `Result` with `let _ =`, so the API could report success
+/// while the in-memory `AgentState` never changed — yet
+/// `persist_agent_enabled` still flipped the on-disk `enabled` flag,
+/// leaving state and disk in disagreement. With the fix the call
+/// propagates; on the happy path it must still succeed AND the in-memory
+/// state must actually be the new value (proving the write was observed,
+/// not silently dropped).
+#[test]
+fn suspend_resume_actually_transition_in_memory_state() {
+    use librefang_types::agent::AgentState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-resume-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "suspend-resume-agent".to_string(),
+                description: "exercises suspend/resume state propagation".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed on happy path");
+    let after_suspend = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after suspend");
+    assert_eq!(
+        after_suspend.state,
+        AgentState::Suspended,
+        "in-memory state must actually be Suspended — the set_state Result \
+         is now propagated, not swallowed (#5137)"
+    );
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed on happy path");
+    let after_resume = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after resume");
+    assert_eq!(
+        after_resume.state,
+        AgentState::Running,
+        "in-memory state must actually be Running after resume (#5137)"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5137: `sync_default_model_agents` previously returned `()` and
+/// discarded the `update_model_and_provider` / `save_agent` Results, so a
+/// provider switch could half-apply with no signal. It now returns a
+/// per-agent partial-failure list. On the happy path the list must be
+/// empty AND the eligible agent must have been migrated to the new
+/// provider/model — proving the writes are observed, not swallowed, and
+/// that the new return contract is wired through the trait.
+#[test]
+fn sync_default_model_agents_reports_no_failures_and_migrates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Agent spawned with provider="default" — eligible for default-model sync.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "default-tracking-agent".to_string(),
+                description: "tracks the kernel default model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "default".to_string(),
+                    model: "default".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::HashMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "anthropic/claude-3.5-sonnet".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
+    assert!(
+        failures.is_empty(),
+        "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
+    );
+
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after sync");
+    assert_eq!(
+        entry.manifest.model.provider, "openrouter",
+        "eligible agent must be migrated to the new provider — the \
+         update_model_and_provider Result is no longer swallowed (#5137)"
+    );
+    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
+
+    kernel.shutdown();
+}

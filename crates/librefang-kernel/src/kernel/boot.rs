@@ -1629,11 +1629,27 @@ impl LibreFangKernel {
                                                             persisted_hand_configs
                                                                 .get(&hand_id)
                                                                 .unwrap_or(&empty);
-                                                        let _ = apply_settings_block_to_manifest(
-                                                            &mut entry.manifest,
-                                                            &def.settings,
-                                                            cfg_for_settings,
-                                                        );
+                                                        // Capture the returned env-var allowlist
+                                                        // and re-inject it into
+                                                        // metadata["hand_allowed_env"] — mirroring
+                                                        // the activation path in
+                                                        // `activate_hand_with_id`. Discarding it
+                                                        // here meant hand-injected env passthrough
+                                                        // silently disappeared on every restart
+                                                        // until a manual re-activation (#5137).
+                                                        let allowed_env =
+                                                            apply_settings_block_to_manifest(
+                                                                &mut entry.manifest,
+                                                                &def.settings,
+                                                                cfg_for_settings,
+                                                            );
+                                                        if !allowed_env.is_empty() {
+                                                            entry.manifest.metadata.insert(
+                                                                "hand_allowed_env".to_string(),
+                                                                serde_json::to_value(&allowed_env)
+                                                                    .unwrap_or_default(),
+                                                            );
+                                                        }
                                                     }
 
                                                     // Re-render `## Reference Knowledge` and

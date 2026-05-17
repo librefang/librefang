@@ -217,30 +217,37 @@ impl ModelCatalog {
         let mut models: Vec<ModelCatalogEntry> = Vec::new();
         let mut providers: Vec<ProviderInfo> = Vec::new();
         for (source, is_custom) in sources {
-            if let Ok(file) = toml::from_str::<ModelCatalogFile>(source) {
-                let provider_id = file.provider.as_ref().map(|p| p.id.clone());
-                if let Some(p) = file.provider {
-                    let mut info: ProviderInfo = p.into();
-                    info.is_custom = *is_custom;
-                    providers.push(info);
+            let file = match toml::from_str::<ModelCatalogFile>(source) {
+                Ok(f) => f,
+                Err(e) => {
+                    // A syntax error here previously reverted to defaults with
+                    // no log — a misconfigured custom provider just vanished.
+                    tracing::warn!(%e, "provider catalog TOML ignored: parse failed");
+                    continue;
                 }
-                for mut model in file.models {
-                    // Back-fill provider from the [provider] section when
-                    // the model entry omits it (common in registry TOML files).
-                    if model.provider.is_empty() {
-                        if let Some(ref pid) = provider_id {
-                            model.provider = pid.clone();
-                        }
+            };
+            let provider_id = file.provider.as_ref().map(|p| p.id.clone());
+            if let Some(p) = file.provider {
+                let mut info: ProviderInfo = p.into();
+                info.is_custom = *is_custom;
+                providers.push(info);
+            }
+            for mut model in file.models {
+                // Back-fill provider from the [provider] section when
+                // the model entry omits it (common in registry TOML files).
+                if model.provider.is_empty() {
+                    if let Some(ref pid) = provider_id {
+                        model.provider = pid.clone();
                     }
-                    // Reject malformed text entries (zero context_window /
-                    // max_output_tokens) so we fail at parse instead of
-                    // silently feeding 0 into compaction / budget math.
-                    if let Err(e) = model.validate() {
-                        tracing::warn!("Skipping invalid catalog entry: {e}");
-                        continue;
-                    }
-                    models.push(model);
                 }
+                // Reject malformed text entries (zero context_window /
+                // max_output_tokens) so we fail at parse instead of
+                // silently feeding 0 into compaction / budget math.
+                if let Err(e) = model.validate() {
+                    tracing::warn!("Skipping invalid catalog entry: {e}");
+                    continue;
+                }
+                models.push(model);
             }
         }
 
@@ -643,9 +650,20 @@ impl ModelCatalog {
 
     /// Load the suppressed-providers list from a JSON file.
     pub fn load_suppressed(&mut self, path: &std::path::Path) {
-        if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(list) = serde_json::from_str::<Vec<String>>(&data) {
-                self.suppressed_providers = list.into_iter().collect();
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "suppressed-providers file ignored: read failed");
+                return;
+            }
+        };
+        match serde_json::from_str::<Vec<String>>(&data) {
+            Ok(list) => self.suppressed_providers = list.into_iter().collect(),
+            Err(e) => {
+                // A malformed file previously reverted to defaults silently —
+                // previously suppressed providers reappeared with no log.
+                tracing::warn!(path = %path.display(), %e, "suppressed-providers file ignored: parse failed");
             }
         }
     }
@@ -721,9 +739,20 @@ impl ModelCatalog {
 
     /// Load model overrides from a JSON file.
     pub fn load_overrides(&mut self, path: &std::path::Path) {
-        if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(map) = serde_json::from_str::<HashMap<String, ModelOverrides>>(&data) {
-                self.overrides = map;
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), %e, "model-overrides file ignored: read failed");
+                return;
+            }
+        };
+        match serde_json::from_str::<HashMap<String, ModelOverrides>>(&data) {
+            Ok(map) => self.overrides = map,
+            Err(e) => {
+                // A syntax error previously reverted to defaults with no log,
+                // silently dropping the operator's per-model tuning.
+                tracing::warn!(path = %path.display(), %e, "model-overrides file ignored: parse failed");
             }
         }
     }
@@ -1197,13 +1226,32 @@ impl ModelCatalog {
                 .unwrap_or_default(),
         ] {
             if aliases_path.is_file() {
-                if let Ok(data) = std::fs::read_to_string(aliases_path) {
-                    if let Ok(aliases_file) = toml::from_str::<AliasesCatalogFile>(&data) {
-                        for (alias, canonical) in aliases_file.aliases {
-                            self.aliases
-                                .entry(alias.to_lowercase())
-                                .or_insert(canonical);
+                match std::fs::read_to_string(aliases_path) {
+                    Ok(data) => match toml::from_str::<AliasesCatalogFile>(&data) {
+                        Ok(aliases_file) => {
+                            for (alias, canonical) in aliases_file.aliases {
+                                self.aliases
+                                    .entry(alias.to_lowercase())
+                                    .or_insert(canonical);
+                            }
                         }
+                        Err(e) => {
+                            // A syntax error here previously dropped every
+                            // alias silently — model lookups by alias then
+                            // 404'd with no explanation.
+                            tracing::warn!(
+                                path = %aliases_path.display(),
+                                %e,
+                                "aliases.toml ignored: parse failed"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %aliases_path.display(),
+                            %e,
+                            "aliases.toml ignored: read failed"
+                        );
                     }
                 }
                 break;

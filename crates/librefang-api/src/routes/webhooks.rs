@@ -741,7 +741,22 @@ pub async fn test_webhook(
     if let Some((ref host, addr)) = pinned_host {
         builder = builder.resolve(host, addr);
     }
-    let client = builder.build().expect("HTTP client build");
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            // A TLS / root-cert / proxy misconfiguration must not panic the
+            // user-facing handler — surface it as a 500 so the dashboard
+            // shows an error instead of the connection resetting.
+            let msg = {
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                t.t_args(
+                    "api-error-webhook-reach-failed",
+                    &[("error", &e.to_string())],
+                )
+            };
+            return ApiErrorResponse::internal(msg).into_json_tuple();
+        }
+    };
 
     let mut request = client
         .post(&webhook.url)
