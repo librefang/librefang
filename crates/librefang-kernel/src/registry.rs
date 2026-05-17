@@ -486,7 +486,7 @@ impl AgentRegistry {
         fallback_models: Vec<librefang_types::agent::FallbackModel>,
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            entry.manifest.fallback_models = fallback_models;
+            entry.manifest.fallback_models = Some(fallback_models);
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
