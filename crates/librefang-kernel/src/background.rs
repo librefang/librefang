@@ -25,6 +25,51 @@ struct AgentTaskEntry {
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
+/// Maximum number of *consecutive* ticks whose agent turn failed because the
+/// LLM provider was rate-limited / quota-exhausted before the continuous /
+/// periodic background loop stops re-firing the agent (issue #5168).
+///
+/// Without this cap, a hand agent that hits a long-lived provider limit
+/// (e.g. an Ollama Cloud *weekly* quota) re-runs the agent loop on every
+/// `check_interval_secs` tick forever: the in-loop `call_with_retry` does its
+/// bounded 3 retries, fails with the deferred rate-limit error, the error is
+/// logged and dropped, the `busy` flag clears, and the next tick fires the
+/// exact same doomed call again. That burns the entire quota and the loop is
+/// restarted on every daemon boot (`start_background_agents`), so the zombie
+/// survives restarts. A single non-rate-limited successful (or
+/// non-rate-limited *failed*) tick resets the counter, so transient blips do
+/// not permanently park a healthy agent.
+const MAX_CONSECUTIVE_RATE_LIMITS: u32 = 5;
+
+/// Outcome of a single background tick, reported back from the inner watcher
+/// task to the scheduling loop so the loop can stop hammering a rate-limited
+/// provider (issue #5168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// The agent turn completed, or failed for a reason other than a provider
+    /// rate-limit / quota exhaustion. Resets the consecutive rate-limit count.
+    Ok,
+    /// The agent turn failed because the LLM provider rate-limited / exhausted
+    /// quota (the runtime surfaced the `RATE_LIMIT_DEFER_MARKER`). Counts
+    /// toward [`MAX_CONSECUTIVE_RATE_LIMITS`].
+    RateLimited,
+}
+
+/// Classify a kernel `send_message_*` error string into a [`TickOutcome`].
+///
+/// The runtime appends [`librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER`]
+/// (`[rate_limit_defer_ms]=<ms>`) to the error message *only* after the
+/// in-loop retry budget for a rate-limit / overload error is exhausted, so
+/// its presence is a precise, already-tested signal that this turn failed on
+/// a provider limit rather than a one-off transient or a logic error.
+pub fn classify_tick_error(err_msg: &str) -> TickOutcome {
+    if err_msg.contains(librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER) {
+        TickOutcome::RateLimited
+    } else {
+        TickOutcome::Ok
+    }
+}
+
 /// RAII guard that clears the busy flag on drop, even if the task panics.
 struct BusyGuard {
     flag: Arc<AtomicBool>,
@@ -99,7 +144,10 @@ impl BackgroundExecutor {
     /// For `Proactive` mode, registers triggers — no dedicated task needed.
     ///
     /// `send_message` is a closure that sends a message to the given agent
-    /// and returns a result. It captures an `Arc<LibreFangKernel>` from the caller.
+    /// and returns a join handle resolving to a [`TickOutcome`]. It captures
+    /// an `Arc<LibreFangKernel>` from the caller. The outcome lets the
+    /// scheduling loop stop re-firing an agent that is stuck on a provider
+    /// rate-limit (issue #5168) instead of burning quota forever.
     pub fn start_agent<F>(
         &self,
         agent_id: AgentId,
@@ -107,7 +155,7 @@ impl BackgroundExecutor {
         schedule: &ScheduleMode,
         send_message: F,
     ) where
-        F: Fn(AgentId, String) -> tokio::task::JoinHandle<()> + Send + Sync + 'static,
+        F: Fn(AgentId, String) -> tokio::task::JoinHandle<TickOutcome> + Send + Sync + 'static,
     {
         match schedule {
             ScheduleMode::Reactive => {} // nothing to do
@@ -134,6 +182,10 @@ impl BackgroundExecutor {
                 );
 
                 let check_interval = *check_interval_secs;
+                // Consecutive rate-limit tick counter (issue #5168). Updated by
+                // the inner watcher from the tick outcome; read by the loop to
+                // decide when to stop hammering a rate-limited provider.
+                let rate_limit_streak = Arc::new(std::sync::atomic::AtomicU32::new(0));
                 // Shared list of inner watcher handles so stop_agent can abort them.
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -154,6 +206,29 @@ impl BackgroundExecutor {
                                 info!(agent = %name, "Continuous loop: shutdown signal received");
                                 break;
                             }
+                        }
+
+                        // Rate-limit circuit breaker (issue #5168): once the
+                        // agent has failed N consecutive ticks on a provider
+                        // rate-limit / quota exhaustion, stop re-firing it.
+                        // Continuing would burn the (possibly weekly) quota on
+                        // every tick forever with no chance of success until
+                        // the window resets. Terminating the loop leaves the
+                        // agent idle (the same terminal state as a normal
+                        // stop); an operator restart / resume gets a fresh
+                        // bounded budget rather than resuming an infinite loop.
+                        let streak = rate_limit_streak.load(Ordering::SeqCst);
+                        if streak >= MAX_CONSECUTIVE_RATE_LIMITS {
+                            warn!(
+                                agent = %name,
+                                id = %agent_id,
+                                consecutive_rate_limits = streak,
+                                max = MAX_CONSECUTIVE_RATE_LIMITS,
+                                "Continuous loop: provider rate-limited for {streak} consecutive \
+                                 ticks — stopping the autonomous loop to stop burning quota. \
+                                 Resolve the provider quota and resume / restart the agent.",
+                            );
+                            break;
                         }
 
                         // Skip tick if agent is paused (hand pause)
@@ -188,19 +263,40 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Continuous loop: sending self-prompt");
                         let busy_clone = busy.clone();
                         let watcher_name = name.clone();
+                        let streak_clone = rate_limit_streak.clone();
                         let jh = (send_message)(agent_id, prompt);
                         // Spawn a watcher with RAII guard — busy flag clears even on panic.
                         // Track the handle so stop_agent can abort it and release the permit.
                         let watcher_jh = tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
-                            if let Err(e) = jh.await {
-                                warn!(
-                                    agent = %watcher_name,
-                                    id = %agent_id,
-                                    error = %e,
-                                    "Continuous loop: agent tick task panicked or was aborted",
-                                );
+                            match jh.await {
+                                Ok(TickOutcome::RateLimited) => {
+                                    let n = streak_clone
+                                        .fetch_add(1, Ordering::SeqCst)
+                                        .saturating_add(1);
+                                    warn!(
+                                        agent = %watcher_name,
+                                        id = %agent_id,
+                                        consecutive_rate_limits = n,
+                                        "Continuous loop: tick failed on provider rate-limit",
+                                    );
+                                }
+                                Ok(TickOutcome::Ok) => {
+                                    // A non-rate-limited tick (success or any
+                                    // other failure) clears the streak so a
+                                    // transient blip cannot permanently park
+                                    // an otherwise-healthy agent.
+                                    streak_clone.store(0, Ordering::SeqCst);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        agent = %watcher_name,
+                                        id = %agent_id,
+                                        error = %e,
+                                        "Continuous loop: agent tick task panicked or was aborted",
+                                    );
+                                }
                             }
                         });
                         if let Ok(mut guards) = watcher_handles_loop.lock() {
@@ -240,6 +336,9 @@ impl BackgroundExecutor {
                     "Starting periodic background loop"
                 );
 
+                // Consecutive rate-limit tick counter (issue #5168) — same
+                // circuit-breaker rationale as the continuous loop above.
+                let rate_limit_streak = Arc::new(std::sync::atomic::AtomicU32::new(0));
                 // Shared list of inner watcher handles so stop_agent can abort them.
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -259,6 +358,24 @@ impl BackgroundExecutor {
                                 info!(agent = %name, "Periodic loop: shutdown signal received");
                                 break;
                             }
+                        }
+
+                        // Rate-limit circuit breaker (issue #5168): stop
+                        // re-firing once the provider has rate-limited N
+                        // consecutive ticks. See the continuous loop for the
+                        // full rationale.
+                        let streak = rate_limit_streak.load(Ordering::SeqCst);
+                        if streak >= MAX_CONSECUTIVE_RATE_LIMITS {
+                            warn!(
+                                agent = %name,
+                                id = %agent_id,
+                                consecutive_rate_limits = streak,
+                                max = MAX_CONSECUTIVE_RATE_LIMITS,
+                                "Periodic loop: provider rate-limited for {streak} consecutive \
+                                 ticks — stopping the scheduled loop to stop burning quota. \
+                                 Resolve the provider quota and resume / restart the agent.",
+                            );
+                            break;
                         }
 
                         // Skip tick if agent is paused (hand pause)
@@ -291,19 +408,36 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Periodic loop: sending scheduled prompt");
                         let busy_clone = busy.clone();
                         let watcher_name = name.clone();
+                        let streak_clone = rate_limit_streak.clone();
                         let jh = (send_message)(agent_id, prompt);
                         // Spawn a watcher with RAII guard — busy flag clears even on panic.
                         // Track the handle so stop_agent can abort it and release the permit.
                         let watcher_jh = tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
-                            if let Err(e) = jh.await {
-                                warn!(
-                                    agent = %watcher_name,
-                                    id = %agent_id,
-                                    error = %e,
-                                    "Periodic loop: agent tick task panicked or was aborted",
-                                );
+                            match jh.await {
+                                Ok(TickOutcome::RateLimited) => {
+                                    let n = streak_clone
+                                        .fetch_add(1, Ordering::SeqCst)
+                                        .saturating_add(1);
+                                    warn!(
+                                        agent = %watcher_name,
+                                        id = %agent_id,
+                                        consecutive_rate_limits = n,
+                                        "Periodic loop: tick failed on provider rate-limit",
+                                    );
+                                }
+                                Ok(TickOutcome::Ok) => {
+                                    streak_clone.store(0, Ordering::SeqCst);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        agent = %watcher_name,
+                                        id = %agent_id,
+                                        error = %e,
+                                        "Periodic loop: agent tick task panicked or was aborted",
+                                    );
+                                }
                             }
                         });
                         if let Ok(mut guards) = watcher_handles_loop.lock() {
@@ -571,6 +705,7 @@ mod tests {
             let tc = tick_clone.clone();
             tokio::spawn(async move {
                 tc.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::Ok
             })
         });
 
@@ -609,6 +744,7 @@ mod tests {
             tokio::spawn(async move {
                 tc.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                TickOutcome::Ok
             })
         });
 
@@ -630,7 +766,7 @@ mod tests {
         // Reactive mode → no background task
         let id = AgentId::new();
         executor.start_agent(id, "reactive", &ScheduleMode::Reactive, |_id, _msg| {
-            tokio::spawn(async {})
+            tokio::spawn(async { TickOutcome::Ok })
         });
         assert_eq!(executor.active_count(), 0);
 
@@ -642,8 +778,145 @@ mod tests {
             &ScheduleMode::Proactive {
                 conditions: vec!["event:agent_spawned".to_string()],
             },
-            |_id, _msg| tokio::spawn(async {}),
+            |_id, _msg| tokio::spawn(async { TickOutcome::Ok }),
         );
         assert_eq!(executor.active_count(), 0);
+    }
+
+    #[test]
+    fn test_classify_tick_error_detects_rate_limit_defer_marker() {
+        // The runtime appends RATE_LIMIT_DEFER_MARKER only after the in-loop
+        // retry budget is exhausted on a rate-limit / overload error. Its
+        // presence (even wrapped in the LibreFangError Display prefix) must
+        // classify as RateLimited; everything else is Ok.
+        let exhausted = "LLM driver error: Rate limited after 3 retries \
+                         [rate_limit_defer_ms]=300000";
+        assert_eq!(classify_tick_error(exhausted), TickOutcome::RateLimited);
+
+        let overloaded = "LLM driver error: Model overloaded after 3 retries \
+                          [rate_limit_defer_ms]=60000";
+        assert_eq!(classify_tick_error(overloaded), TickOutcome::RateLimited);
+
+        // A plain rate-limit string WITHOUT the marker (e.g. an in-flight
+        // retry log, or a one-off transient) must NOT trip the breaker —
+        // only the exhaustion marker counts.
+        assert_eq!(
+            classify_tick_error("Rate limited, retrying after delay"),
+            TickOutcome::Ok
+        );
+        assert_eq!(
+            classify_tick_error("Tool execution failed: file_read — not found"),
+            TickOutcome::Ok
+        );
+        assert_eq!(classify_tick_error(""), TickOutcome::Ok);
+    }
+
+    /// Regression for issue #5168: a hand agent whose every tick fails on a
+    /// provider rate-limit (e.g. an Ollama Cloud *weekly* quota) must NOT
+    /// re-fire forever. The continuous loop must stop after a bounded number
+    /// of consecutive rate-limited ticks instead of burning quota until the
+    /// (possibly week-long) window resets.
+    #[tokio::test]
+    async fn test_continuous_loop_stops_after_max_consecutive_rate_limits() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+
+        let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick_clone = tick_count.clone();
+
+        let schedule = ScheduleMode::Continuous {
+            // Sub-second interval: without the fix this would fire dozens of
+            // times in the test window; with the fix it caps out quickly.
+            check_interval_secs: 1,
+        };
+
+        // Every tick reports RateLimited, exactly as the real closure does
+        // once `send_message_with_sender_context` returns the deferred
+        // rate-limit error.
+        executor.start_agent(agent_id, "rl-hand", &schedule, move |_id, _msg| {
+            let tc = tick_clone.clone();
+            tokio::spawn(async move {
+                tc.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::RateLimited
+            })
+        });
+
+        // Give the loop generous wall-clock time to either self-terminate
+        // (fixed) or keep hammering (the pre-fix infinite loop). With a 1s
+        // interval, an unbounded loop would tick ~9 times in 10s; the bound
+        // is MAX_CONSECUTIVE_RATE_LIMITS, so a few extra ticks for the
+        // jitter + in-flight watcher are expected but it must plateau.
+        tokio::time::sleep(std::time::Duration::from_millis(10_000)).await;
+        let ticks_a = tick_count.load(Ordering::SeqCst);
+
+        // It must NOT be unbounded. The breaker trips at
+        // MAX_CONSECUTIVE_RATE_LIMITS; allow a small slop for the initial
+        // jitter tick and the one in-flight tick whose outcome lands after
+        // the loop already read the (sub-threshold) streak.
+        let ceiling = u64::from(MAX_CONSECUTIVE_RATE_LIMITS) + 2;
+        assert!(
+            ticks_a >= 1 && ticks_a <= ceiling,
+            "rate-limited continuous loop must terminate bounded: got {ticks_a} \
+             ticks, expected 1..={ceiling}"
+        );
+
+        // The loop has terminated: no further ticks fire even after waiting
+        // several more intervals. This is the "does not re-enter forever"
+        // assertion — the pre-fix loop would keep climbing here.
+        tokio::time::sleep(std::time::Duration::from_millis(4_000)).await;
+        let ticks_b = tick_count.load(Ordering::SeqCst);
+        assert_eq!(
+            ticks_a, ticks_b,
+            "loop must stay terminated (no new ticks after the breaker tripped): \
+             before={ticks_a} after={ticks_b}"
+        );
+
+        executor.stop_agent(agent_id);
+    }
+
+    /// A single non-rate-limited tick must reset the consecutive-rate-limit
+    /// streak so a transient blip cannot permanently park a healthy agent —
+    /// and so the breaker only fires on a *sustained* limit, not a flap.
+    #[tokio::test]
+    async fn test_intermittent_rate_limit_does_not_trip_breaker() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::new(shutdown_rx);
+        let agent_id = AgentId::new();
+
+        let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick_clone = tick_count.clone();
+
+        let schedule = ScheduleMode::Continuous {
+            check_interval_secs: 1,
+        };
+
+        // Alternate RateLimited / Ok forever: the streak never reaches
+        // MAX_CONSECUTIVE_RATE_LIMITS, so the loop must keep running.
+        executor.start_agent(agent_id, "flaky-hand", &schedule, move |_id, _msg| {
+            let tc = tick_clone.clone();
+            tokio::spawn(async move {
+                let n = tc.fetch_add(1, Ordering::SeqCst);
+                if n % 2 == 0 {
+                    TickOutcome::RateLimited
+                } else {
+                    TickOutcome::Ok
+                }
+            })
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(8_000)).await;
+        let ticks = tick_count.load(Ordering::SeqCst);
+        // With a 1s interval over ~8s the loop should still be alive and have
+        // ticked several times — well past MAX_CONSECUTIVE_RATE_LIMITS — proving
+        // the Ok ticks reset the streak and the breaker did NOT fire.
+        assert!(
+            ticks > u64::from(MAX_CONSECUTIVE_RATE_LIMITS),
+            "intermittent rate-limit must not trip the breaker: only {ticks} ticks \
+             (expected > {})",
+            MAX_CONSECUTIVE_RATE_LIMITS
+        );
+
+        executor.stop_agent(agent_id);
     }
 }
