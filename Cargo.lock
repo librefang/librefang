@@ -228,7 +228,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -239,7 +239,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1154,7 +1154,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1972,7 +1972,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2302,7 +2302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2875,7 +2875,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-tokio",
@@ -4333,7 +4333,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4411,7 +4411,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "aes 0.9.0",
  "async-trait",
@@ -4466,7 +4466,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4513,7 +4513,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "axum",
  "clap",
@@ -4544,7 +4544,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4577,7 +4577,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4595,7 +4595,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "librefang-types",
  "reqwest",
@@ -4607,7 +4607,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4665,7 +4665,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4679,7 +4679,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -4691,7 +4691,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4720,7 +4720,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4748,7 +4748,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4771,7 +4771,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -4787,7 +4787,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4805,7 +4805,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "chrono",
  "hex",
@@ -4909,7 +4909,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4933,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4955,7 +4955,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -4995,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5051,7 +5051,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5467,7 +5467,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5628,7 +5628,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6119,7 +6119,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7990,7 +7990,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8073,7 +8073,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8817,7 +8817,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9153,9 +9153,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.39.1"
+version = "0.38.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4deba334e1190ba7cb498327affa11e5ece10d26a30ab2f27fcf09504b8d8b6"
+checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
 dependencies = [
  "libc",
  "memchr",
@@ -9680,7 +9680,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10349,7 +10349,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10432,7 +10432,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11513,7 +11513,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12289,7 +12289,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
