@@ -25,21 +25,14 @@ struct AgentTaskEntry {
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
-/// Maximum number of *consecutive* ticks whose agent turn failed because the
-/// LLM provider was rate-limited / quota-exhausted before the continuous /
-/// periodic background loop stops re-firing the agent (issue #5168).
+/// Compiled-in default for [`BackgroundExecutor::max_consecutive_rate_limits`]
+/// when the operator has not configured it via
+/// `KernelConfig.background.max_consecutive_rate_limits` (issue #5168).
 ///
-/// Without this cap, a hand agent that hits a long-lived provider limit
-/// (e.g. an Ollama Cloud *weekly* quota) re-runs the agent loop on every
-/// `check_interval_secs` tick forever: the in-loop `call_with_retry` does its
-/// bounded 3 retries, fails with the deferred rate-limit error, the error is
-/// logged and dropped, the `busy` flag clears, and the next tick fires the
-/// exact same doomed call again. That burns the entire quota and the loop is
-/// restarted on every daemon boot (`start_background_agents`), so the zombie
-/// survives restarts. A single non-rate-limited successful (or
-/// non-rate-limited *failed*) tick resets the counter, so transient blips do
-/// not permanently park a healthy agent.
-const MAX_CONSECUTIVE_RATE_LIMITS: u32 = 5;
+/// See [`BackgroundExecutor`] for the rationale behind the breaker. A single
+/// non-rate-limited tick resets the counter, so transient blips do not
+/// permanently park a healthy agent.
+pub const DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS: u32 = 5;
 
 /// Outcome of a single background tick, reported back from the inner watcher
 /// task to the scheduling loop so the loop can stop hammering a rate-limited
@@ -51,7 +44,9 @@ pub enum TickOutcome {
     Ok,
     /// The agent turn failed because the LLM provider rate-limited / exhausted
     /// quota (the runtime surfaced the `RATE_LIMIT_DEFER_MARKER`). Counts
-    /// toward [`MAX_CONSECUTIVE_RATE_LIMITS`].
+    /// toward the configured `max_consecutive_rate_limits` cap (see
+    /// [`DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS`] and
+    /// `KernelConfig.background.max_consecutive_rate_limits`).
     RateLimited,
 }
 
@@ -82,38 +77,84 @@ impl Drop for BusyGuard {
 }
 
 /// Manages background task loops for autonomous agents.
+///
+/// The rate-limit circuit breaker (issue #5168) stops a continuous /
+/// periodic loop from re-firing forever when the LLM provider is
+/// rate-limited or quota-exhausted. Without this cap, a hand agent that
+/// hits a long-lived provider limit (e.g. an Ollama Cloud *weekly* quota)
+/// re-runs the agent loop on every `check_interval_secs` tick forever:
+/// the in-loop `call_with_retry` does its bounded 3 retries, fails with
+/// the deferred rate-limit error, the error is logged and dropped, the
+/// `busy` flag clears, and the next tick fires the exact same doomed call
+/// again. That burns the entire quota and the loop is restarted on every
+/// daemon boot (`start_background_agents`), so the zombie survives
+/// restarts. A single non-rate-limited successful (or non-rate-limited
+/// *failed*) tick resets the counter, so transient blips do not
+/// permanently park a healthy agent. The cap is configurable via
+/// `KernelConfig.background.max_consecutive_rate_limits` and defaults to
+/// [`DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS`].
 pub struct BackgroundExecutor {
     /// Running background task handles (outer loop + inner watcher list), keyed by agent ID.
-    tasks: DashMap<AgentId, AgentTaskEntry>,
+    tasks: Arc<DashMap<AgentId, AgentTaskEntry>>,
     /// Shutdown signal receiver (from Supervisor).
     shutdown_rx: watch::Receiver<bool>,
     /// SECURITY: Global semaphore to limit concurrent background LLM calls.
     llm_semaphore: Arc<tokio::sync::Semaphore>,
     /// Per-agent pause flags: when true, background ticks are skipped.
     pause_flags: DashMap<AgentId, Arc<AtomicBool>>,
+    /// Cap on consecutive rate-limited ticks before the autonomous loop
+    /// for an agent self-terminates (issue #5168). `0` disables the
+    /// breaker (loop re-fires forever — only safe against a provider
+    /// with no quota).
+    max_consecutive_rate_limits: u32,
 }
 
 impl BackgroundExecutor {
-    /// Create a new executor bound to the supervisor's shutdown signal.
-    ///
-    /// `max_concurrent` overrides the default [`MAX_CONCURRENT_BG_LLM`] when
-    /// provided (i.e. when it is > 0). Pass `0` to use the compiled default.
+    /// Create a new executor bound to the supervisor's shutdown signal,
+    /// using compiled-in defaults for every knob.
     pub fn new(shutdown_rx: watch::Receiver<bool>) -> Self {
         Self::with_concurrency(shutdown_rx, MAX_CONCURRENT_BG_LLM)
     }
 
     /// Create a new executor with a custom concurrency limit for background LLM calls.
+    ///
+    /// The rate-limit circuit-breaker cap uses
+    /// [`DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS`]; use [`Self::with_config`]
+    /// to override it from `KernelConfig.background`.
     pub fn with_concurrency(shutdown_rx: watch::Receiver<bool>, max_concurrent: usize) -> Self {
+        Self::with_config(
+            shutdown_rx,
+            max_concurrent,
+            DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS,
+        )
+    }
+
+    /// Create a new executor with full configuration: concurrency limit
+    /// for background LLM calls AND the rate-limit circuit-breaker cap
+    /// (issue #5168).
+    ///
+    /// `max_concurrent == 0` falls back to the compiled
+    /// [`MAX_CONCURRENT_BG_LLM`] default so an unset config field still
+    /// produces a sane semaphore. `max_consecutive_rate_limits` is
+    /// honoured verbatim — `0` disables the breaker entirely, which
+    /// callers can opt into explicitly when running against a provider
+    /// with no quota.
+    pub fn with_config(
+        shutdown_rx: watch::Receiver<bool>,
+        max_concurrent: usize,
+        max_consecutive_rate_limits: u32,
+    ) -> Self {
         let effective = if max_concurrent == 0 {
             MAX_CONCURRENT_BG_LLM
         } else {
             max_concurrent
         };
         Self {
-            tasks: DashMap::new(),
+            tasks: Arc::new(DashMap::new()),
             shutdown_rx,
             llm_semaphore: Arc::new(tokio::sync::Semaphore::new(effective)),
             pause_flags: DashMap::new(),
+            max_consecutive_rate_limits,
         }
     }
 
@@ -186,10 +227,17 @@ impl BackgroundExecutor {
                 // the inner watcher from the tick outcome; read by the loop to
                 // decide when to stop hammering a rate-limited provider.
                 let rate_limit_streak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+                let max_rate_limit_streak = self.max_consecutive_rate_limits;
                 // Shared list of inner watcher handles so stop_agent can abort them.
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 let watcher_handles_loop = watcher_handles.clone();
+                // Self-cleanup: when this outer loop exits (cap, shutdown, or
+                // any other break path), drop the DashMap entry so a stale
+                // `AgentTaskEntry` does not keep `active_count()` inflated and
+                // a later `start_agent` does not silently overwrite a zombie
+                // (issue #5174 review).
+                let tasks_for_cleanup = self.tasks.clone();
 
                 let handle = tokio::spawn(async move {
                     // Stagger first tick: random jitter (0..interval) so agents
@@ -217,13 +265,15 @@ impl BackgroundExecutor {
                         // agent idle (the same terminal state as a normal
                         // stop); an operator restart / resume gets a fresh
                         // bounded budget rather than resuming an infinite loop.
+                        // `max_rate_limit_streak == 0` disables the breaker
+                        // entirely (operator opt-in for quota-free providers).
                         let streak = rate_limit_streak.load(Ordering::SeqCst);
-                        if streak >= MAX_CONSECUTIVE_RATE_LIMITS {
+                        if max_rate_limit_streak > 0 && streak >= max_rate_limit_streak {
                             warn!(
                                 agent = %name,
                                 id = %agent_id,
                                 consecutive_rate_limits = streak,
-                                max = MAX_CONSECUTIVE_RATE_LIMITS,
+                                max = max_rate_limit_streak,
                                 "Continuous loop: provider rate-limited for {streak} consecutive \
                                  ticks — stopping the autonomous loop to stop burning quota. \
                                  Resolve the provider quota and resume / restart the agent.",
@@ -304,6 +354,15 @@ impl BackgroundExecutor {
                             guards.push(watcher_jh);
                         }
                     }
+
+                    // Self-cleanup on any break path (cap, shutdown, semaphore
+                    // closed). Without this the entry survives as a zombie
+                    // visible to `active_count()` and a subsequent
+                    // `start_agent` for the same id silently overwrites it
+                    // (DashMap insert is replace-semantic). `stop_agent`
+                    // takes the same `remove` path, so this is a no-op when
+                    // an operator stop arrived first.
+                    tasks_for_cleanup.remove(&agent_id);
                 });
 
                 self.tasks.insert(
@@ -339,10 +398,14 @@ impl BackgroundExecutor {
                 // Consecutive rate-limit tick counter (issue #5168) — same
                 // circuit-breaker rationale as the continuous loop above.
                 let rate_limit_streak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+                let max_rate_limit_streak = self.max_consecutive_rate_limits;
                 // Shared list of inner watcher handles so stop_agent can abort them.
                 let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 let watcher_handles_loop = watcher_handles.clone();
+                // Self-cleanup on outer-task exit — see the continuous loop
+                // for the rationale (issue #5174 review).
+                let tasks_for_cleanup = self.tasks.clone();
 
                 let handle = tokio::spawn(async move {
                     // Stagger first tick: random jitter so agents don't spike memory together.
@@ -363,14 +426,14 @@ impl BackgroundExecutor {
                         // Rate-limit circuit breaker (issue #5168): stop
                         // re-firing once the provider has rate-limited N
                         // consecutive ticks. See the continuous loop for the
-                        // full rationale.
+                        // full rationale. `0` disables the breaker entirely.
                         let streak = rate_limit_streak.load(Ordering::SeqCst);
-                        if streak >= MAX_CONSECUTIVE_RATE_LIMITS {
+                        if max_rate_limit_streak > 0 && streak >= max_rate_limit_streak {
                             warn!(
                                 agent = %name,
                                 id = %agent_id,
                                 consecutive_rate_limits = streak,
-                                max = MAX_CONSECUTIVE_RATE_LIMITS,
+                                max = max_rate_limit_streak,
                                 "Periodic loop: provider rate-limited for {streak} consecutive \
                                  ticks — stopping the scheduled loop to stop burning quota. \
                                  Resolve the provider quota and resume / restart the agent.",
@@ -445,6 +508,14 @@ impl BackgroundExecutor {
                             guards.push(watcher_jh);
                         }
                     }
+
+                    // Self-cleanup on any break path (cap, shutdown, semaphore
+                    // closed). See the continuous loop for the rationale —
+                    // without this the entry survives as a zombie visible to
+                    // `active_count()` and a later `start_agent` for the same
+                    // id silently overwrites it (DashMap insert is
+                    // replace-semantic).
+                    tasks_for_cleanup.remove(&agent_id);
                 });
 
                 self.tasks.insert(
@@ -845,16 +916,16 @@ mod tests {
         // Give the loop generous wall-clock time to either self-terminate
         // (fixed) or keep hammering (the pre-fix infinite loop). With a 1s
         // interval, an unbounded loop would tick ~9 times in 10s; the bound
-        // is MAX_CONSECUTIVE_RATE_LIMITS, so a few extra ticks for the
-        // jitter + in-flight watcher are expected but it must plateau.
+        // is DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS, so a few extra ticks for
+        // the jitter + in-flight watcher are expected but it must plateau.
         tokio::time::sleep(std::time::Duration::from_millis(10_000)).await;
         let ticks_a = tick_count.load(Ordering::SeqCst);
 
         // It must NOT be unbounded. The breaker trips at
-        // MAX_CONSECUTIVE_RATE_LIMITS; allow a small slop for the initial
-        // jitter tick and the one in-flight tick whose outcome lands after
-        // the loop already read the (sub-threshold) streak.
-        let ceiling = u64::from(MAX_CONSECUTIVE_RATE_LIMITS) + 2;
+        // DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS; allow a small slop for the
+        // initial jitter tick and the one in-flight tick whose outcome lands
+        // after the loop already read the (sub-threshold) streak.
+        let ceiling = u64::from(DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS) + 2;
         assert!(
             ticks_a >= 1 && ticks_a <= ceiling,
             "rate-limited continuous loop must terminate bounded: got {ticks_a} \
@@ -892,7 +963,7 @@ mod tests {
         };
 
         // Alternate RateLimited / Ok forever: the streak never reaches
-        // MAX_CONSECUTIVE_RATE_LIMITS, so the loop must keep running.
+        // DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS, so the loop must keep running.
         executor.start_agent(agent_id, "flaky-hand", &schedule, move |_id, _msg| {
             let tc = tick_clone.clone();
             tokio::spawn(async move {
@@ -908,15 +979,114 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(8_000)).await;
         let ticks = tick_count.load(Ordering::SeqCst);
         // With a 1s interval over ~8s the loop should still be alive and have
-        // ticked several times — well past MAX_CONSECUTIVE_RATE_LIMITS — proving
-        // the Ok ticks reset the streak and the breaker did NOT fire.
+        // ticked several times — well past DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS
+        // — proving the Ok ticks reset the streak and the breaker did NOT fire.
         assert!(
-            ticks > u64::from(MAX_CONSECUTIVE_RATE_LIMITS),
+            ticks > u64::from(DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS),
             "intermittent rate-limit must not trip the breaker: only {ticks} ticks \
              (expected > {})",
-            MAX_CONSECUTIVE_RATE_LIMITS
+            DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS
         );
 
         executor.stop_agent(agent_id);
+    }
+
+    /// Regression for issue #5174 review (P1): once the rate-limit
+    /// circuit breaker trips and the continuous loop self-terminates,
+    /// the agent's entry MUST be removed from the `tasks` map.
+    /// Otherwise `active_count()` reports a phantom live loop and a
+    /// subsequent `start_agent` for the same id silently overwrites the
+    /// zombie (DashMap insert is replace-semantic), losing the new
+    /// outer handle.
+    #[tokio::test]
+    async fn tasks_map_cleared_after_rate_limit_cap_break() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Aggressive cap = 2 so the breaker trips inside the test window
+        // without requiring DEFAULT_MAX_CONSECUTIVE_RATE_LIMITS worth of
+        // wall-clock seconds.
+        let executor = BackgroundExecutor::with_config(shutdown_rx, 0, 2);
+        let agent_id = AgentId::new();
+
+        let schedule = ScheduleMode::Continuous {
+            check_interval_secs: 1,
+        };
+
+        executor.start_agent(agent_id, "rl-cleanup", &schedule, |_id, _msg| {
+            tokio::spawn(async move { TickOutcome::RateLimited })
+        });
+
+        // Sanity: the loop is registered before the breaker trips.
+        assert_eq!(executor.active_count(), 1, "loop must register on start");
+
+        // Generous slack for jitter + the in-flight watcher whose outcome
+        // lands after the breaker reads the streak.
+        tokio::time::sleep(std::time::Duration::from_millis(8_000)).await;
+
+        // The outer task self-terminates and removes its own entry.
+        assert_eq!(
+            executor.active_count(),
+            0,
+            "tasks map must be cleaned up after the cap break"
+        );
+
+        // And a fresh start_agent on the same id is not racing a zombie.
+        executor.start_agent(agent_id, "rl-cleanup-2", &schedule, |_id, _msg| {
+            tokio::spawn(async move { TickOutcome::Ok })
+        });
+        assert_eq!(
+            executor.active_count(),
+            1,
+            "re-starting after self-cleanup must install a fresh entry"
+        );
+        executor.stop_agent(agent_id);
+    }
+
+    /// The cap MUST be configurable. With
+    /// `max_consecutive_rate_limits = 2` the loop must terminate after
+    /// roughly two rate-limited ticks — well below the compiled-in
+    /// default of 5 — proving the knob actually reaches the loop
+    /// (issue #5174 review).
+    #[tokio::test]
+    async fn configured_cap_overrides_compiled_default() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let executor = BackgroundExecutor::with_config(shutdown_rx, 0, 2);
+        let agent_id = AgentId::new();
+
+        let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick_clone = tick_count.clone();
+
+        let schedule = ScheduleMode::Continuous {
+            check_interval_secs: 1,
+        };
+
+        executor.start_agent(agent_id, "rl-configured", &schedule, move |_id, _msg| {
+            let tc = tick_clone.clone();
+            tokio::spawn(async move {
+                tc.fetch_add(1, Ordering::SeqCst);
+                TickOutcome::RateLimited
+            })
+        });
+
+        // Let the loop run long enough that a cap of DEFAULT (5) would
+        // produce noticeably more ticks than a cap of 2.
+        tokio::time::sleep(std::time::Duration::from_millis(8_000)).await;
+        let ticks = tick_count.load(Ordering::SeqCst);
+
+        // With cap = 2 we expect the loop to plateau around 2 ticks
+        // plus the jitter / in-flight slack. Tighter than the default
+        // ceiling — if the knob were ignored, this would climb past 5.
+        let ceiling = 2u64 + 2; // cap + jitter/in-flight slack
+        assert!(
+            ticks >= 1 && ticks <= ceiling,
+            "configured cap must terminate the loop early: got {ticks} \
+             ticks, expected 1..={ceiling}"
+        );
+
+        // Self-cleanup also runs on the configured-cap path.
+        assert_eq!(
+            executor.active_count(),
+            0,
+            "configured-cap break path must also clean up tasks map"
+        );
     }
 }

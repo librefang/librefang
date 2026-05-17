@@ -3267,6 +3267,12 @@ pub struct KernelConfig {
     /// Default: `None` (unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_total_timeout_secs: Option<u64>,
+    /// Background autonomous-loop executor knobs (issue #5168).
+    /// Currently governs the rate-limit circuit breaker that stops a
+    /// continuous / periodic loop from re-firing forever when the LLM
+    /// provider is rate-limited or quota-exhausted.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4659,6 +4665,46 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// Background autonomous-loop executor configuration (issue #5168).
+///
+/// Tunes the circuit breaker that stops a continuous / periodic background
+/// loop from re-firing forever when the LLM provider is rate-limited or
+/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
+/// `librefang_kernel::background` for the rationale.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [background]
+/// max_consecutive_rate_limits = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Maximum number of *consecutive* background ticks whose agent turn
+    /// failed because the LLM provider was rate-limited / quota-exhausted
+    /// before the continuous / periodic loop stops re-firing the agent.
+    ///
+    /// A single non-rate-limited tick resets the counter, so transient
+    /// blips do not permanently park a healthy agent. Set to `0` to
+    /// disable the breaker entirely (the loop re-fires forever — only
+    /// appropriate when running against a provider with no quota).
+    /// Default: `5`.
+    #[serde(default = "default_max_consecutive_rate_limits")]
+    pub max_consecutive_rate_limits: u32,
+}
+
+fn default_max_consecutive_rate_limits() -> u32 {
+    5
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -5582,6 +5628,7 @@ impl Default for KernelConfig {
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
+            background: BackgroundConfig::default(),
         }
     }
 }
