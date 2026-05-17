@@ -40,6 +40,17 @@ fn secrets_file_path() -> Option<PathBuf> {
 /// `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
 pub fn load_dotenv() {
     DOTENV_LOADED.call_once(|| {
+        // Bootstrap step: scan the dotenv files for `LIBREFANG_VAULT_KEY` and
+        // inject it into the process env *before* the vault unlock attempt.
+        // Without this pre-pass, container deployments that ship the vault key
+        // in `secrets.env` (rather than the host env) hit a chicken-and-egg:
+        // the vault wants the key from env, but the key isn't in env yet
+        // because secrets.env hasn't been loaded. The bootstrap is scoped
+        // strictly to the vault-key var, so the documented priority order
+        // (system env > vault > .env > secrets.env) for every other secret
+        // stays intact — `load_env_file` later still skips keys the vault
+        // (or system env) already populated.
+        prime_vault_key_from_dotenv();
         load_vault();
         if let Some(p) = env_file_path() {
             load_env_file(&p);
@@ -48,6 +59,66 @@ pub fn load_dotenv() {
             load_env_file(&p);
         }
     });
+}
+
+/// Inject only `LIBREFANG_VAULT_KEY` from `.env` / `secrets.env` into the
+/// process env if it isn't already set there. The vault unlock that runs
+/// immediately after needs the key in env; the bulk dotenv load happens
+/// later, after the vault has been consulted (so vault secrets keep their
+/// documented precedence over dotenv files for every other variable).
+fn prime_vault_key_from_dotenv() {
+    if std::env::var(crate::vault::VAULT_KEY_ENV).is_ok() {
+        // System env already supplies the key — nothing to do.
+        return;
+    }
+    // Scan in priority order: `.env` first, then `secrets.env`. Stop on the
+    // first file that yields a non-empty value — matches the priority that
+    // `load_env_file` would have applied later.
+    for path in [env_file_path(), secrets_file_path()].into_iter().flatten() {
+        if let Some(value) = extract_env_value(&path, crate::vault::VAULT_KEY_ENV) {
+            // SAFETY: called from synchronous main() before the tokio runtime
+            // exists; no other threads have been spawned yet.
+            unsafe { std::env::set_var(crate::vault::VAULT_KEY_ENV, value) };
+            return;
+        }
+    }
+}
+
+/// Pull a single `KEY=VALUE` out of a dotenv file without populating the
+/// rest of the process env. Returns the unescaped value when found, or
+/// `None` for missing key / missing file / blank value.
+///
+/// Delegates per-line parsing to [`parse_env_line`] so quoting, escapes,
+/// and "no `=` on this line" handling stay consistent with the regular
+/// dotenv loader — a malformed line earlier in the file never aborts the
+/// scan, the way a bare `?` propagation would.
+fn extract_env_value(path: &Path, key: &str) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            // Match `load_vault` and the broader bootstrap path: no tracing
+            // subscriber is installed yet when load_dotenv runs.
+            eprintln!(
+                "librefang-dotenv: cannot read {} for vault-key bootstrap: {e}; skipping",
+                path.display()
+            );
+            return None;
+        }
+    };
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = parse_env_line(trimmed) else {
+            continue;
+        };
+        if k == key && !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Try to unlock the credential vault and inject secrets into process env.
@@ -365,6 +436,48 @@ mod tests {
         load_env_file(&PathBuf::from("/nonexistent/.env"));
     }
 
+    #[test]
+    fn extract_env_value_finds_key_with_base64_padding() {
+        // The vault key is base64 — the trailing `=` is data, not a delimiter.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "GROQ_API_KEY=plain\nLIBREFANG_VAULT_KEY=GNTYsbsWZijklydfyPftpxKsq9TH1HT4Fp8vjUTB0T0=\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("GNTYsbsWZijklydfyPftpxKsq9TH1HT4Fp8vjUTB0T0="),
+        );
+    }
+
+    #[test]
+    fn extract_env_value_handles_quoted_and_commented_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "# LIBREFANG_VAULT_KEY=ignored_because_comment\nLIBREFANG_VAULT_KEY=\"quoted_value\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("quoted_value"),
+        );
+    }
+
+    #[test]
+    fn extract_env_value_returns_none_for_missing_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.env");
+        assert!(extract_env_value(&missing, "ANYTHING").is_none());
+
+        let blank = dir.path().join("blank.env");
+        std::fs::write(&blank, "LIBREFANG_VAULT_KEY=\n").unwrap();
+        assert!(extract_env_value(&blank, "LIBREFANG_VAULT_KEY").is_none());
+    }
+
     /// Regression for #3790: a value containing a literal newline must
     /// be written as a single `KEY="..."` line (escaped) and must round
     /// trip back to the original bytes via `parse_env_line`.
@@ -439,5 +552,75 @@ mod tests {
 
         // SAFETY: same as above.
         unsafe { std::env::remove_var(key) };
+    }
+
+    /// A malformed line earlier in the file (no `=`, leftover marker, hand-
+    /// edit typo) must NOT abort the scan before the real vault-key line.
+    /// A previous implementation propagated `?` out of `split_once('=')` and
+    /// regressed exactly this case.
+    #[test]
+    fn extract_env_value_skips_malformed_lines_before_vault_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "# header comment\n\
+             STRAY_MARKER_NO_EQUALS\n\
+             ANOTHER_BAD_LINE\n\
+             LIBREFANG_VAULT_KEY=after_garbage\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("after_garbage"),
+        );
+    }
+
+    /// End-to-end regression for the boot-ordering fix: when only
+    /// `secrets.env` carries the vault key (the container-deploy
+    /// scenario this PR is named after), `prime_vault_key_from_dotenv`
+    /// must seed `LIBREFANG_VAULT_KEY` into the process env *before*
+    /// the vault unlock attempt.
+    ///
+    /// `#[serial]` for the same reason as the priority-order test:
+    /// `std::env::{set,remove}_var` is UB while other threads exist.
+    #[test]
+    #[serial_test::serial]
+    fn prime_vault_key_from_dotenv_seeds_env_from_secrets_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = dir.path().join("secrets.env");
+        std::fs::write(
+            &secrets,
+            "# header\nSTRAY_MARKER\nLIBREFANG_VAULT_KEY=primed-from-secrets\n",
+        )
+        .unwrap();
+
+        let prev_home = std::env::var_os("LIBREFANG_HOME");
+        let prev_key = std::env::var_os(crate::vault::VAULT_KEY_ENV);
+        // SAFETY: #[serial] serialises env mutation across tests in this
+        // binary; no concurrent reader observes the transient state below.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", dir.path());
+            std::env::remove_var(crate::vault::VAULT_KEY_ENV);
+        }
+
+        prime_vault_key_from_dotenv();
+        let after = std::env::var(crate::vault::VAULT_KEY_ENV).ok();
+
+        // Restore env BEFORE asserting so a failure does not leak state
+        // to sibling tests (same pattern as the priority-order test).
+        // SAFETY: same as above.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+            match prev_key {
+                Some(v) => std::env::set_var(crate::vault::VAULT_KEY_ENV, v),
+                None => std::env::remove_var(crate::vault::VAULT_KEY_ENV),
+            }
+        }
+
+        assert_eq!(after.as_deref(), Some("primed-from-secrets"));
     }
 }
