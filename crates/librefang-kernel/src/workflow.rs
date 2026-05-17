@@ -2330,6 +2330,32 @@ impl WorkflowEngine {
         }
     }
 
+    /// Resolve the text that `{{input}}` (the whole-input form) should
+    /// render to at the start of a run.
+    ///
+    /// For object-shaped input we still seed every top-level key as a
+    /// `{{key}}` variable via [`Self::seed_input_vars_from_json`], but a
+    /// caller that *also* wants free-form context for a step prompt's
+    /// `{{input}}` (e.g. the dashboard's "additional context" textarea
+    /// alongside a parameter form) has nowhere to put it: serialising the
+    /// whole object as `{{input}}` would dump JSON into the prompt. So a
+    /// top-level **string** `"input"` key is treated as that free-text and
+    /// becomes the `{{input}}` value; the per-key seeding still binds the
+    /// remaining placeholders. This is purely additive — input that is a
+    /// plain string, or an object with no string `"input"` key, renders
+    /// exactly as before (the raw blob, per the #4982 contract), so the
+    /// agent `workflow_run` tool path is unchanged.
+    fn template_input_text(input: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(input)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get("input"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| input.to_string())
+    }
+
     /// Execute a single step with error mode handling. Returns (output, input_tokens, output_tokens).
     async fn execute_step_with_error_mode<F, Fut>(
         step: &WorkflowStep,
@@ -3021,16 +3047,17 @@ impl WorkflowEngine {
                 } else {
                     // Fresh start: seed per-key vars from the input JSON so
                     // that `{{cover}}` / `{{topic}}` (etc.) in step prompts
-                    // resolve from object-shaped input. `{{input}}` keeps
-                    // rendering the whole blob (#4982 — gap 3).
+                    // resolve from object-shaped input. `{{input}}` renders
+                    // the object's string `input` key when present, else
+                    // the raw blob (#4982 — gap 3; see template_input_text).
                     let mut vars = HashMap::new();
                     Self::seed_input_vars_from_json(input, &mut vars);
-                    (input.to_string(), vars, 0_usize)
+                    (Self::template_input_text(input), vars, 0_usize)
                 }
             } else {
                 let mut vars = HashMap::new();
                 Self::seed_input_vars_from_json(input, &mut vars);
-                (input.to_string(), vars, 0_usize)
+                (Self::template_input_text(input), vars, 0_usize)
             }
         };
         let mut all_outputs: Vec<String> = Vec::new();
@@ -4375,7 +4402,9 @@ impl WorkflowEngine {
         Self::seed_input_vars_from_json(input, &mut variables);
         // Track which step names have failed so we can skip dependents
         let mut failed_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut last_output = input.to_string();
+        // `{{input}}` mirrors the sequential path: the object's string
+        // `input` key when present, else the raw blob (see template_input_text).
+        let mut last_output = Self::template_input_text(input);
 
         info!(
             run_id = %run_id,
@@ -4668,7 +4697,7 @@ impl WorkflowEngine {
         // dry_run's resolved prompts reflect the real {{var}} substitution
         // an actual run will perform (#4982 — gap 3).
         Self::seed_input_vars_from_json(input, &mut variables);
-        let mut current_input = input.to_string();
+        let mut current_input = Self::template_input_text(input);
 
         for (i, step) in workflow.steps.iter().enumerate() {
             let raw_prompt =
@@ -6585,6 +6614,30 @@ mod tests {
         );
         assert_eq!(vars["topic"], "preexisting");
         assert_eq!(vars["fresh"], "v");
+    }
+
+    #[test]
+    fn template_input_text_resolves_input_key_else_raw_blob() {
+        // Object with a string `input` key → that key is the {{input}} text.
+        assert_eq!(
+            WorkflowEngine::template_input_text(
+                &serde_json::json!({"challenge": "X", "input": "notes"}).to_string()
+            ),
+            "notes"
+        );
+        // Object WITHOUT an `input` key → raw blob (unchanged #4982 contract).
+        let blob = serde_json::json!({"challenge": "X"}).to_string();
+        assert_eq!(WorkflowEngine::template_input_text(&blob), blob);
+        // Object whose `input` key is non-string → raw blob (no coercion).
+        let non_str = serde_json::json!({"input": {"nested": true}}).to_string();
+        assert_eq!(WorkflowEngine::template_input_text(&non_str), non_str);
+        // Plain (non-JSON) string → returned verbatim.
+        assert_eq!(
+            WorkflowEngine::template_input_text("just text"),
+            "just text"
+        );
+        // A JSON string scalar is not an object → verbatim.
+        assert_eq!(WorkflowEngine::template_input_text("\"x\""), "\"x\"");
     }
 
     /// End-to-end engine substitution: a workflow with `{{topic}}` and

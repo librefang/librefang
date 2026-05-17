@@ -2,6 +2,30 @@
 
 use super::AppState;
 
+/// Extract the workflow run input string from a request body.
+///
+/// The workflow engine takes a single `input` string. When that string is
+/// a JSON object, the workflow engine's `seed_input_vars_from_json`
+/// explodes its top-level keys into `{{key}}` template variables (#4982's
+/// contract), so a parameterised workflow whose steps reference
+/// `{{challenge}}` resolves the value the user supplied instead of leaving
+/// the literal placeholder in the prompt. This mirrors the runtime tool's
+/// `prepare_workflow_input` so HTTP callers (the dashboard run / parameter
+/// form) get the same per-key binding the `workflow_run` agent tool
+/// already has.
+///
+/// Accepted `input` shapes:
+/// - string → used verbatim (free-text `{{input}}`, backward-compatible)
+/// - object → serialised to a JSON string so per-key `{{var}}` binding applies
+/// - null / absent / other → empty string
+fn workflow_run_input_string(req: &serde_json::Value) -> String {
+    match req.get("input") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(v @ serde_json::Value::Object(_)) => serde_json::to_string(v).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 /// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
@@ -1014,7 +1038,7 @@ pub async fn run_workflow(
         }
     });
 
-    let input = req["input"].as_str().unwrap_or("").to_string();
+    let input = workflow_run_input_string(&req);
 
     if query.wait {
         // -- Synchronous path (backward-compatible) --
@@ -1204,7 +1228,7 @@ pub async fn dry_run_workflow(
         }
     });
 
-    let input = req["input"].as_str().unwrap_or("").to_string();
+    let input = workflow_run_input_string(&req);
 
     match state.kernel.dry_run_workflow(workflow_id, input).await {
         Ok(steps) => {

@@ -381,7 +381,7 @@ describe("WorkflowsPage", () => {
     expect(labelTexts).not.toContain("research");
   });
 
-  it("includes param values in the run input when parameters are filled", async () => {
+  it("sends param values as a structured object so {{var}} binds at run time", async () => {
     useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
     useWorkflowDetailMock.mockReturnValue(
       makeQuery({
@@ -403,9 +403,11 @@ describe("WorkflowsPage", () => {
     expect(mutations.run.mutateAsync).toHaveBeenCalledTimes(1);
     const callArgs = mutations.run.mutateAsync.mock.calls[0][0];
     expect(callArgs.workflowId).toBe("wf-1");
-    // The input should contain the parameter value as JSON.
-    expect(callArgs.input).toContain("quantum computing");
-    expect(callArgs.input).toContain("topic");
+    // Filled params are sent as an object keyed by parameter name so the
+    // backend's seed_input_vars_from_json binds `{{topic}}` at run time
+    // (not folded into a free-text `{{input}}` blob). No free-text was
+    // typed, so there is no `input` key.
+    expect(callArgs.input).toEqual({ topic: "quantum computing" });
   });
 
   it("filters templates by the active category pill", () => {
