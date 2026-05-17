@@ -12,7 +12,20 @@ import {
   retryTask,
   cleanupSessions,
 } from "../../api";
-import { overviewKeys, runtimeKeys, sessionKeys } from "../queries/keys";
+import {
+  agentKeys,
+  channelKeys,
+  configKeys,
+  memoryKeys,
+  overviewKeys,
+  runtimeKeys,
+  scheduleKeys,
+  sessionKeys,
+  skillKeys,
+  triggerKeys,
+  cronKeys,
+  handKeys,
+} from "../queries/keys";
 
 type ShutdownResult = { status: string };
 
@@ -35,13 +48,36 @@ export function useCreateBackup() {
   });
 }
 
+// A backup restore overwrites the entire ~/.librefang data directory
+// (agents, memory, sessions, config, channels, schedules, triggers,
+// cron, skills, hands). Every cached domain is therefore potentially
+// stale — this is the legitimate "cache reset" case for `.all` keys
+// described in AGENTS.md, not the narrow per-id default. Without this,
+// every page navigated after a restore shows pre-restore state until a
+// manual refresh (#5140).
+const RESTORE_DIRTIED_KEYS = [
+  agentKeys.all,
+  memoryKeys.all,
+  sessionKeys.all,
+  configKeys.all,
+  channelKeys.all,
+  scheduleKeys.all,
+  triggerKeys.all,
+  cronKeys.all,
+  skillKeys.all,
+  handKeys.all,
+  runtimeKeys.all,
+  overviewKeys.all,
+] as const;
+
 export function useRestoreBackup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: restoreBackup,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
-      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      for (const queryKey of RESTORE_DIRTIED_KEYS) {
+        qc.invalidateQueries({ queryKey });
+      }
     },
   });
 }

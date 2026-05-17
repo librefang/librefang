@@ -1,4 +1,5 @@
 import { formatCost } from "../lib/format";
+import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
@@ -2662,12 +2663,10 @@ export function ChatPage() {
   }, [selectedAgentId, tts.stop]);
 
   const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
+    return safeStorageGet("librefang.chat.show_hand_agents") === "1";
   });
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(
+    safeStorageSet(
       "librefang.chat.show_hand_agents",
       showHandAgents ? "1" : "0",
     );

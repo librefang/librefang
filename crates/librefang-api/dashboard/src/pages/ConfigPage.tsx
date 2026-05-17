@@ -422,9 +422,15 @@ const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|cred
 type SelectOption = string | { id: string; name: string; provider: string } | { value: string; label: string };
 
 function ConfigFieldInput({
-  fieldKey, fieldType, options, min, max, step, value, onChange,
+  inputId, fieldKey, fieldType, options, min, max, step, value, onChange,
   itemSchema, schemaRoot,
 }: {
+  // DOM id applied to the primitive control (input / select / boolean
+  // toggle) so the row's <label htmlFor> resolves for screen readers
+  // and label-click focus (#5140). Composite editors (string_map /
+  // struct_list / object) render multiple controls and are not a single
+  // labelable target — the row label still describes them as a group.
+  inputId: string;
   fieldKey: string;
   fieldType: string;
   options?: SelectOption[];
@@ -446,6 +452,10 @@ function ConfigFieldInput({
     return (
       <div className="flex items-center h-[30px]">
         <button
+          id={inputId}
+          type="button"
+          role="switch"
+          aria-checked={Boolean(value)}
           onClick={() => onChange(!value)}
           className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
         >
@@ -473,7 +483,7 @@ function ConfigFieldInput({
       }
     };
     return (
-      <select value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
+      <select id={inputId} value={matched} onChange={(e) => handleChange(e.target.value)} className={inputClass}>
         {matched && !normalizedOptions.some((o) => o.value === matched) && <option value={matched}>{matched}</option>}
         {normalizedOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -482,7 +492,7 @@ function ConfigFieldInput({
 
   if (fieldType === "number") {
     return (
-      <input type="number" value={value != null ? String(value) : ""}
+      <input id={inputId} type="number" value={value != null ? String(value) : ""}
         onChange={(e) => {
           const v = e.target.value;
           if (v === "") { onChange(null); return; }
@@ -497,7 +507,7 @@ function ConfigFieldInput({
   if (fieldType === "string[]" || fieldType === "array") {
     const arr = Array.isArray(value) ? value : [];
     return (
-      <input type="text" value={arr.join(", ")}
+      <input id={inputId} type="text" value={arr.join(", ")}
         onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
         placeholder="comma-separated values" className={inputClass} />
     );
@@ -544,7 +554,7 @@ function ConfigFieldInput({
   const isSensitive = fieldType === "string" && SENSITIVE_PATTERNS.test(fieldKey);
 
   return (
-    <input type={isSensitive ? "password" : "text"} value={String(value ?? "")}
+    <input id={inputId} type={isSensitive ? "password" : "text"} value={String(value ?? "")}
       onChange={(e) => onChange(e.target.value || null)} className={inputClass}
       autoComplete={isSensitive ? "off" : undefined} />
   );
@@ -1098,6 +1108,10 @@ export function ConfigPage({ category }: { category: string }) {
                     fieldType === "struct_list";
                   const useRootSemantics = desc.root_level || isCollection;
                   const path = useRootSemantics ? fieldKey : `${sKey}.${fieldKey}`;
+                  // DOM-safe, stable per-field id for label↔control
+                  // association (#5140). `path` is unique within a
+                  // section render; non-word chars → '-'.
+                  const fieldInputId = `cfg-${path.replace(/[^\w-]/g, "-")}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
                     : getNestedValue(config, sKey, fieldKey, useRootSemantics);
@@ -1128,9 +1142,9 @@ export function ConfigPage({ category }: { category: string }) {
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
                       <div className="w-44 shrink-0 pt-1">
-                        <p className="text-xs font-semibold leading-tight">
+                        <label htmlFor={fieldInputId} className="block text-xs font-semibold leading-tight">
                           <Highlight text={fieldLabel} query={q} />
-                        </p>
+                        </label>
                         <div className="flex items-center gap-1 mt-0.5">
                           <p className="text-[10px] text-text-dim font-mono leading-tight">
                             <Highlight text={fieldKey} query={q} />
@@ -1143,6 +1157,7 @@ export function ConfigPage({ category }: { category: string }) {
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
                         <ConfigFieldInput
+                          inputId={fieldInputId}
                           fieldKey={fieldKey}
                           fieldType={fieldType}
                           options={options}

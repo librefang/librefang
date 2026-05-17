@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
-import { memo, useMemo, useState, useCallback, useEffect, useReducer } from "react";
+import { memo, useId, useMemo, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
@@ -1084,6 +1084,9 @@ const initialFilterState: FilterState = {
 
 export function ProvidersPage() {
   const { t } = useTranslation();
+  // Stable prefix for the config modal's <label htmlFor> / <input id>
+  // pairs so screen readers announce each field (#5140).
+  const cfgFieldId = useId();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [filterState, dispatch] = useReducer(filterReducer, initialFilterState);
@@ -1472,16 +1475,16 @@ export function ProvidersPage() {
 
             {config.provider.key_required !== false && (
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
-                <input type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
+                <label htmlFor={`${cfgFieldId}-api-key`} className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
+                <input id={`${cfgFieldId}-api-key`} type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
             )}
 
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
-              <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
+              <label htmlFor={`${cfgFieldId}-base-url`} className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input id={`${cfgFieldId}-base-url`} type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
@@ -1493,8 +1496,8 @@ export function ProvidersPage() {
             </div>
 
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
-              <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
+              <label htmlFor={`${cfgFieldId}-proxy-url`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+              <input id={`${cfgFieldId}-proxy-url`} type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
                 placeholder={t("providers.proxy_url_placeholder")}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>

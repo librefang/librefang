@@ -362,7 +362,21 @@ function GroupNodeComponent({ data, id }: { data: CanvasNodeData; id: string }) 
         className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
       >
-        <div className="flex items-center gap-2 flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}>
+        <div
+          className="flex items-center gap-2 flex-1 min-w-0"
+          role="button"
+          tabIndex={0}
+          aria-expanded={expanded}
+          aria-label={data.label || t("canvas.group")}
+          onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              data._onToggle?.(id);
+            }
+          }}
+        >
           {expanded
             ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
             : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
@@ -416,6 +430,18 @@ function WorkflowList({
         ) : (
           workflows.map(w => (
             <div key={w.id} onClick={() => onSelect(w)}
+              role="button"
+              tabIndex={0}
+              aria-pressed={selectedId === w.id}
+              aria-label={w.name}
+              onKeyDown={(e) => {
+                // Only the row itself activates select; nested run /
+                // delete buttons handle their own keys.
+                if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  onSelect(w);
+                }
+              }}
               className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
                 }`}>
               {confirmId === w.id ? (
