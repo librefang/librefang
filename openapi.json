@@ -10174,7 +10174,8 @@
           "filename": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkActionResult": {
         "type": "object",
@@ -10217,7 +10218,8 @@
               "type": "string"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkCreateRequest": {
         "type": "object",
@@ -10232,7 +10234,8 @@
               "$ref": "#/components/schemas/SpawnRequest"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkCreateResult": {
         "type": "object",
@@ -10282,7 +10285,8 @@
               "$ref": "#/components/schemas/UserUpsert"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkImportResult": {
         "type": "object",
@@ -10385,7 +10389,8 @@
             ],
             "description": "New username — optional, omit to keep the current username."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ClawHubInstallRequest": {
         "type": "object",
@@ -10405,7 +10410,8 @@
             "type": "string",
             "description": "ClawHub skill slug (e.g., \"github-helper\")."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CloneAgentRequest": {
         "type": "object",
@@ -10425,7 +10431,8 @@
           "new_name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ExtensionInstallRequest": {
         "type": "object",
@@ -10438,7 +10445,8 @@
             "type": "string",
             "description": "Extension/integration ID (e.g., \"github\", \"slack\")."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ExtensionUninstallRequest": {
         "type": "object",
@@ -10451,7 +10459,8 @@
             "type": "string",
             "description": "Extension/integration ID to remove."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "InjectMessageRequest": {
         "type": "object",
@@ -10471,7 +10480,8 @@
             ],
             "description": "Optional session id; when omitted the message broadcasts to all live sessions for the agent."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "InjectMessageResponse": {
         "type": "object",
@@ -10582,7 +10592,8 @@
             "type": "boolean",
             "description": "Whether the bot was @mentioned in a group message."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MessageResponse": {
         "type": "object",
@@ -10680,7 +10691,8 @@
           "target_dir": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MigrateScanRequest": {
         "type": "object",
@@ -10692,7 +10704,8 @@
           "path": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ParticipantRefSchema": {
         "type": "object",
@@ -10825,7 +10838,8 @@
             ],
             "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "PushMessageRequest": {
         "type": "object",
@@ -10855,7 +10869,8 @@
             ],
             "description": "Optional thread/topic ID for threaded replies (platform-specific)."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "RefreshRequest": {
         "type": "object",
@@ -10908,7 +10923,8 @@
           "content": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetAgentToolsRequest": {
         "type": "object",
@@ -10944,7 +10960,8 @@
             },
             "description": "Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetEnabledRequest": {
         "type": "object",
@@ -10955,7 +10972,8 @@
           "enabled": {
             "type": "boolean"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetModeRequest": {
         "type": "object",
@@ -10967,7 +10985,8 @@
           "mode": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SkillInstallRequest": {
         "type": "object",
@@ -10986,7 +11005,8 @@
           "name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SkillUninstallRequest": {
         "type": "object",
@@ -10998,7 +11018,8 @@
           "name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SpawnRequest": {
         "type": "object",
@@ -11029,7 +11050,8 @@
             ],
             "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SpawnResponse": {
         "type": "object",
@@ -11087,7 +11109,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UserUpsert": {
         "type": "object",
@@ -11117,7 +11140,8 @@
           "role": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UserView": {
         "type": "object",
