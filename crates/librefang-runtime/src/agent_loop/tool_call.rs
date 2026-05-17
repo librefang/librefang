@@ -699,6 +699,31 @@ pub(super) async fn execute_single_tool_call_inner(
         result.content.clone()
     };
 
+    // Spill the full raw result to the artifact store BEFORE
+    // `sanitize_tool_result_content` truncates it. Web tools spill at
+    // execution time, but MCP (and any other) results arrive un-spilled, so
+    // without this they would be destructively truncated and the original
+    // bytes lost — the LLM would get clipped text with no `read_artifact`
+    // reference. A web stub is already < threshold, so this is a no-op pass
+    // through for it (no double-spill).
+    let result_content = {
+        let cfg = ctx.opts.tool_results_config.clone().unwrap_or_default();
+        let (threshold, max_artifact) = crate::tool_runner::resolve_spill_config(
+            cfg.spill_threshold_bytes,
+            cfg.max_artifact_bytes,
+        );
+        match crate::artifact_store::maybe_spill(
+            &tool_call.name,
+            result_content.as_bytes(),
+            threshold,
+            max_artifact,
+            &crate::artifact_store::default_artifact_storage_dir(),
+        ) {
+            Some(stub) => stub,
+            None => result_content,
+        }
+    };
+
     let content = sanitize_tool_result_content(
         &result_content,
         ctx.context_budget,
