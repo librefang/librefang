@@ -132,8 +132,23 @@ impl EventTranslator {
                 // tool-call card. (#3313 review, PR-3)
                 let pending_before = queue.as_ref().map(|q| q.len()).unwrap_or(0);
                 let tool_call_id = queue
-                    .and_then(|q| q.pop_front())
+                    .map(|q| q.pop_front())
+                    .unwrap_or(None)
                     .unwrap_or_else(|| ToolCallId::new(format!("orphan-{name}")));
+                // Reap the outer entry once its queue drains. Without
+                // this the `(name, empty-VecDeque)` pair lingers for the
+                // life of the translator (this turn / ACP session) and
+                // grows with the count of distinct tool names invoked —
+                // a per-session leak (#5144). Re-borrow and check
+                // emptiness directly so a queue emptied by this pop (or
+                // one already empty from a prior result) is removed.
+                if self
+                    .in_flight_by_name
+                    .get(&name)
+                    .is_some_and(|q| q.is_empty())
+                {
+                    self.in_flight_by_name.remove(&name);
+                }
                 let status = if is_error {
                     ToolCallStatus::Failed
                 } else {
@@ -383,5 +398,79 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    /// Regression (#5144): once a tool name's in-flight queue drains,
+    /// the outer `in_flight_by_name` entry must be removed, not left as
+    /// a `(name, empty-VecDeque)` pair. Before the fix the map grew with
+    /// the count of distinct tool names invoked in the session/turn even
+    /// though every call had completed.
+    #[test]
+    fn drained_tool_queue_is_reaped_from_map() {
+        let mut t = EventTranslator::new();
+
+        // Two distinct tool names, each a single start→result round-trip.
+        for name in ["read_file", "write_file"] {
+            let _ = t.translate(StreamEvent::ToolUseStart {
+                id: format!("{name}-1"),
+                name: name.to_string(),
+            });
+            // While in flight the entry exists.
+            assert!(
+                t.in_flight_by_name.contains_key(name),
+                "in-flight entry must exist for {name}"
+            );
+            let _ = t.translate(StreamEvent::ToolExecutionResult {
+                name: name.to_string(),
+                result_preview: "done".into(),
+                is_error: false,
+            });
+            // After the result drains the queue the entry must be gone.
+            assert!(
+                !t.in_flight_by_name.contains_key(name),
+                "drained entry for {name} must be reaped"
+            );
+        }
+
+        assert!(
+            t.in_flight_by_name.is_empty(),
+            "map must be empty after all tool calls completed, got {} entries",
+            t.in_flight_by_name.len()
+        );
+    }
+
+    /// A still-pending sibling call must NOT cause premature reaping:
+    /// the entry survives until its queue is fully drained.
+    #[test]
+    fn map_entry_survives_while_siblings_pending() {
+        let mut t = EventTranslator::new();
+        let _ = t.translate(StreamEvent::ToolUseStart {
+            id: "a".into(),
+            name: "fetch".into(),
+        });
+        let _ = t.translate(StreamEvent::ToolUseStart {
+            id: "b".into(),
+            name: "fetch".into(),
+        });
+        // First result pops "a" but "b" is still pending → keep entry.
+        let _ = t.translate(StreamEvent::ToolExecutionResult {
+            name: "fetch".into(),
+            result_preview: "first".into(),
+            is_error: false,
+        });
+        assert!(
+            t.in_flight_by_name.contains_key("fetch"),
+            "entry must survive while a sibling call is still in flight"
+        );
+        // Second result drains the queue → entry reaped.
+        let _ = t.translate(StreamEvent::ToolExecutionResult {
+            name: "fetch".into(),
+            result_preview: "second".into(),
+            is_error: false,
+        });
+        assert!(
+            !t.in_flight_by_name.contains_key("fetch"),
+            "entry must be reaped once all siblings have completed"
+        );
     }
 }
