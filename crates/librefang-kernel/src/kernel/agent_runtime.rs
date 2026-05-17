@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use librefang_types::agent::{AgentId, RunningSessionSnapshot, RunningSessionState, SessionId};
 use librefang_types::error::LibreFangError;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::error::{KernelError, KernelResult};
 use crate::metering::MeteringEngine;
@@ -570,8 +570,29 @@ impl LibreFangKernel {
             }
         }
 
-        // Remove from persistent storage
-        let _ = self.memory.substrate.remove_agent(agent_id);
+        // Remove from persistent storage. Capture the result so a DB-side
+        // failure (lock contention, schema drift, FS error) is surfaced to
+        // the operator instead of being silently discarded with `let _ =`
+        // (#5117). Registry/scheduler/cron unwind has already happened by
+        // this point, so on failure the live state is gone but the DB row
+        // remains — the agent would otherwise resurrect on next daemon boot
+        // via `load_all_agents`. The lifecycle event and audit-log write
+        // below still run so any downstream subscribers (channel adapters,
+        // websocket peers, audit consumers) see the live-state teardown;
+        // `purge_identity` is intentionally skipped because dropping the
+        // canonical UUID while the agent row still exists would leave an
+        // unreachable orphan on the next boot.
+        let db_remove_result = self.memory.substrate.remove_agent(agent_id);
+        if let Err(e) = db_remove_result.as_ref() {
+            error!(
+                agent = %entry.name,
+                id = %agent_id,
+                error = %e,
+                "Failed to remove agent row from persistent storage; live state \
+                 has been torn down but the DB row remains and the agent may \
+                 resurrect on next boot (#5117)"
+            );
+        }
 
         // Clean up proactive memories for this agent
         if let Some(pm) = self.memory.proactive_memory.get() {
@@ -585,8 +606,11 @@ impl LibreFangKernel {
         // the binding so a respawn under the same name reuses this UUID.
         // `kill_agent_with_purge(agent, true)` (gated behind explicit
         // confirmation at the API/CLI surface) also drops the entry,
-        // which is the destructive path the issue describes.
-        if purge_identity {
+        // which is the destructive path the issue describes. Skipped when
+        // the DB row could not be removed — otherwise the next boot would
+        // load an `agents` row whose name is no longer in the canonical
+        // identity registry, leaving an unreachable orphan (#5117).
+        if purge_identity && db_remove_result.is_ok() {
             if let Some(dropped) = self.agents.agent_identities.purge(&entry.name) {
                 info!(
                     agent = %entry.name,
@@ -596,24 +620,40 @@ impl LibreFangKernel {
             }
         }
 
-        // SECURITY: Record agent kill in audit trail
+        // SECURITY: Record agent kill in audit trail. The status field
+        // distinguishes a clean kill from one whose persistent-storage
+        // delete failed so audit consumers can flag the latter for
+        // follow-up (#5117).
+        let audit_status = if db_remove_result.is_ok() {
+            "ok"
+        } else {
+            "db_remove_failed"
+        };
         self.metering.audit_log.record(
             agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentKill,
             format!("name={}, purge_identity={}", entry.name, purge_identity),
-            "ok",
+            audit_status,
         );
 
         // Lifecycle: agent has been removed from the registry; sessions tied
         // to this agent are no longer active. Use the agent name as the
         // best-effort reason — call sites that need richer context can extend
-        // the variant in a future change.
+        // the variant in a future change. Emitted even on DB-remove failure
+        // so downstream subscribers (channel adapters, websocket peers) see
+        // the live-state teardown that already happened above (#5117).
         self.events.session_lifecycle_bus.publish(
             crate::session_lifecycle::SessionLifecycleEvent::AgentTerminated {
                 agent_id,
                 reason: format!("kill_agent(name={})", entry.name),
             },
         );
+
+        // Bubble the DB-remove failure last so the operator hears about it
+        // (#5117); on success this is a no-op. routes/agents.rs::kill_agent
+        // maps a non-AgentNotFound KernelError to ApiErrorResponse::internal
+        // → HTTP 500, so the DELETE no longer returns a false 200 OK.
+        db_remove_result.map_err(KernelError::LibreFang)?;
 
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
         Ok(())

@@ -102,6 +102,7 @@ _95 PRs from 5 contributors since v2026.5.8-beta.10._
 - Align status fields, fix OFP-disabled empty-state (#4945) (@houko)
 - Add missing model_override in Session literal (#4955) (@houko)
 - Exclude cache-read hits from burst limit; sort agent-detail skills (#4957) (@houko)
+- Propagate DB error from agent deletion instead of false 200 OK (#5117) (@houko)
 
 ### Changed
 

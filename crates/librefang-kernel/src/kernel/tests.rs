@@ -7946,3 +7946,62 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
 
     kernel.shutdown();
 }
+
+// ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
+
+/// Happy-path regression for #5117: `kill_agent_with_purge` previously
+/// discarded the substrate `remove_agent` result with `let _ = …`, so a DB
+/// failure (lock contention, schema drift, FS error) would silently leave the
+/// row on disk and the agent would resurrect on next daemon boot. After the
+/// fix, the error is propagated as `KernelError::LibreFang(LibreFangError)`.
+/// This test pins the success path so the refactor cannot regress the
+/// common case: kill returns `Ok(())` AND the SQLite `agents` row is
+/// scrubbed.
+#[test]
+fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-5117-happy");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let manifest = AgentManifest {
+        name: "agent-5117".to_string(),
+        description: "agent for #5117 regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent before kill")
+            .is_some(),
+        "agent row must exist in SQLite before kill"
+    );
+
+    kernel
+        .kill_agent_with_purge(agent_id, true)
+        .expect("kill_agent_with_purge should succeed on happy path");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent after kill")
+            .is_none(),
+        "agent row must be gone from SQLite after successful kill_agent_with_purge (#5117)"
+    );
+
+    kernel.shutdown();
+}
