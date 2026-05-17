@@ -1711,25 +1711,31 @@ impl McpConnection {
     /// SSRF guard for every MCP transport that opens an outbound HTTP
     /// connection (SSE, Streamable HTTP, HTTP compatibility shim).
     ///
-    /// Delegates to [`crate::mcp_oauth::is_ssrf_blocked_url`] so the
-    /// connect path and the OAuth discovery / token-exchange paths share
-    /// one policy. The shared helper:
+    /// Delegates to [`crate::mcp_oauth::is_ssrf_blocked_url_for_connect`].
+    /// The MCP backend URL is operator-configured (config.toml), not
+    /// influenced by a remote response, so a local MCP server on
+    /// `127.0.0.1` / `localhost` / a LAN address is a legitimate, common
+    /// setup and is allowed. The helper still:
     ///
     /// * parses the URL with the `url` crate (no substring matching),
     /// * rejects non-`http(s)` schemes (`file://`, `ftp://`, …),
     /// * rejects userinfo (`http://user:pw@host/`),
-    /// * blocks loopback (`127.0.0.0/8`, `::1`), RFC1918
-    ///   (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64.0.0/10`),
-    ///   link-local (`169.254/16`, `fe80::/10`), and ULA (`fc00::/7`),
+    /// * blocks the cloud-metadata pivots that are never a legitimate
+    ///   backend: `0.0.0.0`, `169.254/16`, CGNAT `100.64.0.0/10`,
+    ///   Azure IMDS `192.0.0.192`, and IMDS hostnames
+    ///   (`metadata.google.internal`, `metadata.aws.internal`,
+    ///   `instance-data`),
     /// * unwraps IPv4-mapped IPv6 and the NAT64 well-known prefix
-    ///   (`64:ff9b::/96`) before re-checking the embedded IPv4,
-    /// * blocks IMDS hostnames (`metadata.google.internal`,
-    ///   `metadata.aws.internal`, `instance-data`) and `localhost`.
+    ///   (`64:ff9b::/96`) before re-checking the embedded IPv4.
+    ///
+    /// The full loopback / RFC1918 / ULA block is retained on the OAuth
+    /// discovery / token-exchange path (`is_ssrf_blocked_url`), where the
+    /// host comes from a remote server response.
     ///
     /// `label` is woven into the error so the operator can tell which
     /// transport rejected the URL.
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
-        crate::mcp_oauth::is_ssrf_blocked_url(url)
+        crate::mcp_oauth::is_ssrf_blocked_url_for_connect(url)
             .map_err(|reason| format!("SSRF: {label} URL rejected — {reason}"))
     }
 
@@ -3911,23 +3917,25 @@ mod tests {
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
         assert!(McpConnection::check_ssrf("http://metadata.aws.internal/", "test").is_err());
+        // Azure IMDS alternative endpoint — public IANA-assigned IP but
+        // blocked unconditionally to stay aligned with web_fetch::check_ssrf.
+        assert!(McpConnection::check_ssrf("http://192.0.0.192/metadata/instance", "test").is_err());
+        // Same Azure IMDS alternative reached through the two IPv6-embedded
+        // IPv4 forms that route to 192.0.0.192 on the wire — the most
+        // regression-prone codepath (ipv6_embedded_ipv4 → blocked_v4).
+        // IPv4-mapped: ::ffff:192.0.0.192.
+        assert!(McpConnection::check_ssrf("http://[::ffff:192.0.0.192]/", "test").is_err());
+        // NAT64 well-known prefix: 64:ff9b::192.0.0.192 (== 64:ff9b::c000:c0).
+        assert!(McpConnection::check_ssrf("http://[64:ff9b::c000:c0]/", "test").is_err());
 
-        // Loopback — IPv4, hostname, and IPv6
-        assert!(McpConnection::check_ssrf("http://127.0.0.1/admin", "test").is_err());
-        assert!(McpConnection::check_ssrf("http://localhost/x", "test").is_err());
-        assert!(McpConnection::check_ssrf("http://[::1]/x", "test").is_err());
-
-        // RFC1918 and CGNAT
-        assert!(McpConnection::check_ssrf("http://10.0.0.1/x", "test").is_err());
-        assert!(McpConnection::check_ssrf("http://192.168.1.1/x", "test").is_err());
-        assert!(McpConnection::check_ssrf("http://172.16.0.1/x", "test").is_err());
+        // CGNAT 100.64.0.0/10 — covers Alibaba Cloud IMDS 100.100.100.200;
+        // never a legitimate operator backend, blocked on the connect path.
         assert!(McpConnection::check_ssrf("http://100.64.0.1/x", "test").is_err());
+        // 0.0.0.0 unspecified — resolves to loopback, footgun, blocked.
+        assert!(McpConnection::check_ssrf("http://0.0.0.0/x", "test").is_err());
 
         // NAT64 well-known prefix smuggling IMDS (64:ff9b::169.254.169.254)
         assert!(McpConnection::check_ssrf("http://[64:ff9b::a9fe:a9fe]/x", "test").is_err());
-
-        // IPv4-mapped IPv6 smuggling loopback (::ffff:127.0.0.1)
-        assert!(McpConnection::check_ssrf("http://[::ffff:7f00:1]/x", "test").is_err());
 
         // Userinfo — pre-#3623 substring stub let credentials through
         assert!(McpConnection::check_ssrf("http://alice:pw@example.com/", "test").is_err());
@@ -3935,8 +3943,45 @@ mod tests {
         // Non-http(s) schemes — file:// must never reach reqwest
         assert!(McpConnection::check_ssrf("file:///etc/passwd", "test").is_err());
 
+        // The MCP backend URL is operator-configured (config.toml), not
+        // attacker-influenced, so a local / LAN MCP server is a
+        // legitimate, common setup and must be allowed on the connect
+        // path. (#5156 over-blocked these and broke every localhost MCP
+        // HTTP backend — `test_http_compat_end_to_end` is the regression
+        // canary; the full block stays on the OAuth path, see
+        // `test_oauth_path_still_blocks_private`.)
+        assert!(McpConnection::check_ssrf("http://127.0.0.1:3000/mcp", "test").is_ok());
+        assert!(McpConnection::check_ssrf("http://localhost/x", "test").is_ok());
+        assert!(McpConnection::check_ssrf("http://[::1]/x", "test").is_ok());
+        assert!(McpConnection::check_ssrf("http://10.0.0.1/x", "test").is_ok());
+        assert!(McpConnection::check_ssrf("http://192.168.1.1/x", "test").is_ok());
+        assert!(McpConnection::check_ssrf("http://172.16.0.1/x", "test").is_ok());
+        // IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) — private-tier,
+        // allowed on connect like its bare IPv4 form.
+        assert!(McpConnection::check_ssrf("http://[::ffff:7f00:1]/x", "test").is_ok());
+
         // Sanity: a normal public MCP endpoint is allowed
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
+    }
+
+    /// Pins the split introduced for #5156's localhost over-block: the
+    /// OAuth discovery / token-exchange path (host comes from a remote
+    /// response) keeps the full loopback / RFC1918 / ULA block even
+    /// though the operator-configured connect path now allows it.
+    #[test]
+    fn test_oauth_path_still_blocks_private() {
+        use crate::mcp_oauth::is_ssrf_blocked_url;
+        // Still blocked on the server-response-influenced path:
+        assert!(is_ssrf_blocked_url("http://127.0.0.1/x").is_err());
+        assert!(is_ssrf_blocked_url("http://localhost/x").is_err());
+        assert!(is_ssrf_blocked_url("http://10.0.0.1/x").is_err());
+        assert!(is_ssrf_blocked_url("http://192.168.1.1/x").is_err());
+        assert!(is_ssrf_blocked_url("http://[::1]/x").is_err());
+        // Metadata pivots blocked on both paths:
+        assert!(is_ssrf_blocked_url("http://169.254.169.254/x").is_err());
+        assert!(is_ssrf_blocked_url("http://192.0.0.192/x").is_err());
+        // Public host still allowed:
+        assert!(is_ssrf_blocked_url("https://api.example.com/mcp").is_ok());
     }
 
     #[test]
