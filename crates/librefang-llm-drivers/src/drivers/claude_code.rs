@@ -423,6 +423,55 @@ impl ClaudeCodeDriver {
         }
     }
 
+    /// Force the spawned CLI's home directory to a path where it can
+    /// actually find its credentials.
+    ///
+    /// Containers that drop privileges to a numeric uid without a matching
+    /// passwd entry inherit a placeholder home directory from the OS:
+    ///   * glibc / Linux: `/nonexistent`
+    ///   * BSD / Alpine `nobody`: `/var/empty`
+    ///   * Some hardened images: `/dev/null`
+    ///   * Some misconfigured services: empty string
+    ///
+    /// The spawned `claude.exe` then tries to read
+    /// `~/.claude/.credentials.json` under that path, finds nothing, and
+    /// exits silently before draining its stdin. The kernel-side
+    /// `stdin.write_all(prompt)` then hits `Broken pipe (os error 32)` once
+    /// the prompt exceeds the pipe buffer (~64 KiB) and the caller sees
+    /// `Failed to write prompt to Claude Code CLI stdin: Broken pipe`
+    /// with no actionable detail.
+    ///
+    /// Resolution order:
+    ///   1. `LIBREFANG_HOME` — the documented kernel-boot override, set by
+    ///      the wrapper / Lazycat init (see `CLAUDE.md` "Environment").
+    ///   2. The platform's home variable: `$HOME` on Unix,
+    ///      `%USERPROFILE%` on Windows.
+    ///
+    /// The candidate must resolve to an existing directory on disk. That
+    /// single `is_dir()` check rejects every placeholder above — and any
+    /// future passwd-less sentinel some distro might invent — without us
+    /// having to enumerate them. If neither source yields a real
+    /// directory we leave the inherited home alone; the caller has
+    /// bigger problems and the existing diagnostic surfaces them.
+    fn ensure_home_env(cmd: &mut tokio::process::Command) {
+        // Spawned CLI resolves `~` via `$HOME` on Unix and `%USERPROFILE%`
+        // on Windows. Override only the platform-relevant variable; the
+        // other one is either ignored by the CLI or already correct.
+        #[cfg(unix)]
+        let env_var = "HOME";
+        #[cfg(windows)]
+        let env_var = "USERPROFILE";
+
+        let candidate = std::env::var_os("LIBREFANG_HOME")
+            .or_else(|| std::env::var_os(env_var))
+            .filter(|p| !p.is_empty())
+            .filter(|p| std::path::Path::new(p).is_dir());
+
+        if let Some(home) = candidate {
+            cmd.env(env_var, home);
+        }
+    }
+
     fn build_command_args(
         &self,
         output_format: &str,
@@ -701,6 +750,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
+        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -982,6 +1032,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
+        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -1912,6 +1963,204 @@ mod tests {
         // Argument vector must be small and bounded — no prompt body in it.
         assert!(args.iter().all(|a| a.len() < 256));
         assert!(args.contains(&"-p".to_string()));
+    }
+
+    /// Pin: when the daemon inherited `HOME=/nonexistent` (Lazycat-style
+    /// containers default uid-without-passwd to that path), `ensure_home_env`
+    /// MUST override it with `LIBREFANG_HOME` or the spawned `claude.exe`
+    /// can't find its credentials and the next `stdin.write_all` hits
+    /// `Broken pipe`.
+    ///
+    /// `#[serial]` because every test in this module that mutates `HOME` /
+    /// `LIBREFANG_HOME` must run sequentially: `std::env::{set,remove}_var`
+    /// is UB while other threads exist, and `cargo test` /  `cargo nextest`
+    /// run tests concurrently by default.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_overrides_nonexistent_when_libfang_home_set() {
+        // A real on-disk directory so the new `is_dir()` filter accepts it.
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        // SAFETY: #[serial_test::serial] serialises every env-mutating test
+        // in this binary, so no other thread reads or writes these vars.
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::set_var("LIBREFANG_HOME", dir.path());
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        // Round-trip via Command::get_envs() — env() overrides land here.
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        // SAFETY: restore env BEFORE asserting — a failed assert otherwise
+        // poisons sibling tests that read these vars.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_libfang {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_keeps_real_home_when_no_libfang_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        // SAFETY: see the comment on the test above.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::remove_var("LIBREFANG_HOME");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_libfang {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_leaves_command_alone_when_no_candidate() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        // SAFETY: see the comment on the first test in this group.
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::remove_var("LIBREFANG_HOME");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        // No HOME override should be added when neither LIBREFANG_HOME nor a
+        // valid HOME is available. The child will inherit the broken HOME and
+        // we surface the underlying issue via the existing diagnostic.
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_libfang {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+        assert!(
+            resolved.iter().all(|(k, _)| k != "HOME"),
+            "no HOME override expected, got: {resolved:?}",
+        );
+    }
+
+    /// Beyond `/nonexistent`, the broader class of passwd-less placeholders
+    /// — `/var/empty` (BSD / Alpine `nobody`), `/dev/null` (some hardened
+    /// images), the empty string, plus any path that does not resolve to
+    /// an existing directory — must also be rejected. The single
+    /// `Path::is_dir()` check in `ensure_home_env` covers them all
+    /// without us having to enumerate.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_rejects_broader_placeholders() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+
+        // `/dev/null` exists but is a character device, not a directory.
+        // `/this/.../does/not/exist` is the catch-all for unknown sentinels.
+        // Empty string is the "misconfigured uid" case.
+        for placeholder in &["", "/dev/null", "/this/path/should/not/exist"] {
+            // SAFETY: see the comment on the first test in this group.
+            unsafe {
+                std::env::set_var("HOME", placeholder);
+                std::env::remove_var("LIBREFANG_HOME");
+            }
+            let mut cmd = tokio::process::Command::new("/bin/true");
+            ClaudeCodeDriver::ensure_home_env(&mut cmd);
+            let resolved: Vec<(String, Option<String>)> = cmd
+                .as_std()
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|s| s.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            // Restore env before each potential assert! failure (loop).
+            // SAFETY: same as above.
+            unsafe {
+                match &saved_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &saved_libfang {
+                    Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                    None => std::env::remove_var("LIBREFANG_HOME"),
+                }
+            }
+            assert!(
+                resolved.iter().all(|(k, _)| k != "HOME"),
+                "placeholder HOME={placeholder:?} should be rejected, got: {resolved:?}",
+            );
+        }
     }
 
     #[test]
