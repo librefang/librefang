@@ -33,6 +33,10 @@ struct AclKernel {
     /// Number of wiki writes / reads that reached the vault.
     wiki_write_calls: Arc<Mutex<usize>>,
     wiki_read_calls: Arc<Mutex<usize>>,
+    /// Provenance payloads captured from `wiki_write` calls that reached the
+    /// vault. Used to assert that the dispatcher routes `channel` and
+    /// `sender` into distinct frontmatter fields (#5179 P1).
+    wiki_write_provenance: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The ACL this kernel hands back from `memory_acl_for_sender`. `None`
     /// models "RBAC disabled / sender unattributed".
     acl: Option<UserMemoryAccess>,
@@ -44,6 +48,7 @@ struct AclProbes {
     list: CallLog,
     wiki_write: Arc<Mutex<usize>>,
     wiki_read: Arc<Mutex<usize>>,
+    wiki_write_provenance: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 impl AclKernel {
@@ -53,12 +58,14 @@ impl AclKernel {
         let list: CallLog = Arc::new(Mutex::new(Vec::new()));
         let wiki_write = Arc::new(Mutex::new(0usize));
         let wiki_read = Arc::new(Mutex::new(0usize));
+        let wiki_write_provenance = Arc::new(Mutex::new(Vec::new()));
         let kernel = Self {
             store_calls: Arc::clone(&store),
             recall_calls: Arc::clone(&recall),
             list_calls: Arc::clone(&list),
             wiki_write_calls: Arc::clone(&wiki_write),
             wiki_read_calls: Arc::clone(&wiki_read),
+            wiki_write_provenance: Arc::clone(&wiki_write_provenance),
             acl,
         };
         (
@@ -69,6 +76,7 @@ impl AclKernel {
                 list,
                 wiki_write,
                 wiki_read,
+                wiki_write_provenance,
             },
         )
     }
@@ -164,10 +172,11 @@ impl WikiAccess for AclKernel {
         &self,
         _topic: &str,
         _body: &str,
-        _provenance: serde_json::Value,
+        provenance: serde_json::Value,
         _force: bool,
     ) -> Result<serde_json::Value, librefang_kernel_handle::KernelOpError> {
         *self.wiki_write_calls.lock().unwrap() += 1;
+        self.wiki_write_provenance.lock().unwrap().push(provenance);
         Ok(json!({"status": "written"}))
     }
 }
@@ -550,4 +559,54 @@ async fn allowed_user_wiki_roundtrip_works() {
     assert!(!g.is_error, "user may read wiki: {}", g.content);
     assert_eq!(*probes.wiki_write.lock().unwrap(), 1);
     assert_eq!(*probes.wiki_read.lock().unwrap(), 1);
+}
+
+/// #5179 P1: the provenance frontmatter MUST keep `channel` (transport / room)
+/// and `sender` (attributed user) as distinct fields. An earlier draft of the
+/// dispatcher wrote `sender_id` into the `channel` slot, which would pollute
+/// the wiki history with channel rows that actually identify users and
+/// destroy the audit value of the frontmatter.
+#[tokio::test]
+async fn wiki_write_provenance_separates_channel_and_sender() {
+    let (kernel, probes) = AclKernel::new(Some(user_acl()));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, Some("alice"), Some("telegram"));
+    let w = execute_tool_raw(
+        "t9",
+        "wiki_write",
+        &json!({"topic": "Doc", "body": "hello"}),
+        &ctx,
+    )
+    .await;
+
+    assert!(!w.is_error, "user may write wiki: {}", w.content);
+
+    let captured = probes.wiki_write_provenance.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        1,
+        "exactly one wiki_write should have landed"
+    );
+    let prov = &captured[0];
+
+    assert_eq!(
+        prov.get("sender").and_then(|v| v.as_str()),
+        Some("alice"),
+        "sender field must carry the user id, got provenance = {prov}"
+    );
+    assert_eq!(
+        prov.get("channel").and_then(|v| v.as_str()),
+        Some("telegram"),
+        "channel field must carry the transport, got provenance = {prov}"
+    );
+    assert_eq!(
+        prov.get("agent").and_then(|v| v.as_str()),
+        Some("test-agent"),
+        "agent field must carry the caller agent id, got provenance = {prov}"
+    );
+    assert!(
+        prov.get("at").and_then(|v| v.as_str()).is_some(),
+        "provenance must carry an `at` timestamp, got provenance = {prov}"
+    );
 }

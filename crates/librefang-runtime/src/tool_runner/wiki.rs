@@ -88,9 +88,16 @@ pub(super) fn tool_wiki_write(
     let agent = caller_agent_id
         .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    // Keep `channel` and `sender` as DISTINCT fields in the audit
+    // frontmatter: `channel` is the transport/room (telegram, slack, "cron",
+    // …) and `sender` is the attributed user. Conflating them — as an
+    // earlier draft did by writing `sender_id` into the `channel` slot —
+    // pollutes the wiki history with channel rows that actually identify
+    // users, defeating the audit value of the provenance trail.
     let provenance = serde_json::json!({
         "agent": agent,
-        "channel": sender_id,
+        "channel": channel,
+        "sender": sender_id,
         "at": chrono::Utc::now().to_rfc3339(),
     });
 
