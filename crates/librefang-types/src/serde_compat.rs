@@ -82,6 +82,86 @@ where
     deserializer.deserialize_any(VecLenientVisitor(PhantomData))
 }
 
+/// Deserialize an `Option<Vec<T>>` leniently:
+/// - absent / null / unit / non-sequence primitive → `None`
+/// - empty sequence → `Some([])`
+/// - non-empty sequence → `Some([…])`
+/// - map → `None` (drain map for consistency)
+///
+/// Used for fields like `fallback_models` where `None` means "inherit the
+/// global default" and `Some(vec)` means "agent override" (#5112).
+pub fn option_vec_lenient<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct OptionVecLenientVisitor<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for OptionVecLenientVisitor<T> {
+        type Value = Option<Vec<T>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a sequence or absent/null (which becomes None)")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(item) = seq.next_element()? {
+                vec.push(item);
+            }
+            Ok(Some(vec))
+        }
+
+        fn visit_map<A>(self, mut _map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while let Some((_, _)) = _map.next_entry::<de::IgnoredAny, de::IgnoredAny>()? {}
+            Ok(None)
+        }
+
+        fn visit_i64<E: de::Error>(self, _v: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E: de::Error>(self, _v: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, _v: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(
+            self,
+            deserializer: D2,
+        ) -> Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(OptionVecLenientVisitor(PhantomData))
+}
+
 /// Deserialize a `HashMap<K, V>` leniently: if the stored value is not a map
 /// (e.g., it's a sequence, integer, string, bool, or null), return an empty
 /// HashMap instead of failing.
