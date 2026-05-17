@@ -26,6 +26,14 @@ import {
   clawhubCnKeys,
   skillhubKeys,
   sessionKeys,
+  agentKeys,
+  memoryKeys,
+  configKeys,
+  channelKeys,
+  scheduleKeys,
+  triggerKeys,
+  cronKeys,
+  handKeys,
 } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
@@ -73,7 +81,25 @@ function expectAllSurfacesInvalidated(spy: ReturnType<typeof vi.spyOn>) {
 }
 
 describe("useRestoreBackup", () => {
-  it("invalidates runtimeKeys.backups() and overviewKeys.snapshot()", async () => {
+  // A backup restore overwrites the entire data directory, so every
+  // cached domain is stale — not just backups + the overview snapshot
+  // (#5140). The mutation must invalidate every domain `.all` root.
+  const RESTORE_DIRTIED_KEYS = [
+    agentKeys.all,
+    memoryKeys.all,
+    sessionKeys.all,
+    configKeys.all,
+    channelKeys.all,
+    scheduleKeys.all,
+    triggerKeys.all,
+    cronKeys.all,
+    skillKeys.all,
+    handKeys.all,
+    runtimeKeys.all,
+    overviewKeys.all,
+  ] as const;
+
+  it("invalidates every dirtied domain .all key after restore (#5140)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -84,12 +110,9 @@ describe("useRestoreBackup", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: runtimeKeys.backups(),
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: overviewKeys.snapshot(),
-    });
+    for (const queryKey of RESTORE_DIRTIED_KEYS) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
+    }
   });
 });
 
