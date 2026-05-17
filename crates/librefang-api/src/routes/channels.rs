@@ -1663,16 +1663,17 @@ pub async fn remove_channel(
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    // Remove all secret env vars for this channel
+    // Remove all secret env vars for this channel. Route the process-wide
+    // env mutation through `remove_env_var_guarded` so it serializes against
+    // every other writer in the daemon (set_provider_key / set_hand_secret /
+    // the per-instance configure paths above). A bare `unsafe { remove_var }`
+    // here would reintroduce the writer/writer race #5142 closed.
     for field_def in meta.fields {
         if let Some(env_var) = field_def.env_var {
             if let Err(e) = remove_secret_env(&secrets_path, env_var) {
                 tracing::warn!("Failed to remove secret env var: {e}");
             }
-            // SAFETY: Single-threaded config operation
-            unsafe {
-                std::env::remove_var(env_var);
-            }
+            crate::secrets_env::remove_env_var_guarded(env_var.to_string()).await;
         }
     }
 

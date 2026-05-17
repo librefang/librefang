@@ -3925,6 +3925,147 @@ async fn kill_agent_aborts_in_flight_run_5142() {
     kernel.shutdown();
 }
 
+/// #5142 follow-up regression: the streaming-dispatch path must not
+/// register an orphan `RunningTask` when a `kill_agent` lands in the
+/// window between `entry = registry.get(agent_id)` (line 1717) and the
+/// `running_tasks.insert((agent, session), …)` at the bottom of
+/// `send_message_streaming_*`. Pre-fix, the kill's `stop_agent_run` ran
+/// before the dispatcher had inserted its handle, so the kill found
+/// nothing to abort; then the dispatcher inserted a handle for an agent
+/// that was no longer in the registry. The handle survived until the
+/// next periodic GC sweep — long enough to keep burning provider tokens.
+///
+/// The fix is the post-insert registry recheck + `remove_if` self-eject
+/// in `send_message_streaming_with_routing_…`. This test exercises that
+/// exact protocol at the running_tasks layer: spawn N concurrent
+/// "dispatchers" that follow the protocol against an agent another
+/// thread is repeatedly killing, and assert no orphan entries survive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_agent_dispatch_insert_race_leaves_no_orphan_5142() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-dispatch-race-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+
+    let manifest = AgentManifest {
+        name: "race-victim".to_string(),
+        description: "agent for kill/dispatch race".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Count how many dispatchers observed the kill via the post-insert
+    // recheck and self-ejected. Used only for diagnostic output.
+    let self_ejected = Arc::new(AtomicUsize::new(0));
+
+    // Thread A: kill the agent. The kill's `stop_agent_run` runs before
+    // some dispatchers' inserts (the racy window) and `registry.remove`
+    // runs before the rest.
+    let killer_kernel = Arc::clone(&kernel);
+    let killer = tokio::spawn(async move {
+        // Brief yield so the dispatchers have spun up their loops.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let _ = killer_kernel.kill_agent(agent_id);
+    });
+
+    // Thread B (x N): simulate the streaming dispatch insert protocol.
+    // We do NOT call `send_message_streaming_*` directly because that
+    // would require a real LLM driver fixture; instead we replicate the
+    // exact insert-side sequence (snapshot-entry → spawn → post-insert
+    // recheck) at the running_tasks layer the fix touches.
+    let mut dispatchers = Vec::new();
+    for i in 0..32 {
+        let kernel_b = Arc::clone(&kernel);
+        let self_ejected_b = Arc::clone(&self_ejected);
+        dispatchers.push(tokio::spawn(async move {
+            // (1) Snapshot the entry the way `send_message_full` does at
+            //     line 819 / `send_message_streaming_*` at line 1717.
+            let entry_snapshot = kernel_b.agents.registry.get(agent_id);
+            if entry_snapshot.is_none() {
+                // Kill already won — dispatcher would have errored at the
+                // registry.get above and returned without spawning. No
+                // orphan possible on this branch.
+                return;
+            }
+
+            // (2) Spawn a long-lived task standing in for the in-flight
+            //     LLM stream.
+            let task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            });
+            let abort = task.abort_handle();
+
+            // Variable delay across dispatchers so insert/kill interleave
+            // exercises every race position.
+            tokio::time::sleep(std::time::Duration::from_micros(i * 50)).await;
+
+            // (3) Insert into running_tasks (matches messaging.rs:2911).
+            let session = SessionId::new();
+            let turn_task_id = uuid::Uuid::new_v4();
+            kernel_b.agents.running_tasks.insert(
+                (agent_id, session),
+                RunningTask {
+                    abort: abort.clone(),
+                    started_at: chrono::Utc::now(),
+                    task_id: turn_task_id,
+                },
+            );
+
+            // (4) Post-insert recheck + self-eject (the fix itself —
+            //     mirrors messaging.rs:2927-2942).
+            if kernel_b.agents.registry.get(agent_id).is_none() {
+                if let Some((_, evicted)) = kernel_b
+                    .agents
+                    .running_tasks
+                    .remove_if(&(agent_id, session), |_, v| v.task_id == turn_task_id)
+                {
+                    evicted.abort.abort();
+                    self_ejected_b.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    killer.await.expect("killer must finish");
+    for d in dispatchers {
+        d.await.expect("dispatcher must finish");
+    }
+
+    // The invariant: after kill + every dispatcher's insert protocol has
+    // run, the running_tasks map must hold no entries for this agent.
+    // Without the post-insert recheck, dispatchers that lost the race
+    // would have left an orphan that only the next gc_sweep tick could
+    // reap — and pre-#5142 the sweep dropped the AbortHandle on the
+    // floor anyway.
+    let leftovers: Vec<_> = kernel
+        .agents
+        .running_tasks
+        .iter()
+        .filter(|e| e.key().0 == agent_id)
+        .map(|e| *e.key())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "kill_agent + concurrent dispatch insert must not leave orphan running_tasks; \
+         {} leftover(s) after {} dispatchers self-ejected",
+        leftovers.len(),
+        self_ejected.load(Ordering::Relaxed),
+    );
+
+    kernel.shutdown();
+}
+
 /// #5142 regression: the periodic GC sweep must FIRE the `AbortHandle` for a
 /// dead agent's leftover `running_tasks` entry, not just drop it. Pre-#5142
 /// the sweep `running_tasks.remove(&key)` discarded the handle without

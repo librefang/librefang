@@ -2879,6 +2879,26 @@ impl LibreFangKernel {
                     session_id = %effective_session_id,
                     "spawned task already finished; skipping running_tasks registration"
                 );
+            } else if self.agents.registry.get(agent_id).is_none() {
+                // #5142: close the kill/dispatch race window. The kill path
+                // (`kill_agent_with_purge`) calls `stop_agent_run(agent_id)`
+                // *then* `registry.remove(agent_id)`. A concurrent dispatch
+                // that snapshotted the entry before `stop_agent_run` but
+                // hasn't reached this insert yet would otherwise register an
+                // orphan `RunningTask` after the agent is gone — the abort
+                // handle then survives until the periodic GC sweep, and the
+                // spawned loop keeps burning provider tokens against a
+                // deleted agent. Re-check the registry here under the same
+                // shard read used by every other registry access; if the
+                // agent is gone, abort the just-spawned task and skip
+                // registration so the loop unwinds at its next `.await`
+                // instead of leaking.
+                tracing::info!(
+                    agent_id = %agent_id,
+                    session_id = %effective_session_id,
+                    "agent removed from registry before running_tasks insert; aborting spawned task"
+                );
+                handle.abort();
             } else {
                 let new_task = RunningTask {
                     abort: handle.abort_handle(),
@@ -2896,6 +2916,29 @@ impl LibreFangKernel {
                         "aborting previous running task before starting new one"
                     );
                     old_task.abort.abort();
+                }
+                // #5142: a kill that lands *between* our registry check and
+                // the insert above would have aborted nothing (its
+                // `stop_agent_run` ran before our entry existed) yet
+                // `registry.remove` has since dropped the agent. Re-check
+                // post-insert and self-eject under the same `remove_if`
+                // task_id guard the cleanup path uses, so we never wipe a
+                // successor turn's entry.
+                if self.agents.registry.get(agent_id).is_none() {
+                    if let Some((_, evicted)) = self
+                        .agents
+                        .running_tasks
+                        .remove_if(&(agent_id, effective_session_id), |_, v| {
+                            v.task_id == turn_task_id
+                        })
+                    {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            session_id = %effective_session_id,
+                            "agent removed from registry during running_tasks insert; aborting spawned task"
+                        );
+                        evicted.abort.abort();
+                    }
                 }
             }
         }
