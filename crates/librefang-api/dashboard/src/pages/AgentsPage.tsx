@@ -27,7 +27,7 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, Plug, Radio } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -58,8 +58,12 @@ import {
   useAgentStats,
   useAgentTemplates,
   useAgentTools,
+  useAgentMcpServers,
+  useAgentSkills,
+  useAgentChannels,
   useTools,
 } from "../lib/queries/agents";
+import { useMcpServers } from "../lib/queries/mcp";
 import {
   useAgentTemplateToml,
   useCloneAgent,
@@ -72,6 +76,9 @@ import {
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
+  useSetAgentMcpServers,
+  useSetAgentSkills,
+  useSetAgentChannels,
 } from "../lib/mutations/agents";
 
 /**
@@ -221,10 +228,15 @@ export function AgentsPage() {
   const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
+  // Draft state for Save-button pattern on Skills / MCP / Channels tabs.
+  // null = not yet initialized from server data.
+  const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
+  const [mcpDraft, setMcpDraft] = useState<string[] | null>(null);
+  const [channelsDraft, setChannelsDraft] = useState<string[] | null>(null);
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "mcp" | "channels" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -506,6 +518,23 @@ export function AgentsPage() {
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  // Per-agent MCP server assignment — backs the MCP tab. Fetches
+  // both the agent's assigned allowlist and all available MCP servers
+  // from the kernel so the tab can show the full picture.
+  const agentMcpServersQuery = useAgentMcpServers(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "mcp",
+  });
+  const setAgentMcpServersMutation = useSetAgentMcpServers();
+  const agentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "skills",
+  });
+  const setAgentSkillsMutation = useSetAgentSkills();
+  const agentChannelsQuery = useAgentChannels(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "channels",
+  });
+  const setAgentChannelsMutation = useSetAgentChannels();
+  // Full MCP servers list for description cross-reference in MCP tab
+  const allMcpServersQuery = useMcpServers({ enabled: !!detailAgent && agentTab === "mcp" });
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -754,6 +783,13 @@ export function AgentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredAgents, detailAgent]);
 
+  // Reset drafts when selected agent changes so stale edits don't leak.
+  useEffect(() => {
+    setSkillsDraft(null);
+    setMcpDraft(null);
+    setChannelsDraft(null);
+  }, [detailAgent?.id]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
     // Row-embedded stats from /api/agents (single grouped SQL pass). The
@@ -817,6 +853,8 @@ export function AgentsPage() {
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
+      { id: "mcp",          label: t("agents.tab.mcp",          { defaultValue: "MCP" }),          Icon: Plug },
+      { id: "channels",     label: t("agents.tab.channels",     { defaultValue: "Channels" }),     Icon: Radio },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -1061,6 +1099,8 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
+      case "mcp":               return renderMcpTab(agent);
+      case "channels":          return renderChannelsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -1223,49 +1263,77 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — 2-col card grid per design canvas
+  // ---------- Skills tab — local draft + explicit Save button
+
+  // Use upstream's skillDescriptionByName for skill descriptions
+
+  // Cross-reference MCP servers for connection info
+  const mcpDescMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of allMcpServersQuery.data?.connected ?? []) {
+      if (s.name) {
+        const desc = s.tools_count > 0
+          ? `${s.tools_count} tool${s.tools_count !== 1 ? "s" : ""}`
+          : s.connected ? "connected" : "disconnected";
+        map.set(s.name, desc);
+      }
+    }
+    return map;
+  }, [allMcpServersQuery.data]);
+
   const renderSkillsTab = (agent: AgentDetail) => {
-    const view = agent as AgentView;
-    // Sort alphabetically (#4940) — the backend returns the manifest's
-    // allowlist order, which is meaningless to humans scanning the tab.
-    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
-    // stable across locales (localeCompare would flip in tr-TR etc).
-    const skills: string[] = (
-      Array.isArray(view.skills)
-        ? view.skills
-        : Array.isArray(view.capabilities?.skills)
-          ? view.capabilities!.skills!
-          : []
-    )
-      .slice()
-      .sort();
-    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
-    // every skill in the registry, the default), or 'allowlist' (manifest
-    // pinned a list). Each needs a different empty-state copy; the
-    // previous code collapsed them all to "0 installed".
-    const skillsMode = (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all" && skills.length === 0;
-    const skillsDisabled = skillsMode === "none";
+    const skillsData = agentSkillsQuery.data;
+    const serverAssigned: string[] = [...(skillsData?.assigned ?? [])].sort();
+    const available: string[] = [...(skillsData?.available ?? [])].sort();
+    const mode: string = skillsData?.mode ?? (agent as AgentDetail).skills_mode ?? "all";
+    const usesAll = mode === "all";
+    const isDisabled = mode === "none";
+    const isLoading = agentSkillsQuery.isLoading;
+
+    // Initialize draft from server state on first load
+    const draft = skillsDraft ?? serverAssigned;
+    const isDirty = skillsDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
+
+    const handleToggleSkill = (skillName: string) => {
+      const isAssigned = draft.includes(skillName);
+      const next = isAssigned
+        ? draft.filter((s) => s !== skillName)
+        : [...draft, skillName];
+      setSkillsDraft(next);
+    };
+
+    const handleCustomize = () => {
+      setSkillsDraft([...available]);
+    };
+
+    const handleUseAll = () => {
+      setSkillsDraft([]);
+    };
+
+    const handleSave = () => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.skills_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setSkillsDraft(null);
+        },
+      });
+    };
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
             {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })}
             {" · "}
-            {usesAllSkills
-              ? t("agents.detail.skills_all", { defaultValue: "all" })
-              : skills.length}
+            {isDisabled
+              ? t("agents.detail.skills_none", { defaultValue: "disabled" })
+              : usesAll && !isDirty
+                ? t("agents.detail.skills_all", { defaultValue: "all" })
+                : draft.length}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={<Plus className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/skills" })}
-          >
-            {t("agents.detail.install_skill", { defaultValue: "Install" })}
-          </Button>
         </div>
-        {skillsDisabled ? (
+        {isDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
@@ -1279,42 +1347,494 @@ export function AgentsPage() {
               </div>
             </div>
           </div>
-        ) : usesAllSkills ? (
-          <div
-            onClick={() => navigate({ to: "/skills" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
-              </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.skills_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
-                })}
-              </div>
-            </div>
+        ) : isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : skills.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
-          </div>
+        ) : usesAll && !isDirty ? (
+          <>
+            {available.length > 0 ? (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                    />
+                  ))}
+                </div>
+                <button
+                  onClick={handleCustomize}
+                  className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+                >
+                  {t("agents.detail.skills_customize", { defaultValue: "Customize — switch to allowlist" })}
+                </button>
+              </>
+            ) : (
+              <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+                <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {t("agents.detail.skills_all_desc", {
+                      defaultValue: "no skills registered in the system yet",
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {skills.map((s) => (
-              <AgentSkillItem
-                key={s}
-                name={s}
-                description={skillDescriptionByName.get(s)}
-                onClick={() => navigate({ to: "/skills" })}
-              />
-            ))}
+          <>
+            {draft.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {draft.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {skillDescriptionByName.get(s) ?? t("agents.detail.skill_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleSkill(s)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.skill_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((s) => !draft.includes(s)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.skills_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((s) => !draft.includes(s))
+                    .map((s) => (
+                      <AgentSkillItem
+                        key={s}
+                        name={s}
+                        description={skillDescriptionByName.get(s)}
+                        onClick={() => handleToggleSkill(s)}
+                      />
+                    ))}
+                </div>
+              </>
+            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.skills_reset_to_all", { defaultValue: "Reset to use all skills" })}
+            </button>
+          </>
+        )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentSkillsMutation.isPending}
+            >
+              {setAgentSkillsMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
           </div>
         )}
       </div>
     );
   };
+
+  // ---------- MCP tab — local draft + explicit Save button
+  const renderMcpTab = (agent: AgentDetail) => {
+    const mcpData = agentMcpServersQuery.data;
+    const serverAssigned: string[] = [...(mcpData?.assigned ?? (agent as AgentView).mcp_servers ?? [])].sort();
+    const available: string[] = [...(mcpData?.available ?? [])].sort();
+    const mode: string = mcpData?.mode ?? (agent as AgentView).mcp_servers_mode ?? "all";
+    const usesAll = mode === "all";
+    const isLoading = agentMcpServersQuery.isLoading;
+
+    const draft = mcpDraft ?? serverAssigned;
+    const isDirty = mcpDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
+
+    const handleToggleServer = (serverName: string) => {
+      const isAssigned = draft.includes(serverName);
+      const next = isAssigned
+        ? draft.filter((s) => s !== serverName)
+        : [...draft, serverName];
+      setMcpDraft(next);
+    };
+
+    const handleCustomize = () => {
+      setMcpDraft([...available]);
+    };
+
+    const handleUseAll = () => {
+      setMcpDraft([]);
+    };
+
+    const handleSave = () => {
+      if (!agent.id) return;
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.mcp_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setMcpDraft(null);
+        },
+      });
+    };
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.connected_mcp_servers", { defaultValue: "Connected MCP servers" })}
+            {" · "}
+            {usesAll && !isDirty
+              ? t("agents.detail.mcp_all", { defaultValue: "all" })
+              : draft.length}
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll && !isDirty ? (
+          available.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {available.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {mcpDescMap.get(s) ?? t("agents.detail.mcp_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                    <Plug className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleCustomize}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.mcp_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Plug className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.mcp_all_title", { defaultValue: "Using all connected MCP servers" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.mcp_all_desc", {
+                    defaultValue: "no MCP servers connected yet",
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        ) : draft.length === 0 && available.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_mcp", { defaultValue: "No MCP servers connected." })}
+          </div>
+        ) : (
+          <>
+            {draft.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {draft.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {mcpDescMap.get(s) ?? t("agents.detail.mcp_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleServer(s)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.mcp_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((s) => !draft.includes(s)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.mcp_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((s) => !draft.includes(s))
+                    .map((s) => (
+                      <div
+                        key={s}
+                        onClick={() => handleToggleServer(s)}
+                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {mcpDescMap.get(s) ?? t("agents.detail.mcp_click_assign", { defaultValue: "click to assign" })}
+                          </div>
+                        </div>
+                        <Plug className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.mcp_reset_to_all", { defaultValue: "Reset to use all servers" })}
+            </button>
+          </>
+        )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentMcpServersMutation.isPending}
+            >
+              {setAgentMcpServersMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- Channels tab — local draft + explicit Save button
+  const renderChannelsTab = (agent: AgentDetail) => {
+    const chData = agentChannelsQuery.data;
+    const serverAssigned: string[] = [...(chData?.assigned ?? [])].sort();
+    const available: string[] = [...(chData?.available ?? [])].sort();
+    const mode: string = chData?.mode ?? "all";
+    const usesAll = mode === "all";
+    const isLoading = agentChannelsQuery.isLoading;
+
+    const draft = channelsDraft ?? serverAssigned;
+    const isDirty = channelsDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((c) => !serverAssigned.includes(c)));
+
+    // Capitalize channel type name for display (e.g. "email" -> "Email")
+    const channelLabel = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
+
+    // Descriptive subtitle based on the channel transport/protocol
+    const channelSubtitle = (name: string): string => {
+      const subtitles: Record<string, string> = {
+        email: "IMAP/SMTP",
+        telegram: "Bot",
+        discord: "Bot",
+        slack: "Bot",
+        matrix: "Bridge",
+        whatsapp: "Bridge",
+        signal: "Bridge",
+        irc: "Bridge",
+        webhook: "HTTP",
+        websocket: "WS",
+      };
+      return subtitles[name.toLowerCase()] ?? "Channel";
+    };
+
+    const handleToggleChannel = (channelName: string) => {
+      const isAssigned = draft.includes(channelName);
+      const next = isAssigned
+        ? draft.filter((c) => c !== channelName)
+        : [...draft, channelName];
+      setChannelsDraft(next);
+    };
+
+    const handleCustomize = () => {
+      setChannelsDraft([...available]);
+    };
+
+    const handleUseAll = () => {
+      setChannelsDraft([]);
+    };
+
+    const handleSave = () => {
+      if (!agent.id) return;
+      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.channels_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setChannelsDraft(null);
+        },
+      });
+    };
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.connected_channels", { defaultValue: "Connected channels" })}
+            {" · "}
+            {usesAll && !isDirty
+              ? t("agents.detail.channels_all", { defaultValue: "all" })
+              : draft.length}
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll && !isDirty ? (
+          available.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {available.map((c) => (
+                  <div
+                    key={c}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {channelSubtitle(c)}
+                        {" · "}{t("agents.detail.channel_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                    <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleCustomize}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.channels_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Radio className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.channels_all_title", { defaultValue: "Using all connected channels" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.channels_all_desc", {
+                    defaultValue: "no channels connected yet",
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        ) : draft.length === 0 && available.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_channels", { defaultValue: "No channels connected." })}
+          </div>
+        ) : (
+          <>
+            {draft.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {draft.map((c) => (
+                  <div
+                    key={c}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {channelSubtitle(c)}
+                        {" · "}{t("agents.detail.channel_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleChannel(c)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.channel_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((c) => !draft.includes(c)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.channels_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((c) => !draft.includes(c))
+                    .map((c) => (
+                      <div
+                        key={c}
+                        onClick={() => handleToggleChannel(c)}
+                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {channelSubtitle(c)}
+                            {" · "}{t("agents.detail.channel_click_assign", { defaultValue: "click to assign" })}
+                          </div>
+                        </div>
+                        <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.channels_reset_to_all", { defaultValue: "Reset to use all channels" })}
+            </button>
+          </>
+        )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentChannelsMutation.isPending}
+            >
+              {setAgentChannelsMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
 
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
@@ -1351,8 +1871,49 @@ export function AgentsPage() {
     const hasSchedule = cron.length > 0 || triggers.length > 0;
     const scheduleMode = (agent as AgentDetail).schedule;
     const isScheduleReactive = !scheduleMode || scheduleMode === "manual";
+    const isContinuous = typeof scheduleMode === "string" && scheduleMode.startsWith("continuous");
+    const continuousMatch = scheduleMode?.match(/(\d+)s/);
+    const continuousInterval = continuousMatch ? Number(continuousMatch[1]) : 120;
     return (
       <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.schedule_mode", { defaultValue: "Mode" })}
+        </div>
+        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-md bg-brand/10 text-brand grid place-items-center shrink-0">
+            {isContinuous ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-mono text-[13px] text-text-main">
+              {isContinuous
+                ? `${t("agents.detail.schedule_continuous", { defaultValue: "Continuous" })} (${continuousInterval}s)`
+                : t("agents.detail.schedule_manual", { defaultValue: "Manual" })}
+            </div>
+            <div className="text-[11px] text-text-dim/80 mt-0.5">
+              {isContinuous
+                ? t("agents.detail.schedule_continuous_desc", { defaultValue: "agent checks for work on a fixed interval" })
+                : t("agents.detail.schedule_manual_desc", { defaultValue: "wakes on messages and events only" })}
+            </div>
+          </div>
+          {isContinuous ? (
+            <Button variant="ghost" size="sm" onClick={() => {
+              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: "reactive" } }, {
+                onSuccess: () => addToast(t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }), "success"),
+              });
+            }}>
+              {t("agents.detail.switch_to_manual", { defaultValue: "Switch to manual" })}
+            </Button>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => {
+              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: { continuous: { check_interval_secs: 120 } } } }, {
+                onSuccess: () => addToast(t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }), "success"),
+              });
+            }}>
+              {t("agents.detail.switch_to_continuous", { defaultValue: "Switch to continuous" })}
+            </Button>
+          )}
+        </div>
+
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
           {t("agents.detail.trigger", { defaultValue: "Trigger" })}
         </div>

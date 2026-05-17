@@ -874,6 +874,20 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
     }
 }
 
+/// Return the names of all channel types that are configured in the live config.
+///
+/// Used by the agent-channels endpoint so `available` reflects every configured
+/// channel, not only those that happen to be started/connected right now.
+pub(super) fn configured_channel_names(
+    config: &librefang_types::config::ChannelsConfig,
+) -> Vec<String> {
+    CHANNEL_REGISTRY
+        .iter()
+        .filter(|meta| is_channel_configured(config, meta.name))
+        .map(|meta| meta.name.to_owned())
+        .collect()
+}
+
 /// Build a JSON field descriptor, checking env var presence but never exposing secrets.
 /// For non-secret fields, includes the actual config value from `config_values` if available.
 fn build_field_json(

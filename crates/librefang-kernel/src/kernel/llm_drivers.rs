@@ -189,28 +189,32 @@ impl LibreFangKernel {
             }
         };
 
-        // Build effective fallback list: agent-level fallbacks + global fallback_providers.
-        // Resolve "default" provider in fallback entries to the actual default provider.
-        let mut effective_fallbacks = manifest.fallback_models.clone();
-        // Append global fallback_providers so every agent benefits from the configured chain
-        for gfb in &cfg.fallback_providers {
-            let already_present = effective_fallbacks
-                .iter()
-                .any(|fb| fb.provider == gfb.provider && fb.model == gfb.model);
-            if !already_present {
-                effective_fallbacks.push(librefang_types::agent::FallbackModel {
-                    provider: gfb.provider.clone(),
-                    model: gfb.model.clone(),
-                    api_key_env: if gfb.api_key_env.is_empty() {
-                        None
-                    } else {
-                        Some(gfb.api_key_env.clone())
-                    },
-                    base_url: gfb.base_url.clone(),
-                    extra_params: std::collections::HashMap::new(),
-                });
-            }
-        }
+        // Build effective fallback list.
+        // When the agent sets `fallback_models` explicitly (Some), use exactly
+        // that list — the agent is opting out of inheriting global fallbacks.
+        // When it is None, build from the global `cfg.fallback_providers` so
+        // every agent benefits from the operator-configured chain (#5112).
+        let effective_fallbacks: Vec<librefang_types::agent::FallbackModel> =
+            match &manifest.fallback_models {
+                Some(agent_fallbacks) => agent_fallbacks.clone(),
+                None => {
+                    let mut list = Vec::new();
+                    for gfb in &cfg.fallback_providers {
+                        list.push(librefang_types::agent::FallbackModel {
+                            provider: gfb.provider.clone(),
+                            model: gfb.model.clone(),
+                            api_key_env: if gfb.api_key_env.is_empty() {
+                                None
+                            } else {
+                                Some(gfb.api_key_env.clone())
+                            },
+                            base_url: gfb.base_url.clone(),
+                            extra_params: std::collections::HashMap::new(),
+                        });
+                    }
+                    list
+                }
+            };
 
         // If fallback models are configured, wrap in FallbackDriver
         if !effective_fallbacks.is_empty() {

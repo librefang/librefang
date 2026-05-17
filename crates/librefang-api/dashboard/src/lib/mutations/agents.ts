@@ -26,6 +26,9 @@ import {
   resetAgentSession,
   updateAgentTools,
   getAgentTemplateToml,
+  setAgentMcpServers,
+  setAgentSkills,
+  setAgentChannels,
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
@@ -149,6 +152,7 @@ export function usePatchAgent() {
         model?: string;
         provider?: string;
         mcp_servers?: string[];
+        schedule?: string | { continuous: { check_interval_secs: number } };
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
@@ -526,5 +530,59 @@ export function useUpdateAgentTools() {
 export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
+  });
+}
+
+/** PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server allowlist. */
+export function useSetAgentMcpServers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      servers,
+    }: {
+      agentId: string;
+      servers: string[];
+    }) => setAgentMcpServers(agentId, servers),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+    },
+  });
+}
+
+/** PUT /api/agents/{id}/skills — replace the agent's skill allowlist. */
+export function useSetAgentSkills() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      skills,
+    }: {
+      agentId: string;
+      skills: string[];
+    }) => setAgentSkills(agentId, skills),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+    },
+  });
+}
+
+/** PUT /api/agents/{id}/channels — replace the agent's channel allowlist. */
+export function useSetAgentChannels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      channels,
+    }: {
+      agentId: string;
+      channels: string[];
+    }) => setAgentChannels(agentId, channels),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+    },
   });
 }

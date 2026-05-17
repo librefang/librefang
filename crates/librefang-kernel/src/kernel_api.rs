@@ -254,6 +254,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         schedule: librefang_types::agent::ScheduleMode,
     ) -> KernelResult<()>;
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
@@ -945,6 +946,9 @@ impl KernelApi for LibreFangKernel {
         schedule: librefang_types::agent::ScheduleMode,
     ) -> KernelResult<()> {
         LibreFangKernel::set_agent_schedule(&self, agent_id, schedule)
+    }
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        Self::set_agent_channels(self, agent_id, channels)
     }
     fn set_agent_tool_filters(
         &self,

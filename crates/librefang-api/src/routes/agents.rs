@@ -141,6 +141,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_mcp_servers).put(set_agent_mcp_servers),
         )
         .route(
+            "/agents/{id}/channels",
+            axum::routing::get(get_agent_channels).put(set_agent_channels),
+        )
+        .route(
             "/agents/{id}/identity",
             axum::routing::patch(update_agent_identity),
         )
@@ -321,6 +325,13 @@ async fn resolve_manifest(
             });
         }
     };
+
+    // When spawning from a template, clear the workspace path so the new
+    // agent gets its own directory. persist_manifest_to_disk writes absolute
+    // paths which would cause resolve_workspace_dir to reject them.
+    if req.template.is_some() {
+        manifest.workspace = None;
+    }
 
     // Allow callers to override the manifest name, enabling multiple agents
     // from the same template with distinct names.
@@ -2639,6 +2650,8 @@ pub async fn get_agent(
             "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
+            "channels": entry.manifest.channels,
+            "channels_mode": if entry.manifest.channels.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
@@ -4125,10 +4138,13 @@ pub async fn set_agent_skills(
         })
         .unwrap_or_default();
     match state.kernel.set_agent_skills(agent_id, skills.clone()) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "skills": skills})),
-        ),
+        Ok(()) => {
+            state.kernel.persist_manifest_to_disk(agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "skills": skills})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(
@@ -4247,10 +4263,119 @@ pub async fn set_agent_mcp_servers(
         .kernel
         .set_agent_mcp_servers(agent_id, servers.clone())
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
+        Ok(()) => {
+            state.kernel.persist_manifest_to_disk(agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
+    }
+}
+
+/// GET /api/agents/{id}/channels — Get an agent's channel assignment info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's channel assignment info", body = crate::types::JsonObject)
+    )
+)]
+pub async fn get_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    // Read configured channels before creating ErrorTranslator (which is !Send).
+    let available: Vec<String> = {
+        let live_channels = state.channels_config.read().await;
+        super::channels::configured_channel_names(&live_channels)
+    };
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    let mode = if entry.manifest.channels.is_empty() {
+        "all"
+    } else {
+        "allowlist"
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "assigned": entry.manifest.channels,
+            "available": available,
+            "mode": mode,
+        })),
+    )
+}
+
+/// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonArray, description = "Array of channel names"),
+    responses(
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+    )
+)]
+pub async fn set_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let channels: Vec<String> = body["channels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    match state.kernel.set_agent_channels(agent_id, channels.clone()) {
+        Ok(()) => {
+            state.kernel.persist_manifest_to_disk(agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "channels": channels})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(
