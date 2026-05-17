@@ -83,6 +83,8 @@ use crate::types;
         routes::set_agent_skills,
         routes::get_agent_mcp_servers,
         routes::set_agent_mcp_servers,
+        routes::get_agent_channels,
+        routes::set_agent_channels,
         routes::update_agent_identity,
         routes::patch_agent_config,
         routes::patch_hand_agent_runtime_config,

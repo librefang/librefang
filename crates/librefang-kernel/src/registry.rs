@@ -486,7 +486,7 @@ impl AgentRegistry {
         fallback_models: Vec<librefang_types::agent::FallbackModel>,
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
-            entry.manifest.fallback_models = fallback_models;
+            entry.manifest.fallback_models = Some(fallback_models);
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -508,6 +508,16 @@ impl AgentRegistry {
     pub fn update_mcp_servers(&self, id: AgentId, servers: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.mcp_servers = servers;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's channel allowlist.
+    pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.channels = channels;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();

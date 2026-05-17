@@ -974,8 +974,14 @@ pub struct AgentManifest {
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub fallback_models: Vec<FallbackModel>,
+    /// `None` means "inherit global fallback_providers"; `Some([])` means
+    /// "disable all fallbacks for this agent".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::option_vec_lenient"
+    )]
+    pub fallback_models: Option<Vec<FallbackModel>>,
     /// Resource quotas.
     pub resources: ResourceQuota,
     /// Priority level.
@@ -1011,6 +1017,9 @@ pub struct AgentManifest {
     /// in `agent.toml` at runtime takes effect without an agent respawn.
     #[serde(default)]
     pub mcp_disabled: bool,
+    /// Channel allowlist (empty = agent can use all configured channels).
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub channels: Vec<String>,
     /// Custom metadata.
     #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -1411,7 +1420,7 @@ impl Default for AgentManifest {
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
             model: ModelConfig::default(),
-            fallback_models: Vec::new(),
+            fallback_models: None,
             resources: ResourceQuota::default(),
             priority: Priority::default(),
             capabilities: ManifestCapabilities::default(),
@@ -1421,6 +1430,7 @@ impl Default for AgentManifest {
             skills_disabled: false,
             mcp_servers: Vec::new(),
             mcp_disabled: false,
+            channels: Vec::new(),
             metadata: HashMap::new(),
             tags: Vec::new(),
             routing: None,
@@ -2341,19 +2351,19 @@ mod tests {
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
             profile: Some(ToolProfile::Coding),
-            fallback_models: vec![FallbackModel {
+            fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
                 extra_params: std::collections::HashMap::new(),
-            }],
+            }]),
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile, Some(ToolProfile::Coding));
-        assert_eq!(back.fallback_models.len(), 1);
+        assert_eq!(back.fallback_models.as_deref().map(|v| v.len()), Some(1));
     }
 
     #[test]
