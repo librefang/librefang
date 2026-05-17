@@ -3914,6 +3914,13 @@ mod tests {
         // Azure IMDS alternative endpoint — public IANA-assigned IP but
         // blocked unconditionally to stay aligned with web_fetch::check_ssrf.
         assert!(McpConnection::check_ssrf("http://192.0.0.192/metadata/instance", "test").is_err());
+        // Same Azure IMDS alternative reached through the two IPv6-embedded
+        // IPv4 forms that route to 192.0.0.192 on the wire — the most
+        // regression-prone codepath (ipv6_embedded_ipv4 → blocked_v4).
+        // IPv4-mapped: ::ffff:192.0.0.192.
+        assert!(McpConnection::check_ssrf("http://[::ffff:192.0.0.192]/", "test").is_err());
+        // NAT64 well-known prefix: 64:ff9b::192.0.0.192 (== 64:ff9b::c000:c0).
+        assert!(McpConnection::check_ssrf("http://[64:ff9b::c000:c0]/", "test").is_err());
 
         // Loopback — IPv4, hostname, and IPv6
         assert!(McpConnection::check_ssrf("http://127.0.0.1/admin", "test").is_err());
