@@ -1564,17 +1564,9 @@ pub async fn configure_channel(
                 return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
                     .into_json_tuple();
             }
-            // `std::env::set_var` is not thread-safe in an async context; delegate
-            // to a blocking thread to avoid UB in the multithreaded tokio runtime.
-            {
-                let env_var_owned = env_var.to_string();
-                let value_owned = value.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // SAFETY: single mutation on a dedicated blocking thread.
-                    unsafe { std::env::set_var(&env_var_owned, &value_owned) };
-                })
-                .await;
-            }
+            // Serialized through the process-global env write guard (#5142):
+            // `spawn_blocking` does NOT serialize concurrent env mutations.
+            crate::secrets_env::set_env_var_guarded(env_var.to_string(), value.to_string()).await;
             // Also write the env var NAME to config.toml so the channel section
             // is not empty and the kernel knows which env var to read.
             config_fields.insert(
@@ -1996,9 +1988,9 @@ fn prepare_fields_write(
 
 /// Apply the deferred secret writes from `prepare_fields_write` under the
 /// `config_write_lock` critical section. Each pair is written to
-/// `secrets.env` and pushed into the running process's environment via a
-/// dedicated blocking thread (`std::env::set_var` is not thread-safe in the
-/// async runtime).
+/// `secrets.env` and pushed into the running process's environment through
+/// the process-global env write guard (#5142) — `spawn_blocking` does NOT
+/// serialize concurrent env mutations.
 async fn apply_secret_writes(
     secrets_path: &std::path::Path,
     secret_writes: &[(String, String)],
@@ -2010,13 +2002,7 @@ async fn apply_secret_writes(
                     .into_json_tuple(),
             );
         }
-        let env_var_owned = env_var.clone();
-        let value_owned = value.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::set_var(&env_var_owned, &value_owned) };
-        })
-        .await;
+        crate::secrets_env::set_env_var_guarded(env_var.clone(), value.clone()).await;
     }
     Ok(())
 }
@@ -2368,12 +2354,10 @@ pub async fn update_channel_instance_handler(
                     if let Err(e) = remove_secret_env(&secrets_path, env_name) {
                         tracing::warn!(error = %e, env_var = %env_name, "Failed to remove cleared secret env var");
                     }
-                    let env_owned = env_name.to_string();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        // SAFETY: single mutation on a dedicated blocking thread.
-                        unsafe { std::env::remove_var(&env_owned) };
-                    })
-                    .await;
+                    // Serialized through the process-global env write guard
+                    // (#5142) so this remove can never race a concurrent
+                    // guarded `set_var`. `spawn_blocking` does NOT serialize.
+                    crate::secrets_env::remove_env_var_guarded(env_name.to_string()).await;
                 }
             }
         }

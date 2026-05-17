@@ -1116,6 +1116,15 @@ pub struct BridgeManager {
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// `AbortHandle` mirror of every entry in `tasks`, kept behind a
+    /// `std::sync::Mutex` so the bridge can be hard-stopped through a shared
+    /// `&self` (`abort()`), not just the `&mut self` graceful `stop()`
+    /// (#5142). `JoinHandle::abort()` only needs `&self`, but the
+    /// `tasks.drain(..)` + `task.await` join loop in `stop()` needs `&mut`,
+    /// which is unreachable through `Arc<Option<BridgeManager>>` while a
+    /// concurrent `push_message` holds the Arc — the exact leak path the
+    /// audit flagged. Populated in lockstep with `tasks` via `track()`.
+    abort_handles: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
     adapters: Vec<Arc<dyn ChannelAdapter>>,
     /// Webhook routes collected from adapters, to be mounted on the shared server.
     webhook_routes: Vec<(String, axum::Router)>,
@@ -1138,6 +1147,7 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
+            abort_handles: std::sync::Mutex::new(Vec::new()),
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
@@ -1160,6 +1170,7 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
+            abort_handles: std::sync::Mutex::new(Vec::new()),
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
@@ -1335,7 +1346,7 @@ impl BridgeManager {
                     }
                 }
             });
-            self.tasks.push(task);
+            self.track(task);
         } else {
             // Debounce path
             let (debouncer, mut flush_rx) =
@@ -1419,7 +1430,7 @@ impl BridgeManager {
                     }
                 }
             });
-            self.tasks.push(task);
+            self.track(task);
         }
 
         self.adapters.push(adapter);
@@ -1731,7 +1742,7 @@ impl BridgeManager {
             }
         });
 
-        self.tasks.push(task);
+        self.track(task);
     }
 
     /// Push a proactive outbound message to a channel recipient.
@@ -1790,6 +1801,18 @@ impl BridgeManager {
     /// hot-reloads — old and new instances would race on the same
     /// journal entries and double-dispatch.
     pub fn track_task(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.track(handle);
+    }
+
+    /// Internal task recorder. Records the `JoinHandle` for the graceful
+    /// `&mut self` `stop()` join loop AND its `AbortHandle` mirror for the
+    /// `&self` hard `abort()` path (#5142). Every spawn that the bridge
+    /// owns MUST go through here so the two collections never drift —
+    /// otherwise `abort()` would silently leak the un-mirrored task.
+    fn track(&mut self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut guard) = self.abort_handles.lock() {
+            guard.push(handle.abort_handle());
+        }
         self.tasks.push(handle);
     }
 
@@ -1797,6 +1820,45 @@ impl BridgeManager {
     /// can `select!` on this to exit cleanly when `stop()` fires.
     pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
         self.shutdown_rx.clone()
+    }
+
+    /// Hard-stop the bridge through a **shared** `&self` (#5142).
+    ///
+    /// `reload_channels_from_disk` swaps the old `BridgeManager` out of an
+    /// `ArcSwap<Option<BridgeManager>>` and then tries `Arc::try_unwrap` to
+    /// get `&mut` for the graceful `stop()`. Under load that `try_unwrap`
+    /// fails — `routes/agents.rs::push_message` does
+    /// `state.bridge_manager.load_full()` and holds the Arc across
+    /// `bm.push_message(...).await`, so a strong ref outlives the swap. The
+    /// old `if let Ok(Some(_)) = try_unwrap` arm is then skipped and the old
+    /// bridge's tokio tasks leak until the strong count happens to hit 1
+    /// (potentially never on a busy channel).
+    ///
+    /// This method is callable on the still-shared Arc: it fires the watch
+    /// shutdown signal (every dispatch loop and every adapter `select!`s on
+    /// `shutdown.changed()`, so they break promptly) and then `abort()`s
+    /// every tracked task handle as a hard backstop for any task parked
+    /// somewhere a cooperative break can't reach. It does not move out of
+    /// `self`, so it is sound to call regardless of `try_unwrap`'s outcome.
+    /// `stop()` remains the preferred path when `&mut self` is reachable
+    /// (it additionally awaits a clean join and runs each adapter's own
+    /// async cleanup).
+    pub fn abort(&self) {
+        if let Err(e) = self.shutdown_tx.send(true) {
+            debug!(error = %e, "Channel bridge shutdown signal had no live receivers");
+        }
+        if let Ok(mut guard) = self.abort_handles.lock() {
+            let n = guard.len();
+            for h in guard.drain(..) {
+                h.abort();
+            }
+            if n > 0 {
+                debug!(
+                    tasks = n,
+                    "Channel bridge tasks aborted via shared-ref abort()"
+                );
+            }
+        }
     }
 
     pub async fn stop(&mut self) {
@@ -1818,6 +1880,12 @@ impl BridgeManager {
 
         for task in self.tasks.drain(..) {
             let _ = task.await;
+        }
+        // The graceful join above completed every task, so the mirrored
+        // abort handles are now stale no-ops; clear them so a later
+        // `abort()` on a re-shared Arc doesn't iterate dead handles.
+        if let Ok(mut guard) = self.abort_handles.lock() {
+            guard.clear();
         }
     }
 }
@@ -8375,5 +8443,62 @@ mod tests {
                 other => panic!("timeout must produce the unavailable block, got {other:?}"),
             }
         }
+    }
+
+    /// #5142 regression: `BridgeManager::abort()` must hard-stop the bridge's
+    /// tracked tasks through a **shared** `&self`. The hot-reload path
+    /// (`reload_channels_from_disk`) cannot get `&mut self` when a concurrent
+    /// `push_message` holds a strong `Arc` ref — pre-#5142 the graceful
+    /// `stop()` was simply skipped and the old bridge's tasks leaked. This
+    /// test reproduces that exact shape: a tracked long-lived task, a second
+    /// outstanding `Arc` clone making `Arc::try_unwrap` fail, then `abort()`
+    /// on the still-shared Arc must terminate the task.
+    #[tokio::test]
+    async fn bridge_abort_stops_tracked_task_through_shared_arc_5142() {
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let mut mgr = BridgeManager::new(handle, router);
+
+        // Stand-in for an adapter dispatch loop. It exits cleanly on the
+        // shutdown signal too, but we assert the hard abort backstop fires.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        let abort_probe = task.abort_handle();
+        mgr.track_task(task);
+        assert!(
+            !abort_probe.is_finished(),
+            "sanity: tracked task is alive before abort()"
+        );
+
+        // Model the live AppState: the bridge lives behind an Arc and a
+        // concurrent reader (push_message) holds a second strong ref, so
+        // `Arc::try_unwrap` would fail and the &mut `stop()` is unreachable.
+        let shared = Arc::new(Some(mgr));
+        let concurrent_reader = Arc::clone(&shared);
+        assert!(
+            Arc::try_unwrap(Arc::clone(&shared)).is_err(),
+            "sanity: a second strong ref must make try_unwrap fail (the leak path)"
+        );
+
+        // The reload path's new behaviour: always abort() on the shared ref.
+        shared.as_ref().as_ref().unwrap().abort();
+
+        for _ in 0..50 {
+            if abort_probe.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            abort_probe.is_finished(),
+            "abort() on the shared Arc must terminate the tracked task (#5142) — \
+             otherwise the old bridge's tasks leak across hot-reload"
+        );
+
+        drop(concurrent_reader);
+        drop(shared);
     }
 }

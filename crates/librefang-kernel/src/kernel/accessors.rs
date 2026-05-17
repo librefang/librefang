@@ -1067,7 +1067,16 @@ impl LibreFangKernel {
                 .collect();
             total_removed += finished.len();
             for key in finished {
-                self.agents.running_tasks.remove(&key);
+                // Fire the abort handle before dropping the map entry (#5142).
+                // For a dead agent the loop may still be parked at an `.await`
+                // inside an LLM stream; merely removing the entry drops the
+                // `AbortHandle` without cancelling the task, so the killed
+                // agent's request keeps burning tokens until the provider
+                // returns. `abort()` on an already-finished task is a no-op,
+                // so the live-but-finished branch is unaffected.
+                if let Some((_, task)) = self.agents.running_tasks.remove(&key) {
+                    task.abort.abort();
+                }
             }
         }
 

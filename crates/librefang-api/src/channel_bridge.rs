@@ -4024,11 +4024,28 @@ pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
     // Stop existing bridge. Swap it out atomically so concurrent readers see
-    // None immediately, then unwrap the Arc to get owned access for stop().
+    // None immediately, then tear down the old instance.
+    //
+    // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
+    // exists — but `routes/agents.rs::push_message` does
+    // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
+    // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
+    // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old
+    // bridge's tokio tasks until the strong count happened to hit 1. We now
+    // ALWAYS call `abort()` (which only needs `&self`: fires the watch
+    // shutdown signal + aborts every tracked task handle). When we *did* get
+    // exclusive ownership we additionally run the graceful `stop()` for its
+    // clean join + per-adapter async cleanup.
     {
         let old = state.bridge_manager.swap(std::sync::Arc::new(None));
-        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
-            b.stop().await;
+        match std::sync::Arc::try_unwrap(old) {
+            Ok(Some(mut b)) => b.stop().await,
+            Ok(None) => {}
+            Err(still_shared) => {
+                if let Some(b) = still_shared.as_ref() {
+                    b.abort();
+                }
+            }
         }
     }
 
