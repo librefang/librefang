@@ -1996,6 +1996,29 @@ impl WorkflowEngine {
                 continue;
             }
             let age = now.signed_duration_since(run.started_at).num_seconds();
+            // Wall-clock skew guard (#5114): `Utc::now()` is not monotonic.
+            // A backwards NTP step (or a daemon that restarts on a host
+            // whose clock has drifted backwards) makes `age` negative —
+            // pre-fix that always satisfied `age < stale_secs` and silently
+            // masked real stale rows. A forward step at boot, conversely,
+            // makes every Running row look ancient and force-fails them as
+            // "Interrupted by daemon restart". Treat negative ages as
+            // "fresh" (skip the row) and emit a structured warn so
+            // operators see the skew. A monotonic / heartbeat-based reap
+            // is the proper long-term fix and is tracked separately; this
+            // is the minimal correctness change.
+            if age < 0 {
+                warn!(
+                    run_id = %run.id,
+                    state = ?run.state,
+                    now = %now,
+                    started_at = %run.started_at,
+                    age_secs = age,
+                    "Negative workflow run age — wall-clock moved backwards; \
+                     treating run as fresh, not stale"
+                );
+                continue;
+            }
             if age < stale_secs {
                 continue;
             }
@@ -8460,6 +8483,101 @@ prompt_template = "do {{x}}"
             assert!(engine.runs.contains_key(&completed_id));
             assert!(!engine.runs.contains_key(&running_id));
         }
+    }
+
+    /// Regression for #5114: `recover_stale_running_runs` must not
+    /// force-fail a Running row whose `started_at` is in the future.
+    ///
+    /// Pre-fix the function compared wall-clock now to `started_at`
+    /// directly. After a backwards NTP step (or a daemon restart on a
+    /// host whose clock drifted backwards in the interim), `age` is
+    /// negative, `age < stale_secs` is always true, and the row is
+    /// skipped — silently masking real stale rows. With the fix, the
+    /// negative-age branch logs a warn and skips the row explicitly,
+    /// without changing state.
+    #[test]
+    fn recover_stale_skips_run_with_started_at_in_the_future() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+
+        // Run "started" one hour in the future relative to wall-clock
+        // now — the shape a backwards NTP step at boot produces for an
+        // in-memory Running row reloaded from disk. `make_terminal_run`
+        // bakes in `completed_at: Some(...)` because it's a terminal-row
+        // helper; clear it back to `None` so the row mirrors a real
+        // Running row that hasn't completed yet (and so we can later
+        // assert the skew guard didn't slip a completed_at onto it).
+        let future_started_at = Utc::now() + chrono::Duration::hours(1);
+        let run = WorkflowRun {
+            state: WorkflowRunState::Running,
+            started_at: future_started_at,
+            completed_at: None,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let run_id = run.id;
+        engine.runs.insert(run.id, run);
+
+        // 60-second stale cutoff — irrelevant to the negative-age branch
+        // but realistic. The function must return an empty Vec because
+        // the only candidate has a negative age and is treated as fresh.
+        let recovered = engine.recover_stale_running_runs(std::time::Duration::from_secs(60));
+        assert!(
+            recovered.is_empty(),
+            "negative-age row must not be reported as recovered, got: {recovered:?}"
+        );
+
+        // State must still be Running — not force-failed.
+        let r = engine.runs.get(&run_id).expect("run vanished");
+        assert!(
+            matches!(r.state, WorkflowRunState::Running),
+            "negative-age row was force-failed instead of skipped: {:?}",
+            r.state
+        );
+        assert!(
+            r.error.is_none(),
+            "negative-age row gained an error string: {:?}",
+            r.error
+        );
+        assert!(
+            r.completed_at.is_none(),
+            "negative-age row gained a completed_at: {:?}",
+            r.completed_at
+        );
+        assert_eq!(
+            r.started_at, future_started_at,
+            "started_at must not be rewritten by the skew guard"
+        );
+    }
+
+    /// Sanity sibling for #5114: with a clearly-stale `started_at` in
+    /// the past and the same 60-second cutoff, the row IS reaped — so
+    /// the new negative-age branch hasn't accidentally short-circuited
+    /// the normal happy path.
+    #[test]
+    fn recover_stale_still_reaps_normally_aged_running_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+
+        let stale_started_at = Utc::now() - chrono::Duration::hours(1);
+        let run = WorkflowRun {
+            state: WorkflowRunState::Running,
+            started_at: stale_started_at,
+            completed_at: None,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let run_id = run.id;
+        engine.runs.insert(run.id, run);
+
+        let recovered = engine.recover_stale_running_runs(std::time::Duration::from_secs(60));
+        assert_eq!(
+            recovered,
+            vec![run_id],
+            "a one-hour-old Running row must still be force-failed under a 60s cutoff"
+        );
+
+        let r = engine.runs.get(&run_id).expect("run vanished");
+        assert!(matches!(r.state, WorkflowRunState::Failed));
+        assert_eq!(r.error.as_deref(), Some("Interrupted by daemon restart"));
     }
 
     /// Regression for #3335: graceful shutdown must transition every
