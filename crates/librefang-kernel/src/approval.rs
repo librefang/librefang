@@ -831,7 +831,46 @@ impl ApprovalManager {
             }
         }
 
+        // Piggyback the stale-TOTP-entry sweep on the existing periodic
+        // pending-request expiry pass (driven by `spawn_approval_sweep_task`,
+        // ~every 10s) instead of introducing a second background task
+        // (#5144).
+        self.gc_expired_totp_entries();
+
         (escalated, expired)
+    }
+
+    /// Drop TOTP grace / failure map entries that can no longer affect a
+    /// decision, so the maps stay bounded by *currently-relevant* sender
+    /// IDs rather than every sender ID seen over the daemon's lifetime
+    /// (#5144).
+    ///
+    /// - A grace entry is dead once `last.elapsed() >= totp_grace_period_secs`
+    ///   (it can no longer satisfy `is_within_totp_grace`). When the policy
+    ///   sets `totp_grace_period_secs == 0` grace is never honoured, so all
+    ///   grace entries are dead.
+    /// - A failure entry is dead once its lockout window has elapsed
+    ///   (`lockout_start.elapsed() >= TOTP_LOCKOUT_SECS`). Entries that
+    ///   never reached the lockout threshold (`lockout_start == None`)
+    ///   still gate brute-force counting, so they are kept — they are
+    ///   bounded by the in-flight failing senders and cleared on the
+    ///   next success or on lockout expiry inside `record_totp_failure`.
+    fn gc_expired_totp_entries(&self) {
+        let grace_secs = {
+            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            policy.totp_grace_period_secs
+        };
+        {
+            let mut grace = self.totp_grace.lock().unwrap_or_else(|e| e.into_inner());
+            grace.retain(|_, last| grace_secs > 0 && last.elapsed().as_secs() < grace_secs);
+        }
+        {
+            let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+            failures.retain(|_, (_, lockout_start)| match lockout_start {
+                Some(started) => started.elapsed().as_secs() < TOTP_LOCKOUT_SECS,
+                None => true,
+            });
+        }
     }
 
     /// Resolve a pending request (called by API/UI).
@@ -2949,6 +2988,59 @@ mod tests {
         // Even after recording grace, zero period means no grace
         mgr.record_totp_grace("admin");
         assert!(!mgr.is_within_totp_grace("admin", &policy));
+    }
+
+    /// Regression (#5144): `gc_expired_totp_entries` must drop grace
+    /// entries that can no longer satisfy `is_within_totp_grace` and
+    /// failure entries whose lockout window has elapsed, so the maps
+    /// stay bounded by *currently-relevant* sender IDs instead of every
+    /// sender seen over the daemon's lifetime. Entries that still gate a
+    /// decision (pre-threshold failure counters) must be preserved.
+    #[test]
+    fn gc_drops_only_dead_totp_entries() {
+        // grace_period == 0 → no grace entry can ever be honoured, so a
+        // sweep must drop every grace entry regardless of age. This
+        // exercises the GC deterministically without real-time waits.
+        let policy = ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            totp_grace_period_secs: 0,
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        mgr.record_totp_grace("alice");
+        mgr.record_totp_grace("bob");
+        assert_eq!(
+            mgr.totp_grace.lock().unwrap().len(),
+            2,
+            "grace entries recorded before sweep"
+        );
+
+        // Two pre-threshold failures (count < TOTP_MAX_FAILURES, so
+        // lockout_start stays None) — these must survive the sweep
+        // because they still gate brute-force counting.
+        let _ = mgr.record_totp_failure("charlie");
+        let _ = mgr.record_totp_failure("charlie");
+        assert_eq!(
+            mgr.totp_failures.lock().unwrap().len(),
+            1,
+            "pre-threshold failure entry recorded"
+        );
+
+        mgr.gc_expired_totp_entries();
+
+        assert_eq!(
+            mgr.totp_grace.lock().unwrap().len(),
+            0,
+            "grace entries must be reaped when grace is disabled"
+        );
+        assert_eq!(
+            mgr.totp_failures.lock().unwrap().len(),
+            1,
+            "pre-threshold failure entry must be preserved (still gates counting)"
+        );
+        // Charlie's counter must be intact.
+        assert!(!mgr.is_totp_locked_out("charlie"));
     }
 
     #[test]

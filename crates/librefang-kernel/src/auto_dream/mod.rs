@@ -802,6 +802,23 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         return;
     }
 
+    // Scan throttle (moved ahead of the spawn — #5144): a chatty agent
+    // can push dozens of turns per minute past the three pre-filters.
+    // By design at most one dream fires per `min_hours`, so scanning
+    // more often than every ~10 minutes is pure noise. Evaluating this
+    // synchronously on the hot path means a throttled turn no longer
+    // allocates a short-lived `Arc<LibreFangKernel>`-holding task only
+    // to early-return inside it. The throttle is a pure rate-limit on
+    // `agent_id` (records the scan instant in a global map); it does
+    // not depend on the live kernel/global/opt-in state that the
+    // in-task re-checks below guard against, so it is correct to
+    // resolve before the `spawn_supervised`. Matches libre-code's
+    // `SESSION_SCAN_INTERVAL_MS = 10 min`.
+    if should_throttle_event_scan(agent_id) {
+        tracing::trace!(agent = %agent_id, "auto_dream: turn-end scan throttled (within 10 min of last scan)");
+        return;
+    }
+
     crate::supervised_spawn::spawn_supervised("auto_dream_dispatch", async move {
         // Re-check all three gates inside the task. The operator could have
         // flipped the global switch, toggled this agent off, or started a
@@ -818,17 +835,6 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         }
         if !kernel.agent_registry_ref().is_auto_dream_enabled(agent_id) {
             tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
-            return;
-        }
-        // Scan throttle: a chatty agent can push dozens of turns per minute
-        // past the three pre-filters. Each of those would otherwise run a
-        // full `check_agent_gates` (lock stat + sessions-touched SQL).
-        // Cheap individually but pointless at that rate — by design, at
-        // most one dream fires per `min_hours`, so scanning more often
-        // than every ~10 minutes is pure noise. Matches libre-code's
-        // `SESSION_SCAN_INTERVAL_MS = 10 min`.
-        if should_throttle_event_scan(agent_id) {
-            tracing::trace!(agent = %agent_id, "auto_dream: turn-end scan throttled (within 10 min of last scan)");
             return;
         }
         match check_agent_gates(&kernel, agent_id, false).await {
@@ -928,6 +934,13 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
             }
         }
 
+        // Subscribe to the supervisor shutdown signal so the scheduler
+        // wakes immediately on daemon shutdown instead of finishing a
+        // pending `sleep(interval_s)` first. `interval_s` is floored at
+        // 60s, so a plain `is_shutting_down()` check between sleeps left
+        // up to a full check-interval of shutdown latency (#5144).
+        let mut shutdown_rx = kernel.agents.supervisor.subscribe();
+
         loop {
             let interval_s = {
                 let cfg = kernel.config_snapshot();
@@ -936,7 +949,16 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
                 // a shorter cadence past the UI's validation.
                 cfg.auto_dream.check_interval_secs.max(60)
             };
-            tokio::time::sleep(Duration::from_secs(interval_s)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(interval_s)) => {}
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        tracing::debug!("auto_dream: shutdown signalled, scheduler exiting");
+                        return;
+                    }
+                    continue;
+                }
+            }
 
             if kernel.agents.supervisor.is_shutting_down() {
                 tracing::debug!("auto_dream: shutdown detected, scheduler exiting");
