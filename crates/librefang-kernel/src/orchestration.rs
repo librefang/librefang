@@ -266,6 +266,13 @@ impl QualityCheck {
 // Recovery — exponential backoff with jitter
 // ---------------------------------------------------------------------------
 
+/// Hard ceiling (seconds) applied when a `RetryPolicy` has `max_backoff ==
+/// ZERO` (interpreted as "no operator cap"). Bounds the scaled wait so an
+/// unbounded multiplier can never overflow `Duration::mul_f64`. One hour is
+/// far longer than any sane retry wait while staying well inside Duration's
+/// range. #5136.
+const MAX_BACKOFF_FALLBACK_SECS: f64 = 3600.0;
+
 /// Configuration for exponential-backoff retries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
@@ -296,25 +303,97 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Sanitize `backoff_multiplier` for use in [`Self::delay_for_attempt`].
+    ///
+    /// `f64::powi` of a negative base with an odd exponent yields a negative
+    /// number, and `Duration::mul_f64(<0.0)` panics. NaN propagates through
+    /// `powi` and also panics in `mul_f64`. A multiplier below `1.0` would
+    /// shrink the backoff every attempt (anti-backoff). Clamp to the sane
+    /// `[1.0, MAX]` range and treat any non-finite value as the default `2.0`
+    /// so a hand-edited or deserialized config can never panic the retry hot
+    /// path. Returns the effective multiplier.
+    fn effective_multiplier(&self) -> f64 {
+        let m = self.backoff_multiplier;
+        if !m.is_finite() {
+            // NaN / ±inf — fall back to the documented default.
+            return 2.0;
+        }
+        // Clamp into [1.0, MAX]: < 1.0 (incl. negatives) would invert the
+        // backoff curve; MAX keeps `powi` from overflowing to +inf early.
+        m.clamp(1.0, f64::MAX)
+    }
+
+    /// Reject a structurally invalid policy at construction / config-load
+    /// time, before any retry actually runs.
+    ///
+    /// [`Self::delay_for_attempt`] is internally panic-proof (it clamps the
+    /// multiplier and floors the jitter window), but a NaN or negative
+    /// multiplier in a deserialized config is almost always an operator
+    /// mistake we want surfaced loudly rather than silently coerced to the
+    /// default. Callers that load a `RetryPolicy` from user-supplied TOML/JSON
+    /// should call this and propagate the error.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.backoff_multiplier.is_nan() {
+            return Err("retry backoff_multiplier is NaN".to_string());
+        }
+        if !self.backoff_multiplier.is_finite() {
+            return Err(format!(
+                "retry backoff_multiplier must be finite, got {}",
+                self.backoff_multiplier
+            ));
+        }
+        if self.backoff_multiplier < 1.0 {
+            return Err(format!(
+                "retry backoff_multiplier must be >= 1.0, got {}",
+                self.backoff_multiplier
+            ));
+        }
+        Ok(())
+    }
+
     /// Compute the wait duration for a given attempt (0-indexed).
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         // Cap exponent to 63 — beyond that any multiplier >= 2 overflows f64
         // or produces values so large that Duration::mul_f64 panics.
         let exp = attempt.min(63) as i32;
-        let multiplier = self.backoff_multiplier.powi(exp);
-        // Guard against infinity/NaN to prevent Duration::mul_f64 panic.
-        let capped =
-            if multiplier.is_finite() && multiplier < f64::MAX / self.max_backoff.as_secs_f64() {
+        // `effective_multiplier()` guarantees a finite value in [1.0, MAX],
+        // so `mul_f64` below can never see a negative or NaN scale factor.
+        let multiplier = self.effective_multiplier().powi(exp);
+        // A zero `max_backoff` means "no cap configured" — NOT "cap every
+        // wait to zero". The original code divided `f64::MAX / 0.0` (→ +inf)
+        // and then `.min(ZERO)`, collapsing every retrier's wait to 0 so they
+        // all fired in lockstep. Treat ZERO (and any non-positive cap) as
+        // uncapped: scale freely and skip the `.min(max_backoff)` clamp.
+        let max_secs = self.max_backoff.as_secs_f64();
+        let capped = if max_secs > 0.0 {
+            let overflow_guard = f64::MAX / max_secs;
+            if multiplier.is_finite() && multiplier < overflow_guard {
                 self.initial_backoff
                     .mul_f64(multiplier)
                     .min(self.max_backoff)
             } else {
                 self.max_backoff
-            };
+            }
+        } else if multiplier.is_finite() {
+            // Uncapped: clamp the scaled value to MAX_BACKOFF_FALLBACK so an
+            // unbounded multiplier can't overflow Duration::mul_f64.
+            let scaled = self.initial_backoff.as_secs_f64() * multiplier;
+            if scaled.is_finite() && scaled < MAX_BACKOFF_FALLBACK_SECS {
+                self.initial_backoff.mul_f64(multiplier)
+            } else {
+                Duration::from_secs_f64(MAX_BACKOFF_FALLBACK_SECS)
+            }
+        } else {
+            Duration::from_secs_f64(MAX_BACKOFF_FALLBACK_SECS)
+        };
         if self.jitter {
-            // Full jitter: random duration in [0, capped) instead of [capped, 2*capped).
-            let capped_ms = capped.as_millis() as u64;
-            Duration::from_millis(rand::random::<u64>() % capped_ms.max(1))
+            // Full jitter: random duration in [0, capped) instead of
+            // [capped, 2*capped). Floor the jitter window at 1ms: when
+            // `capped < 1ms` the millisecond truncation made `capped_ms == 0`,
+            // so `rand % 1` was always 0 and every retrier fired in lockstep
+            // (thundering herd). A 1ms floor restores per-retrier dispersion.
+            let capped_ms = (capped.as_millis() as u64).max(1);
+            Duration::from_millis(rand::random::<u64>() % capped_ms)
         } else {
             capped
         }
@@ -683,5 +762,103 @@ mod tests {
 
         let all = store.list_all().await.unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    // -- #5136: retry-backoff arithmetic robustness -------------------------
+
+    #[test]
+    fn test_negative_multiplier_does_not_panic() {
+        // Odd exponent with a negative multiplier previously produced
+        // `Duration::mul_f64(<0.0)` which panics. Drive several attempts
+        // (mix of odd/even exponents) and assert no panic + bounded output.
+        let policy = RetryPolicy {
+            max_retries: 5,
+            initial_backoff: Duration::from_secs(1),
+            backoff_multiplier: -2.0,
+            max_backoff: Duration::from_secs(30),
+            jitter: false,
+        };
+        for attempt in 0..6 {
+            let d = policy.delay_for_attempt(attempt);
+            assert!(
+                d <= Duration::from_secs(30),
+                "attempt {attempt}: {d:?} must stay within max_backoff"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nan_multiplier_does_not_panic() {
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_backoff: Duration::from_secs(1),
+            backoff_multiplier: f64::NAN,
+            max_backoff: Duration::from_secs(30),
+            jitter: false,
+        };
+        // NaN previously propagated into mul_f64 and panicked. The effective
+        // multiplier falls back to the default 2.0, so attempt 0 == base.
+        assert_eq!(policy.delay_for_attempt(0), Duration::from_secs(1));
+        assert_eq!(policy.delay_for_attempt(1), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_zero_max_backoff_does_not_collapse_to_zero() {
+        // max_backoff == ZERO made the old `f64::MAX / 0.0` divisor +inf,
+        // so the finite branch was always taken with `.min(ZERO)` → every
+        // wait collapsed to zero (all retriers in lockstep). With the fix,
+        // a zero cap means "no cap": the wait grows with the multiplier.
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_backoff: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+            max_backoff: Duration::ZERO,
+            jitter: false,
+        };
+        assert_eq!(policy.delay_for_attempt(0), Duration::from_secs(1));
+        assert_eq!(policy.delay_for_attempt(2), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_sub_millisecond_cap_keeps_jitter_window() {
+        // capped < 1ms previously truncated `capped_ms` to 0, so
+        // `rand % 1` was always 0 → zero jitter, thundering herd. The 1ms
+        // floor restores a non-degenerate window: not every sample is
+        // identical across many draws.
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_backoff: Duration::from_micros(100),
+            backoff_multiplier: 1.0,
+            max_backoff: Duration::from_micros(100),
+            jitter: true,
+        };
+        // All samples must be in [0, 1ms) and not panic.
+        for _ in 0..50 {
+            let d = policy.delay_for_attempt(0);
+            assert!(d < Duration::from_millis(1), "jitter {d:?} out of window");
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_and_negative() {
+        let nan = RetryPolicy {
+            backoff_multiplier: f64::NAN,
+            ..RetryPolicy::default()
+        };
+        assert!(nan.validate().is_err());
+
+        let neg = RetryPolicy {
+            backoff_multiplier: -1.0,
+            ..RetryPolicy::default()
+        };
+        assert!(neg.validate().is_err());
+
+        let inf = RetryPolicy {
+            backoff_multiplier: f64::INFINITY,
+            ..RetryPolicy::default()
+        };
+        assert!(inf.validate().is_err());
+
+        assert!(RetryPolicy::default().validate().is_ok());
     }
 }

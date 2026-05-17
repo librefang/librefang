@@ -295,6 +295,22 @@ fn default_timeout() -> u64 {
     120
 }
 
+/// Upper bound (seconds) for any user-supplied step / total timeout.
+///
+/// `tokio::time::timeout` internally computes `Instant::now() + duration`;
+/// when `duration` is built from a near-`u64::MAX` `timeout_secs` the
+/// `Instant + Duration` add overflows and panics. One year is already far
+/// beyond any legitimate workflow / step timeout, so clamping here removes
+/// the panic vector without truncating any realistic operator config.
+const MAX_TIMEOUT_SECS: u64 = 366 * 24 * 60 * 60;
+
+/// Build a `Duration` from a user-supplied `timeout_secs`, clamped to
+/// [`MAX_TIMEOUT_SECS`] so `tokio::time::timeout` can never panic on an
+/// `Instant + Duration` overflow. See [`MAX_TIMEOUT_SECS`].
+fn clamp_timeout_duration(timeout_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(timeout_secs.min(MAX_TIMEOUT_SECS))
+}
+
 /// How to identify the agent for a step.
 ///
 /// Deserialization accepts THREE on-wire shapes for operator ergonomics
@@ -2369,7 +2385,7 @@ impl WorkflowEngine {
         F: Fn(AgentId, String, Option<SessionMode>) -> Fut,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
     {
-        let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
+        let timeout_dur = clamp_timeout_duration(step.timeout_secs);
         let session_mode = step.session_mode;
 
         match &step.error_mode {
@@ -2952,7 +2968,7 @@ impl WorkflowEngine {
         };
 
         let result = if let Some(secs) = total_timeout {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), inner_fut).await {
+            match tokio::time::timeout(clamp_timeout_duration(secs), inner_fut).await {
                 Ok(r) => r,
                 Err(_elapsed) => {
                     let msg = format!("workflow exceeded total_timeout of {secs}s");
@@ -3280,7 +3296,7 @@ impl WorkflowEngine {
                             &prev_results,
                             agent_inherit,
                         );
-                        let timeout_dur = std::time::Duration::from_secs(fan_step.timeout_secs);
+                        let timeout_dur = clamp_timeout_duration(fan_step.timeout_secs);
 
                         step_infos.push((*idx, fan_step.name.clone(), agent_id, agent_name));
                         step_prompts.push(prompt.clone());
@@ -4558,7 +4574,7 @@ impl WorkflowEngine {
                         let prompt =
                             Self::expand_variables(&step.prompt_template, input, &variables);
                         step_prompts.push(prompt.clone());
-                        let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
+                        let timeout_dur = clamp_timeout_duration(step.timeout_secs);
                         let err_mode = step.error_mode.clone();
                         let step_name = step.name.clone();
                         let step_session_mode = step.session_mode;
@@ -10485,5 +10501,37 @@ name = "topic"
             "expected a _operator:operator step result; got: {:?}",
             run.step_results
         );
+    }
+
+    // -- #5136: timeout Duration overflow guard -----------------------------
+
+    #[test]
+    fn clamp_timeout_duration_caps_pathological_u64() {
+        // `tokio::time::timeout(Duration::from_secs(u64::MAX))` panics on the
+        // internal `Instant + Duration` add. A user-supplied near-u64::MAX
+        // `timeout_secs` must be clamped to MAX_TIMEOUT_SECS so the timer
+        // can never overflow.
+        let d = clamp_timeout_duration(u64::MAX);
+        assert_eq!(d, std::time::Duration::from_secs(MAX_TIMEOUT_SECS));
+
+        // A realistic timeout passes through unchanged (no silent truncation
+        // of legitimate operator config).
+        let normal = clamp_timeout_duration(300);
+        assert_eq!(normal, std::time::Duration::from_secs(300));
+
+        // Exactly at the cap is preserved.
+        let at_cap = clamp_timeout_duration(MAX_TIMEOUT_SECS);
+        assert_eq!(at_cap, std::time::Duration::from_secs(MAX_TIMEOUT_SECS));
+    }
+
+    #[tokio::test]
+    async fn clamped_timeout_does_not_panic_in_tokio_timeout() {
+        // Drive the clamped duration through the real tokio timer with a
+        // future that completes immediately — this is the exact call shape
+        // (`tokio::time::timeout(clamp_timeout_duration(secs), fut)`) used by
+        // the workflow executor. Pre-fix, `from_secs(u64::MAX)` panicked here.
+        let dur = clamp_timeout_duration(u64::MAX);
+        let r = tokio::time::timeout(dur, async { 7u8 }).await;
+        assert_eq!(r.expect("inner future completed"), 7);
     }
 }

@@ -473,8 +473,19 @@ impl ApprovalManager {
                 if elapsed >= TOTP_LOCKOUT_SECS {
                     None // Lockout has expired — don't restore
                 } else {
-                    // Reconstruct an Instant that is `elapsed` seconds in the past
-                    Some(Instant::now() - std::time::Duration::from_secs(elapsed))
+                    // Reconstruct an Instant that is `elapsed` seconds in the
+                    // past. `Instant - Duration` panics when the result would
+                    // predate the platform's monotonic origin (on Linux that
+                    // is process boot, so a long `elapsed` recovered from a
+                    // restored lockout panics within the first minute of a
+                    // cold start). `checked_sub` returns None instead; fall
+                    // back to "now" (treat the lockout as having just begun —
+                    // conservative: it expires slightly later, never earlier).
+                    let now = Instant::now();
+                    Some(
+                        now.checked_sub(std::time::Duration::from_secs(elapsed))
+                            .unwrap_or(now),
+                    )
                 }
             });
             // If lockout_start is None but failures >= threshold, the lockout
@@ -3245,6 +3256,51 @@ mod tests {
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.
         assert!(mgr.is_totp_code_used("987654"));
+    }
+
+    /// #5136: `load_totp_lockout` reconstructs `Instant::now() - elapsed`.
+    /// `Instant - Duration` panics when the result predates the platform's
+    /// monotonic origin (Linux: process boot) — so a lockout row restored
+    /// within the first `elapsed` seconds of a cold-started daemon panicked.
+    /// The `checked_sub(..).unwrap_or(now)` guard must keep the restore
+    /// path total: a stale-but-unexpired row yields `Some(Instant)` (never a
+    /// future instant) and never panics.
+    #[test]
+    fn issue_5136_load_totp_lockout_does_not_panic_on_stale_row() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            // locked_at far in the past but still inside the 300s window
+            // (elapsed = 290s): exercises the Instant-reconstruction branch
+            // with a large `elapsed`, the exact shape that underflows on a
+            // freshly-booted process.
+            conn.execute(
+                "INSERT INTO totp_lockout (sender_id, failures, locked_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params!["stale-sender", TOTP_MAX_FAILURES as i64, now_unix - 290],
+            )
+            .unwrap();
+        }
+
+        // Must not panic regardless of how young this test process is.
+        let map = ApprovalManager::load_totp_lockout(&pool);
+        let (failures, lockout_start) = map.get("stale-sender").expect("stale lockout restored");
+        assert_eq!(*failures, TOTP_MAX_FAILURES);
+        let started = lockout_start.expect("lockout_start reconstructed");
+        // The reconstructed instant must not be in the future (worst case it
+        // is the `now` fallback, i.e. <= Instant::now()).
+        assert!(
+            started <= Instant::now(),
+            "reconstructed lockout_start must not be in the future"
+        );
     }
 
     /// `record_totp_code_used_for` MUST surface a DB write failure as `Err`,
