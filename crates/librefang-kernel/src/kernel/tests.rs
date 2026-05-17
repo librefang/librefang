@@ -1737,19 +1737,53 @@ fn test_evaluate_condition_unknown_format() {
 
 #[test]
 fn test_peer_scoped_key() {
-    // With peer_id: key is namespaced
+    use librefang_runtime::kernel_handle::KernelOpError;
+
+    // With a colon-free, non-empty peer_id: key is namespaced.
     assert_eq!(
-        peer_scoped_key("car", Some("user-123")),
+        peer_scoped_key("car", Some("user-123")).expect("colon-free peer_id ok"),
         "peer:user-123:car"
     );
+
+    // Without peer_id: key is unchanged (global scope).
     assert_eq!(
-        peer_scoped_key("prefs.color", Some("u:456")),
-        "peer:u:456:prefs.color"
+        peer_scoped_key("car", None).expect("None peer_id ok"),
+        "car"
+    );
+    assert_eq!(
+        peer_scoped_key("global_setting", None).expect("None peer_id ok"),
+        "global_setting"
     );
 
-    // Without peer_id: key is unchanged
-    assert_eq!(peer_scoped_key("car", None), "car");
-    assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+    // SECURITY (#5119): peer_id containing ':' is rejected — the historical
+    // `peer:{pid}:{key}` framing is only injective when pid is colon-free.
+    assert!(matches!(
+        peer_scoped_key("prefs.color", Some("u:456")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("car", Some("T1:U2")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5119 / review #3): an empty peer_id is rejected — `peer::{key}`
+    // is ambiguous with a `None`-scope key literally named `:{key}` and would
+    // split / shadow a namespace.
+    assert!(matches!(
+        peer_scoped_key("car", Some("")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5120): key starting with reserved `peer:` prefix is rejected
+    // so an LLM-supplied key cannot collide with the internal namespace.
+    assert!(matches!(
+        peer_scoped_key("peer:victim:user_name", None),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("peer:anything", Some("alice")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
 }
 
 #[test]
