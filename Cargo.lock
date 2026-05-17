@@ -4627,6 +4627,7 @@ dependencies = [
  "librefang-kernel-metering",
  "librefang-kernel-router",
  "librefang-llm-driver",
+ "librefang-llm-drivers",
  "librefang-memory",
  "librefang-memory-wiki",
  "librefang-runtime",

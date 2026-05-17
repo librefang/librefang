@@ -434,6 +434,11 @@ impl LibreFangKernel {
                     // is used when drivers are next constructed.
                     self.llm.driver_cache.clear();
                 }
+                HotAction::ReloadCredentialPools => {
+                    info!("Hot-reload: credential pool config changed — rebuilding pools");
+                    rebuild_credential_pools(&self.llm.credential_pools, new_config);
+                    self.llm.driver_cache.clear();
+                }
                 HotAction::ReloadProviderApiKeys => {
                     info!("Hot-reload: provider API keys changed — flushing driver cache");
                     self.llm.driver_cache.clear();
@@ -537,5 +542,73 @@ impl LibreFangKernel {
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
+    }
+}
+
+/// Rebuild credential pools from a new config snapshot.
+///
+/// Called on boot and hot-reload. Replaces the contents of the existing
+/// `DashMap` so that in-flight `PooledDriver` references to old pools
+/// continue to work (they hold an `ArcCredentialPool` which is not
+/// invalidated by the map-level replace). Newly created `PooledDriver`s
+/// in `resolve_driver` will look up the new pool entries.
+fn rebuild_credential_pools(
+    pools: &dashmap::DashMap<String, librefang_llm_drivers::ArcCredentialPool>,
+    config: &librefang_types::config::KernelConfig,
+) {
+    use librefang_llm_drivers::PoolStrategy;
+
+    // Determine which provider pools are still configured.
+    let configured: std::collections::HashSet<String> = config
+        .credential_pools
+        .iter()
+        .map(|p| p.provider.clone())
+        .collect();
+
+    // Remove pools for providers no longer configured.
+    pools.retain(|provider, _| configured.contains(provider));
+
+    for pool_cfg in &config.credential_pools {
+        if pool_cfg.keys.is_empty() {
+            continue;
+        }
+        let mut key_priority_pairs = Vec::with_capacity(pool_cfg.keys.len());
+        for key_cfg in &pool_cfg.keys {
+            match std::env::var(&key_cfg.api_key_env) {
+                Ok(key) => {
+                    key_priority_pairs.push((key, key_cfg.priority));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = %key_cfg.api_key_env,
+                        label = %key_cfg.label,
+                        provider = %pool_cfg.provider,
+                        "Hot-reload: credential pool key env var not set — skipping"
+                    );
+                }
+            }
+        }
+        if key_priority_pairs.is_empty() {
+            tracing::warn!(
+                provider = %pool_cfg.provider,
+                "Hot-reload: credential pool has no resolvable keys — skipping"
+            );
+            pools.remove(&pool_cfg.provider);
+            continue;
+        }
+        let strategy: PoolStrategy = match pool_cfg.strategy {
+            librefang_types::config::CredentialPoolStrategy::FillFirst => PoolStrategy::FillFirst,
+            librefang_types::config::CredentialPoolStrategy::RoundRobin => PoolStrategy::RoundRobin,
+            librefang_types::config::CredentialPoolStrategy::Random => PoolStrategy::Random,
+            librefang_types::config::CredentialPoolStrategy::LeastUsed => PoolStrategy::LeastUsed,
+        };
+        let pool = librefang_llm_drivers::new_arc_pool(key_priority_pairs, strategy);
+        tracing::info!(
+            provider = %pool_cfg.provider,
+            strategy = ?pool_cfg.strategy,
+            key_count = pool_cfg.keys.len(),
+            "Hot-reload: rebuilt credential pool"
+        );
+        pools.insert(pool_cfg.provider.clone(), pool);
     }
 }

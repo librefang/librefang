@@ -1258,6 +1258,63 @@ impl LibreFangKernel {
         // Extract before config is moved into ArcSwap.
         let wf_default_total_timeout = config.workflow_default_total_timeout_secs;
 
+        // ── Credential pools ────────────────────────────────────────────────
+        // Build per-provider key rotation pools from `[[credential_pools]]` in
+        // config.toml. Each pool is a `DashMap<String, ArcCredentialPool>`.
+        let credential_pools = {
+            use librefang_llm_drivers::PoolStrategy;
+            let pools = dashmap::DashMap::new();
+            for pool_cfg in &config.credential_pools {
+                if pool_cfg.keys.is_empty() {
+                    continue;
+                }
+                let mut key_priority_pairs = Vec::with_capacity(pool_cfg.keys.len());
+                for key_cfg in &pool_cfg.keys {
+                    match std::env::var(&key_cfg.api_key_env) {
+                        Ok(key) => {
+                            key_priority_pairs.push((key, key_cfg.priority));
+                        }
+                        Err(_) => {
+                            warn!(
+                                env_var = %key_cfg.api_key_env,
+                                label = %key_cfg.label,
+                                provider = %pool_cfg.provider,
+                                "Credential pool key env var not set — skipping"
+                            );
+                        }
+                    }
+                }
+                if key_priority_pairs.is_empty() {
+                    warn!(
+                        provider = %pool_cfg.provider,
+                        "Credential pool has no resolvable keys — skipping"
+                    );
+                    continue;
+                }
+                let strategy: PoolStrategy = match pool_cfg.strategy {
+                    librefang_types::config::CredentialPoolStrategy::FillFirst => {
+                        PoolStrategy::FillFirst
+                    }
+                    librefang_types::config::CredentialPoolStrategy::RoundRobin => {
+                        PoolStrategy::RoundRobin
+                    }
+                    librefang_types::config::CredentialPoolStrategy::Random => PoolStrategy::Random,
+                    librefang_types::config::CredentialPoolStrategy::LeastUsed => {
+                        PoolStrategy::LeastUsed
+                    }
+                };
+                let pool = librefang_llm_drivers::new_arc_pool(key_priority_pairs, strategy);
+                info!(
+                    provider = %pool_cfg.provider,
+                    strategy = ?pool_cfg.strategy,
+                    key_count = pool_cfg.keys.len(),
+                    "Initialized credential pool"
+                );
+                pools.insert(pool_cfg.provider.clone(), pool);
+            }
+            pools
+        };
+
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -1290,6 +1347,7 @@ impl LibreFangKernel {
                 initial_aux_client,
                 embedding_driver,
                 model_catalog,
+                credential_pools,
             ),
             wasm_sandbox,
             security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
