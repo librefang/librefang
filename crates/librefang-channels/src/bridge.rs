@@ -5257,6 +5257,180 @@ async fn dispatch_with_blocks(
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
 
+    // Streaming path: when the adapter supports progressive output, flatten
+    // enriched text blocks into a string and stream the response back.
+    // This ensures file/voice/audio attachments go through the same streaming
+    // pipeline as plain text messages, so Telegram (and other streaming-capable
+    // adapters) receive the full enriched content via the streaming path (#5195).
+    if adapter.supports_streaming() {
+        // Flatten all Text content blocks into the user message string so the
+        // kernel receives the enriched file content (saved path, transcription,
+        // caption, etc.) even though the streaming API only accepts &str.
+        let text: String = blocks
+            .iter()
+            .filter_map(|b| {
+                if let ContentBlock::Text { text, .. } = b {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        match handle
+            .send_message_streaming_with_sender_status(agent_id, &text, &sender_ctx)
+            .await
+        {
+            Ok((mut delta_rx, status_rx)) => {
+                send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Streaming)
+                    .await;
+
+                let prefix_chunk = resolve_prefix_chunk(handle, overrides, agent_id).await;
+                let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
+                let prefix_chunk_owned = prefix_chunk.clone();
+                let drain_fut = async {
+                    let mut buffered = String::new();
+                    if let Some(ref p) = prefix_chunk_owned {
+                        buffered.push_str(p);
+                        if adapter_tx.send(p.clone()).await.is_err() {
+                            return buffered;
+                        }
+                    }
+                    while let Some(delta) = delta_rx.recv().await {
+                        buffered.push_str(&delta);
+                        if let Some(name) = extract_tool_marker_name(&delta) {
+                            send_lifecycle_reaction(
+                                adapter,
+                                &message.sender,
+                                msg_id,
+                                &AgentPhase::tool_use(&name),
+                            )
+                            .await;
+                        }
+                        if adapter_tx.send(delta).await.is_err() {
+                            break;
+                        }
+                    }
+                    drop(adapter_tx);
+                    buffered
+                };
+
+                let (stream_result, buffered_text) = tokio::join!(
+                    adapter.send_streaming(&message.sender, adapter_rx, thread_id),
+                    drain_fut
+                );
+
+                let kernel_status = status_rx.await.unwrap_or(Ok(()));
+                let kernel_ok = kernel_status.is_ok();
+                let kernel_err_str = kernel_status.as_ref().err().cloned();
+
+                match &stream_result {
+                    Ok(()) => {
+                        let phase = if kernel_ok {
+                            AgentPhase::Done
+                        } else {
+                            AgentPhase::Error
+                        };
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, &phase).await;
+                        handle
+                            .record_delivery(
+                                agent_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                kernel_ok,
+                                kernel_err_str.as_deref(),
+                                thread_id,
+                            )
+                            .await;
+                        if let Some(j) = journal {
+                            j.record_outcome(
+                                &message.platform_message_id,
+                                kernel_ok,
+                                kernel_err_str.clone(),
+                            )
+                            .await;
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("Streaming send failed (blocks path), falling back to non-streaming: {e}");
+                        if !buffered_text.is_empty()
+                            && (kernel_ok || !adapter.suppress_error_responses())
+                        {
+                            let buffered_text = if kernel_ok {
+                                maybe_prefix_response(handle, overrides, agent_id, buffered_text)
+                                    .await
+                            } else {
+                                buffered_text
+                            };
+                            send_response(
+                                adapter,
+                                &message.sender,
+                                buffered_text,
+                                thread_id,
+                                output_format,
+                            )
+                            .await;
+                            let phase = if kernel_ok {
+                                AgentPhase::Done
+                            } else {
+                                AgentPhase::Error
+                            };
+                            send_lifecycle_reaction(adapter, &message.sender, msg_id, &phase).await;
+                            let err_str = if kernel_ok {
+                                None
+                            } else {
+                                kernel_err_str.clone()
+                            };
+                            handle
+                                .record_delivery(
+                                    agent_id,
+                                    ct_str,
+                                    &message.sender.platform_id,
+                                    kernel_ok,
+                                    err_str.as_deref(),
+                                    thread_id,
+                                )
+                                .await;
+                            if let Some(j) = journal {
+                                j.record_outcome(&message.platform_message_id, kernel_ok, err_str)
+                                    .await;
+                            }
+                            return;
+                        }
+                        send_lifecycle_reaction(
+                            adapter,
+                            &message.sender,
+                            msg_id,
+                            &AgentPhase::Error,
+                        )
+                        .await;
+                        let err_str = kernel_err_str.unwrap_or_else(|| e.to_string());
+                        handle
+                            .record_delivery(
+                                agent_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                false,
+                                Some(&err_str),
+                                thread_id,
+                            )
+                            .await;
+                        if let Some(j) = journal {
+                            j.record_outcome(&message.platform_message_id, false, Some(err_str))
+                                .await;
+                        }
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Streaming unavailable for blocks dispatch, falling back: {e}");
+            }
+        }
+    }
+
     match handle
         .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
         .await
