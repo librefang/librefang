@@ -111,10 +111,14 @@ impl ProcessManager {
         let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        // Spawn background readers for stdout/stderr
+        // Spawn background readers for stdout/stderr. The reader handles
+        // were previously dropped, so a panic inside a reader silently
+        // truncated the process's captured output mid-run with no trace.
+        // Retain each handle and watch it for panic (#5137).
         if let Some(out) = stdout {
             let buf = stdout_buf.clone();
-            tokio::spawn(async move {
+            let pid_label = agent_id.to_string();
+            let handle = tokio::spawn(async move {
                 let reader = BufReader::new(out);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -126,11 +130,23 @@ impl ProcessManager {
                     b.push(line);
                 }
             });
+            tokio::spawn(async move {
+                if let Err(e) = handle.await {
+                    if e.is_panic() {
+                        tracing::error!(
+                            agent = %pid_label,
+                            error = %e,
+                            "stdout reader task panicked; process output truncated"
+                        );
+                    }
+                }
+            });
         }
 
         if let Some(err) = stderr {
             let buf = stderr_buf.clone();
-            tokio::spawn(async move {
+            let pid_label = agent_id.to_string();
+            let handle = tokio::spawn(async move {
                 let reader = BufReader::new(err);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -139,6 +155,17 @@ impl ProcessManager {
                         b.drain(..100);
                     }
                     b.push(line);
+                }
+            });
+            tokio::spawn(async move {
+                if let Err(e) = handle.await {
+                    if e.is_panic() {
+                        tracing::error!(
+                            agent = %pid_label,
+                            error = %e,
+                            "stderr reader task panicked; process output truncated"
+                        );
+                    }
                 }
             });
         }

@@ -990,11 +990,19 @@ impl LibreFangKernel {
     /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
     /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
     ///   stored provider matches `old_provider` — these were using the old default
+    ///
+    /// Returns a per-agent partial-failure list `(agent_name, error)`. An
+    /// empty vec means every eligible agent was migrated cleanly. Callers
+    /// (the provider-switch API handlers) surface this so an operator sees
+    /// which agents are still pinned to the old provider on disk instead of
+    /// the switch silently half-applying (#5137).
+    #[must_use]
     pub fn sync_default_model_agents(
         &self,
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
-    ) {
+    ) -> Vec<(String, String)> {
+        let mut failures: Vec<(String, String)> = Vec::new();
         for entry in self.agents.registry.list() {
             let is_default_provider = entry.manifest.model.provider.is_empty()
                 || entry.manifest.model.provider == "default";
@@ -1013,11 +1021,19 @@ impl LibreFangKernel {
                 || is_auto_spawned
                 || is_stale_dashboard_default
             {
-                let _ = self.agents.registry.update_model_and_provider(
+                if let Err(e) = self.agents.registry.update_model_and_provider(
                     entry.id,
                     dm.model.clone(),
                     dm.provider.clone(),
-                );
+                ) {
+                    tracing::error!(
+                        agent = %entry.name,
+                        error = %e,
+                        "Failed to update agent model/provider during default-model sync"
+                    );
+                    failures.push((entry.name.clone(), e.to_string()));
+                    continue;
+                }
                 if !dm.api_key_env.is_empty() {
                     if let Some(mut e) = self.agents.registry.get(entry.id) {
                         if e.manifest.model.api_key_env.is_none() {
@@ -1034,13 +1050,28 @@ impl LibreFangKernel {
                                 .entry(key.clone())
                                 .or_insert(value.clone());
                         }
-                        let _ = self.memory.substrate.save_agent(&e);
+                        if let Err(err) = self.memory.substrate.save_agent(&e) {
+                            tracing::error!(
+                                agent = %entry.name,
+                                error = %err,
+                                "Failed to persist agent after default-model sync"
+                            );
+                            failures.push((entry.name.clone(), err.to_string()));
+                        }
                     }
                 } else if let Some(e) = self.agents.registry.get(entry.id) {
-                    let _ = self.memory.substrate.save_agent(&e);
+                    if let Err(err) = self.memory.substrate.save_agent(&e) {
+                        tracing::error!(
+                            agent = %entry.name,
+                            error = %err,
+                            "Failed to persist agent after default-model sync"
+                        );
+                        failures.push((entry.name.clone(), err.to_string()));
+                    }
                 }
             }
         }
+        failures
     }
 
     pub fn trigger_all_hands(&self) {

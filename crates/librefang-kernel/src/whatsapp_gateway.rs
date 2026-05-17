@@ -184,12 +184,23 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
     let gateway_url = format!("http://127.0.0.1:{port}");
     {
         let gateway_url_clone = gateway_url.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             // SAFETY: running on a dedicated blocking thread; tokio workers do
             // not race on this env var at this point in boot.
             unsafe { std::env::set_var("WHATSAPP_WEB_GATEWAY_URL", &gateway_url_clone) };
         })
-        .await;
+        .await
+        {
+            // The set_var task panicked / the runtime is shutting down — the
+            // env var was NOT set, so the rest of the system can't find the
+            // gateway. Don't log the success line below as if it were set;
+            // abort the gateway start instead (#5137).
+            warn!(
+                error = %e,
+                "Failed to set WHATSAPP_WEB_GATEWAY_URL env var; aborting WhatsApp gateway start"
+            );
+            return;
+        }
     }
     info!("WHATSAPP_WEB_GATEWAY_URL set to http://127.0.0.1:{port}");
 

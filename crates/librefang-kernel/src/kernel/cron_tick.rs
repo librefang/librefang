@@ -62,12 +62,31 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
             match &job.action {
                 librefang_types::scheduler::CronAction::SystemEvent { text } => {
                     tracing::debug!(job = %job_name, "Cron: firing system event");
-                    let payload_bytes = serde_json::to_vec(&serde_json::json!({
+                    let payload_bytes = match serde_json::to_vec(&serde_json::json!({
                         "type": format!("cron.{}", job_name),
                         "text": text,
                         "job_id": job_id.to_string(),
-                    }))
-                    .unwrap_or_default();
+                    })) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            // Publishing an empty payload here would emit an
+                            // event subscribers can't decode and the cron
+                            // fire would look "successful" — record the
+                            // failure and skip this job's tick instead
+                            // (#5137).
+                            tracing::error!(
+                                job = %job_name,
+                                job_id = %job_id,
+                                error = %e,
+                                "Cron: failed to encode system event payload; skipping fire"
+                            );
+                            kernel
+                                .workflows
+                                .cron_scheduler
+                                .record_failure(job_id, &format!("payload encode failed: {e}"));
+                            continue;
+                        }
+                    };
                     let event = Event::new(
                         AgentId::new(), // system-originated
                         EventTarget::Broadcast,

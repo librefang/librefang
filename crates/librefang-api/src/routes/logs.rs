@@ -41,7 +41,7 @@ pub async fn logs_stream(
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
 
-    tokio::spawn(async move {
+    let forwarder = tokio::spawn(async move {
         // Cursor-based polling: `last_seq == 0` triggers the bounded
         // backfill on the very first iteration, then every subsequent
         // poll asks for entries strictly newer than the last delivered
@@ -105,6 +105,21 @@ pub async fn logs_stream(
                 last_seq = last.seq;
             }
             first_poll = false;
+        }
+    });
+
+    // Watchdog: the forwarder handle was previously dropped, so a panic in
+    // the poll loop left the EventSource hung with no server trace. Watch it
+    // and log on panic (#5137). The watchdog ends naturally when the
+    // forwarder returns (client disconnect) — no leak.
+    tokio::spawn(async move {
+        if let Err(e) = forwarder.await {
+            if e.is_panic() {
+                tracing::error!(
+                    error = %e,
+                    "SSE log forwarder task panicked; EventSource stalled"
+                );
+            }
         }
     });
 

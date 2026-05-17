@@ -1218,9 +1218,25 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
         };
-        state
+        let sync_failures = state
             .kernel
             .sync_default_model_agents(&current_provider, &new_dm);
+        if !sync_failures.is_empty() {
+            let mut resp = serde_json::json!({"status": "saved", "provider": name});
+            resp["switched_default"] = serde_json::json!(true);
+            resp["sync_failures"] = serde_json::json!(sync_failures
+                .iter()
+                .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
+                .collect::<Vec<_>>());
+            resp["message"] = serde_json::json!(format!(
+                "API key saved and default provider switched to '{name}', but {} agent(s) \
+                 could not be migrated and remain pinned to the old provider on disk.",
+                sync_failures.len()
+            ));
+            // Mixed outcome: the key was saved but the fan-out half-applied.
+            // 207 surfaces the partial failure instead of a lying 200.
+            return (StatusCode::MULTI_STATUS, Json(resp));
+        }
     }
 
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
@@ -1893,20 +1909,28 @@ pub async fn set_default_provider(
     }
 
     // Update registry entries for agents that were tracking the old default
-    state
+    let sync_failures = state
         .kernel
         .sync_default_model_agents(&old_provider, &new_dm);
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "updated",
-            "provider": name,
-            "model": model_id,
-            "api_key_env": env_var,
-            "persisted": persisted,
-        })),
-    )
+    let mut body = serde_json::json!({
+        "status": "updated",
+        "provider": name,
+        "model": model_id,
+        "api_key_env": env_var,
+        "persisted": persisted,
+    });
+    if sync_failures.is_empty() {
+        (StatusCode::OK, Json(body))
+    } else {
+        body["sync_failures"] = serde_json::json!(sync_failures
+            .iter()
+            .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
+            .collect::<Vec<_>>());
+        // Some agents stayed pinned to the old provider on disk — surface
+        // the partial failure instead of a lying 200 (#5137).
+        (StatusCode::MULTI_STATUS, Json(body))
+    }
 }
 
 /// Safely persist the `[default_model]` section into config.toml using proper

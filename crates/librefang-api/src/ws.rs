@@ -1762,7 +1762,10 @@ pub async fn send_json(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     value: &serde_json::Value,
 ) -> Result<(), axum::Error> {
-    let text = serde_json::to_string(value).unwrap_or_default();
+    // Don't send `""` on encode failure — the client would receive an empty
+    // frame it can't decode and silently stall. Surface the error so the
+    // caller can close the socket with a server-error code (#5137).
+    let text = serde_json::to_string(value).map_err(axum::Error::new)?;
     let mut s = sender.lock().await;
     s.send(Message::Text(text.into()))
         .await

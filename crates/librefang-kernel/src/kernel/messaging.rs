@@ -707,13 +707,23 @@ impl LibreFangKernel {
             let has_content = !result.response.trim().is_empty();
             let no_tool_errors = result.iterations > 0;
             let success = has_content && no_tool_errors;
-            let _ = self.record_experiment_request(
+            if let Err(e) = self.record_experiment_request(
                 &ctx.experiment_id.to_string(),
                 &ctx.variant_id.to_string(),
                 latency_ms,
                 cost,
                 success,
-            );
+            ) {
+                // Dropping this silently undercounts the experiment arm and
+                // lets the auto-selected winner run on incomplete data.
+                tracing::error!(
+                    agent_id = %agent_id,
+                    experiment_id = %ctx.experiment_id,
+                    variant_id = %ctx.variant_id,
+                    error = %e,
+                    "Failed to record A/B experiment request metrics"
+                );
+            }
         }
 
         let mut result = result;
@@ -2709,13 +2719,24 @@ impl LibreFangKernel {
                             let has_content = !result.response.trim().is_empty();
                             let no_tool_errors = result.iterations > 0;
                             let success = has_content && no_tool_errors;
-                            let _ = kernel_clone.record_experiment_request(
+                            if let Err(e) = kernel_clone.record_experiment_request(
                                 &ctx.experiment_id.to_string(),
                                 &ctx.variant_id.to_string(),
                                 latency_ms,
                                 cost,
                                 success,
-                            );
+                            ) {
+                                // Dropping this silently undercounts the
+                                // experiment arm and lets the auto-selected
+                                // winner run on incomplete data.
+                                tracing::error!(
+                                    agent_id = %agent_id,
+                                    experiment_id = %ctx.experiment_id,
+                                    variant_id = %ctx.variant_id,
+                                    error = %e,
+                                    "Failed to record A/B experiment request metrics (streaming)"
+                                );
+                            }
                         }
                     }
 
