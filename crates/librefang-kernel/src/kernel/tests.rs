@@ -3851,6 +3851,140 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
     kernel.shutdown();
 }
 
+/// #5142 regression: `kill_agent` must abort the agent's in-flight LLM
+/// loop, not merely tear down the registry entry and leave the streaming
+/// task burning provider tokens. Pre-#5142, `kill_agent_with_purge` removed
+/// the registry/scheduler entries but never called `stop_agent_run`, and the
+/// orphaned `running_tasks` entry was only reaped by the GC sweep — which
+/// *dropped* the `AbortHandle` instead of firing it. `suspend_agent` did the
+/// right thing; `kill_agent` did not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_agent_aborts_in_flight_run_5142() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-kill-abort-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "victim".to_string(),
+        description: "agent whose run must be aborted on kill".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session = SessionId::new();
+
+    // A genuine long-lived task standing in for an in-flight LLM stream.
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let abort = task.abort_handle();
+    kernel.agents.running_tasks.insert(
+        (agent_id, session),
+        RunningTask {
+            abort: abort.clone(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    assert!(
+        !abort.is_finished(),
+        "sanity: the simulated in-flight run must be alive before kill"
+    );
+    assert!(kernel.agent_has_active_session(agent_id));
+
+    kernel
+        .kill_agent(agent_id)
+        .expect("kill_agent should succeed");
+
+    // The running_tasks entry must be gone AND the underlying task aborted.
+    assert!(
+        !kernel.agent_has_active_session(agent_id),
+        "kill_agent must remove the in-flight run entry"
+    );
+    // `AbortHandle::abort()` cancels at the next .await; give the runtime a
+    // moment to actually drop the task, then assert it is finished.
+    for _ in 0..50 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        abort.is_finished(),
+        "kill_agent must fire abort() on the in-flight LLM task (#5142) — \
+         the task is still running, so it would keep burning provider tokens"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5142 regression: the periodic GC sweep must FIRE the `AbortHandle` for a
+/// dead agent's leftover `running_tasks` entry, not just drop it. Pre-#5142
+/// the sweep `running_tasks.remove(&key)` discarded the handle without
+/// `abort()`, so a task that outlived its agent (e.g. a kill that raced the
+/// dispatcher) kept running until the provider returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_aborts_orphaned_running_task_5142() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-abort-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Agent ID that is NOT in the registry → the sweep classifies its
+    // running_tasks entry as belonging to a dead agent and must reap it.
+    let dead_agent = AgentId(uuid::Uuid::new_v4());
+    let session = SessionId::new();
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let abort = task.abort_handle();
+    kernel.agents.running_tasks.insert(
+        (dead_agent, session),
+        RunningTask {
+            abort: abort.clone(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    assert!(!abort.is_finished(), "sanity: orphan task alive pre-sweep");
+
+    kernel.gc_sweep();
+
+    assert!(
+        kernel
+            .agents
+            .running_tasks
+            .get(&(dead_agent, session))
+            .is_none(),
+        "GC sweep must remove the dead agent's running_tasks entry"
+    );
+    for _ in 0..50 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        abort.is_finished(),
+        "GC sweep must fire abort() on the orphaned task (#5142), not just \
+         drop the AbortHandle"
+    );
+
+    kernel.shutdown();
+}
+
 /// `/api/sessions` joins the SQLite session list with this snapshot to set
 /// the per-row `active` flag (#4290). Verify it surfaces every running
 /// session across agents and shrinks back to empty after stops.

@@ -1066,18 +1066,11 @@ pub async fn set_provider_key(
             .into_json_tuple();
     }
 
-    // Set env var in current process so detect_auth picks it up.
-    // `std::env::set_var` is not thread-safe in an async context; delegate to
-    // a blocking thread to avoid undefined behaviour in the tokio runtime.
-    {
-        let env_var_clone = env_var.clone();
-        let key_clone = key.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::set_var(&env_var_clone, &key_clone) };
-        })
-        .await;
-    }
+    // Set env var in current process so detect_auth picks it up. Serialized
+    // through the process-global env write guard (#5142) — `spawn_blocking`
+    // does NOT serialize concurrent env mutations, it fans out across the
+    // blocking pool.
+    crate::secrets_env::set_env_var_guarded(env_var.clone(), key.clone()).await;
 
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
@@ -1265,19 +1258,11 @@ pub async fn delete_provider_key(
             .into_json_tuple();
     }
 
-    // Remove from process environment. `std::env::remove_var` became unsafe
-    // in Rust 1.82 for the same reason `set_var` did — concurrent reads
-    // from other threads race the mutation. Delegate to a blocking thread
-    // so the tokio worker stays unblocked, mirroring the `set_provider_key`
-    // path above.
-    {
-        let env_var_clone = env_var.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::remove_var(&env_var_clone) };
-        })
-        .await;
-    }
+    // Remove from process environment. `std::env::remove_var` carries the
+    // same writer/reader UB contract as `set_var`; serialize it through the
+    // SAME process-global env write guard (#5142) so a remove can never race
+    // a concurrent guarded `set_var`. `spawn_blocking` does NOT serialize.
+    crate::secrets_env::remove_env_var_guarded(env_var.clone()).await;
 
     // Suppress fallback/CLI detection for this provider and refresh auth
     {
@@ -2244,17 +2229,10 @@ pub async fn copilot_oauth_poll(
                 );
             }
 
-            // Set in current process.
-            // `std::env::set_var` is not thread-safe inside async; push to a
-            // blocking thread to avoid UB in the multithreaded tokio runtime.
-            {
-                let token = access_token.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // SAFETY: single mutation on a dedicated blocking thread.
-                    unsafe { std::env::set_var("GITHUB_TOKEN", &token) };
-                })
-                .await;
-            }
+            // Set in current process. Serialized through the process-global
+            // env write guard (#5142) — `spawn_blocking` does NOT serialize
+            // concurrent env mutations.
+            crate::secrets_env::set_env_var_guarded("GITHUB_TOKEN", access_token.to_string()).await;
 
             // Refresh auth detection
             state.kernel.model_catalog_update(&mut |catalog| {
