@@ -191,10 +191,22 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     match socket_addr.to_socket_addrs() {
         Ok(addrs) => {
             for addr in addrs {
-                // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) before any
-                // safety check — see canonical_ip below.
-                let ip = canonical_ip(&addr.ip());
-                if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+                // Canonicalise IPv4-mapped IPv6 (::ffff:X.X.X.X) AND the
+                // NAT64 well-known prefix (64:ff9b::/96) before any safety
+                // check. Delegating to the canonical `web_fetch` helpers
+                // (rather than a local copy) means the WASM guest path and
+                // the runtime web_fetch path enforce identical SSRF policy
+                // and cannot drift: the local copy here previously missed
+                // NAT64 unwrap and CGNAT (100.64.0.0/10), letting a guest
+                // with `NetConnect(*)` reach IMDS via
+                // `http://[64:ff9b::a9fe:a9fe]/` on a NAT64-gateway env
+                // (issue #5141).
+                let ip = crate::web_fetch::canonical_ip(&addr.ip());
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    || crate::web_fetch::is_private_ip(&ip)
+                    || crate::web_fetch::is_cloud_metadata_ip(&ip)
+                {
                     return Err(json!({"error": format!(
                         "SSRF blocked: {hostname} resolves to private IP {ip}"
                     )}));
@@ -219,34 +231,15 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     })
 }
 
-/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
-/// addresses are returned unchanged. Keeps downstream IP checks operating on
-/// the address the OS will actually connect to.
-fn canonical_ip(ip: &std::net::IpAddr) -> std::net::IpAddr {
-    match ip {
-        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => std::net::IpAddr::V4(v4),
-            None => std::net::IpAddr::V6(*v6),
-        },
-        std::net::IpAddr::V4(_) => *ip,
-    }
-}
-
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match canonical_ip(ip) {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            matches!(
-                octets,
-                [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
-            )
-        }
-        std::net::IpAddr::V6(v6) => {
-            let segments = v6.segments();
-            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
+// NOTE: the SSRF IP-classification helpers (`canonical_ip`,
+// `is_private_ip`, `is_cloud_metadata_ip`, NAT64 unwrap) used to be
+// duplicated here. They are now the single canonical implementation in
+// `crate::web_fetch` (`pub(crate)`), shared by both the runtime web_fetch
+// path and this WASM-guest path. The local copy missed the NAT64
+// well-known prefix unwrap and the CGNAT 100.64.0.0/10 block, so a guest
+// with `NetConnect(*)` could reach IMDS via `http://[64:ff9b::a9fe:a9fe]/`
+// on a NAT64-gateway environment (issue #5141). Sharing one implementation
+// makes that class of drift structurally impossible.
 
 // ---------------------------------------------------------------------------
 // Always-allowed functions
@@ -1658,6 +1651,17 @@ mod tests {
         assert!(is_ssrf_target("https://api.openai.com/?email=me@example.com").is_ok());
     }
 
+    // Helper aliases so the existing WASM-path assertions keep exercising
+    // the IP classification used by `is_ssrf_target` — now the shared
+    // `web_fetch` implementation rather than a drifted local copy.
+    fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+        let c = crate::web_fetch::canonical_ip(ip);
+        c.is_loopback()
+            || c.is_unspecified()
+            || crate::web_fetch::is_private_ip(&c)
+            || crate::web_fetch::is_cloud_metadata_ip(&c)
+    }
+
     #[test]
     fn test_is_private_ip() {
         use std::net::IpAddr;
@@ -1686,6 +1690,23 @@ mod tests {
         ));
         // Real IPv6 still takes the V6 branch.
         assert!(!is_private_ip(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_blocks_nat64_and_cgnat() {
+        use std::net::IpAddr;
+        // NAT64 well-known prefix embedding IMDS / loopback / RFC1918 —
+        // previously missed by the local copy (issue #5141).
+        assert!(is_private_ip(
+            &"64:ff9b::a9fe:a9fe".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(&"64:ff9b::7f00:1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"64:ff9b::a00:1".parse::<IpAddr>().unwrap()));
+        // CGNAT 100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200).
+        assert!(is_private_ip(&"100.64.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"100.100.100.200".parse::<IpAddr>().unwrap()));
+        // A public address that merely shares the leading octet is fine.
+        assert!(!is_private_ip(&"100.128.0.1".parse::<IpAddr>().unwrap()));
     }
 
     #[test]

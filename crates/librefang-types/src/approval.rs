@@ -647,8 +647,8 @@ pub struct ApprovalPolicy {
     pub timeout_secs: u64,
     /// Auto-approve in autonomous mode. Default: `false`.
     pub auto_approve_autonomous: bool,
-    /// Alias: if `auto_approve = true`, clears the require list at boot.
-    #[serde(default, alias = "auto_approve")]
+    /// If `auto_approve = true`, clears the require list at boot.
+    #[serde(default)]
     pub auto_approve: bool,
     /// User IDs that are trusted and auto-approved for all tools.
     ///
@@ -1270,6 +1270,28 @@ mod tests {
         policy.auto_approve = true;
         policy.apply_shorthands();
         assert!(policy.require_approval.is_empty());
+    }
+
+    #[test]
+    fn policy_auto_approve_canonical_name_deserializes() {
+        // Regression for #5145: the field previously carried a
+        // self-referential `#[serde(alias = "auto_approve")]` no-op.
+        // Removing it must not affect deserialization of the canonical
+        // field name.
+        let policy: ApprovalPolicy = serde_json::from_str(r#"{"auto_approve": true}"#).unwrap();
+        assert!(policy.auto_approve);
+
+        let default: ApprovalPolicy = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!default.auto_approve);
+
+        // Full roundtrip with the field set still preserves it.
+        let p = ApprovalPolicy {
+            auto_approve: true,
+            ..ApprovalPolicy::default()
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
+        assert!(back.auto_approve);
     }
 
     // -----------------------------------------------------------------------

@@ -5,6 +5,115 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.17] - 2026-05-17
+
+_76 PRs from 5 contributors since v2026.5.12-beta.11._
+
+### Highlights
+
+- **Workflow operator nodes** — Wait, Gate, Transform, Branch, and human-in-the-loop pause/resume steps bring full orchestration control to multi-step workflows, with inline image display and rich invocation support
+- **Per-agent compaction & prompt-cache tuning** — agents can now configure context compaction thresholds and Anthropic prompt-cache breakpoint strategy directly in `agent.toml`, reducing token costs on long sessions
+- **On-demand tool/skill loading and declarative triggers** — tools and skills load only when needed, and `[[triggers]]` can now be declared directly in `agent.toml`, cutting startup overhead and simplifying agent configuration
+- **Async task tracker and training exporters** — a kernel-level async task registry with W&B, Tinker, and Atropos trajectory exporters enables continuous learning pipelines from agent runs
+- **Audio transcription and voice routing fixes** — inbound channel audio auto-transcribes when enabled, outbound OGG/Opus correctly routes via `sendVoice`, and per-channel proxy configuration is now supported
+
+### Added
+
+- Show skill descriptions in agent Skills tab (#5013) (@houko)
+- Display generated images inline in workflow run view (#5015) (@houko)
+- File_read deduplication — stub repeated reads of unchanged files (#5016) (@houko)
+- Per-channel proxy configuration (#4795) (#5019) (@houko)
+- Per-agent compaction settings in agent.toml (#4976) (#5020) (@houko)
+- Prompt-cache breakpoint strategy for Anthropic (#5021) (@houko)
+- Dual-layer compression — gateway safety net before agent loop (#4972) (#5022) (@houko)
+- Reference existing registry agents in workflow steps (#5023) (@houko)
+- Async task tracker — kernel registry + event injection + wake-idle (#4983) (#5033) (@houko)
+- New crate + W&B + Tinker + Atropos exporters (#3331) (#5034) (@houko)
+- Non-agent operator nodes — Wait, Gate, Transform, Branch (#4980) (#5035) (@houko)
+- Skill/tool finder in agent creation dialog (#5049) (#5066) (@houko)
+- ProviderExhaustionStore substrate + AuxClient consumer (#4807) (#5067) (@houko)
+- Declarative [[triggers]] in agent.toml (#5014) (#5068) (@houko)
+- On-demand tool/skill loading (#5073) (@houko)
+- Rich workflow invocation (#4982) (#5075) (@houko)
+- Document ElevenLabs and validate voice_id at driver boundary (#5078) (@houko)
+- Operator step mode — human-in-the-loop pause + resume (#4977 step 1/N) (#5108) (@houko)
+
+### Fixed
+
+- Keep ANTHROPIC_API_KEY in subprocess env (#4967) (@f-liva)
+- Surface CLI stderr on stdin write failure (#4974) (@f-liva)
+- Add schedule field to PATCH partial update path (#4986) (@DaBlitzStein)
+- Allow deleting connection arrows between steps (#4978) (#4993) (@houko)
+- Scope ApprovalRequested delivery to requesting agent's adapters/recipients (#4985) (#4994) (@houko)
+- Allow media read tools to access kernel staging dir (#4981) (#4995) (@houko)
+- Accept absolute workspace paths under workspaces_root (#4991) (#4996) (@houko)
+- Route audio/ogg outbound via sendVoice (#4959) (#4998) (@houko)
+- Auto-transcribe inbound channel audio when [media].audio_transcription = true (#4975) (#4999) (@houko)
+- Node delete via context menu writes history and cascades edges (#5007) (@houko)
+- Keep ANTHROPIC_* env vars when spawning CLI (#5008) (@houko)
+- Override account_id() in non-Telegram multi-bot adapters (#5009) (@houko)
+- Magic-byte sniff outbound audio/ogg to catch mislabeled payloads (#5010) (@houko)
+- Route approvals to bound chats when default_agent is None (#5002) (#5011) (@houko)
+- Downgrade OGG Vorbis to sendDocument; only Opus is valid for sendVoice (#5012) (@houko)
+- Unblock Windows test lane (7 assertions / platform divergences) (#5024) (@houko)
+- Stabilise diagnose_stdin macOS test (#5024 follow-up) (#5026) (@houko)
+- Resolve ioreg / reg.exe by absolute path (#5025) (#5031) (@houko)
+- Schedule field PATCH + actual_provider wiring + warn_ws_proxy_bypass gating (supersedes #4986) (#5036) (@houko)
+- Unblock main — docs TS 6 + lettre RUSTSEC-2026-0141 (#5056) (@houko)
+- Guard pr-status-labels filter against undefined check_run entries (#5057) (@houko)
+- Unify init() key resolution with resolve_master_key() (#5074) (@houko)
+- Add input_schema: None to Workflow literals after #5075 (#5105) (@houko)
+- Add input_schema: None to workflow_with_single_op_step test helper (#5107) (@houko)
+- Apply per-agent tool_allowlist/blocklist on tools/list (#5101) (#5109) (@houko)
+- Invalidate budget/usage on send and snapshot-prefix on session override (#5147) (@houko)
+- Raise persisted-session message cap from 200 to 2000 (#5148) (@houko)
+- Preserve other config sections during default-model write (#5150) (@houko)
+- Deny unknown fields in request DTOs to catch body typos (#5131) (#5151) (@houko)
+- Reuse reqwest::Client across fan-out fires; skip engine on empty targets (#5152) (@houko)
+- Preserve nested serde aliases + deny unknown fields on repeated tables (#5129, #5130) (#5154) (@houko)
+- Clamp negative age in stale-run recovery to survive NTP backstep (#5155) (@houko)
+- Replace SSRF substring stub with parsed-URL allowlist (#5156) (@houko)
+- Require non-empty sub claim on IdTokenClaims (#5128) (#5157) (@houko)
+- Refuse to run hook when concurrency semaphore is closed (#5158) (@houko)
+- Block Azure IMDS alternative 192.0.0.192 in MCP SSRF helper (#5159) (@houko)
+- Reject peer: key prefix and colon-bearing peer_id at substrate boundary (#5161) (@houko)
+- Propagate DB error from agent deletion (#5117) (#5163) (@houko)
+- Bind named params at run time (#5170) (@houko)
+- Give the root route an explicit notFoundComponent (#5171) (@houko)
+- Cap sysinfo at 0.38 to honor 1.94.1 MSRV (#5183) (@houko)
+
+### Changed
+
+- #3710 god-crate split — 5 standalone crates + oauth/wasm collapse (#5053) (@houko)
+- Typed SandboxError replaces anyhow (#3576) (#5077) (@houko)
+- Drop pass-through KernelError wrapper (#3576 wedge) (#5110) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Add Auto-Evolution Mode page (companion to registry#94) (#5029) (@houko)
+- Trajectory format RFC (#3330) (#5032) (@houko)
+- Clarify extraction_model provider/model format (#5059) (#5062) (@leszek3737)
+- Correct historical attribution in README (#3710 follow-up) (#5100) (@houko)
+- Sync DEFAULT_MAX_HISTORY_MESSAGES default (60, not 40) (#5153) (@houko)
+
+### Maintenance
+
+- Bump the actions-minor-patch group with 4 updates (#4988) (@app/dependabot)
+- Bump apple-actions/import-codesign-certs from b2e261033a9e248f91a9b57201e8d1e12b15a24e to 5142e029c445c10ffc7149d172e540235a065466 (#4989) (@app/dependabot)
+- Bump actions/setup-python from 5 to 6 (#4990) (@app/dependabot)
+- Install rustc on cli_npm/cli_pypi to fix sysinfo MSRV (#4992) (@houko)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 9 updates (#5027) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 7 updates (#5028) (@app/dependabot)
+- Bump typescript from 5.9.3 to 6.0.3 in /docs (#5052) (@app/dependabot)
+- Update IGNORE path after #5053 god-crate split (#5102) (@houko)
+- Rustfmt mcp_tools_list_allowlist_test.rs (fix main CI) (#5146) (@houko)
+
+</details>
+
+
 ## [2026.5.12] - 2026-05-12
 
 _95 PRs from 5 contributors since v2026.5.8-beta.10._
@@ -984,6 +1093,8 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 ### Fixed
 
 - **Workflow stale-run recovery survives backwards NTP step (#5114)** — `WorkflowEngine::recover_stale_running_runs` previously computed run age as `Utc::now().signed_duration_since(run.started_at)`. Wall-clock arithmetic across daemon restarts is unsound: a backwards NTP correction makes `age` negative so `age < stale_secs` is always true and no row is reaped (silently masking real stale rows); a forward step at boot makes every Running row look ancient and force-fails them all as `Interrupted by daemon restart`. The boot sweep now detects a negative `age`, emits a structured `warn!` with `now`, `started_at`, `run_id`, and the negative `age_secs`, and skips the row (treats it as fresh) without changing state. The proper long-term fix is a monotonic / heartbeat-based reap signal that does not depend on wall-clock; that's out of scope here. Tests: 2 new kernel-unit cases in `librefang_kernel::workflow::tests` — `recover_stale_skips_run_with_started_at_in_the_future` (future `started_at` → row stays Running, empty recovered list, no error/completed_at mutation) and `recover_stale_still_reaps_normally_aged_running_run` (1h-old `started_at` under a 60s cutoff still demotes to Failed, pinning the happy path so the new branch can't silently short-circuit it). (@houko)
+- **Trigger cooldown wedges when `last_fired_at > now`** (#5115). The cooldown check in `librefang_kernel::triggers::TriggerEngine::evaluate_with_resolver` computed `elapsed = (now - last).to_std().unwrap_or(Duration::ZERO)`; on a future-dated `last_fired_at` (wall-clock backstep after NTP correction, manual clock adjustment, VM snapshot restore, or imported state with an ahead-of-now timestamp) `to_std()` errors, the fallback collapses elapsed to 0, and `0 < cooldown` then silently suppresses every gated trigger fire until the wall clock catches up. Replaced with a typed match on the `to_std()` result: the `Err` arm emits a structured `warn!` with `trigger_id`, `agent_id`, `now`, and `last_fired_at`, and treats the cooldown as elapsed-exceeded (`Duration::MAX`) so the trigger fires once. The successful fire then overwrites `last_fired` with `now`, self-healing the registry entry so subsequent evaluations resume the normal cooldown path. Regression test (`test_cooldown_unwedges_on_future_last_fired_at`) seeds the registry with a `+1h` future timestamp, asserts the first evaluation fires, that `last_fired` is rewritten to a non-future value, and that the immediate second evaluation is suppressed by the normal cooldown again — pinning both the unwedge and the self-heal. Closes #5115. (@houko)
+
 - **API request DTOs reject unknown fields so body typos surface as 400 instead of silent feature loss (#5131)** — Every `*Request` / `*Body` shape that an axum `Json<T>` extractor materialises in `crates/librefang-api/src/` gains `#[serde(deny_unknown_fields)]`. Before the fix, a payload like `{"name":"x","url":"…","evnts":["foo"]}` (note the typo'd `evnts`) deserialised to `CreateWebhookRequest` with the unknown key silently dropped and `events` defaulting to `[]`; the server returned 201 Created and the webhook never fired anything. After the fix, serde rejects the payload at the deserialization boundary and axum surfaces 400 Bad Request — the operator sees the typo immediately. DTOs locked down: `webhook_store::{CreateWebhookRequest, UpdateWebhookRequest}`; `types::{SpawnRequest, MessageRequest, AttachmentRef, InjectMessageRequest, SkillInstallRequest, SkillUninstallRequest, SetModeRequest, MigrateRequest, MigrateScanRequest, ClawHubInstallRequest, BulkCreateRequest, BulkAgentIdsRequest, ExtensionInstallRequest, ExtensionUninstallRequest, PushMessageRequest}`; `routes::approvals::{CreateApprovalRequest, ApproveRequestBody, ModifyRequestBody, BatchResolveRequest, ApproveAllForSessionRequest, TotpSetupBody, TotpConfirmBody, TotpRevokeBody}`; `routes::agents::{SetAgentToolsRequest, UpdateIdentityRequest, PatchAgentConfigRequest, CloneAgentRequest, SetAgentFileRequest}`; `routes::users::{UserUpsert, BulkImportRequest}`; `routes::memory::{MemoryAddBody, MemoryUpdateBody}`; `routes::skills::PatchMcpTaintRequest`; `routes::terminal::{CreateWindowRequest, RenameWindowRequest}`; `routes::auto_dream::SetEnabledRequest`; `routes::pairing::PairingCompleteRequest`; `server::ChangePasswordRequest`. Deferred (and why): OpenAI-compat `ChatCompletionRequest` (clients legitimately send `top_p`, `frequency_penalty`, `n`, … — OpenAI's own spec is permissive); OAuth `CallbackBody` / `IntrospectRequest` / `RefreshRequest` (RFC 6749 §3.1 / RFC 7662 explicitly permit extra parameters); request DTOs that live in `librefang-types` (`MediaImageRequest`, `MediaTtsRequest`, `MediaVideoRequest`, `MediaMusicRequest`, `PromptVersion`, `PromptExperiment`, webhook `WakePayload` / `AgentHookPayload`) — they are shared types that are also deserialised from internal stores, so locking them down belongs in their owning crate, not this PR. **Potential client breakage**: callers that previously got away with sending extra fields (typos, optimistic forward-compat keys, debug fields) will now get 400 Bad Request on the listed endpoints. This is the intended behaviour — the silent-drop semantics were the bug — but operators with custom integrations should audit their request bodies. Integration test `crates/librefang-api/tests/api_deny_unknown_fields_test.rs` drives the canonical reproduction from the issue (`POST /api/webhooks` with `evnts` typo) and asserts 400 + zero side-effects, plus a companion test that the same handler still accepts a correctly-spelled body. Closes #5131. (@houko)
 
 - **`POST /api/providers/{name}/default` no longer wipes operator-authored sections of `config.toml`** (#5116). `persist_default_model` previously read the existing config with `std::fs::read_to_string(&path).unwrap_or_default()`, so any transient read failure (`EACCES`, `EIO`, …) collapsed the input to an empty string. The rewrite then serialized a fresh TOML tree containing only `[default_model]` through `atomic_write`, atomically replacing the on-disk file and silently destroying every other section the operator had authored (`[email]`, `[telegram]`, `[proxy]`, `[skill_workshop]`, `[queue]`, …). The fix discriminates `ErrorKind::NotFound` (which legitimately means "first write" — the daemon may create `config.toml` here) from every other read error and returns the latter as `Err`, so the route reports a failed `persisted=false` to the caller and leaves the on-disk file untouched rather than truncating it. The downstream `toml::from_str` / `atomic_write` path is unchanged so the existing crash-safety (temp-write + rename) still applies to a successful merge. Integration test: `set_default_provider_preserves_other_config_sections` in `crates/librefang-api/tests/providers_routes_test.rs` pre-seeds `config.toml` with `[default_model]` + sibling `[email]` and `[proxy]` sections, drives the route, and asserts all three survive in the post-write file; `set_default_provider_when_config_toml_absent_creates_it_with_default_model` pins the `NotFound` branch to confirm the fresh-daemon case still writes a usable config. (@houko)

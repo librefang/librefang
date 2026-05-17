@@ -771,7 +771,31 @@ impl TriggerEngine {
                 Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&trigger.id) {
-                    let elapsed = (now - *last).to_std().unwrap_or(Duration::ZERO);
+                    // `now - *last` is negative when `*last > now`, which can happen
+                    // if the wall clock stepped backwards (NTP correction, manual
+                    // adjustment, VM snapshot restore) or if the persisted
+                    // `last_fired_at` was imported from a future-dated state.
+                    // `to_std()` then errors; the old `unwrap_or(Duration::ZERO)`
+                    // collapsed elapsed to 0 and wedged the trigger off until the
+                    // wall clock caught up (#5115). Treat the anomaly as
+                    // elapsed-exceeded so the trigger fires once: the subsequent
+                    // `self.last_fired.insert(trigger.id, now)` below stamps a
+                    // sane timestamp and self-heals the entry.
+                    let elapsed = match (now - *last).to_std() {
+                        Ok(e) => e,
+                        Err(_) => {
+                            warn!(
+                                trigger_id = %trigger.id,
+                                agent_id = %trigger.agent_id,
+                                now = %now,
+                                last_fired_at = %*last,
+                                "Trigger last_fired_at is in the future relative to now; \
+                                 treating cooldown as elapsed (wall-clock backstep or \
+                                 imported state). This entry will self-heal on next fire."
+                            );
+                            Duration::MAX
+                        }
+                    };
                     if elapsed < cooldown {
                         debug!(
                             trigger_id = %trigger.id,
@@ -1782,6 +1806,54 @@ mod tests {
         // First evaluation fires
         assert_eq!(engine.evaluate(&event).0.len(), 1);
         // Immediate second evaluation should be suppressed by cooldown
+        assert_eq!(engine.evaluate(&event).0.len(), 0);
+    }
+
+    /// Regression test for #5115: when the persisted `last_fired_at` is in
+    /// the future relative to `now` (wall-clock backstep, imported state,
+    /// VM snapshot restore), the trigger must still fire instead of being
+    /// silently wedged off until the wall clock catches up.
+    #[test]
+    fn test_cooldown_unwedges_on_future_last_fired_at() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        let tid = engine.register(
+            agent_id,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+        );
+
+        // Simulate a future-dated `last_fired_at` — far enough ahead that
+        // the bug's `unwrap_or(Duration::ZERO)` path would suppress every
+        // fire for the next hour.
+        let future = Utc::now() + chrono::Duration::hours(1);
+        engine.last_fired.insert(tid, future);
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // Trigger must fire despite the future-dated stamp.
+        assert_eq!(
+            engine.evaluate(&event).0.len(),
+            1,
+            "trigger must fire when last_fired_at is in the future (#5115)"
+        );
+
+        // After firing, `last_fired` is rewritten to `now` (≤ Utc::now() at
+        // the assertion point) — the anomaly has self-healed and normal
+        // cooldown behaviour resumes.
+        let stamped = *engine.last_fired.get(&tid).unwrap();
+        assert!(
+            stamped <= Utc::now(),
+            "last_fired must be reset to a non-future timestamp after firing"
+        );
+        // Immediate refire is now suppressed by the normal cooldown path.
         assert_eq!(engine.evaluate(&event).0.len(), 0);
     }
 
