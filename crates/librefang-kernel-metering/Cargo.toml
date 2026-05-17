@@ -11,6 +11,7 @@ librefang-memory = { path = "../librefang-memory" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 serde = { workspace = true }
+arc-swap = { workspace = true }
 tracing = { workspace = true }
 
 [lints]

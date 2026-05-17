@@ -852,24 +852,43 @@ impl LibreFangKernel {
             .reserve_global_budget(&self.current_budget(), estimated_usd)
             .map_err(KernelError::LibreFang)?;
 
+        // Pre-dispatch provider budget check — reject early when the
+        // provider's hourly/daily spend is already exhausted so the
+        // caller gets a fast 429 instead of consuming a slow LLM round
+        // trip that would be wasted anyway.
+        {
+            let budget_cfg = self.current_budget();
+            if let Some(pb) = budget_cfg.providers.get(&entry.manifest.model.provider) {
+                if let Err(e) = self
+                    .metering
+                    .engine
+                    .check_provider_budget(&entry.manifest.model.provider, pb)
+                {
+                    usd_reservation.release();
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
+        }
+
         // Enforce quota on the effective target agent (after routing).
         // Use check_quota_and_reserve so the estimated token budget is
         // pre-charged inside the same DashMap write-lock, closing the TOCTOU
         // race where N concurrent callers all pass the check before any of
         // them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation = match self
-            .agents
-            .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // Roll back the USD reservation — the call never dispatched.
-                usd_reservation.release();
-                return Err(KernelError::LibreFang(e));
-            }
-        };
+        let token_reservation =
+            match self
+                .agents
+                .scheduler
+                .check_quota_and_reserve(agent_id, estimated_tokens, None)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // Roll back the USD reservation — the call never dispatched.
+                    usd_reservation.release();
+                    return Err(KernelError::LibreFang(e));
+                }
+            };
 
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
@@ -937,6 +956,7 @@ impl LibreFangKernel {
                     agent_id,
                     token_reservation,
                     &result.total_usage,
+                    None,
                 );
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
@@ -1746,7 +1766,7 @@ impl LibreFangKernel {
         let token_reservation = self
             .agents
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .check_quota_and_reserve(agent_id, estimated_tokens, None)
             .map_err(KernelError::LibreFang)?;
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
@@ -1794,6 +1814,7 @@ impl LibreFangKernel {
                             agent_id,
                             token_reservation,
                             &result.total_usage,
+                            None,
                         );
                         let _ = kernel_clone
                             .agents
@@ -2594,6 +2615,7 @@ impl LibreFangKernel {
                         agent_id,
                         token_reservation,
                         &result.total_usage,
+                        None,
                     );
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;

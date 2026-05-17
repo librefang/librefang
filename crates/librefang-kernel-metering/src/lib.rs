@@ -7,6 +7,8 @@
 //! same exhaustion view the LLM fallback chain reads from (#4807).
 //! Nothing else from the driver crate is used here.
 
+pub mod provider_gate;
+
 use librefang_llm_driver::exhaustion::{
     ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,
 };
