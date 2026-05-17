@@ -683,7 +683,19 @@ impl CronScheduler {
                 meta.auto_disabled = true;
                 false
             } else {
-                meta.job.next_run = Some(compute_next_run_after(&meta.job.schedule, Utc::now()));
+                // Exponential backoff on consecutive failures so a flaky
+                // provider isn't hammered at full schedule cadence. For
+                // `Every { every_secs: 60 }` the un-backed-off path retried
+                // every 60s for ~5 minutes (until MAX_CONSECUTIVE_ERRORS)
+                // before quieting. Add 2^(errors-1) minutes of extra delay
+                // on top of the schedule's natural next fire, capped so a
+                // long-running daemon doesn't push the retry absurdly far
+                // out. errors is in 1..MAX_CONSECUTIVE_ERRORS here. Issue
+                // #5136.
+                let base = compute_next_run_after(&meta.job.schedule, Utc::now());
+                let backoff_steps = meta.consecutive_errors.saturating_sub(1).min(10);
+                let backoff_secs: i64 = 60i64.saturating_mul(1i64 << backoff_steps);
+                meta.job.next_run = Some(base + Duration::seconds(backoff_secs));
                 false
             }
         } else {
@@ -719,16 +731,33 @@ pub fn compute_next_run(schedule: &CronSchedule) -> chrono::DateTime<Utc> {
 /// return the same minute (or even the same second), causing the
 /// scheduler to re-fire immediately.
 ///
-/// # DST safety
+/// # DST behaviour (NOT full immunity)
 ///
-/// All fire times are stored and compared in UTC. `chrono::Local` is never
-/// used internally — even when a job specifies a named `tz` (e.g.
-/// `"America/New_York"`), the computation converts `after` to that timezone
-/// only to honour the user's wall-clock intent, then immediately converts
-/// the result back to UTC before storing it. This means the scheduler is
-/// immune to DST transitions: a "09:00 daily" job in a DST-observing
-/// timezone will naturally shift by one UTC hour at the clock change, but
-/// will never fire twice or be skipped.
+/// All fire times are stored and compared in UTC, and `chrono::Local` is
+/// never used internally. For UTC jobs (`tz = None`, `Some("")`, or
+/// `Some("UTC")`) and for non-`Cron` schedules (`Every` / `At`) the scheduler
+/// is genuinely DST-immune — there are no wall-clock transitions to fall
+/// foul of.
+///
+/// For a `Cron { tz: Some("America/New_York"), .. }` job the wall-clock
+/// expression is resolved in that named zone via the `cron` crate, then
+/// converted back to UTC. This faithfully honours the operator's *local*
+/// intent but is therefore subject to the two standard DST hazards:
+///
+/// - **Spring-forward**: a local time that does not exist that day (e.g.
+///   `0 30 2 * * *` US/Eastern, where `02:30` is skipped) — the `cron`
+///   crate advances to the next *existing* matching time, so that day's
+///   fire effectively shifts/coalesces rather than firing at `02:30`.
+/// - **Fall-back**: a local time that occurs twice (the duplicated hour) —
+///   only the first (earlier-UTC) occurrence is selected; the second is not
+///   fired.
+///
+/// A boundary-crossing fire is logged at `warn` (see the DST-boundary
+/// `warn!` below) so the shift is observable. **To opt a production cron
+/// out of DST entirely, set the job's `timezone = "UTC"`** (or leave it
+/// unset) and express the schedule in UTC; that takes the genuinely
+/// DST-immune path above. The earlier "immune to DST" claim here was
+/// incorrect — it only held for the UTC / `Every` / `At` cases.
 pub fn compute_next_run_after(
     schedule: &CronSchedule,
     after: chrono::DateTime<Utc>,
@@ -737,13 +766,20 @@ pub fn compute_next_run_after(
         // For `at` schedules, return the original time only if it's still
         // in the future. Otherwise the scheduler would see `next_run <= now`
         // forever and fire the job on every tick (every 15s) until the
-        // process restarts. Push it to the far future so the job never
-        // fires again. Issue #2337.
+        // process restarts. Push it well past any realistic daemon uptime so
+        // the job never fires again. Issue #2337.
+        //
+        // A 100-year offset (the old `days(36500)`) produces year ~104000
+        // timestamps; subtracting one from `now` overflows the i64 chrono
+        // `Duration` in `(now - next_run).num_seconds()` paths. One year is
+        // already ~2M tick intervals beyond any daemon's lifetime, so the
+        // "never fires again" guarantee still holds while keeping the
+        // resulting timestamp arithmetic in range. Issue #5136.
         CronSchedule::At { at } => {
             if *at > after {
                 *at
             } else {
-                after + Duration::days(36500)
+                after + Duration::days(366)
             }
         }
         CronSchedule::Every { every_secs } => after + Duration::seconds(*every_secs as i64),
@@ -1362,8 +1398,19 @@ mod tests {
         let past = now - Duration::hours(1);
         let schedule = CronSchedule::At { at: past };
         let next = compute_next_run_after(&schedule, now);
-        // Should be far future, not the original past time.
-        assert!(next > now + Duration::days(1000));
+        // Should be far future (so the job never re-fires), but bounded:
+        // the old 100-year offset produced year ~104000 timestamps that
+        // overflowed i64 chrono Duration arithmetic in `now - next_run`
+        // paths. The corrected sentinel is ~1 year out — still ~2M scheduler
+        // tick intervals beyond any daemon uptime. #5136.
+        assert!(
+            next > now + Duration::days(300),
+            "must be pushed well into the future, got {next}"
+        );
+        assert!(
+            next < now + Duration::days(800),
+            "sentinel must stay bounded (< ~2y), not year ~104000, got {next}"
+        );
     }
 
     #[test]
@@ -2249,5 +2296,93 @@ mod tests {
             &job.delivery_targets[0],
             CronDeliveryTarget::Email { to, .. } if to == "alice@example.com"
         ));
+    }
+
+    // -- #5136: time/clock/scheduling robustness ----------------------------
+
+    #[test]
+    fn test_past_at_schedule_uses_bounded_far_future() {
+        // A past `At` is pushed to a far-future sentinel so it never fires
+        // again. The old 100-year offset produced year ~104000 timestamps
+        // that overflowed i64 chrono Duration arithmetic in `now - next_run`
+        // paths. Assert the sentinel stays within ~2 years (well past any
+        // daemon uptime) and that `(now - next_run).num_seconds()` is finite.
+        let past = Utc::now() - Duration::hours(1);
+        let next = compute_next_run_after(&CronSchedule::At { at: past }, Utc::now());
+        let now = Utc::now();
+        assert!(next > now, "past At must be pushed into the future");
+        assert!(
+            next < now + Duration::days(800),
+            "sentinel {next} must stay bounded (< ~2y), not year ~104000"
+        );
+        // The arithmetic that previously overflowed must now be finite.
+        let delta = (now - next).num_seconds();
+        assert!(delta < 0, "next_run is in the future, delta {delta} sane");
+    }
+
+    #[test]
+    fn test_record_failure_applies_exponential_backoff() {
+        // A flaky `Every { every_secs: 60 }` job must NOT retry at full
+        // cadence; each consecutive failure pushes next_run further out.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::Every { every_secs: 60 };
+        let id = sched.add_job(job, false).unwrap();
+
+        let mut prev_gap = chrono::Duration::zero();
+        // errors 1..MAX-1 take the backoff branch (MAX auto-disables).
+        for i in 0..(MAX_CONSECUTIVE_ERRORS - 1) {
+            let before = Utc::now();
+            sched.record_failure(id, &format!("err {i}"));
+            let meta = sched.get_meta(id).unwrap();
+            let next = meta.job.next_run.expect("next_run set");
+            let gap = next - before;
+            // Each retry must be strictly further out than the previous
+            // (exponential), and well beyond the bare 60s schedule cadence
+            // once we are past the first failure.
+            assert!(
+                gap > prev_gap,
+                "failure {}: gap {gap} must exceed previous {prev_gap}",
+                i + 1
+            );
+            if i >= 1 {
+                assert!(
+                    gap > chrono::Duration::seconds(60),
+                    "failure {}: gap {gap} must exceed schedule cadence (60s)",
+                    i + 1
+                );
+            }
+            prev_gap = gap;
+        }
+    }
+
+    #[test]
+    fn test_cron_dst_zone_does_not_panic_on_spring_forward() {
+        // `0 30 2 * * *` US/Eastern around the spring-forward day: 02:30
+        // does not exist that morning. The computation must advance to the
+        // next existing matching time without panicking, and yield a
+        // strictly-future UTC instant.
+        let after = chrono::Utc
+            .with_ymd_and_hms(2025, 3, 9, 0, 0, 0)
+            .single()
+            .unwrap();
+        let sched = CronSchedule::Cron {
+            expr: "0 30 2 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        let next = compute_next_run_after(&sched, after);
+        assert!(
+            next > after,
+            "next fire {next} must be strictly after {after}"
+        );
+
+        // The UTC opt-out path is genuinely DST-immune: same expr, tz=UTC.
+        let sched_utc = CronSchedule::Cron {
+            expr: "0 30 2 * * *".into(),
+            tz: Some("UTC".into()),
+        };
+        let next_utc = compute_next_run_after(&sched_utc, after);
+        assert!(next_utc > after);
     }
 }

@@ -262,12 +262,17 @@ fn pick_cooldown(
         // RPH is preferred — the issue specifically calls out RPH-strict
         // providers (Nous Portal, OpenAI tier-1).  A 1-hour reset is the
         // dangerous case we must not forget across restarts.
+        // `reset_after_secs` is parsed from an upstream `X-RateLimit-Reset`
+        // header (f64). `rph > 0.0` excludes negatives and NaN but admits
+        // `f64::INFINITY` (a malformed/overflowing header like `1e400` or
+        // `inf` parses to +inf), and `Duration::from_secs_f64(INFINITY)`
+        // panics in this driver hot path. Require a finite, positive value.
         let rph = snap.requests_per_hour.reset_after_secs;
-        if snap.requests_per_hour.has_data() && rph > 0.0 {
+        if snap.requests_per_hour.has_data() && rph.is_finite() && rph > 0.0 {
             return Duration::from_secs_f64(rph);
         }
         let rpm = snap.requests_per_minute.reset_after_secs;
-        if snap.requests_per_minute.has_data() && rpm > 0.0 {
+        if snap.requests_per_minute.has_data() && rpm.is_finite() && rpm > 0.0 {
             return Duration::from_secs_f64(rpm);
         }
     }
@@ -663,5 +668,51 @@ mod tests {
 
         // SAFETY: guarded by ENV_GUARD mutex.
         unsafe { std::env::remove_var("LIBREFANG_HOME") };
+    }
+
+    // -- #5136: non-finite reset header must not panic the cooldown path ----
+
+    #[test]
+    fn pick_cooldown_rejects_infinite_rph_reset() {
+        // A malformed / overflowing `X-RateLimit-Reset` header parses to
+        // f64::INFINITY. The old `rph > 0.0` gate admitted it, and
+        // `Duration::from_secs_f64(INFINITY)` panics in this driver hot
+        // path. The guard must fall back instead of panicking.
+        use crate::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
+        use std::time::Instant;
+        let snap = RateLimitSnapshot {
+            requests_per_hour: RateLimitBucket {
+                limit: 1000,
+                remaining: 0,
+                reset_after_secs: f64::INFINITY,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        // Must not panic; with no usable RPH/RPM and no retry_after, falls
+        // back to DEFAULT_COOLDOWN.
+        let cd = pick_cooldown(Some(&snap), None);
+        assert_eq!(cd, DEFAULT_COOLDOWN);
+
+        // A finite caller-supplied retry_after still wins over the bogus RPH.
+        let cd2 = pick_cooldown(Some(&snap), Some(Duration::from_secs(42)));
+        assert_eq!(cd2, Duration::from_secs(42));
+    }
+
+    #[test]
+    fn pick_cooldown_rejects_infinite_rpm_reset() {
+        use crate::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
+        use std::time::Instant;
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 60,
+                remaining: 0,
+                reset_after_secs: f64::INFINITY,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
+        };
+        let cd = pick_cooldown(Some(&snap), None);
+        assert_eq!(cd, DEFAULT_COOLDOWN);
     }
 }
