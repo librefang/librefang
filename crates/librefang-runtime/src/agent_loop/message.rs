@@ -11,7 +11,7 @@
 
 use crate::context_budget::{truncate_tool_result_dynamic, ContextBudget};
 use crate::silent_response::{ENVELOPE_LINE_PREFIXES, ENVELOPE_STANDALONE_MARKERS};
-use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
+use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE, ERR_SYMLINK_LEAF};
 use librefang_types::message::{Message, Role, TokenUsage};
 use tracing::{info, warn};
 
@@ -176,6 +176,7 @@ pub(super) fn is_cascade_leak(text: &str) -> bool {
 pub(super) fn is_soft_error_content(content: &str) -> bool {
     content.contains(ERR_PATH_TRAVERSAL)
         || content.contains(ERR_SANDBOX_ESCAPE)
+        || content.contains(ERR_SYMLINK_LEAF)
         || content.contains("arguments were truncated")
         || is_parameter_error_content(content)
 }
