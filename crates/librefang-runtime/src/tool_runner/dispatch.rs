@@ -162,7 +162,7 @@ pub async fn execute_tool_raw(
         process_manager,
         process_registry: _,
         sender_id,
-        channel: _,
+        channel,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -859,15 +859,18 @@ pub async fn execute_tool_raw(
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
 
-        // Shared memory tools (peer-scoped when sender_id is present)
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
-        "memory_list" => tool_memory_list(*kernel, *sender_id),
+        // Shared memory tools (peer-scoped when sender_id is present).
+        // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
+        // tool fn (`enforce_memory_acl`) using the attributed sender +
+        // channel, mirroring the proactive-retrieval gate.
+        "memory_store" => tool_memory_store(input, *kernel, *sender_id, *channel),
+        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id, *channel),
+        "memory_list" => tool_memory_list(*kernel, *sender_id, *channel),
 
-        // Memory wiki tools (issue #3329)
-        "wiki_get" => tool_wiki_get(input, *kernel),
-        "wiki_search" => tool_wiki_search(input, *kernel),
-        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id),
+        // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
+        "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),
+        "wiki_search" => tool_wiki_search(input, *kernel, *sender_id, *channel),
+        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
