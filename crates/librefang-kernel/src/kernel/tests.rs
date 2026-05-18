@@ -8747,3 +8747,103 @@ async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
 
     kernel.shutdown();
 }
+
+// Regression test for #5201: when a session is over the token threshold but
+// under threshold_messages, the inner gate in compact_agent_session_with_id
+// must NOT return "No compaction needed" — it must proceed to the compactor.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_runtime::compactor::{estimate_token_count, CompactionConfig};
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "compact-token-gate-test".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let entry = kernel.agents.registry.get(agent_id).unwrap();
+    let session_id = entry.session_id;
+    drop(entry);
+
+    // Build a session with fewer messages than threshold_messages (default 30)
+    // but enough token volume to exceed token_threshold_ratio × context_window
+    // (default 0.7 × 200_000 = 140_000 tokens).
+    // Each ~60K-char ASCII message estimates to ~15K tokens (chars/4).
+    // 10 such messages → ~150K tokens, which exceeds 140K.
+    let big_chunk = "word ".repeat(12_000); // ~60K chars ≈ 15K tokens
+    let messages: Vec<Message> = (0..10)
+        .map(|_| Message::user(big_chunk.clone()))
+        .collect();
+
+    // Sanity: message count is below the default threshold (30).
+    assert!(
+        messages.len() < CompactionConfig::default().threshold,
+        "test invariant: message count must be below threshold_messages"
+    );
+
+    // Sanity: token estimate exceeds the default token threshold.
+    let estimated = estimate_token_count(&messages, None, None);
+    let token_threshold = (CompactionConfig::default().context_window_tokens as f64
+        * CompactionConfig::default().token_threshold_ratio) as usize;
+    assert!(
+        estimated > token_threshold,
+        "test invariant: estimated tokens ({estimated}) must exceed token threshold ({token_threshold})"
+    );
+
+    // Persist the fat session so compact_agent_session_with_id can load it.
+    let session = MemSession {
+        id: session_id,
+        agent_id,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory
+        .substrate
+        .save_session(&session)
+        .expect("save_session should succeed");
+
+    // Call the function under test.  Without the fix it returns
+    // Ok("No compaction needed (10 messages, threshold 30)"); with the fix
+    // it proceeds past the gate and either compacts or errors at the LLM
+    // step (no provider configured in test).  Either way the result must
+    // not be the early-return sentinel.
+    let result = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id))
+        .await;
+
+    match &result {
+        Ok(msg) => {
+            assert!(
+                !msg.starts_with("No compaction needed"),
+                "gate must not short-circuit on token-only trigger; got: {msg}"
+            );
+        }
+        Err(_) => {
+            // An error from the LLM driver (no provider) is the expected
+            // outcome once the gate passes — this is correct behaviour.
+        }
+    }
+
+    kernel.shutdown();
+}

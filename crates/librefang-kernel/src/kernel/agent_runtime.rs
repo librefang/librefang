@@ -300,7 +300,10 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
     ) -> KernelResult<String> {
         let cfg = self.config.load_full();
-        use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
+        use librefang_runtime::compactor::{
+            compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+            CompactionConfig,
+        };
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -331,7 +334,10 @@ impl LibreFangKernel {
             entry.manifest.compaction.as_ref(),
         );
 
-        if !needs_compaction(&session, &config) {
+        let estimated_tokens = estimate_token_count(&session.messages, None, None);
+        if !needs_compaction(&session, &config)
+            && !needs_compaction_by_tokens(estimated_tokens, &config)
+        {
             return Ok(format!(
                 "No compaction needed ({} messages, threshold {})",
                 session.messages.len(),
