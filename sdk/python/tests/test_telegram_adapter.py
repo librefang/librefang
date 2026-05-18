@@ -15,7 +15,14 @@ from librefang.sidecar.adapters import telegram as tg  # noqa: E402
 
 
 def _adapter(**env):
-    for k, v in {"TELEGRAM_BOT_TOKEN": "T:tok", "ALLOWED_USERS": ""}.items():
+    # Reset every adapter-read env var each call (overridable) so state
+    # never leaks between tests in this in-process suite.
+    defaults = {
+        "TELEGRAM_BOT_TOKEN": "T:tok",
+        "ALLOWED_USERS": "",
+        "TELEGRAM_CLEAR_DONE_REACTION": "",
+    }
+    for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
     return tg.TelegramAdapter()
 
@@ -145,26 +152,129 @@ def test_poll_once_emits_and_advances_offset(monkeypatch):
         a._poll_once(out.append, {"offset": 0})
 
 
+from librefang.sidecar import protocol  # noqa: E402
+
+
+def test_utf16_len_and_chunks16_split_on_surrogates_and_newline():
+    assert tg._utf16_len("abc") == 3
+    assert tg._utf16_len("😀") == 2  # astral char = 2 UTF-16 units
+    # Hard split at the UTF-16 limit, never inside a surrogate pair.
+    out = tg._chunks16("x" * 4090 + "😀" * 5, 4096)
+    assert len(out) == 2
+    assert all(tg._utf16_len(c) <= 4096 for c in out)
+    assert "".join(out) == "x" * 4090 + "😀" * 5
+    # Prefer a newline boundary when one exists in the window.
+    body = ("a" * 1000 + "\n") * 6  # 6006 chars, newline-separable
+    parts = tg._chunks16(body, 4096)
+    assert len(parts) > 1
+    assert all(tg._utf16_len(p) <= 4096 for p in parts)
+    # Content preserved; only boundary newlines may be consumed at cuts.
+    assert "".join(parts).replace("\n", "") == body.replace("\n", "")
+
+
+def test_map_reaction_matches_rust_table():
+    assert tg._map_reaction("⏳") == "👀"
+    assert tg._map_reaction("⚙️") == "⚡"
+    assert tg._map_reaction("✅") == "🎉"
+    assert tg._map_reaction("❌") == "👎"
+    assert tg._map_reaction("🤔") == "🤔"  # passthrough
+
+
+@pytest.mark.asyncio
+async def test_on_command_send_chunks_and_threads(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tg.TelegramAdapter, "_call",
+                        lambda self, m, p: calls.append((m, p)) or {})
+    a = _adapter()
+
+    await a.on_command(protocol.Send("c1", "hi", {"Text": "hi"}, None, {}))
+    await a.on_command(protocol.Send("c2", "x", {"Text": "x"}, "777", {}))
+    await a.on_command(protocol.Send("c3", "", {"Image": {"url": "u"}},
+                                     None, {}))
+    await a.on_command(protocol.Send("", "no-chat", None, None, {}))  # skip
+    sends = [p for (m, p) in calls if m == "sendMessage"]
+    assert sends[0]["chat_id"] == "c1" and sends[0]["text"] == "hi"
+    assert "message_thread_id" not in sends[0]
+    assert sends[1]["message_thread_id"] == "777"      # forum thread
+    assert sends[2]["text"] == "(Unsupported content type)"
+    assert len(sends) == 3                              # empty-chat skipped
+
+
+@pytest.mark.asyncio
+async def test_on_command_typing_reaction_interactive(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tg.TelegramAdapter, "_call",
+                        lambda self, m, p: calls.append((m, p)) or {})
+
+    a = _adapter()
+    await a.on_command(protocol.TypingCmd("c1"))
+    await a.on_command(protocol.Reaction("c1", "55", "✅"))   # mapped → 🎉
+    await a.on_command(protocol.Interactive("c1", {
+        "text": "pick", "buttons": [[
+            {"label": "Yes", "action": "y"},
+            {"label": "Docs", "url": "https://x"},
+        ]]}))
+    by = {m: p for (m, p) in calls}
+    assert by["sendChatAction"] == {"chat_id": "c1", "action": "typing"}
+    assert by["setMessageReaction"]["message_id"] == 55
+    assert by["setMessageReaction"]["reaction"] == [
+        {"type": "emoji", "emoji": "🎉"}]
+    kb = by["sendMessage"]["reply_markup"]["inline_keyboard"]
+    assert kb == [[{"text": "Yes", "callback_data": "y"},
+                   {"text": "Docs", "url": "https://x"}]]
+
+    # clear-on-done when configured
+    calls.clear()
+    b = _adapter(TELEGRAM_CLEAR_DONE_REACTION="1")
+    await b.on_command(protocol.Reaction("c1", "9", "✅"))
+    assert calls[0][1]["reaction"] == []
+
+
+@pytest.mark.asyncio
+async def test_on_command_streaming_initial_then_throttled_edit(monkeypatch):
+    calls = []
+
+    def fake_call(self, method, payload):
+        calls.append((method, payload))
+        return {"result": {"message_id": 4242}}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake_call)
+    a = _adapter()
+
+    await a.on_command(protocol.StreamStart("c1", "s1"))
+    await a.on_command(protocol.StreamDelta("s1", "Hel"))   # first → send
+    await a.on_command(protocol.StreamDelta("s1", "lo"))     # throttled
+    await a.on_command(protocol.StreamEnd("s1"))             # final edit
+
+    methods = [m for (m, _) in calls]
+    assert methods[0] == "sendMessage"
+    assert "editMessageText" in methods
+    final = [p for (m, p) in calls if m == "editMessageText"][-1]
+    assert final["message_id"] == 4242 and final["text"] == "Hello"
+    assert "s1" not in a._streams  # cleaned up on end
+
+
 @pytest.mark.asyncio
 async def test_on_send_text_vs_unsupported_and_skips(monkeypatch):
     sent = []
-    monkeypatch.setattr(tg.TelegramAdapter, "_send",
-                        lambda self, c, t: sent.append((c, t)))
+    monkeypatch.setattr(tg.TelegramAdapter, "_send_text",
+                        lambda self, c, t, th=None: sent.append((c, t, th)))
     a = _adapter()
 
     class Cmd:
-        def __init__(self, channel_id, text, content):
+        def __init__(self, channel_id, text, content, thread_id=None):
             self.channel_id = channel_id
             self.text = text
             self.content = content
+            self.thread_id = thread_id
 
     await a.on_send(Cmd("c1", "hi", {"Text": "hi"}))
     await a.on_send(Cmd("c1", "", {"Image": {"url": "u"}}))
-    await a.on_send(Cmd("c1", "plain", None))
+    await a.on_send(Cmd("c1", "plain", None, "9"))
     await a.on_send(Cmd("", "no-chat", None))      # skipped
     await a.on_send(Cmd("c1", "", None))           # skipped (empty text)
     assert sent == [
-        ("c1", "hi"),
-        ("c1", "(Unsupported content type)"),
-        ("c1", "plain"),
+        ("c1", "hi", None),
+        ("c1", "(Unsupported content type)", None),
+        ("c1", "plain", "9"),
     ]
