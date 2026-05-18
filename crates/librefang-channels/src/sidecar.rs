@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 // ── JSON-RPC Protocol Types ────────────────────────────────────────
@@ -279,6 +279,378 @@ fn url_host(url: &str) -> Option<String> {
     }
 }
 
+// ── Supervision tunables ───────────────────────────────────────────
+// Compile-time defaults; P3 makes these per-adapter config fields.
+const RESTART_INITIAL_BACKOFF_MS: u64 = 500;
+const RESTART_MAX_BACKOFF_MS: u64 = 30_000;
+const RESTART_MAX_RETRIES: u32 = 10;
+const RESTART_RESET_AFTER_SECS: u64 = 60;
+const READY_TIMEOUT_SECS: u64 = 30;
+const SHUTDOWN_GRACE_SECS: u64 = 5;
+const MSG_BUFFER: usize = 256;
+
+/// Why the stdout reader task ended — drives the supervisor's decision
+/// to restart vs. stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderExit {
+    /// stdout closed or a read error — the child is gone; restart it.
+    ChildClosed,
+    /// `stop()` signalled shutdown — do not restart.
+    Shutdown,
+    /// The bridge dropped the message stream — nothing to feed; stop.
+    ReceiverGone,
+}
+
+/// Owned, cloneable context the supervisor re-uses for every (re)spawn.
+/// `tokio::spawn` requires `'static`, so the supervisor can't borrow
+/// `&self`; it owns clones of the adapter's shared (Arc/channel) state.
+#[derive(Clone)]
+struct SpawnCtx {
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    channel_type: ChannelType,
+    name: String,
+    stdin_tx: StdinHandle,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
+    status: Arc<std::sync::Mutex<ChannelStatus>>,
+    caps: Arc<RwLock<Caps>>,
+    account_id_cell: Arc<OnceLock<Option<String>>>,
+    typing_tx: mpsc::Sender<TypingEvent>,
+    tx: mpsc::Sender<ChannelMessage>,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+/// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
+/// wall clock. Backoff jitter does not need a CSPRNG.
+fn backoff_with_jitter(attempt: u32) -> std::time::Duration {
+    let exp = RESTART_INITIAL_BACKOFF_MS.saturating_mul(1u64 << attempt.min(20));
+    let base = exp.min(RESTART_MAX_BACKOFF_MS);
+    let span = base / 5 + 1;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    std::time::Duration::from_millis(base + nanos % span)
+}
+
+/// Spawn the child once and wire stdin/stdout/stderr. Returns the
+/// stdout-reader join handle (its `ReaderExit` tells the supervisor
+/// why the child ended) and a oneshot that fires on the first `ready`.
+async fn spawn_once(
+    ctx: &SpawnCtx,
+) -> Result<
+    (tokio::task::JoinHandle<ReaderExit>, oneshot::Receiver<()>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut cmd = Command::new(&ctx.command);
+    cmd.args(&ctx.args)
+        .envs(&ctx.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to spawn sidecar '{}' ({}): {e}",
+            ctx.name, ctx.command
+        )
+    })?;
+
+    let child_stdin = child
+        .stdin
+        .take()
+        .ok_or("Failed to capture sidecar stdin")?;
+    {
+        let mut guard = ctx.stdin_tx.lock().await;
+        *guard = Some(child_stdin);
+    }
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or("Failed to capture sidecar stdout")?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or("Failed to capture sidecar stderr")?;
+    {
+        let mut guard = ctx.child.lock().await;
+        *guard = Some(child);
+    }
+    {
+        let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+        s.connected = true;
+        s.started_at = Some(Utc::now());
+    }
+
+    let stderr_name = ctx.name.clone();
+    tokio::spawn(async move {
+        let reader = BufReader::new(child_stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            warn!(adapter = %stderr_name, "[sidecar stderr] {line}");
+        }
+    });
+
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let channel_type = ctx.channel_type.clone();
+    let adapter_name = ctx.name.clone();
+    let status_clone = ctx.status.clone();
+    let caps = ctx.caps.clone();
+    let account_id_cell = ctx.account_id_cell.clone();
+    let reader_stdin = ctx.stdin_tx.clone();
+    let typing_tx = ctx.typing_tx.clone();
+    let tx = ctx.tx.clone();
+    let mut shutdown_rx = ctx.shutdown_rx.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut ready_tx = Some(ready_tx);
+        let reader = BufReader::new(child_stdout);
+        let mut lines = reader.lines();
+        let exit;
+        loop {
+            tokio::select! {
+                result = lines.next_line() => {
+                    match result {
+                        Ok(Some(line)) => {
+                            let line = line.trim().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            match serde_json::from_str::<SidecarEvent>(&line) {
+                                Ok(SidecarEvent::Ready { params }) => {
+                                    let cap_count = params.capabilities.len();
+                                    match caps.write() {
+                                        Ok(mut g) => {
+                                            g.set = params
+                                                .capabilities
+                                                .iter()
+                                                .cloned()
+                                                .collect();
+                                            g.suppress_errors =
+                                                params.suppress_error_responses;
+                                            g.notification_recipients =
+                                                params.notification_recipients.clone();
+                                            g.header_rules =
+                                                params.header_rules.clone();
+                                        }
+                                        Err(p) => {
+                                            let mut g = p.into_inner();
+                                            g.set = params
+                                                .capabilities
+                                                .iter()
+                                                .cloned()
+                                                .collect();
+                                            g.suppress_errors =
+                                                params.suppress_error_responses;
+                                            g.notification_recipients =
+                                                params.notification_recipients.clone();
+                                            g.header_rules =
+                                                params.header_rules.clone();
+                                        }
+                                    }
+                                    let _ = account_id_cell
+                                        .set(params.account_id.clone());
+                                    info!(
+                                        adapter = %adapter_name,
+                                        capabilities = cap_count,
+                                        protocol_version = params.protocol_version,
+                                        "Sidecar adapter ready"
+                                    );
+                                    if let Some(t) = ready_tx.take() {
+                                        let _ = t.send(());
+                                    }
+                                    if let Err(e) = write_command(
+                                        &reader_stdin,
+                                        &SidecarCommand::ReadyAck,
+                                    )
+                                    .await
+                                    {
+                                        debug!(
+                                            adapter = %adapter_name,
+                                            "Failed to send ReadyAck: {e}"
+                                        );
+                                    }
+                                }
+                                Ok(SidecarEvent::Typing { params }) => {
+                                    let _ = typing_tx.try_send(TypingEvent {
+                                        channel: channel_type.clone(),
+                                        sender: ChannelUser {
+                                            platform_id: params.user_id,
+                                            display_name: params.user_name,
+                                            librefang_user: None,
+                                        },
+                                        is_typing: params.is_typing,
+                                    });
+                                }
+                                Ok(SidecarEvent::Message { params }) => {
+                                    let params = *params;
+                                    debug!(
+                                        adapter = %adapter_name,
+                                        user = %params.user_name,
+                                        "Received message from sidecar"
+                                    );
+                                    let mut metadata = params.metadata;
+                                    if let Some(ch) = params.channel_id {
+                                        metadata.insert(
+                                            "channel_id".to_string(),
+                                            serde_json::Value::String(ch),
+                                        );
+                                    }
+                                    if let Some(p) = params.platform {
+                                        metadata.insert(
+                                            "platform".to_string(),
+                                            serde_json::Value::String(p),
+                                        );
+                                    }
+                                    if let Some(h) = params.username {
+                                        metadata.insert(
+                                            "username".to_string(),
+                                            serde_json::Value::String(h),
+                                        );
+                                    }
+                                    if !params.group_members.is_empty() {
+                                        if let Ok(v) = serde_json::to_value(
+                                            &params.group_members,
+                                        ) {
+                                            metadata.insert(
+                                                "group_members".to_string(),
+                                                v,
+                                            );
+                                        }
+                                    }
+                                    if !params.group_participants.is_empty() {
+                                        if let Ok(v) = serde_json::to_value(
+                                            &params.group_participants,
+                                        ) {
+                                            metadata.insert(
+                                                "group_participants".to_string(),
+                                                v,
+                                            );
+                                        }
+                                    }
+                                    let content = params
+                                        .content
+                                        .unwrap_or_else(|| {
+                                            ChannelContent::Text(
+                                                params.text.unwrap_or_default(),
+                                            )
+                                        });
+                                    let msg = ChannelMessage {
+                                        channel: channel_type.clone(),
+                                        platform_message_id:
+                                            uuid::Uuid::new_v4().to_string(),
+                                        sender: ChannelUser {
+                                            platform_id: params.user_id,
+                                            display_name: params.user_name,
+                                            librefang_user: params.librefang_user,
+                                        },
+                                        content,
+                                        target_agent: None,
+                                        timestamp: Utc::now(),
+                                        is_group: params.is_group,
+                                        thread_id: params.thread_id,
+                                        metadata,
+                                    };
+                                    {
+                                        let mut s = status_clone
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        s.messages_received += 1;
+                                        s.last_message_at = Some(Utc::now());
+                                    }
+                                    if tx.send(msg).await.is_err() {
+                                        debug!(
+                                            adapter = %adapter_name,
+                                            "Message receiver dropped"
+                                        );
+                                        exit = ReaderExit::ReceiverGone;
+                                        break;
+                                    }
+                                }
+                                Ok(SidecarEvent::Error { params }) => {
+                                    warn!(
+                                        adapter = %adapter_name,
+                                        error = %params.message,
+                                        "Sidecar adapter reported error"
+                                    );
+                                    let mut s = status_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    s.last_error = Some(params.message);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        adapter = %adapter_name,
+                                        line = %line,
+                                        "Failed to parse sidecar event: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            info!(
+                                adapter = %adapter_name,
+                                "Sidecar process stdout closed"
+                            );
+                            let mut s = status_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            s.connected = false;
+                            exit = ReaderExit::ChildClosed;
+                            break;
+                        }
+                        Err(e) => {
+                            error!(
+                                adapter = %adapter_name,
+                                "Error reading sidecar stdout: {e}"
+                            );
+                            let mut s = status_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            s.connected = false;
+                            s.last_error =
+                                Some(format!("stdout read error: {e}"));
+                            exit = ReaderExit::ChildClosed;
+                            break;
+                        }
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!(
+                        adapter = %adapter_name,
+                        "Sidecar reader received shutdown signal"
+                    );
+                    exit = ReaderExit::Shutdown;
+                    break;
+                }
+            }
+        }
+        exit
+    });
+
+    Ok((handle, ready_rx))
+}
+
+/// Circuit-breaker: restarts exhausted. Logged exactly once (the
+/// supervisor breaks right after), so no log-rate gate is needed.
+fn trip_circuit(ctx: &SpawnCtx, attempt: u32) {
+    {
+        let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+        s.connected = false;
+        s.last_error = Some(format!(
+            "sidecar restart circuit-breaker tripped after {attempt} attempts"
+        ));
+    }
+    error!(
+        adapter = %ctx.name,
+        attempt,
+        "Sidecar exceeded {RESTART_MAX_RETRIES} restart attempts; giving up (circuit-break)"
+    );
+}
+
 /// A channel adapter that delegates to an external subprocess via JSON-RPC
 /// over stdin/stdout.
 pub struct SidecarAdapter {
@@ -374,296 +746,139 @@ impl ChannelAdapter for SidecarAdapter {
         info!(
             name = %self.name,
             command = %self.command,
-            "Starting sidecar channel adapter"
+            "Starting supervised sidecar channel adapter"
         );
 
-        let mut cmd = Command::new(&self.command);
-        cmd.args(&self.args)
-            .envs(&self.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        let mut child = cmd.spawn().map_err(|e| {
-            format!(
-                "Failed to spawn sidecar '{}' ({}): {e}",
-                self.name, self.command
-            )
-        })?;
-
-        // Take ownership of stdin
-        let child_stdin = child
-            .stdin
-            .take()
-            .ok_or("Failed to capture sidecar stdin")?;
-        {
-            let mut guard = self.stdin_tx.lock().await;
-            *guard = Some(child_stdin);
-        }
-
-        // Take stdout for reading events
-        let child_stdout = child
-            .stdout
-            .take()
-            .ok_or("Failed to capture sidecar stdout")?;
-
-        // Take stderr for logging
-        let child_stderr = child
-            .stderr
-            .take()
-            .ok_or("Failed to capture sidecar stderr")?;
-
-        // Store child handle to keep the process alive
-        {
-            let mut guard = self.child.lock().await;
-            *guard = Some(child);
-        }
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let channel_type = self.channel_type.clone();
-        let adapter_name = self.name.clone();
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(MSG_BUFFER);
+        let ctx = SpawnCtx {
+            command: self.command.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+            channel_type: self.channel_type.clone(),
+            name: self.name.clone(),
+            stdin_tx: self.stdin_tx.clone(),
+            child: self.child.clone(),
+            status: self.status.clone(),
+            caps: self.caps.clone(),
+            account_id_cell: self.account_id_cell.clone(),
+            typing_tx: self.typing_tx.clone(),
+            tx: tx.clone(),
+            shutdown_rx: self.shutdown_rx.clone(),
+        };
         let mut shutdown_rx = self.shutdown_rx.clone();
-        let status = self.status.clone();
-        let caps = self.caps.clone();
-        let account_id_cell = self.account_id_cell.clone();
-        let reader_stdin = self.stdin_tx.clone();
-        let typing_tx = self.typing_tx.clone();
 
-        // Mark as connected
-        {
-            let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
-            s.connected = true;
-            s.started_at = Some(Utc::now());
-        }
-
-        // Spawn stderr forwarder
-        let stderr_name = adapter_name.clone();
+        // Supervisor: owns the (re)spawn loop. The returned stream
+        // outlives every child — restarts feed the same `tx`. Restart
+        // on crash with exponential backoff + jitter; circuit-break
+        // after RESTART_MAX_RETRIES; never restart on a clean shutdown
+        // or once the bridge dropped the message stream.
         tokio::spawn(async move {
-            let reader = BufReader::new(child_stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!(adapter = %stderr_name, "[sidecar stderr] {line}");
-            }
-        });
-
-        // Spawn stdout reader
-        let status_clone = status.clone();
-        tokio::spawn(async move {
-            let reader = BufReader::new(child_stdout);
-            let mut lines = reader.lines();
-
+            let mut attempt: u32 = 0;
             loop {
-                tokio::select! {
-                    result = lines.next_line() => {
-                        match result {
-                            Ok(Some(line)) => {
-                                let line = line.trim().to_string();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                match serde_json::from_str::<SidecarEvent>(&line) {
-                                    Ok(SidecarEvent::Ready { params }) => {
-                                        let cap_count = params.capabilities.len();
-                                        match caps.write() {
-                                            Ok(mut g) => {
-                                                g.set = params
-                                                    .capabilities
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect();
-                                                g.suppress_errors =
-                                                    params.suppress_error_responses;
-                                                g.notification_recipients =
-                                                    params.notification_recipients.clone();
-                                                g.header_rules =
-                                                    params.header_rules.clone();
-                                            }
-                                            Err(p) => {
-                                                let mut g = p.into_inner();
-                                                g.set = params
-                                                    .capabilities
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect();
-                                                g.suppress_errors =
-                                                    params.suppress_error_responses;
-                                                g.notification_recipients =
-                                                    params.notification_recipients.clone();
-                                                g.header_rules =
-                                                    params.header_rules.clone();
-                                            }
-                                        }
-                                        // First `ready` wins (a restart that
-                                        // re-announces keeps the original id).
-                                        let _ = account_id_cell
-                                            .set(params.account_id.clone());
-                                        info!(
-                                            adapter = %adapter_name,
-                                            capabilities = cap_count,
-                                            protocol_version =
-                                                params.protocol_version,
-                                            "Sidecar adapter ready"
-                                        );
-                                        // Ack so an SDK adapter can stop
-                                        // re-announcing. Best-effort: an
-                                        // adapter that never reads it (or
-                                        // ignores unknown commands) is fine.
-                                        if let Err(e) = write_command(
-                                            &reader_stdin,
-                                            &SidecarCommand::ReadyAck,
-                                        )
-                                        .await
-                                        {
-                                            debug!(
-                                                adapter = %adapter_name,
-                                                "Failed to send ReadyAck: {e}"
-                                            );
-                                        }
-                                    }
-                                    Ok(SidecarEvent::Typing { params }) => {
-                                        // Best-effort: typing is ephemeral.
-                                        // Dropped if nobody took the receiver
-                                        // or the bounded buffer is full.
-                                        let _ = typing_tx.try_send(TypingEvent {
-                                            channel: channel_type.clone(),
-                                            sender: ChannelUser {
-                                                platform_id: params.user_id,
-                                                display_name: params.user_name,
-                                                librefang_user: None,
-                                            },
-                                            is_typing: params.is_typing,
-                                        });
-                                    }
-                                    Ok(SidecarEvent::Message { params }) => {
-                                        // Unbox once: the field moves below
-                                        // (metadata/content/text/sender) need
-                                        // an owned local, not a Box (partial
-                                        // moves out of Box aren't allowed).
-                                        let params = *params;
-                                        debug!(
-                                            adapter = %adapter_name,
-                                            user = %params.user_name,
-                                            "Received message from sidecar"
-                                        );
-                                        let mut metadata = params.metadata;
-                                        if let Some(ch) = params.channel_id {
-                                            metadata.insert(
-                                                "channel_id".to_string(),
-                                                serde_json::Value::String(ch),
-                                            );
-                                        }
-                                        if let Some(p) = params.platform {
-                                            metadata.insert(
-                                                "platform".to_string(),
-                                                serde_json::Value::String(p),
-                                            );
-                                        }
-                                        if let Some(h) = params.username {
-                                            metadata.insert(
-                                                "username".to_string(),
-                                                serde_json::Value::String(h),
-                                            );
-                                        }
-                                        if !params.group_members.is_empty() {
-                                            if let Ok(v) = serde_json::to_value(
-                                                &params.group_members,
-                                            ) {
-                                                metadata.insert(
-                                                    "group_members".to_string(),
-                                                    v,
-                                                );
-                                            }
-                                        }
-                                        if !params.group_participants.is_empty() {
-                                            if let Ok(v) = serde_json::to_value(
-                                                &params.group_participants,
-                                            ) {
-                                                metadata.insert(
-                                                    "group_participants"
-                                                        .to_string(),
-                                                    v,
-                                                );
-                                            }
-                                        }
-                                        // `content` supersedes `text`; legacy
-                                        // text-only adapters omit it and fall
-                                        // back to Text(text).
-                                        let content = params
-                                            .content
-                                            .unwrap_or_else(|| {
-                                                ChannelContent::Text(
-                                                    params
-                                                        .text
-                                                        .unwrap_or_default(),
-                                                )
-                                            });
-                                        let msg = ChannelMessage {
-                                            channel: channel_type.clone(),
-                                            platform_message_id: uuid::Uuid::new_v4().to_string(),
-                                            sender: ChannelUser {
-                                                platform_id: params.user_id,
-                                                display_name: params.user_name,
-                                                librefang_user: params.librefang_user,
-                                            },
-                                            content,
-                                            target_agent: None,
-                                            timestamp: Utc::now(),
-                                            is_group: params.is_group,
-                                            thread_id: params.thread_id,
-                                            metadata,
-                                        };
-                                        // Update status
-                                        {
-                                            let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
-                                            s.messages_received += 1;
-                                            s.last_message_at = Some(Utc::now());
-                                        }
-                                        if tx.send(msg).await.is_err() {
-                                            debug!(adapter = %adapter_name, "Message receiver dropped, stopping sidecar reader");
-                                            break;
-                                        }
-                                    }
-                                    Ok(SidecarEvent::Error { params }) => {
-                                        warn!(
-                                            adapter = %adapter_name,
-                                            error = %params.message,
-                                            "Sidecar adapter reported error"
-                                        );
-                                        let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
-                                        s.last_error = Some(params.message);
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            adapter = %adapter_name,
-                                            line = %line,
-                                            "Failed to parse sidecar event: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                info!(adapter = %adapter_name, "Sidecar process stdout closed");
-                                let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
-                                s.connected = false;
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                let started = std::time::Instant::now();
+                match spawn_once(&ctx).await {
+                    Ok((handle, ready_rx)) => {
+                        // Bound time-to-ready: a child that spawns but
+                        // never announces still counts as a failed try.
+                        let readied = tokio::select! {
+                            _ = shutdown_rx.changed() => {
+                                let _ = handle.await;
                                 break;
                             }
-                            Err(e) => {
-                                error!(adapter = %adapter_name, "Error reading sidecar stdout: {e}");
-                                let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
-                                s.connected = false;
-                                s.last_error = Some(format!("stdout read error: {e}"));
+                            r = ready_rx => r.is_ok(),
+                            _ = tokio::time::sleep(
+                                std::time::Duration::from_secs(
+                                    READY_TIMEOUT_SECS,
+                                ),
+                            ) => false,
+                        };
+                        if !readied {
+                            warn!(
+                                adapter = %ctx.name,
+                                "Sidecar not ready within {READY_TIMEOUT_SECS}s; restarting"
+                            );
+                            {
+                                let mut g = ctx.child.lock().await;
+                                if let Some(mut c) = g.take() {
+                                    let _ = c.kill().await;
+                                }
+                            }
+                            let _ = handle.await;
+                            if attempt >= RESTART_MAX_RETRIES {
+                                trip_circuit(&ctx, attempt);
                                 break;
+                            }
+                            let delay = backoff_with_jitter(attempt);
+                            attempt += 1;
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                _ = shutdown_rx.changed() => break,
+                            }
+                            continue;
+                        }
+                        let exit = handle.await.unwrap_or(ReaderExit::ChildClosed);
+                        match exit {
+                            ReaderExit::Shutdown | ReaderExit::ReceiverGone => break,
+                            ReaderExit::ChildClosed => {
+                                if *shutdown_rx.borrow() || ctx.tx.is_closed() {
+                                    break;
+                                }
+                                // Stable uptime resets backoff so a
+                                // long-lived adapter that crashes once
+                                // doesn't inherit an old penalty.
+                                if started.elapsed()
+                                    >= std::time::Duration::from_secs(RESTART_RESET_AFTER_SECS)
+                                {
+                                    attempt = 0;
+                                }
+                                if attempt >= RESTART_MAX_RETRIES {
+                                    trip_circuit(&ctx, attempt);
+                                    break;
+                                }
+                                let delay = backoff_with_jitter(attempt);
+                                attempt += 1;
+                                warn!(
+                                    adapter = %ctx.name,
+                                    attempt,
+                                    delay_ms = delay.as_millis(),
+                                    "Sidecar exited; restarting after backoff"
+                                );
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => {}
+                                    _ = shutdown_rx.changed() => break,
+                                }
                             }
                         }
                     }
-                    _ = shutdown_rx.changed() => {
-                        info!(adapter = %adapter_name, "Sidecar reader received shutdown signal");
-                        break;
+                    Err(e) => {
+                        {
+                            let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
+                            s.connected = false;
+                            s.last_error = Some(e.to_string());
+                        }
+                        if attempt >= RESTART_MAX_RETRIES {
+                            trip_circuit(&ctx, attempt);
+                            break;
+                        }
+                        let delay = backoff_with_jitter(attempt);
+                        attempt += 1;
+                        warn!(
+                            adapter = %ctx.name,
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            "Sidecar spawn failed: {e}; retrying after backoff"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = shutdown_rx.changed() => break,
+                        }
                     }
                 }
             }
+            debug!(adapter = %ctx.name, "Sidecar supervisor exiting");
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -722,7 +937,12 @@ impl ChannelAdapter for SidecarAdapter {
             let mut guard = self.child.lock().await;
             if let Some(ref mut child) = *guard {
                 // Give the process a moment to exit gracefully
-                match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS),
+                    child.wait(),
+                )
+                .await
+                {
                     Ok(Ok(status)) => {
                         debug!(name = %self.name, ?status, "Sidecar process exited");
                     }
@@ -1539,6 +1759,49 @@ mod tests {
         adapter.stop().await.unwrap();
         let status = adapter.status();
         assert!(!status.connected);
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_restarts_crashing_child() {
+        // A child that announces ready, emits one message, then exits.
+        // The supervisor must restart it so the SAME returned stream
+        // keeps yielding messages across child deaths.
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = concat!(
+            "import sys,json;",
+            "print(json.dumps({'method':'ready'}),flush=True);",
+            "print(json.dumps({'method':'message','params':",
+            "{'user_id':'u','user_name':'n','text':'tick'}}),flush=True);",
+            "sys.exit(0)"
+        );
+        let config = librefang_types::config::SidecarChannelConfig {
+            name: "test-restart".to_string(),
+            command: python,
+            args: vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+            env: HashMap::new(),
+            channel_type: None,
+        };
+        let adapter = SidecarAdapter::new(&config);
+        let mut stream = adapter.start().await.unwrap();
+        use futures::StreamExt;
+
+        // Two messages can only arrive if the child was restarted at
+        // least once (each child emits exactly one then exits).
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+                .await
+                .expect("timed out waiting for a message across restart")
+                .expect("stream ended unexpectedly");
+            match &msg.content {
+                ChannelContent::Text(t) => assert_eq!(t, "tick"),
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+        adapter.stop().await.unwrap();
+        assert!(!adapter.status().connected);
     }
 
     /// Find python3 or python on PATH.
