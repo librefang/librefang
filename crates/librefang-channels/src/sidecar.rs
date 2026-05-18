@@ -279,15 +279,41 @@ fn url_host(url: &str) -> Option<String> {
     }
 }
 
-// ── Supervision tunables ───────────────────────────────────────────
-// Compile-time defaults; P3 makes these per-adapter config fields.
-const RESTART_INITIAL_BACKOFF_MS: u64 = 500;
-const RESTART_MAX_BACKOFF_MS: u64 = 30_000;
-const RESTART_MAX_RETRIES: u32 = 10;
-const RESTART_RESET_AFTER_SECS: u64 = 60;
-const READY_TIMEOUT_SECS: u64 = 30;
-const SHUTDOWN_GRACE_SECS: u64 = 5;
-const MSG_BUFFER: usize = 256;
+// ── Supervision config ─────────────────────────────────────────────
+
+use librefang_types::config::SidecarOverflowPolicy;
+
+/// Per-adapter supervision tunables, snapshotted from
+/// `SidecarChannelConfig` at construction. All scalar/Copy so the
+/// supervisor can carry it cheaply across (re)spawns.
+#[derive(Debug, Clone, Copy)]
+struct SupCfg {
+    restart: bool,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+    max_retries: u32,
+    reset_after_secs: u64,
+    ready_timeout_secs: u64,
+    shutdown_grace_secs: u64,
+    message_buffer: usize,
+    overflow: SidecarOverflowPolicy,
+}
+
+impl SupCfg {
+    fn from_config(c: &librefang_types::config::SidecarChannelConfig) -> Self {
+        Self {
+            restart: c.restart,
+            initial_backoff_ms: c.restart_initial_backoff_ms,
+            max_backoff_ms: c.restart_max_backoff_ms,
+            max_retries: c.restart_max_retries,
+            reset_after_secs: c.restart_reset_after_secs,
+            ready_timeout_secs: c.ready_timeout_secs,
+            shutdown_grace_secs: c.shutdown_grace_secs,
+            message_buffer: c.message_buffer.max(1),
+            overflow: c.overflow,
+        }
+    }
+}
 
 /// Why the stdout reader task ended — drives the supervisor's decision
 /// to restart vs. stop.
@@ -319,13 +345,14 @@ struct SpawnCtx {
     typing_tx: mpsc::Sender<TypingEvent>,
     tx: mpsc::Sender<ChannelMessage>,
     shutdown_rx: watch::Receiver<bool>,
+    sup: SupCfg,
 }
 
 /// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
 /// wall clock. Backoff jitter does not need a CSPRNG.
-fn backoff_with_jitter(attempt: u32) -> std::time::Duration {
-    let exp = RESTART_INITIAL_BACKOFF_MS.saturating_mul(1u64 << attempt.min(20));
-    let base = exp.min(RESTART_MAX_BACKOFF_MS);
+fn backoff_with_jitter(attempt: u32, initial_ms: u64, max_ms: u64) -> std::time::Duration {
+    let exp = initial_ms.saturating_mul(1u64 << attempt.min(20));
+    let base = exp.min(max_ms);
     let span = base / 5 + 1;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -403,10 +430,12 @@ async fn spawn_once(
     let reader_stdin = ctx.stdin_tx.clone();
     let typing_tx = ctx.typing_tx.clone();
     let tx = ctx.tx.clone();
+    let overflow = ctx.sup.overflow;
     let mut shutdown_rx = ctx.shutdown_rx.clone();
 
     let handle = tokio::spawn(async move {
         let mut ready_tx = Some(ready_tx);
+        let mut dropped: u64 = 0;
         let reader = BufReader::new(child_stdout);
         let mut lines = reader.lines();
         let exit;
@@ -561,13 +590,49 @@ async fn spawn_once(
                                         s.messages_received += 1;
                                         s.last_message_at = Some(Utc::now());
                                     }
-                                    if tx.send(msg).await.is_err() {
-                                        debug!(
-                                            adapter = %adapter_name,
-                                            "Message receiver dropped"
-                                        );
-                                        exit = ReaderExit::ReceiverGone;
-                                        break;
+                                    match overflow {
+                                        SidecarOverflowPolicy::Block => {
+                                            if tx.send(msg).await.is_err() {
+                                                debug!(
+                                                    adapter = %adapter_name,
+                                                    "Message receiver dropped"
+                                                );
+                                                exit = ReaderExit::ReceiverGone;
+                                                break;
+                                            }
+                                        }
+                                        SidecarOverflowPolicy::DropNewest => {
+                                            use tokio::sync::mpsc::error::TrySendError;
+                                            match tx.try_send(msg) {
+                                                Ok(()) => {}
+                                                Err(TrySendError::Closed(_)) => {
+                                                    debug!(
+                                                        adapter = %adapter_name,
+                                                        "Message receiver dropped"
+                                                    );
+                                                    exit =
+                                                        ReaderExit::ReceiverGone;
+                                                    break;
+                                                }
+                                                Err(TrySendError::Full(_)) => {
+                                                    dropped += 1;
+                                                    // Rate-limited: first, then
+                                                    // every 100th, so a flooded
+                                                    // notification sidecar can't
+                                                    // spam the log.
+                                                    if dropped == 1
+                                                        || dropped
+                                                            .is_multiple_of(100)
+                                                    {
+                                                        warn!(
+                                                            adapter = %adapter_name,
+                                                            dropped,
+                                                            "Inbound buffer full; dropping message (overflow=drop_newest)"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Ok(SidecarEvent::Error { params }) => {
@@ -647,7 +712,8 @@ fn trip_circuit(ctx: &SpawnCtx, attempt: u32) {
     error!(
         adapter = %ctx.name,
         attempt,
-        "Sidecar exceeded {RESTART_MAX_RETRIES} restart attempts; giving up (circuit-break)"
+        max_retries = ctx.sup.max_retries,
+        "Sidecar exceeded restart attempts; giving up (circuit-break)"
     );
 }
 
@@ -679,6 +745,8 @@ pub struct SidecarAdapter {
     /// Receiver half, handed out once by `typing_events()` (sync — uses
     /// a std Mutex, never held across `.await`).
     typing_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<TypingEvent>>>>,
+    /// Supervision tunables snapshotted from config at construction.
+    sup: SupCfg,
 }
 
 impl SidecarAdapter {
@@ -707,6 +775,7 @@ impl SidecarAdapter {
             account_id_cell: Arc::new(OnceLock::new()),
             typing_tx,
             typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
+            sup: SupCfg::from_config(config),
         }
     }
 
@@ -749,7 +818,7 @@ impl ChannelAdapter for SidecarAdapter {
             "Starting supervised sidecar channel adapter"
         );
 
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(MSG_BUFFER);
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(self.sup.message_buffer);
         let ctx = SpawnCtx {
             command: self.command.clone(),
             args: self.args.clone(),
@@ -764,14 +833,16 @@ impl ChannelAdapter for SidecarAdapter {
             typing_tx: self.typing_tx.clone(),
             tx: tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
+            sup: self.sup,
         };
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         // Supervisor: owns the (re)spawn loop. The returned stream
         // outlives every child — restarts feed the same `tx`. Restart
         // on crash with exponential backoff + jitter; circuit-break
-        // after RESTART_MAX_RETRIES; never restart on a clean shutdown
-        // or once the bridge dropped the message stream.
+        // after the configured max retries; never restart on a clean
+        // shutdown, once the bridge dropped the stream, or when
+        // `restart = false`.
         tokio::spawn(async move {
             let mut attempt: u32 = 0;
             loop {
@@ -791,14 +862,15 @@ impl ChannelAdapter for SidecarAdapter {
                             r = ready_rx => r.is_ok(),
                             _ = tokio::time::sleep(
                                 std::time::Duration::from_secs(
-                                    READY_TIMEOUT_SECS,
+                                    ctx.sup.ready_timeout_secs,
                                 ),
                             ) => false,
                         };
                         if !readied {
                             warn!(
                                 adapter = %ctx.name,
-                                "Sidecar not ready within {READY_TIMEOUT_SECS}s; restarting"
+                                timeout_secs = ctx.sup.ready_timeout_secs,
+                                "Sidecar not ready in time; restarting"
                             );
                             {
                                 let mut g = ctx.child.lock().await;
@@ -807,11 +879,18 @@ impl ChannelAdapter for SidecarAdapter {
                                 }
                             }
                             let _ = handle.await;
-                            if attempt >= RESTART_MAX_RETRIES {
+                            if !ctx.sup.restart {
+                                break;
+                            }
+                            if attempt >= ctx.sup.max_retries {
                                 trip_circuit(&ctx, attempt);
                                 break;
                             }
-                            let delay = backoff_with_jitter(attempt);
+                            let delay = backoff_with_jitter(
+                                attempt,
+                                ctx.sup.initial_backoff_ms,
+                                ctx.sup.max_backoff_ms,
+                            );
                             attempt += 1;
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {}
@@ -823,22 +902,26 @@ impl ChannelAdapter for SidecarAdapter {
                         match exit {
                             ReaderExit::Shutdown | ReaderExit::ReceiverGone => break,
                             ReaderExit::ChildClosed => {
-                                if *shutdown_rx.borrow() || ctx.tx.is_closed() {
+                                if *shutdown_rx.borrow() || ctx.tx.is_closed() || !ctx.sup.restart {
                                     break;
                                 }
                                 // Stable uptime resets backoff so a
                                 // long-lived adapter that crashes once
                                 // doesn't inherit an old penalty.
                                 if started.elapsed()
-                                    >= std::time::Duration::from_secs(RESTART_RESET_AFTER_SECS)
+                                    >= std::time::Duration::from_secs(ctx.sup.reset_after_secs)
                                 {
                                     attempt = 0;
                                 }
-                                if attempt >= RESTART_MAX_RETRIES {
+                                if attempt >= ctx.sup.max_retries {
                                     trip_circuit(&ctx, attempt);
                                     break;
                                 }
-                                let delay = backoff_with_jitter(attempt);
+                                let delay = backoff_with_jitter(
+                                    attempt,
+                                    ctx.sup.initial_backoff_ms,
+                                    ctx.sup.max_backoff_ms,
+                                );
                                 attempt += 1;
                                 warn!(
                                     adapter = %ctx.name,
@@ -859,11 +942,18 @@ impl ChannelAdapter for SidecarAdapter {
                             s.connected = false;
                             s.last_error = Some(e.to_string());
                         }
-                        if attempt >= RESTART_MAX_RETRIES {
+                        if !ctx.sup.restart {
+                            break;
+                        }
+                        if attempt >= ctx.sup.max_retries {
                             trip_circuit(&ctx, attempt);
                             break;
                         }
-                        let delay = backoff_with_jitter(attempt);
+                        let delay = backoff_with_jitter(
+                            attempt,
+                            ctx.sup.initial_backoff_ms,
+                            ctx.sup.max_backoff_ms,
+                        );
                         attempt += 1;
                         warn!(
                             adapter = %ctx.name,
@@ -938,7 +1028,7 @@ impl ChannelAdapter for SidecarAdapter {
             if let Some(ref mut child) = *guard {
                 // Give the process a moment to exit gracefully
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS),
+                    std::time::Duration::from_secs(self.sup.shutdown_grace_secs),
                     child.wait(),
                 )
                 .await
@@ -1638,13 +1728,63 @@ mod tests {
     }
 
     fn dummy_adapter() -> SidecarAdapter {
-        SidecarAdapter::new(&librefang_types::config::SidecarChannelConfig {
-            name: "dummy".to_string(),
-            command: "true".to_string(),
-            args: vec![],
-            env: HashMap::new(),
-            channel_type: None,
-        })
+        SidecarAdapter::new(&cfg("dummy", "true", vec![]))
+    }
+
+    /// Build a config with all P3 supervision fields at their serde
+    /// defaults (kept in sync with librefang-types, not hardcoded).
+    fn cfg(
+        name: &str,
+        command: &str,
+        args: Vec<String>,
+    ) -> librefang_types::config::SidecarChannelConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "command": command,
+            "args": args,
+        }))
+        .expect("SidecarChannelConfig from minimal json")
+    }
+
+    #[test]
+    fn test_supcfg_defaults_and_overflow_parsing() {
+        // Minimal config -> every supervision field at its serde default.
+        let c = cfg("x", "true", vec![]);
+        let s = SupCfg::from_config(&c);
+        assert!(s.restart);
+        assert_eq!(s.initial_backoff_ms, 500);
+        assert_eq!(s.max_backoff_ms, 30_000);
+        assert_eq!(s.max_retries, 10);
+        assert_eq!(s.reset_after_secs, 60);
+        assert_eq!(s.ready_timeout_secs, 30);
+        assert_eq!(s.shutdown_grace_secs, 5);
+        assert_eq!(s.message_buffer, 256);
+        assert_eq!(s.overflow, SidecarOverflowPolicy::Block);
+
+        // Explicit overrides round-trip, incl. snake_case enum.
+        let c2: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "x",
+                "command": "true",
+                "restart": false,
+                "restart_max_retries": 3,
+                "message_buffer": 8,
+                "overflow": "drop_newest",
+            }))
+            .unwrap();
+        let s2 = SupCfg::from_config(&c2);
+        assert!(!s2.restart);
+        assert_eq!(s2.max_retries, 3);
+        assert_eq!(s2.message_buffer, 8);
+        assert_eq!(s2.overflow, SidecarOverflowPolicy::DropNewest);
+
+        // message_buffer is clamped to >= 1 (mpsc::channel(0) panics).
+        let c3: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "x", "command": "true", "message_buffer": 0
+            }))
+            .unwrap();
+        assert_eq!(SupCfg::from_config(&c3).message_buffer, 1);
     }
 
     #[tokio::test]
@@ -1704,13 +1844,11 @@ mod tests {
             return;
         }
 
-        let config = librefang_types::config::SidecarChannelConfig {
-            name: "test-echo".to_string(),
-            command: python,
-            args: vec!["-u".to_string(), adapter_path.to_string_lossy().to_string()],
-            env: HashMap::new(),
-            channel_type: None,
-        };
+        let config = cfg(
+            "test-echo",
+            &python,
+            vec!["-u".to_string(), adapter_path.to_string_lossy().to_string()],
+        );
 
         let adapter = SidecarAdapter::new(&config);
         let mut stream = adapter.start().await.unwrap();
@@ -1777,13 +1915,11 @@ mod tests {
             "{'user_id':'u','user_name':'n','text':'tick'}}),flush=True);",
             "sys.exit(0)"
         );
-        let config = librefang_types::config::SidecarChannelConfig {
-            name: "test-restart".to_string(),
-            command: python,
-            args: vec!["-u".to_string(), "-c".to_string(), script.to_string()],
-            env: HashMap::new(),
-            channel_type: None,
-        };
+        let config = cfg(
+            "test-restart",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
         let adapter = SidecarAdapter::new(&config);
         let mut stream = adapter.start().await.unwrap();
         use futures::StreamExt;

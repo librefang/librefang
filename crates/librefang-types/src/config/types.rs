@@ -2128,6 +2128,27 @@ pub enum ResponseFormat {
 /// args = ["adapters/telegram_adapter.py"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
+/// Backpressure policy when the bounded inbound message buffer is full.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarOverflowPolicy {
+    /// Apply backpressure: the reader awaits buffer space (default).
+    /// Correct for chat — dropping a user message is worse than
+    /// slowing the producer.
+    #[default]
+    Block,
+    /// Shed load: drop the just-arrived message when the buffer is
+    /// full (counted + rate-limited warn). For high-volume,
+    /// loss-tolerant notification sidecars.
+    ///
+    /// Note: a tokio mpsc can't evict the *oldest* entry from the
+    /// producer side, so this drops the newest. Named for intent
+    /// (shed load).
+    DropNewest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
@@ -2143,6 +2164,66 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Restart the subprocess automatically when it exits unexpectedly.
+    #[serde(default = "default_sidecar_restart")]
+    pub restart: bool,
+    /// Initial restart backoff in ms (doubles per consecutive failure).
+    #[serde(default = "default_sidecar_restart_initial_backoff_ms")]
+    pub restart_initial_backoff_ms: u64,
+    /// Cap on the restart backoff in ms.
+    #[serde(default = "default_sidecar_restart_max_backoff_ms")]
+    pub restart_max_backoff_ms: u64,
+    /// Consecutive failures before the supervisor gives up (circuit-break).
+    #[serde(default = "default_sidecar_restart_max_retries")]
+    pub restart_max_retries: u32,
+    /// Stable uptime (secs) after which the failure counter resets.
+    #[serde(default = "default_sidecar_restart_reset_after_secs")]
+    pub restart_reset_after_secs: u64,
+    /// How long (secs) to wait for the adapter's `ready` before
+    /// treating the spawn as failed.
+    #[serde(default = "default_sidecar_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
+    #[serde(default = "default_sidecar_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Bounded inbound message buffer (also the backpressure point).
+    #[serde(default = "default_sidecar_message_buffer")]
+    pub message_buffer: usize,
+    /// What to do when `message_buffer` is full.
+    #[serde(default)]
+    pub overflow: SidecarOverflowPolicy,
+}
+
+fn default_sidecar_restart() -> bool {
+    true
+}
+
+fn default_sidecar_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_sidecar_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+fn default_sidecar_restart_max_retries() -> u32 {
+    10
+}
+
+fn default_sidecar_restart_reset_after_secs() -> u64 {
+    60
+}
+
+fn default_sidecar_ready_timeout_secs() -> u64 {
+    30
+}
+
+fn default_sidecar_shutdown_grace_secs() -> u64 {
+    5
+}
+
+fn default_sidecar_message_buffer() -> usize {
+    256
 }
 
 // ---------------------------------------------------------------------------
