@@ -88,7 +88,9 @@ impl PooledDriver {
                 self.pool.mark_exhausted(api_key);
             }
             FailoverReason::ModelUnavailable | FailoverReason::Timeout => {}
-            FailoverReason::ContextTooLong | FailoverReason::Unknown => {}
+            FailoverReason::ContextTooLong
+            | FailoverReason::Unknown
+            | FailoverReason::ChainExhausted => {}
         }
     }
 }

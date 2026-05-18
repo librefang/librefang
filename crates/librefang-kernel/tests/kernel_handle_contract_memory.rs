@@ -453,17 +453,17 @@ fn test_memory_store_rejects_empty_key_5138() {
     let kh: &dyn KernelHandle = &kernel;
 
     let err = kh
-        .memory_store("", serde_json::json!("x"), None)
+        .memory_store("", serde_json::json!("x"), None, None)
         .expect_err("empty key must be rejected");
     assert!(matches!(err, KernelOpError::InvalidInput(_)), "got {err:?}");
     // The rejected write must not have created a "" key.
-    let keys = kh.memory_list(None).expect("list global");
+    let keys = kh.memory_list(None, None).expect("list global");
     assert!(
         !keys.iter().any(|k| k.is_empty()),
         "rejected empty-key write must not have landed a row: {keys:?}"
     );
     // Recall with an empty key is rejected symmetrically.
-    let rerr = kh.memory_recall("", None);
+    let rerr = kh.memory_recall("", None, None);
     assert!(matches!(rerr, Err(KernelOpError::InvalidInput(_))));
 }
 
@@ -478,21 +478,21 @@ fn test_memory_store_rejects_oversized_value_5138() {
     // Comfortably over the 256 KiB cap.
     let big = serde_json::json!("z".repeat(300 * 1024));
     let err = kh
-        .memory_store("huge", big, None)
+        .memory_store("huge", big, None, None)
         .expect_err("oversized value must be rejected");
     assert!(matches!(err, KernelOpError::InvalidInput(_)), "got {err:?}");
     // The rejected write must not have created the key.
     assert_eq!(
-        kh.memory_recall("huge", None).expect("recall"),
+        kh.memory_recall("huge", None, None).expect("recall"),
         None,
         "oversized write must not have landed a row"
     );
 
     // A reasonably-sized value still works.
-    kh.memory_store("ok", serde_json::json!("small"), None)
+    kh.memory_store("ok", serde_json::json!("small"), None, None)
         .expect("normal value must still store");
     assert_eq!(
-        kh.memory_recall("ok", None).expect("recall ok"),
+        kh.memory_recall("ok", None, None).expect("recall ok"),
         Some(serde_json::json!("small"))
     );
 }

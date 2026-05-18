@@ -23,7 +23,7 @@ pub(super) fn tool_memory_store(
         MemoryAclOp::Write,
         &kv_acl_namespace(peer_id),
     )?;
-    kh.memory_store(key, value.clone(), peer_id)
+    kh.memory_store(key, value.clone(), None, peer_id)
         .map_err(|e| e.to_string())?;
     Ok(format!("Stored value under key '{key}'."))
 }
@@ -44,7 +44,10 @@ pub(super) fn tool_memory_recall(
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
     )?;
-    match kh.memory_recall(key, peer_id).map_err(|e| e.to_string())? {
+    match kh
+        .memory_recall(key, None, peer_id)
+        .map_err(|e| e.to_string())?
+    {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
@@ -65,7 +68,7 @@ pub(super) fn tool_memory_list(
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
     )?;
-    let keys = kh.memory_list(peer_id).map_err(|e| e.to_string())?;
+    let keys = kh.memory_list(None, peer_id).map_err(|e| e.to_string())?;
     if keys.is_empty() {
         return Ok("No entries found in shared memory.".to_string());
     }

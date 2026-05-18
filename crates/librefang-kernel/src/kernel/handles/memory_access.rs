@@ -13,7 +13,7 @@ use super::super::{peer_scoped_key, shared_memory_agent_id, spawn_logged, LibreF
 fn resolve_agent_id(agent_id: Option<&str>) -> Result<AgentId, kernel_handle::KernelOpError> {
     match agent_id {
         None => Ok(shared_memory_agent_id()),
-        Some(s) if s.is_empty() => Err(kernel_handle::KernelOpError::InvalidInput(
+        Some("") => Err(kernel_handle::KernelOpError::InvalidInput(
             "agent_id must be a valid UUID string, got empty string".into(),
         )),
         Some(s) => uuid::Uuid::parse_str(s).map(AgentId).map_err(|e| {

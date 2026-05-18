@@ -91,6 +91,7 @@ impl MemoryAccess for WorkflowWriteStubKernel {
         _: &str,
         _: serde_json::Value,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
@@ -98,11 +99,13 @@ impl MemoryAccess for WorkflowWriteStubKernel {
         &self,
         _: &str,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn memory_list(
         &self,
+        _: Option<&str>,
         _: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())

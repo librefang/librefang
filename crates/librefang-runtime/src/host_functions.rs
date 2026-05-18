@@ -1468,13 +1468,26 @@ mod tests {
         host_kv_get(&state, &json!({"key": "secret"}));
 
         let recalled = kernel.recalled.lock().unwrap();
-        assert_eq!(recalled.len(), 1, "Expected exactly one memory_recall call");
+        assert_eq!(
+            recalled.len(),
+            2,
+            "Expected primary + legacy-fallback recall"
+        );
         assert_eq!(
             recalled[0].0.as_deref(),
             Some("agent-alice"),
             "kv_get must pass agent_id for isolation"
         );
         assert_eq!(recalled[0].1, "secret", "kv_get must pass the original key");
+        assert_eq!(
+            recalled[1].0.as_deref(),
+            None,
+            "legacy fallback must use None agent_id (shared namespace)"
+        );
+        assert_eq!(
+            recalled[1].1, "agent-alice:secret",
+            "legacy fallback must use namespaced key"
+        );
     }
 
     /// Regression test for Bug #3837: kv_set must pass agent_id to the
