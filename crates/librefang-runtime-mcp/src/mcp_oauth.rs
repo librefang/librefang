@@ -165,36 +165,80 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 
 /// Return `true` when the given host string is a literal IP address or
 /// known internal hostname that must not be reachable via OAuth metadata
-/// fetches (SSRF defence-in-depth).  No DNS resolution is performed —
-/// only the literal value is matched.  A public hostname that DNS-rebinds
-/// to an internal IP at fetch time is out of scope; mitigate at the
-/// network layer.
+/// fetches or MCP transport connections (SSRF defence-in-depth).  No DNS
+/// resolution is performed — only the literal value is matched.  A public
+/// hostname that DNS-rebinds to an internal IP at fetch time is out of
+/// scope; mitigate at the network layer.
 ///
 /// Blocked values:
-/// * Exact hostnames:   `localhost`, `metadata.google.internal`
+/// * Exact hostnames:   `localhost`, `ip6-localhost`, `metadata.google.internal`,
+///   `metadata.aws.internal`, `instance-data`
 /// * IPv4 loopback      127.0.0.0/8
+/// * IPv4 unspecified   0.0.0.0
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+/// * IPv4 CGNAT         100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200)
 /// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
+/// * IPv4 Azure IMDS    192.0.0.192 (legacy Azure metadata endpoint)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
-/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is private
-/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is private
+/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is blocked
+/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is blocked
+///
+/// Used in two modes (`metadata_only`):
+/// * `false` — full block (loopback / private / link-local / IMDS).
+///   Used for URLs whose host is influenced by a remote response
+///   (OAuth discovery & token exchange) where SSRF protection is
+///   essential. This is the historical behaviour for every caller.
+/// * `true`  — block only the cloud-metadata pivots that are *never* a
+///   legitimate operator-configured backend (IMDS hostnames,
+///   `0.0.0.0`, `169.254/16`, `100.64/10`, `192.0.0.192`, and their
+///   IPv6-embedded forms). Loopback / RFC1918 are allowed. Used by the
+///   operator-configured MCP connect URL (`McpConnection::check_ssrf`),
+///   where pointing at a local MCP server on `127.0.0.1` /
+///   `localhost` / a LAN address is a legitimate, common setup.
 fn is_ssrf_blocked_host(host: &str) -> bool {
+    is_ssrf_blocked_host_impl(host, false)
+}
+
+/// Cloud-metadata / IMDS pivots only — see [`is_ssrf_blocked_host`]
+/// `metadata_only` mode. Always blocked, including on the
+/// operator-configured connect path.
+fn is_cloud_metadata_host(host: &str) -> bool {
+    is_ssrf_blocked_host_impl(host, true)
+}
+
+fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    fn blocked_v4(v4: Ipv4Addr) -> bool {
+    fn blocked_v4(v4: Ipv4Addr, metadata_only: bool) -> bool {
         let o = v4.octets();
+        // Cloud-metadata pivots — never a legitimate operator backend,
+        // blocked on every path including connect.
+        let meta =
+            // 0.0.0.0 unspecified — connects to every interface incl. loopback
+            (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)
+            // 100.64.0.0/10 CGNAT (also Alibaba Cloud IMDS at 100.100.100.200)
+            || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
+            || (o[0] == 169 && o[1] == 254)
+            // 192.0.0.192 — Azure IMDS alternative endpoint. Public IANA-
+            // assigned (192.0.0.0/24 IETF reserved) but used by Azure for
+            // legacy metadata access; web_fetch::check_ssrf blocks it and
+            // this helper must stay aligned.
+            || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192);
+        if metadata_only {
+            return meta;
+        }
+        meta
         // 127.0.0.0/8 loopback
-        o[0] == 127
+        || o[0] == 127
         // 10.0.0.0/8
         || o[0] == 10
         // 172.16.0.0/12
         || (o[0] == 172 && (o[1] & 0xf0) == 16)
         // 192.168.0.0/16
         || (o[0] == 192 && o[1] == 168)
-        // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
-        || (o[0] == 169 && o[1] == 254)
     }
 
     /// IPv4 embedded in an IPv6 address through one of the two forms
@@ -224,7 +268,24 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     // Strip a trailing dot ("localhost." is the same host as "localhost"
     // to a resolver) before the hostname comparison.
     let lower = host.trim_end_matches('.').to_lowercase();
-    if lower == "localhost" || lower == "metadata.google.internal" {
+    // IMDS hostnames are never a legitimate backend — blocked on every
+    // path. Keep this list aligned with
+    // `librefang_runtime::web_fetch::check_ssrf`.
+    if matches!(
+        lower.as_str(),
+        "metadata.google.internal" | "metadata.aws.internal" | "instance-data"
+    ) {
+        return true;
+    }
+    // `localhost` / `ip6-localhost` / `ip6-loopback` are loopback
+    // aliases an operator legitimately runs a local MCP server on —
+    // only blocked on the server-response-influenced paths.
+    if !metadata_only
+        && matches!(
+            lower.as_str(),
+            "localhost" | "ip6-localhost" | "ip6-loopback"
+        )
+    {
         return true;
     }
 
@@ -236,12 +297,17 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 
     if let Ok(ip) = ip_str.parse::<IpAddr>() {
         return match ip {
-            IpAddr::V4(v4) => blocked_v4(v4),
+            IpAddr::V4(v4) => blocked_v4(v4, metadata_only),
             IpAddr::V6(v6) => {
                 if let Some(v4) = ipv6_embedded_ipv4(v6) {
-                    if blocked_v4(v4) {
+                    if blocked_v4(v4, metadata_only) {
                         return true;
                     }
+                }
+                if metadata_only {
+                    // Generic IPv6 loopback / ULA / link-local are
+                    // private-tier — allowed on the connect path.
+                    return false;
                 }
                 let segs = v6.segments();
                 // ::1 loopback
@@ -284,6 +350,25 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 /// endpoint URLs before making outbound requests against values written
 /// before policy tightened.
 pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
+    is_ssrf_blocked_url_with(url_str, is_ssrf_blocked_host)
+}
+
+/// Connect-path variant of [`is_ssrf_blocked_url`]: same scheme +
+/// userinfo + parse rejection, but the host check only blocks the
+/// cloud-metadata pivots (see [`is_cloud_metadata_host`]). Used for the
+/// operator-configured MCP backend URL (SSE / Streamable-HTTP /
+/// HTTP-compat connect) where loopback / RFC1918 destinations are
+/// legitimate. OAuth discovery / token exchange keep the full
+/// [`is_ssrf_blocked_url`] block since those hosts come from a remote
+/// response.
+pub fn is_ssrf_blocked_url_for_connect(url_str: &str) -> Result<(), String> {
+    is_ssrf_blocked_url_with(url_str, is_cloud_metadata_host)
+}
+
+fn is_ssrf_blocked_url_with(
+    url_str: &str,
+    host_blocked: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let parsed = Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -296,7 +381,7 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
-    if is_ssrf_blocked_host(host) {
+    if host_blocked(host) {
         return Err(format!("host '{host}' is a blocked address"));
     }
     Ok(())

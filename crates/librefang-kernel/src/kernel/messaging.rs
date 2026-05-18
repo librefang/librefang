@@ -204,6 +204,39 @@ impl LibreFangKernel {
         .await
     }
 
+    /// Like [`Self::send_message_as`] but pins the callee to a deterministic
+    /// session derived from the caller-supplied `conversation_key`. The key is
+    /// namespaced to `(target_agent, "agent_send:<key>")` via
+    /// `SessionId::for_channel`, so the same key always maps to the same
+    /// session (history preserved) and a distinct key always starts an
+    /// independent thread. The derived `SessionId` is passed as
+    /// `session_id_override`, which takes precedence over the target manifest
+    /// `session_mode`.
+    pub async fn send_message_as_with_key(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        parent_agent_id: AgentId,
+        conversation_key: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let session_id =
+            SessionId::for_channel(agent_id, &format!("agent_send:{conversation_key}"));
+        let upstream = self.any_session_interrupt_for_agent(parent_agent_id);
+        self.send_message_full_with_upstream(
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            None,
+            None,
+            Some(session_id),
+            upstream,
+            false,
+        )
+        .await
+    }
+
     /// Send a message with a per-call deep-thinking override.
     ///
     /// `thinking_override`:
@@ -427,14 +460,27 @@ impl LibreFangKernel {
             let peer_id = sender_context
                 .map(|s| s.user_id.as_str())
                 .filter(|s| !s.is_empty());
-            let user_name_key = peer_scoped_key("user_name", peer_id);
-            let user_name = self
-                .memory
-                .substrate
-                .structured_get(shared_id, &user_name_key)
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            // peer_scoped_key now rejects colon-bearing / empty peer_ids
+            // (#5119); on a malformed peer_id we skip the user_name lookup
+            // with a WARN so prompt assembly stays best-effort rather than
+            // failing the turn.
+            let user_name = match peer_scoped_key("user_name", peer_id) {
+                Ok(user_name_key) => self
+                    .memory
+                    .substrate
+                    .structured_get(shared_id, &user_name_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from)),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = ?peer_id,
+                        error = %e,
+                        "skipping user_name lookup: invalid peer_id namespace"
+                    );
+                    None
+                }
+            };
 
             let peer_agents: Vec<(String, String, String)> =
                 self.agents.registry.peer_agents_summary();
@@ -694,13 +740,23 @@ impl LibreFangKernel {
             let has_content = !result.response.trim().is_empty();
             let no_tool_errors = result.iterations > 0;
             let success = has_content && no_tool_errors;
-            let _ = self.record_experiment_request(
+            if let Err(e) = self.record_experiment_request(
                 &ctx.experiment_id.to_string(),
                 &ctx.variant_id.to_string(),
                 latency_ms,
                 cost,
                 success,
-            );
+            ) {
+                // Dropping this silently undercounts the experiment arm and
+                // lets the auto-selected winner run on incomplete data.
+                tracing::error!(
+                    agent_id = %agent_id,
+                    experiment_id = %ctx.experiment_id,
+                    variant_id = %ctx.variant_id,
+                    error = %e,
+                    "Failed to record A/B experiment request metrics"
+                );
+            }
         }
 
         let mut result = result;
@@ -746,8 +802,48 @@ impl LibreFangKernel {
     /// [`SessionInterrupt`] so a parent session's `/stop` can cascade into
     /// this subagent's loop (issue #3044). Used by `tool_agent_send` when
     /// the caller agent's own interrupt should gate the callee.
+    ///
+    /// Thin wrapper that establishes the task-local held-`agent_msg_locks`
+    /// registry (`held_agent_locks::scope`) around the real work in
+    /// [`Self::send_message_full_inner`]. The registry must span the whole
+    /// body — the per-agent lock is held across the entire agent loop, and
+    /// the re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126)
+    /// tool paths run *inside* that loop on the same task. `scope` is
+    /// idempotent, so a transitively re-entered inner frame shares the
+    /// outer frame's set rather than masking it with a fresh one.
     #[allow(clippy::too_many_arguments)]
     async fn send_message_full_with_upstream(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Arc<dyn KernelHandle>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+        incognito: bool,
+    ) -> KernelResult<AgentLoopResult> {
+        librefang_runtime::held_agent_locks::scope(self.send_message_full_inner(
+            agent_id,
+            message,
+            kernel_handle,
+            content_blocks,
+            sender_context,
+            session_mode_override,
+            thinking_override,
+            session_id_override,
+            upstream_interrupt,
+            incognito,
+        ))
+        .await
+    }
+
+    /// Real implementation of [`Self::send_message_full_with_upstream`].
+    /// Always invoked under `held_agent_locks::scope`; do not call directly.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_full_inner(
         &self,
         agent_id: AgentId,
         message: &str,
@@ -777,25 +873,80 @@ impl LibreFangKernel {
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
 
+        // Reject same-task re-entrant acquisition of `agent_msg_locks[agent_id]`
+        // (#5125). When this resolves to the agent-scoped lock (no
+        // `session_id_override`) and the current task *already* holds that
+        // agent's lock, acquiring `lock.lock().await` below would block the
+        // task on itself forever — `tokio::sync::Mutex` is not reentrant and
+        // there is no other task to release it. This is exactly the
+        // transitive `A -> B -> A` `agent_send` cycle: the depth limiter
+        // (`max_agent_call_depth`) permits it, and the direct
+        // `caller == agent_id` guard in `tool_agent_send` only catches the
+        // 1-hop case. Detect it *before* the lock acquisition (the only
+        // place that cannot itself deadlock) and fail loudly with the held
+        // chain so operators can see which agents form the cycle, instead
+        // of silently parking the worker thread. The session-scoped
+        // (`session_id_override`) path is a different key space that the
+        // re-entrant tool paths never take, so it is exempt.
+        if session_id_override.is_none() && librefang_runtime::held_agent_locks::is_held(agent_id) {
+            let mut chain: Vec<String> = librefang_runtime::held_agent_locks::held_snapshot()
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect();
+            chain.push(agent_id.to_string());
+            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                format!(
+                    "agent_send: re-entrant message to agent {} would deadlock its \
+                     per-agent message lock (transitive A->B->A cycle). Currently-held \
+                     agent locks on this task: [{}]. Break the cycle or use the task \
+                     queue for the callback.",
+                    agent_id,
+                    chain.join(" -> "),
+                ),
+            )));
+        }
+
         // When the caller supplies an explicit session_id, scope the lock to that
         // session so concurrent messages to *different* sessions of the same agent
         // are not serialized against each other (multi-tab / multi-session UIs).
         // Without an override, fall back to the per-agent lock to preserve the
         // existing serialization guarantee for single-session agents.
-        let lock = if let Some(sid) = session_id_override {
-            self.agents
-                .session_msg_locks
-                .entry(sid)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+        let (lock, agent_scoped) = if let Some(sid) = session_id_override {
+            (
+                self.agents
+                    .session_msg_locks
+                    .entry(sid)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                false,
+            )
         } else {
-            self.agents
-                .agent_msg_locks
-                .entry(agent_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+            (
+                self.agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                true,
+            )
         };
         let _guard = lock.lock().await;
+        // Record that this task now holds `agent_msg_locks[agent_id]` so the
+        // re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126)
+        // tool paths — which run inside the agent loop below on this same
+        // task — can detect the self-re-entry instead of deadlocking on a
+        // non-reentrant `tokio::sync::Mutex`. Only the agent-scoped lock is
+        // tracked: the session-scoped (`session_id_override`) lock is a
+        // different key space that those two paths never re-acquire, and
+        // tracking it by `agent_id` would risk a false-positive rejection.
+        // Declared *after* `_guard` so drop order is registry-then-mutex:
+        // while the entry is registered the mutex is provably still held,
+        // never the inverse. Drop is panic-safe (RAII unwinds destructors).
+        let _held_guard = if agent_scoped {
+            Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
+        } else {
+            None
+        };
 
         // Pre-call global budget reservation (#3616). Estimate cost from
         // the model's max output tokens and reserve it on the in-memory
@@ -2050,14 +2201,27 @@ impl LibreFangKernel {
             let peer_id = sender_context
                 .map(|s| s.user_id.as_str())
                 .filter(|s| !s.is_empty());
-            let user_name_key = peer_scoped_key("user_name", peer_id);
-            let user_name = self
-                .memory
-                .substrate
-                .structured_get(shared_id, &user_name_key)
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(String::from));
+            // peer_scoped_key now rejects colon-bearing / empty peer_ids
+            // (#5119); on a malformed peer_id we skip the user_name lookup
+            // with a WARN so prompt assembly stays best-effort rather than
+            // failing the turn.
+            let user_name = match peer_scoped_key("user_name", peer_id) {
+                Ok(user_name_key) => self
+                    .memory
+                    .substrate
+                    .structured_get(shared_id, &user_name_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(String::from)),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = ?peer_id,
+                        error = %e,
+                        "skipping user_name lookup: invalid peer_id namespace"
+                    );
+                    None
+                }
+            };
 
             let peer_agents: Vec<(String, String, String)> =
                 self.agents.registry.peer_agents_summary();
@@ -2288,18 +2452,31 @@ impl LibreFangKernel {
 
         // Acquire the same session/agent lock as the non-streaming path so concurrent
         // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
-        let session_lock = if session_id_override.is_some() {
-            self.agents
-                .session_msg_locks
-                .entry(effective_session_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+        // `agent_scoped` tracks whether we are taking the per-agent lock (vs. a
+        // per-session lock for session_id_override callers): only the agent-scoped
+        // branch needs the task-local `held_agent_locks` registration so the
+        // re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126) tool
+        // paths can observe this streaming turn's holding of agent_msg_locks
+        // and skip / reject as appropriate. Mirrors the non-streaming site at
+        // `send_message_full_inner` (~L871-906).
+        let (session_lock, agent_scoped) = if session_id_override.is_some() {
+            (
+                self.agents
+                    .session_msg_locks
+                    .entry(effective_session_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                false,
+            )
         } else {
-            self.agents
-                .agent_msg_locks
-                .entry(agent_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+            (
+                self.agents
+                    .agent_msg_locks
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone(),
+                true,
+            )
         };
 
         // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
@@ -2318,12 +2495,27 @@ impl LibreFangKernel {
 
         // Reload session after acquiring the lock so we never act on a stale
         // snapshot captured before a concurrent turn's writes landed.
-        let handle = tokio::spawn(async move {
+        let handle = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
             // Acquire the session/agent serialization lock for the duration of
             // this streaming turn.  This matches the non-streaming path and
             // prevents concurrent streaming + non-streaming writes from
             // producing last-write-wins data loss on session history.
             let _session_guard = session_lock.lock().await;
+            // Record that this task now holds `agent_msg_locks[agent_id]` so the
+            // re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126)
+            // tool paths — which run inside `run_agent_loop_streaming` below on
+            // this same task — can detect the self-re-entry instead of
+            // deadlocking on the non-reentrant `tokio::sync::Mutex`. Only the
+            // agent-scoped lock is tracked: the session-scoped
+            // (`session_id_override`) lock is a different key space those two
+            // paths never re-acquire. Mirrors the non-streaming site at
+            // `send_message_full_inner` (~L890-906); declared *after*
+            // `_session_guard` so drop order is registry-then-mutex.
+            let _held_guard = if agent_scoped {
+                Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
+            } else {
+                None
+            };
 
             // Reload session under the lock; keep the placeholder on miss.
             match memory.get_session(effective_session_id) {
@@ -2389,7 +2581,7 @@ impl LibreFangKernel {
             if needs_compact && !loop_opts.is_fork {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
                 match kernel_clone
-                    .compact_agent_session_with_id(agent_id, Some(session.id))
+                    .compact_agent_session_with_id(agent_id, Some(session.id), false)
                     .await
                 {
                     Ok(msg) => {
@@ -2683,13 +2875,24 @@ impl LibreFangKernel {
                             let has_content = !result.response.trim().is_empty();
                             let no_tool_errors = result.iterations > 0;
                             let success = has_content && no_tool_errors;
-                            let _ = kernel_clone.record_experiment_request(
+                            if let Err(e) = kernel_clone.record_experiment_request(
                                 &ctx.experiment_id.to_string(),
                                 &ctx.variant_id.to_string(),
                                 latency_ms,
                                 cost,
                                 success,
-                            );
+                            ) {
+                                // Dropping this silently undercounts the
+                                // experiment arm and lets the auto-selected
+                                // winner run on incomplete data.
+                                tracing::error!(
+                                    agent_id = %agent_id,
+                                    experiment_id = %ctx.experiment_id,
+                                    variant_id = %ctx.variant_id,
+                                    error = %e,
+                                    "Failed to record A/B experiment request metrics (streaming)"
+                                );
+                            }
                         }
                     }
 
@@ -2726,8 +2929,9 @@ impl LibreFangKernel {
                                 info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
-                                if let Err(e) =
-                                    kc.compact_agent_session_with_id(agent_id, Some(sid)).await
+                                if let Err(e) = kc
+                                    .compact_agent_session_with_id(agent_id, Some(sid), false)
+                                    .await
                                 {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
                                 }
@@ -2815,7 +3019,7 @@ impl LibreFangKernel {
                     Err(KernelError::LibreFang(e))
                 }
             }
-        });
+        }));
 
         // Store abort handle for cancellation support. Fork turns skip —
         // registering the fork's handle under the parent's `(agent, session)`
@@ -2853,6 +3057,26 @@ impl LibreFangKernel {
                     session_id = %effective_session_id,
                     "spawned task already finished; skipping running_tasks registration"
                 );
+            } else if self.agents.registry.get(agent_id).is_none() {
+                // #5142: close the kill/dispatch race window. The kill path
+                // (`kill_agent_with_purge`) calls `stop_agent_run(agent_id)`
+                // *then* `registry.remove(agent_id)`. A concurrent dispatch
+                // that snapshotted the entry before `stop_agent_run` but
+                // hasn't reached this insert yet would otherwise register an
+                // orphan `RunningTask` after the agent is gone — the abort
+                // handle then survives until the periodic GC sweep, and the
+                // spawned loop keeps burning provider tokens against a
+                // deleted agent. Re-check the registry here under the same
+                // shard read used by every other registry access; if the
+                // agent is gone, abort the just-spawned task and skip
+                // registration so the loop unwinds at its next `.await`
+                // instead of leaking.
+                tracing::info!(
+                    agent_id = %agent_id,
+                    session_id = %effective_session_id,
+                    "agent removed from registry before running_tasks insert; aborting spawned task"
+                );
+                handle.abort();
             } else {
                 let new_task = RunningTask {
                     abort: handle.abort_handle(),
@@ -2870,6 +3094,29 @@ impl LibreFangKernel {
                         "aborting previous running task before starting new one"
                     );
                     old_task.abort.abort();
+                }
+                // #5142: a kill that lands *between* our registry check and
+                // the insert above would have aborted nothing (its
+                // `stop_agent_run` ran before our entry existed) yet
+                // `registry.remove` has since dropped the agent. Re-check
+                // post-insert and self-eject under the same `remove_if`
+                // task_id guard the cleanup path uses, so we never wipe a
+                // successor turn's entry.
+                if self.agents.registry.get(agent_id).is_none() {
+                    if let Some((_, evicted)) = self
+                        .agents
+                        .running_tasks
+                        .remove_if(&(agent_id, effective_session_id), |_, v| {
+                            v.task_id == turn_task_id
+                        })
+                    {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            session_id = %effective_session_id,
+                            "agent removed from registry during running_tasks insert; aborting spawned task"
+                        );
+                        evicted.abort.abort();
+                    }
                 }
             }
         }

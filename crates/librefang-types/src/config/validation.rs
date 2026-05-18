@@ -29,6 +29,22 @@ const MANUAL_TOP_LEVEL_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
+/// Nested aliases honoured by `#[serde(alias = …)]` on fields of nested
+/// config structs. Each entry is a `(dotted_path, alias)` pair where
+/// `dotted_path` is the section that owns the aliased field (e.g.
+/// `"terminal"` for `TerminalConfig`) and `alias` is the legacy name still
+/// accepted on the wire.
+///
+/// schemars (0.8) drops `serde(alias)` declarations when generating the
+/// JSON Schema, so strict-mode rejected the legacy name even though serde
+/// would happily deserialise it (#5129). Keep this list in sync with the
+/// `alias = "…"` attributes on nested struct fields in `types.rs`.
+const MANUAL_NESTED_ALIASES: &[(&str, &str)] = &[
+    // TerminalConfig.require_proxy_headers was renamed from
+    // `trust_proxy_headers`; the old name stays accepted via serde(alias).
+    ("terminal", "trust_proxy_headers"),
+];
+
 /// Cached allowlists derived once from the schemars-emitted JSON Schema
 /// for `KernelConfig`. Built on first use and reused for the rest of the
 /// process.
@@ -83,6 +99,16 @@ fn build_allowlists() -> DerivedAllowlists {
                 &mut nested,
                 &mut HashSet::new(),
             );
+        }
+    }
+    // Add `#[serde(alias)]` declarations that schemars dropped (#5129).
+    // Only insert into paths the schema actually surfaced — that way a
+    // stale entry in `MANUAL_NESTED_ALIASES` (e.g. a section that was
+    // later removed) doesn't silently widen the allowlist.
+    for (path, alias) in MANUAL_NESTED_ALIASES {
+        if let Some(entry) = nested.get_mut(*path) {
+            let leaked: &'static str = Box::leak((*alias).to_string().into_boxed_str());
+            entry.insert(leaked);
         }
     }
 
@@ -615,13 +641,6 @@ impl KernelConfig {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
             }
         }
-        for nf in self.channels.ntfy.iter() {
-            if !nf.token_env.is_empty()
-                && std::env::var(&nf.token_env).unwrap_or_default().is_empty()
-            {
-                warnings.push(format!("ntfy configured but {} is not set", nf.token_env));
-            }
-        }
         for gf in self.channels.gotify.iter() {
             if std::env::var(&gf.app_token_env)
                 .unwrap_or_default()
@@ -893,6 +912,25 @@ impl KernelConfig {
                      access (not read). Likely a typo: did you mean to add \
                      `writable_namespaces = [\"...\"]`?",
                     user.name,
+                ));
+            }
+        }
+
+        // #5138: `cron_session_max_messages` above the substrate's hard
+        // persistence ceiling can never actually keep that many messages
+        // across daemon restarts — `save_session` truncates the tail
+        // beyond MAX_PERSISTED_SESSION_MESSAGES regardless of the cron cap.
+        // Surface the discrepancy at config load instead of letting the
+        // operator silently lose context.
+        if let Some(n) = self.cron_session_max_messages {
+            if n > super::MAX_PERSISTED_SESSION_MESSAGES {
+                warnings.push(format!(
+                    "cron_session_max_messages = {n} exceeds the substrate \
+                     persistence ceiling of {} messages per session; history \
+                     beyond {} is silently truncated on save and will not \
+                     survive a daemon restart (#5138)",
+                    super::MAX_PERSISTED_SESSION_MESSAGES,
+                    super::MAX_PERSISTED_SESSION_MESSAGES,
                 ));
             }
         }

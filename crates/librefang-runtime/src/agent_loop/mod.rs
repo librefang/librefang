@@ -36,7 +36,7 @@ use tracing::{debug, info, instrument, warn};
 mod end_turn;
 mod history;
 mod message;
-mod model;
+pub mod model;
 mod prompt;
 mod retry;
 mod run_streaming;

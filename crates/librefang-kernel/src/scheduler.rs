@@ -46,6 +46,20 @@ const ONE_MINUTE: Duration = Duration::from_secs(60);
 /// One hour as a Duration constant.
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 
+/// `Instant::now() - d`, but panic-proof.
+///
+/// `Instant - Duration` panics when the result would predate the platform's
+/// monotonic origin (on Linux that origin is process boot). During the first
+/// minute of a cold-started daemon, `Instant::now() - ONE_MINUTE` underflows
+/// and panics inside the scheduler hot path. `checked_sub` returns `None`
+/// instead; we fall back to `now` (an empty look-back window — no timestamp is
+/// older than "now", so eviction simply keeps everything this tick, which is
+/// correct because nothing can yet be a full minute old).
+fn instant_now_minus(d: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(d).unwrap_or(now)
+}
+
 impl Default for UsageTracker {
     fn default() -> Self {
         Self {
@@ -78,7 +92,7 @@ impl UsageTracker {
 
     /// Evict tool-call timestamps older than 1 minute and return how many remain.
     fn tool_calls_in_last_minute(&mut self) -> u32 {
-        let cutoff = Instant::now() - ONE_MINUTE;
+        let cutoff = instant_now_minus(ONE_MINUTE);
         while self
             .tool_call_timestamps
             .front()
@@ -91,7 +105,7 @@ impl UsageTracker {
 
     /// Return total tokens consumed in the last minute (burst window).
     fn tokens_in_last_minute(&mut self) -> u64 {
-        let cutoff = Instant::now() - ONE_MINUTE;
+        let cutoff = instant_now_minus(ONE_MINUTE);
         while self
             .token_timestamps
             .front()
@@ -886,5 +900,42 @@ mod tests {
             "150 prior + 280 actual; no reservation to subtract"
         );
         assert_eq!(after_settle.llm_calls, 2);
+    }
+
+    // -- #5136: Instant - Duration underflow guard --------------------------
+
+    #[test]
+    fn instant_now_minus_does_not_panic_on_huge_duration() {
+        // `Instant::now() - Duration::from_secs(u64::MAX)` underflows the
+        // platform monotonic origin and panics. The helper must return a
+        // valid Instant (the `now` fallback) instead — this is the cold-start
+        // path that previously panicked within the first minute of daemon
+        // life. A normal small subtraction must still produce an earlier
+        // Instant.
+        let now = Instant::now();
+        // Huge duration → fallback to ~now (never panics).
+        let fallback = instant_now_minus(Duration::from_secs(u64::MAX));
+        assert!(
+            fallback >= now,
+            "fallback instant must not predate the call site"
+        );
+        // Small duration well within process lifetime → genuine subtraction.
+        std::thread::sleep(Duration::from_millis(5));
+        let earlier = instant_now_minus(Duration::from_millis(1));
+        assert!(
+            earlier < Instant::now(),
+            "small look-back must yield an earlier instant"
+        );
+    }
+
+    #[test]
+    fn tool_call_and_token_eviction_survive_huge_window() {
+        // Exercises the two call sites: with no timestamps recorded yet the
+        // eviction helpers must run their `instant_now_minus(ONE_MINUTE)`
+        // cutoff without panicking even if invoked on a freshly-started
+        // process (the helper is the guard, this asserts wiring).
+        let mut t = UsageTracker::default();
+        assert_eq!(t.tool_calls_in_last_minute(), 0);
+        assert_eq!(t.tokens_in_last_minute(), 0);
     }
 }

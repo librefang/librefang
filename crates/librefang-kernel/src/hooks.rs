@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Limits the number of hook tasks that may execute concurrently.
 ///
@@ -41,6 +41,30 @@ use tracing::{debug, warn};
 /// unbounded task accumulation.
 static HOOK_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(8));
+
+/// Acquire a concurrency permit for a hook, or refuse to run on `SemaphoreClosed`.
+///
+/// Returning `None` is a hard refusal that causes the caller to skip executing
+/// the hook entirely, so the documented system-wide cap on external hook
+/// `fork()` rate stays a hard guarantee — even in the (currently impossible)
+/// case where the static `LazyLock` semaphore is closed.
+async fn acquire_hook_permit<'a>(
+    sem: &'a tokio::sync::Semaphore,
+    hook_name: &str,
+    ev: &str,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    match sem.acquire().await {
+        Ok(permit) => Some(permit),
+        Err(_closed) => {
+            error!(
+                hook_name = %hook_name,
+                event = %ev,
+                "HOOK_CONCURRENCY semaphore closed; refusing to run hook"
+            );
+            None
+        }
+    }
+}
 
 /// Lifecycle events that external hooks can subscribe to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -301,7 +325,13 @@ impl ExternalHookSystem {
         // prevents unbounded task accumulation on high-frequency events such as
         // `agent:step`.  The permit is held for the duration of the process
         // execution and released automatically when this function returns.
-        let _permit = HOOK_CONCURRENCY.acquire().await.ok();
+        //
+        // The static `LazyLock` semaphore is never closed in practice, but if
+        // it ever is, we refuse to run the hook rather than silently bypassing
+        // the system-wide fork() rate cap.  See `acquire_hook_permit` above.
+        let Some(_permit) = acquire_hook_permit(&HOOK_CONCURRENCY, hook_name, ev).await else {
+            return;
+        };
 
         debug!(
             hook = %hook_name,
@@ -611,6 +641,29 @@ command: /usr/bin/env
                 serde_json::json!({ "event": event.as_str() }),
             );
         }
+    }
+
+    #[tokio::test]
+    async fn acquire_hook_permit_returns_some_on_open_semaphore() {
+        let sem = tokio::sync::Semaphore::new(1);
+        let permit = acquire_hook_permit(&sem, "demo-hook", "agent:start").await;
+        assert!(
+            permit.is_some(),
+            "open semaphore must yield a permit so the hook runs"
+        );
+        // Permit dropped at end of scope — the cap is respected.
+    }
+
+    #[tokio::test]
+    async fn acquire_hook_permit_returns_none_when_semaphore_closed() {
+        let sem = tokio::sync::Semaphore::new(8);
+        sem.close();
+        let permit = acquire_hook_permit(&sem, "demo-hook", "agent:start").await;
+        assert!(
+            permit.is_none(),
+            "closed semaphore must refuse the hook so the system-wide \
+             fork() rate cap stays a hard guarantee (issue #5118)"
+        );
     }
 
     #[test]

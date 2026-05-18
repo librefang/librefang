@@ -1,6 +1,6 @@
 import { formatCost as formatCostUtil } from "../lib/format";
 import type { ModelItem, ModelOverrides } from "../api";
-import { FormEvent, memo, useCallback, useEffect, useReducer, useRef, useMemo, useState } from "react";
+import { FormEvent, memo, useCallback, useEffect, useId, useReducer, useRef, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useAddCustomModel, useRemoveCustomModel, useUpdateModelOverrides, useDeleteModelOverrides } from "../lib/mutations/models";
@@ -388,6 +388,9 @@ function ModelDetailBody({
 
 export function ModelsPage() {
   const { t } = useTranslation();
+  // Stable prefix so each <label htmlFor> resolves to a unique <input id>
+  // for screen readers / label-click focus (#5140).
+  const fieldId = useId();
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
@@ -686,32 +689,32 @@ export function ModelsPage() {
         <form onSubmit={handleAdd} className="p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="sm:col-span-2">
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
-              <input value={form.id} onChange={e => dispatchForm({ type: "SET_FIELD", field: "id", value: e.target.value })} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
+              <label htmlFor={`${fieldId}-model-id`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
+              <input id={`${fieldId}-model-id`} value={form.id} onChange={e => dispatchForm({ type: "SET_FIELD", field: "id", value: e.target.value })} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
-              <input value={form.provider} onChange={e => dispatchForm({ type: "SET_FIELD", field: "provider", value: e.target.value })} placeholder={t("models.provider_placeholder")} className={inputClass} required />
+              <label htmlFor={`${fieldId}-provider`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
+              <input id={`${fieldId}-provider`} value={form.provider} onChange={e => dispatchForm({ type: "SET_FIELD", field: "provider", value: e.target.value })} placeholder={t("models.provider_placeholder")} className={inputClass} required />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
-              <input value={form.displayName} onChange={e => dispatchForm({ type: "SET_FIELD", field: "displayName", value: e.target.value })} placeholder={t("models.display_name_placeholder")} className={inputClass} />
+              <label htmlFor={`${fieldId}-display-name`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
+              <input id={`${fieldId}-display-name`} value={form.displayName} onChange={e => dispatchForm({ type: "SET_FIELD", field: "displayName", value: e.target.value })} placeholder={t("models.display_name_placeholder")} className={inputClass} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
-              <input type="number" value={form.contextWindow} onChange={e => dispatchForm({ type: "SET_FIELD", field: "contextWindow", value: +e.target.value })} className={inputClass} />
+              <label htmlFor={`${fieldId}-context-window`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
+              <input id={`${fieldId}-context-window`} type="number" value={form.contextWindow} onChange={e => dispatchForm({ type: "SET_FIELD", field: "contextWindow", value: +e.target.value })} className={inputClass} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
-              <input type="number" value={form.maxOutput} onChange={e => dispatchForm({ type: "SET_FIELD", field: "maxOutput", value: +e.target.value })} className={inputClass} />
+              <label htmlFor={`${fieldId}-max-output`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
+              <input id={`${fieldId}-max-output`} type="number" value={form.maxOutput} onChange={e => dispatchForm({ type: "SET_FIELD", field: "maxOutput", value: +e.target.value })} className={inputClass} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
-              <input type="number" step="0.01" value={form.inputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "inputCost", value: +e.target.value })} className={inputClass} />
+              <label htmlFor={`${fieldId}-input-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
+              <input id={`${fieldId}-input-cost`} type="number" step="0.01" value={form.inputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "inputCost", value: +e.target.value })} className={inputClass} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
-              <input type="number" step="0.01" value={form.outputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "outputCost", value: +e.target.value })} className={inputClass} />
+              <label htmlFor={`${fieldId}-output-cost`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
+              <input id={`${fieldId}-output-cost`} type="number" step="0.01" value={form.outputCost} onChange={e => dispatchForm({ type: "SET_FIELD", field: "outputCost", value: +e.target.value })} className={inputClass} />
             </div>
           </div>
           <div className="flex flex-wrap gap-3">

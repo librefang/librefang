@@ -349,6 +349,341 @@ async fn test_tool_channel_send_requires_recipient_without_sender_id() {
     );
 }
 
+// ── agent_send conversation_key routing tests ─────────────────────────────
+//
+// Verify that tool_agent_send routes to the correct KernelHandle method
+// depending on whether `conversation_key` and `caller_agent_id` are present.
+// We use a lightweight stub that records which dispatch arm fired.
+
+#[derive(Default)]
+struct DispatchCapture {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AgentControl for DispatchCapture {
+    async fn spawn_agent(
+        &self,
+        _manifest_toml: &str,
+        _parent_id: Option<&str>,
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+        Err("not used".into())
+    }
+
+    async fn send_to_agent(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.calls.lock().unwrap().push("send_to_agent".into());
+        Ok("no-key-no-parent".into())
+    }
+
+    async fn send_to_agent_as(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+        _parent_agent_id: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.calls.lock().unwrap().push("send_to_agent_as".into());
+        Ok("no-key-with-parent".into())
+    }
+
+    async fn send_to_agent_with_key(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+        conversation_key: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("with_key:{conversation_key}"));
+        Ok(format!("keyed:{conversation_key}"))
+    }
+
+    async fn send_to_agent_as_with_key(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+        _parent_agent_id: &str,
+        conversation_key: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("as_with_key:{conversation_key}"));
+        Ok(format!("as-keyed:{conversation_key}"))
+    }
+
+    fn list_agents(&self) -> Vec<AgentInfo> {
+        vec![]
+    }
+
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        Err("not used".into())
+    }
+
+    fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+        vec![]
+    }
+
+    fn max_agent_call_depth(&self) -> u32 {
+        10
+    }
+}
+
+impl MemoryAccess for DispatchCapture {
+    fn memory_store(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _peer_id: Option<&str>,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        Ok(())
+    }
+
+    fn memory_recall(
+        &self,
+        _key: &str,
+        _peer_id: Option<&str>,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        Ok(None)
+    }
+
+    fn memory_list(
+        &self,
+        _peer_id: Option<&str>,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+        Ok(vec![])
+    }
+}
+
+impl WikiAccess for DispatchCapture {}
+
+#[async_trait::async_trait]
+impl TaskQueue for DispatchCapture {
+    async fn task_post(
+        &self,
+        _title: &str,
+        _description: &str,
+        _assigned_to: Option<&str>,
+        _created_by: Option<&str>,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        Ok("task".into())
+    }
+
+    async fn task_claim(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        Ok(None)
+    }
+
+    async fn task_complete(
+        &self,
+        _agent_id: &str,
+        _task_id: &str,
+        _result: &str,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        Ok(())
+    }
+
+    async fn task_list(
+        &self,
+        _status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        Ok(vec![])
+    }
+
+    async fn task_delete(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+        Ok(false)
+    }
+
+    async fn task_retry(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+        Ok(false)
+    }
+
+    async fn task_get(
+        &self,
+        _task_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        Ok(None)
+    }
+
+    async fn task_update_status(
+        &self,
+        _task_id: &str,
+        _new_status: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+        Ok(false)
+    }
+}
+
+#[async_trait::async_trait]
+impl EventBus for DispatchCapture {
+    async fn publish_event(
+        &self,
+        _event_type: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl KnowledgeGraph for DispatchCapture {
+    async fn knowledge_add_entity(
+        &self,
+        _entity: &librefang_types::memory::Entity,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        Ok("entity".into())
+    }
+
+    async fn knowledge_add_relation(
+        &self,
+        _relation: &librefang_types::memory::Relation,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        Ok("relation".into())
+    }
+
+    async fn knowledge_query(
+        &self,
+        _pattern: librefang_types::memory::GraphPattern,
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
+    {
+        Ok(vec![])
+    }
+}
+
+impl CronControl for DispatchCapture {}
+impl ApprovalGate for DispatchCapture {}
+impl HandsControl for DispatchCapture {}
+impl A2ARegistry for DispatchCapture {}
+impl ChannelSender for DispatchCapture {}
+impl PromptStore for DispatchCapture {}
+impl WorkflowRunner for DispatchCapture {}
+impl GoalControl for DispatchCapture {}
+impl ToolPolicy for DispatchCapture {}
+impl librefang_kernel_handle::CatalogQuery for DispatchCapture {}
+impl ApiAuth for DispatchCapture {
+    fn auth_snapshot(&self) -> ApiAuthSnapshot {
+        ApiAuthSnapshot::default()
+    }
+}
+impl SessionWriter for DispatchCapture {
+    fn inject_attachment_blocks(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+        _blocks: Vec<librefang_types::message::ContentBlock>,
+    ) {
+    }
+}
+impl AcpFsBridge for DispatchCapture {}
+impl AcpTerminalBridge for DispatchCapture {}
+
+/// (a) No `conversation_key` and no caller → unchanged behaviour: routes to
+/// `send_to_agent`.
+#[tokio::test]
+async fn agent_send_no_key_no_caller_routes_to_send_to_agent() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
+
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), None).await;
+
+    assert_eq!(result.unwrap(), "no-key-no-parent");
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(&*calls, &["send_to_agent"]);
+}
+
+/// (a) No `conversation_key` with a caller → unchanged behaviour: routes to
+/// `send_to_agent_as`.
+#[tokio::test]
+async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
+
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await;
+
+    assert_eq!(result.unwrap(), "no-key-with-parent");
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(&*calls, &["send_to_agent_as"]);
+}
+
+/// (b) Same `conversation_key` across two calls routes to `send_to_agent_as_with_key`
+/// each time — the kernel's session pinning (tested at the kernel level) ensures
+/// history is preserved; here we verify the dispatch arm is reached.
+#[tokio::test]
+async fn agent_send_same_key_routes_to_as_with_key_both_calls() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({
+        "agent_id": "target",
+        "message": "turn one",
+        "conversation_key": "thread-abc",
+    });
+
+    super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"))
+        .await
+        .unwrap();
+
+    let input2 = serde_json::json!({
+        "agent_id": "target",
+        "message": "turn two",
+        "conversation_key": "thread-abc",
+    });
+    super::agent::tool_agent_send(&input2, Some(&kernel), Some("parent-agent"))
+        .await
+        .unwrap();
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &["as_with_key:thread-abc", "as_with_key:thread-abc"],
+        "both calls must hit the keyed path with the same key"
+    );
+}
+
+/// (c) Distinct keys produce distinct dispatch arms (isolated threads at the
+/// kernel level) — verified here by checking both keys appear in the call log.
+#[tokio::test]
+async fn agent_send_distinct_keys_produce_isolated_dispatch() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+
+    let call = |key: &'static str| {
+        let kernel = kernel.clone();
+        async move {
+            let input = serde_json::json!({
+                "agent_id": "target",
+                "message": "msg",
+                "conversation_key": key,
+            });
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent"))
+                .await
+                .unwrap()
+        }
+    };
+
+    call("key-alpha").await;
+    call("key-beta").await;
+
+    let calls = cap.calls.lock().unwrap();
+    assert_eq!(
+        &*calls,
+        &["as_with_key:key-alpha", "as_with_key:key-beta"],
+        "distinct keys must produce distinct dispatch entries"
+    );
+}
+
 // ── channel_send mirror tests ────────────────────────────────────────────
 
 /// A minimal kernel for mirror tests.

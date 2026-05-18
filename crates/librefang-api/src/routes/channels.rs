@@ -693,22 +693,10 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Generate an OAuth token at twitchapps.com/tmi", "Enter token, nick, and channel below"],
         config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
     },
-    // ── Notifications (4) ───────────────────────────────────────────
-    ChannelMeta {
-        name: "ntfy", display_name: "ntfy", icon: "NF",
-        description: "ntfy.sh pub/sub notification adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Just enter a topic name",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "topic", label: "Topic", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang-alerts", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://ntfy.sh", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("NTFY_TOKEN"), required: false, placeholder: "tk_abc123...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Pick a topic name", "Enter it below — that's it!"],
-        config_template: "[channels.ntfy]\ntopic = \"\"",
-    },
+    // ── Notifications (3) ───────────────────────────────────────────
+    // ntfy migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.ntfy in the SDK package); no longer
+    // an in-process channel.
     ChannelMeta {
         name: "gotify", display_name: "Gotify", icon: "GF",
         description: "Gotify WebSocket notification adapter",
@@ -862,7 +850,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
         "twitch" => config.twitch.is_some(),
-        "ntfy" => config.ntfy.is_some(),
         "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
         "voice" => config.voice.is_some(),
@@ -1135,10 +1122,6 @@ fn channel_config_values(
             .gitter
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "ntfy" => config
-            .ntfy
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "gotify" => config
             .gotify
             .as_ref()
@@ -1215,7 +1198,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
         "twitch" => config.twitch.len(),
-        "ntfy" => config.ntfy.len(),
         "gotify" => config.gotify.len(),
         "webhook" => config.webhook.len(),
         "voice" => config.voice.len(),
@@ -1282,7 +1264,6 @@ fn channel_instances_serialized(
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
         "twitch" => ser(&config.twitch),
-        "ntfy" => ser(&config.ntfy),
         "gotify" => ser(&config.gotify),
         "webhook" => ser(&config.webhook),
         "voice" => ser(&config.voice),
@@ -1564,17 +1545,9 @@ pub async fn configure_channel(
                 return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
                     .into_json_tuple();
             }
-            // `std::env::set_var` is not thread-safe in an async context; delegate
-            // to a blocking thread to avoid UB in the multithreaded tokio runtime.
-            {
-                let env_var_owned = env_var.to_string();
-                let value_owned = value.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // SAFETY: single mutation on a dedicated blocking thread.
-                    unsafe { std::env::set_var(&env_var_owned, &value_owned) };
-                })
-                .await;
-            }
+            // Serialized through the process-global env write guard (#5142):
+            // `spawn_blocking` does NOT serialize concurrent env mutations.
+            crate::secrets_env::set_env_var_guarded(env_var.to_string(), value.to_string()).await;
             // Also write the env var NAME to config.toml so the channel section
             // is not empty and the kernel knows which env var to read.
             config_fields.insert(
@@ -1671,16 +1644,17 @@ pub async fn remove_channel(
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    // Remove all secret env vars for this channel
+    // Remove all secret env vars for this channel. Route the process-wide
+    // env mutation through `remove_env_var_guarded` so it serializes against
+    // every other writer in the daemon (set_provider_key / set_hand_secret /
+    // the per-instance configure paths above). A bare `unsafe { remove_var }`
+    // here would reintroduce the writer/writer race #5142 closed.
     for field_def in meta.fields {
         if let Some(env_var) = field_def.env_var {
             if let Err(e) = remove_secret_env(&secrets_path, env_var) {
                 tracing::warn!("Failed to remove secret env var: {e}");
             }
-            // SAFETY: Single-threaded config operation
-            unsafe {
-                std::env::remove_var(env_var);
-            }
+            crate::secrets_env::remove_env_var_guarded(env_var.to_string()).await;
         }
     }
 
@@ -1996,9 +1970,9 @@ fn prepare_fields_write(
 
 /// Apply the deferred secret writes from `prepare_fields_write` under the
 /// `config_write_lock` critical section. Each pair is written to
-/// `secrets.env` and pushed into the running process's environment via a
-/// dedicated blocking thread (`std::env::set_var` is not thread-safe in the
-/// async runtime).
+/// `secrets.env` and pushed into the running process's environment through
+/// the process-global env write guard (#5142) — `spawn_blocking` does NOT
+/// serialize concurrent env mutations.
 async fn apply_secret_writes(
     secrets_path: &std::path::Path,
     secret_writes: &[(String, String)],
@@ -2010,13 +1984,7 @@ async fn apply_secret_writes(
                     .into_json_tuple(),
             );
         }
-        let env_var_owned = env_var.clone();
-        let value_owned = value.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::set_var(&env_var_owned, &value_owned) };
-        })
-        .await;
+        crate::secrets_env::set_env_var_guarded(env_var.clone(), value.clone()).await;
     }
     Ok(())
 }
@@ -2368,12 +2336,10 @@ pub async fn update_channel_instance_handler(
                     if let Err(e) = remove_secret_env(&secrets_path, env_name) {
                         tracing::warn!(error = %e, env_var = %env_name, "Failed to remove cleared secret env var");
                     }
-                    let env_owned = env_name.to_string();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        // SAFETY: single mutation on a dedicated blocking thread.
-                        unsafe { std::env::remove_var(&env_owned) };
-                    })
-                    .await;
+                    // Serialized through the process-global env write guard
+                    // (#5142) so this remove can never race a concurrent
+                    // guarded `set_var`. `spawn_blocking` does NOT serialize.
+                    crate::secrets_env::remove_env_var_guarded(env_name.to_string()).await;
                 }
             }
         }

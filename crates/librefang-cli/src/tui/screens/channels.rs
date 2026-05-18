@@ -300,14 +300,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["TWITCH_OAUTH_TOKEN"],
         description: "Twitch IRC gateway adapter",
     },
-    // ── Notifications (4)
-    ChannelDef {
-        name: "ntfy",
-        display_name: "ntfy",
-        category: "Notifications",
-        env_vars: &["NTFY_TOKEN"],
-        description: "ntfy.sh pub/sub adapter",
-    },
+    // ── Notifications (3) — ntfy migrated to a sidecar adapter
     ChannelDef {
         name: "gotify",
         display_name: "Gotify",

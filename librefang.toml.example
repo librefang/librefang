@@ -229,6 +229,28 @@ debounce_ms = 500
 # access_token_env = "WHATSAPP_ACCESS_TOKEN"
 # default_agent = "assistant"
 
+# ── Sidecar channel adapters (out-of-process, any language) ──
+# Run a channel adapter as a supervised subprocess that speaks
+# newline-delimited JSON-RPC over stdin/stdout. `name` and `command`
+# are required; every field below is optional and shown with its
+# default. The daemon restarts the subprocess on crash with
+# exponential backoff and a circuit-breaker.
+# [[sidecar_channels]]
+# name = "my-adapter"
+# command = "python3"
+# args = ["adapters/my_adapter.py"]
+# env = { MY_API_TOKEN = "xxx" }
+# channel_type = "my-platform"          # defaults to Custom(name)
+# restart = true                        # auto-restart on unexpected exit
+# restart_initial_backoff_ms = 500      # doubles per consecutive failure
+# restart_max_backoff_ms = 30000        # backoff cap
+# restart_max_retries = 10              # then circuit-break (give up)
+# restart_reset_after_secs = 60         # stable uptime resets the counter
+# ready_timeout_secs = 30               # max wait for the adapter's `ready`
+# shutdown_grace_secs = 5               # clean-exit grace before SIGKILL
+# message_buffer = 256                  # bounded inbound buffer (backpressure); 0 is clamped to 1
+# overflow = "block"                    # or "drop_newest" (shed load)
+
 # ── MCP Servers (external tool integration) ──────────────────
 # PII privacy controls — filter personal data before sending to LLM providers
 # [privacy]

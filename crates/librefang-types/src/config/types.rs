@@ -7,6 +7,18 @@ use std::path::PathBuf;
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
+/// Hard ceiling on messages persisted per session, enforced by
+/// `librefang_memory::session::SessionStore::save_session` before the
+/// blob is written to SQLite (#5121 / #5138).
+///
+/// This is the single source of truth shared between the substrate (which
+/// enforces it) and config validation (which warns when an operator's
+/// `cron_session_max_messages` exceeds it, since the substrate will
+/// silently truncate beyond this point regardless of the cron cap). 2000
+/// keeps a worst-case session blob at roughly ~2 MB while leaving room
+/// for unusually long cron-driven sessions.
+pub const MAX_PERSISTED_SESSION_MESSAGES: usize = 2000;
+
 /// DM (direct message) policy for a channel.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -990,6 +1002,60 @@ impl Default for WebhookTriggerConfig {
             rate_limit_per_minute: 30,
         }
     }
+}
+
+/// Credential selection strategy for a credential pool.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPoolStrategy {
+    /// Always try the highest-priority available key first.
+    #[default]
+    FillFirst,
+    /// Cycle through available keys in priority order.
+    RoundRobin,
+    /// Choose a random available key.
+    Random,
+    /// Choose the key with the fewest successful requests so far.
+    LeastUsed,
+}
+
+/// A single API key entry inside a [`CredentialPoolConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolKeyConfig {
+    /// Environment variable holding the API key.
+    pub api_key_env: String,
+    /// Human-readable label for this key (e.g. "Primary", "Backup").
+    pub label: String,
+    /// Higher-priority keys are tried first in FillFirst / RoundRobin.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub priority: u32,
+}
+
+/// Multi-key credential pool for a single provider.
+///
+/// Configurable in `config.toml` as `[[credential_pools]]`:
+/// ```toml
+/// [[credential_pools]]
+/// provider = "openai"
+/// strategy = "round_robin"
+///
+/// [[credential_pools.keys]]
+/// api_key_env = "OPENAI_API_KEY_1"
+/// label = "Primary"
+/// priority = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolConfig {
+    /// Provider name (e.g., "openai", "anthropic").
+    pub provider: String,
+    /// Key selection strategy.
+    #[serde(default)]
+    pub strategy: CredentialPoolStrategy,
+    /// List of API keys in the pool.
+    pub keys: Vec<CredentialPoolKeyConfig>,
 }
 
 /// Fallback provider chain — tried in order if the primary provider fails.
@@ -2049,6 +2115,29 @@ pub enum ResponseFormat {
     },
 }
 
+/// Backpressure policy when the bounded inbound message buffer is full.
+///
+/// Selected via [`SidecarChannelConfig::overflow`].
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarOverflowPolicy {
+    /// Apply backpressure: the reader awaits buffer space (default).
+    /// Correct for chat — dropping a user message is worse than
+    /// slowing the producer.
+    #[default]
+    Block,
+    /// Shed load: drop the just-arrived message when the buffer is
+    /// full (counted + rate-limited warn). For high-volume,
+    /// loss-tolerant notification sidecars.
+    ///
+    /// Note: a tokio mpsc can't evict the *oldest* entry from the
+    /// producer side, so this drops the newest. Named for intent
+    /// (shed load).
+    DropNewest,
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2059,7 +2148,7 @@ pub enum ResponseFormat {
 /// [[sidecar_channels]]
 /// name = "my-telegram"
 /// command = "python3"
-/// args = ["adapters/telegram_adapter.py"]
+/// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2077,6 +2166,66 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Restart the subprocess automatically when it exits unexpectedly.
+    #[serde(default = "default_sidecar_restart")]
+    pub restart: bool,
+    /// Initial restart backoff in ms (doubles per consecutive failure).
+    #[serde(default = "default_sidecar_restart_initial_backoff_ms")]
+    pub restart_initial_backoff_ms: u64,
+    /// Cap on the restart backoff in ms.
+    #[serde(default = "default_sidecar_restart_max_backoff_ms")]
+    pub restart_max_backoff_ms: u64,
+    /// Consecutive failures before the supervisor gives up (circuit-break).
+    #[serde(default = "default_sidecar_restart_max_retries")]
+    pub restart_max_retries: u32,
+    /// Stable uptime (secs) after which the failure counter resets.
+    #[serde(default = "default_sidecar_restart_reset_after_secs")]
+    pub restart_reset_after_secs: u64,
+    /// How long (secs) to wait for the adapter's `ready` before
+    /// treating the spawn as failed.
+    #[serde(default = "default_sidecar_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
+    #[serde(default = "default_sidecar_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Bounded inbound message buffer (also the backpressure point).
+    #[serde(default = "default_sidecar_message_buffer")]
+    pub message_buffer: usize,
+    /// What to do when `message_buffer` is full.
+    #[serde(default)]
+    pub overflow: SidecarOverflowPolicy,
+}
+
+fn default_sidecar_restart() -> bool {
+    true
+}
+
+fn default_sidecar_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_sidecar_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+fn default_sidecar_restart_max_retries() -> u32 {
+    10
+}
+
+fn default_sidecar_restart_reset_after_secs() -> u64 {
+    60
+}
+
+fn default_sidecar_ready_timeout_secs() -> u64 {
+    30
+}
+
+fn default_sidecar_shutdown_grace_secs() -> u64 {
+    5
+}
+
+fn default_sidecar_message_buffer() -> usize {
+    256
 }
 
 // ---------------------------------------------------------------------------
@@ -2850,6 +2999,10 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
+    /// Credential pools — multi-key rotation per provider.
+    /// Configure in config.toml as `[[credential_pools]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_pools: Vec<CredentialPoolConfig>,
     /// `[llm]` section — currently carries the auxiliary side-task chain
     /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
     #[serde(default)]
@@ -2910,6 +3063,15 @@ pub struct KernelConfig {
     /// each cron fire. Applied in addition to `cron_session_max_tokens`.
     ///
     /// `None` (default) disables message-count pruning.
+    ///
+    /// NOTE (#5138): the memory substrate independently enforces a hard
+    /// persistence ceiling of [`MAX_PERSISTED_SESSION_MESSAGES`] messages
+    /// per session, applied at `save_session` regardless of this value. A
+    /// `cron_session_max_messages` set *above* that ceiling cannot keep
+    /// more than [`MAX_PERSISTED_SESSION_MESSAGES`] across daemon restarts —
+    /// the tail beyond the ceiling is silently truncated on save. Config
+    /// validation emits a warning when this value exceeds the ceiling so
+    /// the discrepancy is not invisible.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
     /// Fraction of the effective token budget (post-prune) at which the
@@ -3267,6 +3429,12 @@ pub struct KernelConfig {
     /// Default: `None` (unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_total_timeout_secs: Option<u64>,
+    /// Background autonomous-loop executor knobs (issue #5168).
+    /// Currently governs the rate-limit circuit breaker that stops a
+    /// continuous / periodic loop from re-firing forever when the LLM
+    /// provider is rate-limited or quota-exhausted.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4659,6 +4827,46 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// Background autonomous-loop executor configuration (issue #5168).
+///
+/// Tunes the circuit breaker that stops a continuous / periodic background
+/// loop from re-firing forever when the LLM provider is rate-limited or
+/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
+/// `librefang_kernel::background` for the rationale.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [background]
+/// max_consecutive_rate_limits = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Maximum number of *consecutive* background ticks whose agent turn
+    /// failed because the LLM provider was rate-limited / quota-exhausted
+    /// before the continuous / periodic loop stops re-firing the agent.
+    ///
+    /// A single non-rate-limited tick resets the counter, so transient
+    /// blips do not permanently park a healthy agent. Set to `0` to
+    /// disable the breaker entirely (the loop re-fires forever — only
+    /// appropriate when running against a provider with no quota).
+    /// Default: `5`.
+    #[serde(default = "default_max_consecutive_rate_limits")]
+    pub max_consecutive_rate_limits: u32,
+}
+
+fn default_max_consecutive_rate_limits() -> u32 {
+    5
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -5201,7 +5409,13 @@ pub struct NamedTaintRuleSet {
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
+//
+// `deny_unknown_fields` catches typos inside `[[mcp_servers]]` elements at
+// deserialize time. The detect_unknown_nested_fields walker can't see into
+// repeated-table elements (#5130), so the only way to surface a typo in,
+// say, `[[mcp_servers]] timout_secs = 30` is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -5488,6 +5702,7 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
+            credential_pools: Vec::new(),
             llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
@@ -5576,6 +5791,7 @@ impl Default for KernelConfig {
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
+            background: BackgroundConfig::default(),
         }
     }
 }
@@ -5667,6 +5883,10 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "fallback_providers",
                 &format!("{} provider(s)", self.fallback_providers.len()),
+            )
+            .field(
+                "credential_pools",
+                &format!("{} pool(s)", self.credential_pools.len()),
             )
             .field("browser", &self.browser)
             .field("extensions", &self.extensions)
@@ -6224,8 +6444,6 @@ pub struct ChannelsConfig {
     pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
-    /// ntfy.sh pub/sub configuration(s).
-    pub ntfy: OneOrMany<NtfyConfig>,
     /// Gotify notification configuration(s).
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
@@ -6327,7 +6545,6 @@ impl Default for ChannelsConfig {
             qq: OneOrMany::default(),
             discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
-            ntfy: OneOrMany::default(),
             gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
@@ -6362,8 +6579,13 @@ impl ChannelsConfig {
 }
 
 /// Telegram channel adapter configuration.
+//
+// `deny_unknown_fields` catches typos inside `[[channels.telegram]]`
+// elements at deserialize time. The detect_unknown_nested_fields walker
+// can't see into repeated-table elements (#5130), so the only way to
+// surface a typo here is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TelegramConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
@@ -6476,8 +6698,10 @@ impl TelegramConfig {
 }
 
 /// Discord channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
@@ -6542,8 +6766,10 @@ impl Default for DiscordConfig {
 }
 
 /// Slack channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
     /// Env var name holding the app-level token (xapp-) for Socket Mode.
     pub app_token_env: String,
@@ -6603,8 +6829,10 @@ impl Default for SlackConfig {
 }
 
 /// WhatsApp Cloud API channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
     /// Env var name holding the access token (Cloud API mode).
     pub access_token_env: String,
@@ -6899,8 +7127,10 @@ impl Default for TeamsConfig {
 }
 
 /// Mattermost channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
     /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
     pub server_url: String,
@@ -8084,39 +8314,6 @@ impl Default for GitterConfig {
         Self {
             token_env: "GITTER_TOKEN".to_string(),
             room_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NtfyConfig {
-    /// ntfy server URL.
-    pub server_url: String,
-    /// Topic to subscribe/publish to.
-    pub topic: String,
-    /// Env var name holding the auth token (optional for public topics).
-    pub token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: "https://ntfy.sh".to_string(),
-            topic: String::new(),
-            token_env: "NTFY_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

@@ -17,7 +17,9 @@ features explicitly when depending on this crate:
 - `all-channels` — every adapter, including heavy ones (matrix, IMAP,
   MQTT, Bluesky, Nostr, …). Used by release CI.
 - Per-adapter: `channel-telegram`, `channel-discord`,
-  `channel-slack`, `channel-webhook`, `channel-ntfy`, etc.
+  `channel-slack`, `channel-webhook`, etc. ntfy migrated to a
+  sidecar — see `librefang.sidecar.adapters.ntfy` in the SDK
+  (`sdk/python/librefang/sidecar/adapters/ntfy.py`).
 
 See `Cargo.toml` for the full feature list.
 

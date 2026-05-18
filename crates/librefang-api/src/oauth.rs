@@ -84,7 +84,16 @@ pub struct JwksResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdTokenClaims {
     /// Subject (unique user identifier from the IdP).
-    #[serde(default)]
+    ///
+    /// SECURITY (#5128): `sub` is the primary key the daemon uses to bind
+    /// stored tokens to a user (`TOKEN_STORE.store(&claims.sub, …)`). When
+    /// this field was `#[serde(default)]`, a JWT missing the `sub` claim
+    /// deserialised with `sub = ""` and every token-less login collided on
+    /// the same slot — the apparent "successful login" actually carried
+    /// another user's refresh token. The field is now mandatory at the
+    /// serde layer, `set_required_spec_claims` enforces it at the JWT
+    /// layer, and `validate_jwt_cached` rejects an explicit empty string
+    /// as a defence-in-depth third gate.
     pub sub: String,
     /// User email (if `email` scope was granted).
     #[serde(default)]
@@ -1031,6 +1040,27 @@ async fn handle_code_exchange(
         }
     }
 
+    // SECURITY (#5128): Refuse to bind a session to an empty `sub`. JWT
+    // validation in `validate_jwt_cached` already rejects this case, but
+    // the userinfo-fallback branch above synthesises `sub` from
+    // `info["sub"].or(info["id"]).unwrap_or("")` — a provider that omits
+    // both fields would otherwise land here with an empty primary key
+    // and silently collide every token-less login on the same slot in
+    // `TOKEN_STORE`.
+    if claims.sub.is_empty() {
+        warn!(
+            provider = %provider.id,
+            "External auth login rejected: empty `sub` after claim resolution"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "Identity provider did not return a usable subject identifier"
+            })),
+        )
+            .into_response();
+    }
+
     info!(
         sub = %claims.sub,
         email = ?claims.email,
@@ -1830,15 +1860,34 @@ async fn validate_jwt_cached(
 
     // Configure validation.
     let mut validation = Validation::new(header.alg);
+    // SECURITY (#5128): `sub` MUST be required at the JWT layer. Without
+    // this, a token missing the claim would still decode successfully and
+    // the empty-string `sub` would become the primary key in
+    // `TOKEN_STORE`, causing different users' sessions to collide on the
+    // same slot. We additionally keep `exp` (lifetime enforcement) and
+    // `aud` (only when one is configured — see below) in the required
+    // set.
     if expected_audience.is_empty() {
         validation.validate_aud = false;
+        validation.set_required_spec_claims(&["sub", "exp"]);
     } else {
         validation.set_audience(&[expected_audience]);
+        validation.set_required_spec_claims(&["sub", "exp", "aud"]);
     }
     validation.validate_exp = true;
 
     let token_data = decode::<IdTokenClaims>(token, &decoding_key, &validation)
         .map_err(|e| format!("JWT validation failed: {e}"))?;
+
+    // Defence in depth (#5128): a JWT with an explicit empty `sub` (e.g.
+    // `"sub": ""`) is structurally valid at the serde + required-claims
+    // layers but is still unusable as a primary key in `TOKEN_STORE`.
+    // Reject here so every caller of `validate_jwt_cached` is protected
+    // uniformly — the OAuth callback, /userinfo, /introspect, and the
+    // auth middleware all funnel through this function.
+    if token_data.claims.sub.is_empty() {
+        return Err("JWT validation failed: `sub` claim is empty".to_string());
+    }
 
     Ok(token_data.claims)
 }

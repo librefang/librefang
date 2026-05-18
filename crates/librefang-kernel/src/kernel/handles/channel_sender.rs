@@ -48,7 +48,6 @@ macro_rules! for_each_channel_field {
         $mac!(mumble, "mumble");
         $mac!(nextcloud, "nextcloud");
         $mac!(nostr, "nostr");
-        $mac!(ntfy, "ntfy");
         $mac!(pumble, "pumble");
         $mac!(qq, "qq");
         $mac!(reddit, "reddit");
@@ -484,7 +483,6 @@ mod tests {
             "mumble",
             "nextcloud",
             "nostr",
-            "ntfy",
             "pumble",
             "qq",
             "reddit",
