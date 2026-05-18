@@ -6,6 +6,7 @@
 
 use crate::types::{
     ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
+    GroupMember, ParticipantRef,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -26,8 +27,13 @@ use tracing::{debug, error, info, warn};
 #[serde(tag = "method")]
 pub enum SidecarEvent {
     /// A new message received from the platform.
+    ///
+    /// Boxed: `SidecarMessageParams` carries full `ChannelContent` +
+    /// group rosters, so it dwarfs the other variants
+    /// (clippy::large_enum_variant). Box keeps `SidecarEvent` small;
+    /// serde and field access (incl. partial moves) are transparent.
     #[serde(rename = "message")]
-    Message { params: SidecarMessageParams },
+    Message { params: Box<SidecarMessageParams> },
     /// Adapter is ready to receive commands.
     #[serde(rename = "ready")]
     Ready,
@@ -50,6 +56,34 @@ pub struct SidecarMessageParams {
     pub text: Option<String>,
     pub channel_id: Option<String>,
     pub platform: Option<String>,
+    /// Full structured content. When present, supersedes `text`.
+    /// Legacy text-only adapters omit this and keep working.
+    #[serde(default)]
+    pub content: Option<ChannelContent>,
+    /// Sender `@handle` if the platform exposes one. Folded into
+    /// message metadata — `ChannelUser` has no handle slot, and
+    /// routing/identity is the bridge's concern, not the adapter's.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Optional mapping to a LibreFang user identity.
+    #[serde(default)]
+    pub librefang_user: Option<String>,
+    /// Whether this message came from a group chat (vs DM).
+    #[serde(default)]
+    pub is_group: bool,
+    /// Thread / reply-to identifier, if any.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Group roster, folded into metadata. The bridge owns
+    /// `SenderContext`; the adapter only transports the data.
+    #[serde(default)]
+    pub group_members: Vec<GroupMember>,
+    /// Group participant refs, folded into metadata.
+    #[serde(default)]
+    pub group_participants: Vec<ParticipantRef>,
+    /// Free-form metadata merged into the `ChannelMessage` metadata map.
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +146,18 @@ pub enum SidecarCommand {
 #[derive(Debug, Serialize)]
 pub struct SidecarSendParams {
     pub channel_id: String,
+    /// Best-effort flattened text. Legacy adapters read only this;
+    /// new adapters read the full `content`.
     pub text: String,
+    /// Full structured content (every `ChannelContent` variant).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ChannelContent>,
+    /// Thread to reply into, if any. Populated by `send_in_thread`
+    /// (wired in P2); plain `send` leaves it `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Full sender identity (`channel_id` is `user.platform_id`).
+    pub user: ChannelUser,
 }
 
 /// `typing` command params (P0 skeleton — wired in P2).
@@ -327,42 +372,82 @@ impl ChannelAdapter for SidecarAdapter {
                                         info!(adapter = %adapter_name, "Sidecar adapter ready");
                                     }
                                     Ok(SidecarEvent::Message { params }) => {
+                                        // Unbox once: the field moves below
+                                        // (metadata/content/text/sender) need
+                                        // an owned local, not a Box (partial
+                                        // moves out of Box aren't allowed).
+                                        let params = *params;
                                         debug!(
                                             adapter = %adapter_name,
                                             user = %params.user_name,
                                             "Received message from sidecar"
                                         );
+                                        let mut metadata = params.metadata;
+                                        if let Some(ch) = params.channel_id {
+                                            metadata.insert(
+                                                "channel_id".to_string(),
+                                                serde_json::Value::String(ch),
+                                            );
+                                        }
+                                        if let Some(p) = params.platform {
+                                            metadata.insert(
+                                                "platform".to_string(),
+                                                serde_json::Value::String(p),
+                                            );
+                                        }
+                                        if let Some(h) = params.username {
+                                            metadata.insert(
+                                                "username".to_string(),
+                                                serde_json::Value::String(h),
+                                            );
+                                        }
+                                        if !params.group_members.is_empty() {
+                                            if let Ok(v) = serde_json::to_value(
+                                                &params.group_members,
+                                            ) {
+                                                metadata.insert(
+                                                    "group_members".to_string(),
+                                                    v,
+                                                );
+                                            }
+                                        }
+                                        if !params.group_participants.is_empty() {
+                                            if let Ok(v) = serde_json::to_value(
+                                                &params.group_participants,
+                                            ) {
+                                                metadata.insert(
+                                                    "group_participants"
+                                                        .to_string(),
+                                                    v,
+                                                );
+                                            }
+                                        }
+                                        // `content` supersedes `text`; legacy
+                                        // text-only adapters omit it and fall
+                                        // back to Text(text).
+                                        let content = params
+                                            .content
+                                            .unwrap_or_else(|| {
+                                                ChannelContent::Text(
+                                                    params
+                                                        .text
+                                                        .unwrap_or_default(),
+                                                )
+                                            });
                                         let msg = ChannelMessage {
                                             channel: channel_type.clone(),
                                             platform_message_id: uuid::Uuid::new_v4().to_string(),
                                             sender: ChannelUser {
                                                 platform_id: params.user_id,
                                                 display_name: params.user_name,
-                                                librefang_user: None,
+                                                librefang_user: params.librefang_user,
                                             },
-                                            content: ChannelContent::Text(
-                                                params.text.unwrap_or_default(),
-                                            ),
+                                            content,
                                             target_agent: None,
                                             timestamp: Utc::now(),
-                                            is_group: false,
-                                            thread_id: None,
-                                            metadata: {
-                                                let mut m = HashMap::new();
-                                                if let Some(ch) = params.channel_id {
-                                                    m.insert(
-                                                        "channel_id".to_string(),
-                                                        serde_json::Value::String(ch),
-                                                    );
-                                                }
-                                                if let Some(p) = params.platform {
-                                                    m.insert(
-                                                        "platform".to_string(),
-                                                        serde_json::Value::String(p),
-                                                    );
-                                                }
-                                                m
-                                            },
+                                            is_group: params.is_group,
+                                            thread_id: params.thread_id,
+                                            metadata,
                                         };
                                         // Update status
                                         {
@@ -435,14 +520,21 @@ impl ChannelAdapter for SidecarAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let text = match content {
-            ChannelContent::Text(t) => t,
-            other => serde_json::to_string(&other)?,
+        // Legacy adapters read only `text`; flatten best-effort.
+        // New adapters read the full structured `content`.
+        let text = match &content {
+            ChannelContent::Text(t) => t.clone(),
+            other => serde_json::to_string(other)?,
         };
 
-        let channel_id = user.platform_id.clone();
         let cmd = SidecarCommand::Send {
-            params: SidecarSendParams { channel_id, text },
+            params: SidecarSendParams {
+                channel_id: user.platform_id.clone(),
+                text,
+                content: Some(content),
+                thread_id: None,
+                user: user.clone(),
+            },
         };
         self.send_command(&cmd).await?;
 
@@ -511,6 +603,7 @@ impl ChannelAdapter for SidecarAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{InteractiveButton, MediaGroupItem};
 
     #[test]
     fn test_sidecar_event_message_deserialization() {
@@ -568,6 +661,13 @@ mod tests {
             params: SidecarSendParams {
                 channel_id: "ch1".to_string(),
                 text: "Hello world".to_string(),
+                content: None,
+                thread_id: None,
+                user: ChannelUser {
+                    platform_id: "ch1".to_string(),
+                    display_name: "Tester".to_string(),
+                    librefang_user: None,
+                },
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -589,6 +689,13 @@ mod tests {
             params: SidecarSendParams {
                 channel_id: "test-channel".to_string(),
                 text: "Test message with \"quotes\" and \nnewlines".to_string(),
+                content: None,
+                thread_id: None,
+                user: ChannelUser {
+                    platform_id: "test-channel".to_string(),
+                    display_name: "Tester".to_string(),
+                    librefang_user: None,
+                },
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -700,6 +807,225 @@ mod tests {
             serde_json::to_string(&SidecarCommand::Shutdown).unwrap(),
             r#"{"method":"shutdown"}"#
         );
+    }
+
+    // ── P1: structured content I/O roundtrips ─────────────────────
+
+    fn all_channel_content_variants() -> Vec<ChannelContent> {
+        let btn = InteractiveButton {
+            label: "Yes".to_string(),
+            action: "yes".to_string(),
+            style: Some("primary".to_string()),
+            url: None,
+        };
+        vec![
+            ChannelContent::Text("hello".to_string()),
+            ChannelContent::Image {
+                url: "https://x/i.png".to_string(),
+                caption: Some("cap".to_string()),
+                mime_type: Some("image/png".to_string()),
+            },
+            ChannelContent::File {
+                url: "https://x/f.pdf".to_string(),
+                filename: "f.pdf".to_string(),
+            },
+            ChannelContent::FileData {
+                data: vec![1, 2, 3, 4],
+                filename: "b.bin".to_string(),
+                mime_type: "application/octet-stream".to_string(),
+            },
+            ChannelContent::Voice {
+                url: "https://x/v.ogg".to_string(),
+                caption: None,
+                duration_seconds: 5,
+            },
+            ChannelContent::Video {
+                url: "https://x/v.mp4".to_string(),
+                caption: Some("c".to_string()),
+                duration_seconds: 12,
+                filename: Some("v.mp4".to_string()),
+            },
+            ChannelContent::Location {
+                lat: 51.5,
+                lon: -0.12,
+            },
+            ChannelContent::Command {
+                name: "start".to_string(),
+                args: vec!["a".to_string(), "b".to_string()],
+            },
+            ChannelContent::Interactive {
+                text: "pick".to_string(),
+                buttons: vec![vec![btn.clone()]],
+            },
+            ChannelContent::ButtonCallback {
+                action: "yes".to_string(),
+                message_text: Some("orig".to_string()),
+            },
+            ChannelContent::DeleteMessage {
+                message_id: "m1".to_string(),
+            },
+            ChannelContent::EditInteractive {
+                message_id: "m1".to_string(),
+                text: "new".to_string(),
+                buttons: vec![vec![btn.clone()]],
+            },
+            ChannelContent::Audio {
+                url: "https://x/a.mp3".to_string(),
+                caption: None,
+                duration_seconds: 200,
+                title: Some("Song".to_string()),
+                performer: Some("Artist".to_string()),
+            },
+            ChannelContent::Animation {
+                url: "https://x/a.gif".to_string(),
+                caption: None,
+                duration_seconds: 3,
+            },
+            ChannelContent::Sticker {
+                file_id: "stk_1".to_string(),
+            },
+            ChannelContent::MediaGroup {
+                items: vec![
+                    MediaGroupItem::Photo {
+                        url: "https://x/1.jpg".to_string(),
+                        caption: Some("one".to_string()),
+                    },
+                    MediaGroupItem::Video {
+                        url: "https://x/2.mp4".to_string(),
+                        caption: None,
+                        duration_seconds: 7,
+                    },
+                ],
+            },
+            ChannelContent::Poll {
+                question: "Q?".to_string(),
+                options: vec!["A".to_string(), "B".to_string()],
+                is_quiz: true,
+                correct_option_id: Some(1),
+                explanation: Some("because".to_string()),
+            },
+            ChannelContent::PollAnswer {
+                poll_id: "p1".to_string(),
+                option_ids: vec![0, 1],
+            },
+        ]
+    }
+
+    #[test]
+    fn test_inbound_content_roundtrip_all_variants() {
+        for content in all_channel_content_variants() {
+            let cv = serde_json::to_value(&content).unwrap();
+            let msg = serde_json::json!({
+                "method": "message",
+                "params": { "user_id": "u", "user_name": "n", "content": cv }
+            });
+            let ev: SidecarEvent = serde_json::from_value(msg).unwrap();
+            match ev {
+                SidecarEvent::Message { params } => {
+                    let got = params
+                        .content
+                        .expect("content must survive the wire roundtrip");
+                    assert_eq!(
+                        serde_json::to_value(&got).unwrap(),
+                        cv,
+                        "content variant mutated across roundtrip: {cv:?}"
+                    );
+                }
+                other => panic!("expected Message, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_inbound_structured_fields_parse() {
+        let msg = serde_json::json!({
+            "method": "message",
+            "params": {
+                "user_id": "u", "user_name": "n", "text": "hi",
+                "is_group": true, "thread_id": "t1", "librefang_user": "lf",
+                "username": "@handle",
+                "group_members": [
+                    {"user_id": "g1", "display_name": "G One", "username": "@g1"}
+                ],
+                "group_participants": [{"jid": "j@x", "display_name": "J"}],
+                "metadata": {"k": "v"}
+            }
+        });
+        let ev: SidecarEvent = serde_json::from_value(msg).unwrap();
+        let SidecarEvent::Message { params } = ev else {
+            panic!("expected Message");
+        };
+        assert!(params.is_group);
+        assert_eq!(params.thread_id.as_deref(), Some("t1"));
+        assert_eq!(params.librefang_user.as_deref(), Some("lf"));
+        assert_eq!(params.username.as_deref(), Some("@handle"));
+        assert_eq!(params.group_members.len(), 1);
+        assert_eq!(params.group_members[0].user_id, "g1");
+        assert_eq!(params.group_members[0].username.as_deref(), Some("@g1"));
+        assert_eq!(params.group_participants.len(), 1);
+        assert_eq!(params.group_participants[0].jid, "j@x");
+        assert_eq!(
+            params.metadata.get("k"),
+            Some(&serde_json::Value::String("v".to_string()))
+        );
+        assert!(params.content.is_none());
+    }
+
+    #[test]
+    fn test_legacy_text_message_falls_back_to_text() {
+        // A pre-existing text-only adapter sends no `content`; the
+        // reader must fall back to ChannelContent::Text(text).
+        let json =
+            r#"{"method":"message","params":{"user_id":"u","user_name":"n","text":"hello"}}"#;
+        let ev: SidecarEvent = serde_json::from_str(json).unwrap();
+        let SidecarEvent::Message { params } = ev else {
+            panic!("expected Message");
+        };
+        let params = *params;
+        assert!(params.content.is_none());
+        assert!(params.group_members.is_empty());
+        assert!(!params.is_group);
+        let resolved = params
+            .content
+            .unwrap_or_else(|| ChannelContent::Text(params.text.unwrap_or_default()));
+        match resolved {
+            ChannelContent::Text(t) => assert_eq!(t, "hello"),
+            other => panic!("expected Text fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_outbound_send_params_serialization() {
+        let user = ChannelUser {
+            platform_id: "chan-1".to_string(),
+            display_name: "Dee".to_string(),
+            librefang_user: None,
+        };
+        let p = SidecarSendParams {
+            channel_id: user.platform_id.clone(),
+            text: "flat".to_string(),
+            content: Some(ChannelContent::Image {
+                url: "https://x/i.png".to_string(),
+                caption: None,
+                mime_type: None,
+            }),
+            thread_id: None,
+            user: user.clone(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["channel_id"], "chan-1");
+        assert_eq!(v["text"], "flat");
+        assert_eq!(v["content"]["Image"]["url"], "https://x/i.png");
+        assert_eq!(v["user"]["platform_id"], "chan-1");
+        // thread_id is skipped when None.
+        assert!(v.get("thread_id").is_none());
+
+        let p2 = SidecarSendParams {
+            thread_id: Some("th-9".to_string()),
+            ..p
+        };
+        let v2 = serde_json::to_value(&p2).unwrap();
+        assert_eq!(v2["thread_id"], "th-9");
     }
 
     #[tokio::test]
