@@ -12,7 +12,7 @@ import {
   retryTask,
   cleanupSessions,
 } from "../../api";
-import { overviewKeys, runtimeKeys, sessionKeys } from "../queries/keys";
+import { runtimeKeys, sessionKeys } from "../queries/keys";
 
 type ShutdownResult = { status: string };
 
@@ -35,13 +35,25 @@ export function useCreateBackup() {
   });
 }
 
+// A backup restore overwrites the entire ~/.librefang data directory:
+// workflows/, data/ (the SQLite substrate backing approvals, usage,
+// budgets, mcp, plugins, totp, peers, network, audit, a2a, media,
+// users, permission policies, authz), data/custom_models.json, and
+// config.toml (which carries provider config). Every cached domain in
+// the dashboard is therefore potentially stale. Enumerating each
+// domain key here repeatedly drifted from what backup.rs actually
+// archives (#5182), so we treat this as a daemon-restart level cache
+// reset and nuke the entire query cache in one call — this is the
+// legitimate "cache reset" case for blanket invalidation described in
+// AGENTS.md, not the narrow per-id default. Without this, every page
+// navigated after a restore shows pre-restore state until a manual
+// refresh (#5140).
 export function useRestoreBackup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: restoreBackup,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
-      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      qc.invalidateQueries();
     },
   });
 }

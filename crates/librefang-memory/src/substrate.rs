@@ -315,6 +315,32 @@ impl MemorySubstrate {
         self.structured.set(agent_id, key, value)
     }
 
+    /// Atomic read-modify-write of a single KV key under a `BEGIN IMMEDIATE`
+    /// write transaction (#5138). Serializes concurrent mutators of the same
+    /// shared key (goals array, peer KV) so no writer's update is lost to a
+    /// last-writer-wins race. See [`StructuredStore::modify`].
+    pub fn structured_modify<T>(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        f: impl FnOnce(Option<serde_json::Value>) -> LibreFangResult<(serde_json::Value, T)>,
+    ) -> LibreFangResult<T> {
+        self.structured.modify(agent_id, key, f)
+    }
+
+    /// Set a value and atomically report whether the key already existed
+    /// (#5138). The existence check and write share one transaction so
+    /// `memory_store` can publish `Created` vs `Updated` from the committed
+    /// transition rather than a racy pre-read.
+    pub fn structured_set_returning_existed(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        value: serde_json::Value,
+    ) -> LibreFangResult<bool> {
+        self.structured.set_returning_existed(agent_id, key, value)
+    }
+
     /// Get a session by ID.
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         self.sessions.get_session(session_id)

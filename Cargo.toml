@@ -82,6 +82,13 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # weight. See #3679.
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
 tracing-opentelemetry = "0.32"
+# W3C trace-context HeaderInjector for outbound LLM HTTP requests. Pulled in
+# explicitly (not transitively via opentelemetry-otlp, which is built with
+# `default-features = false` to avoid its reqwest-based exporters — see the
+# note above). 0.31 aligns with `opentelemetry = "0.31"` and uses `http = 1`,
+# matching the workspace `reqwest = "0.13"` http stack — no second http/reqwest
+# tree is introduced.
+opentelemetry-http = "0.31"
 
 # Prometheus metrics
 metrics = "0.24"
