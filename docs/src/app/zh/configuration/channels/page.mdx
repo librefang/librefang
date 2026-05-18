@@ -16,27 +16,22 @@
 | `account_id` | string 或 null | `null` | 当前 Bot 实例的唯一标识符。用于通过 `[[bindings]]` 匹配规则进行多 Bot 路由。 |
 | `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
 
-#### `[channels.telegram]`
+#### Telegram
+
+Telegram 现已改为 sidecar 模式。`[channels.telegram]` 配置块不再被接受（#5241 已移除内置适配器）。请改用 `[[sidecar_channels]]` 声明：
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = []
-# default_agent = "assistant"
-poll_interval_secs = 1
-# api_url = "https://api.telegram.org"  # 覆盖用于本地 Bot API 服务器
-# account_id = "my-telegram-bot"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "111,@alice"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | 存放 Telegram Bot API 令牌的环境变量。 |
-| `allowed_users` | list of i64 | `[]` | 允许交互的 Telegram 用户 ID 列表。空列表 = 允许所有人。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `poll_interval_secs` | u64 | `1` | 长轮询间隔（秒）。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `api_url` | string 或 null | `null` | 覆盖 Telegram Bot API 基础 URL。适用于本地 Bot API 服务器实例。默认为 `https://api.telegram.org`。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+Sidecar 适配器保留了与原内置适配器相同的运行语义：`TELEGRAM_BOT_TOKEN` 环境变量、可选的 `ALLOWED_USERS` 允许列表、`channel_type = "telegram"` 以及 `channel_role_mapping.telegram` 的 RBAC 映射。详见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
 #### `[channels.discord]`
 
@@ -812,15 +807,15 @@ allowed_users = []
 每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 model = "claude-haiku-4-5-20251001"
-system_prompt = "You are a concise Telegram assistant."
+system_prompt = "You are a concise Discord assistant."
 dm_policy = "respond"
 group_policy = "mention_only"
 rate_limit_per_minute = 0
 rate_limit_per_user = 10
 threading = true
-output_format = "telegram_html"
+output_format = "markdown"
 usage_footer = "tokens"
 typing_mode = "instant"
 disable_commands = false
@@ -890,16 +885,16 @@ blocked_commands = []
 **配方：完全锁定的公共 bot（禁用所有命令）**
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 disable_commands = true
 ```
 
 **配方：保留平台 UX 必需命令的公共 bot**
 
-Telegram 的 UX 约定要求 `/start` 展示欢迎语，只保留安全的几个：
+只保留安全的几个内置命令：
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 allowed_commands = ["start", "help"]
 ```
 
@@ -908,7 +903,7 @@ allowed_commands = ["start", "help"]
 对于面向运维人员的 bot（用 `allowed_users` 限制访问），你可能仍想屏蔽会改变昂贵状态的命令：
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 blocked_commands = ["agent", "new", "reboot", "model", "stop"]
 ```
 

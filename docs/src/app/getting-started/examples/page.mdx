@@ -146,17 +146,16 @@ librefang channel setup telegram
 librefang channel list
 ```
 
-Manual config example:
+Manual config example (Telegram uses the sidecar adapter):
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "customer-support"
-allowed_users = []
-
-[channels.telegram.overrides]
-system_prompt = "Reply as a concise and polite support bot."
-rate_limit_per_user = 10
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
 ```
 
 Restart after editing config:
@@ -346,7 +345,7 @@ JSON
 ## 10. Important Source-Level Notes
 
 - Agent prompts belong under `[model].system_prompt`, not `[system_prompt].prompt`.
-- Channel config belongs under `[channels.<name>]`, for example `[channels.telegram]`.
+- Channel config belongs under `[channels.<name>]`, for example `[channels.discord]`. Telegram is sidecar-only and uses `[[sidecar_channels]]` instead of `[channels.telegram]`.
 - Workflow steps use `agent_name` or `agent_id` plus `prompt`, not the older `type/agent/input` shape.
 - Scheduling is done with `librefang cron ...`, and webhook triggers with `librefang webhooks ...`.
 - The current CLI does not provide `librefang memory search` or `librefang kg query`.

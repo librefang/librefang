@@ -42,27 +42,22 @@ If you are upgrading from a release before this contract was introduced:
 
 If you operate **none** of the channels above, no action is required — your existing config keeps working unchanged.
 
-#### `[channels.telegram]`
+#### Telegram
+
+Telegram is provided by the Python sidecar adapter (`librefang.sidecar.adapters.telegram`). The in-process `[channels.telegram]` config block was removed in #5241. Declare Telegram as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = []
-# default_agent = "assistant"
-poll_interval_secs = 1
-# api_url = "https://api.telegram.org"  # override for local Bot API server
-# account_id = "my-telegram-bot"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "111,@alice"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Env var holding the Telegram Bot API token. |
-| `allowed_users` | list of i64 | `[]` | Telegram user IDs allowed to interact. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `poll_interval_secs` | u64 | `1` | Long-polling interval in seconds. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `api_url` | string or null | `null` | Override the Telegram Bot API base URL. Useful for local Bot API server instances. Defaults to `https://api.telegram.org`. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+See [`[[sidecar_channels]]`](#sidecar_channels) below for all fields. The sidecar preserves the same runtime semantics: `TELEGRAM_BOT_TOKEN` env var, optional `ALLOWED_USERS` allowlist, `channel_type = "telegram"`, and RBAC mapping via `channel_role_mapping.telegram`.
 
 #### `[channels.discord]`
 
@@ -842,15 +837,15 @@ allowed_users = []
 Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 model = "claude-haiku-4-5-20251001"
-system_prompt = "You are a concise Telegram assistant."
+system_prompt = "You are a concise Discord assistant."
 dm_policy = "respond"
 group_policy = "mention_only"
 rate_limit_per_minute = 0
 rate_limit_per_user = 10
 threading = true
-output_format = "telegram_html"
+output_format = "markdown"
 usage_footer = "tokens"
 typing_mode = "instant"
 disable_commands = false
@@ -920,16 +915,16 @@ The three command-policy fields gate the built-in commands per channel. **Preced
 **Recipe: locked-down public bot (no commands at all)**
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 disable_commands = true
 ```
 
 **Recipe: public bot that keeps platform UX commands**
 
-Telegram's UX expects `/start` to display a welcome message. Keep only the safe ones:
+Keep only the safe built-in commands:
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 allowed_commands = ["start", "help"]
 ```
 
@@ -938,7 +933,7 @@ allowed_commands = ["start", "help"]
 For an operator-facing bot (with an `allowed_users` gate), you may still want to block commands that change costly state:
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 blocked_commands = ["agent", "new", "reboot", "model", "stop"]
 ```
 
