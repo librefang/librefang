@@ -3510,6 +3510,21 @@ fn ensure_initialized(config: &Option<PathBuf>) {
 fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
     ensure_initialized(&config);
 
+    // Issue #5186 follow-up: `cmd_start` boots a real daemon, so a bad
+    // `config.toml` must abort here BEFORE `daemon_config_context` swallows
+    // the load error and substitutes `KernelConfig::default()`. The
+    // tolerant default would silently change `home_dir` (used a few lines
+    // below to detect an already-running daemon) and the spawned child
+    // would only fail-closed during its own boot — losing the field-name
+    // diagnostic from the parent's stderr in the process.
+    //
+    // `load_config` already prints the underlying error to stderr (so
+    // operators see the field name even before the tracing subscriber is
+    // wired up); we only need to short-circuit with a non-zero exit.
+    if load_config(config.as_deref()).is_err() {
+        std::process::exit(1);
+    }
+
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -3798,6 +3813,15 @@ fn cmd_stop(config: Option<PathBuf>) {
 }
 
 fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
+    // Same fail-closed rule as `cmd_start` (#5186 follow-up): a bad config
+    // must abort before we read `home_dir` to look up a running daemon, or
+    // we'd `find_daemon_in_home` on `~/.librefang` (the default) and either
+    // miss a real daemon at a user-configured `home_dir` or "stop" the
+    // wrong one. `load_config` already eprintln!s the underlying error.
+    if load_config(config.as_deref()).is_err() {
+        std::process::exit(1);
+    }
+
     let daemon = daemon_config_context(config.as_deref());
     if find_daemon_in_home(&daemon.home_dir).is_some() {
         ui::hint(&i18n::t("daemon-restarting"));
@@ -11170,12 +11194,11 @@ fn cmd_security_verify() {
 /// `--confirm`.
 fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
+    // `load_config` already eprintln!s the underlying parse / deserialize
+    // error (see #5186); printing it again here would double the message.
     let kernel_config = match load_config(config.as_deref()) {
         Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
+        Err(_) => std::process::exit(1),
     };
 
     let db_path = kernel_config
