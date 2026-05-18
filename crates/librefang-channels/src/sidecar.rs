@@ -61,6 +61,12 @@ pub struct SidecarMessageParams {
     pub text: Option<String>,
     pub channel_id: Option<String>,
     pub platform: Option<String>,
+    /// The platform's *native* message id. Stored as
+    /// `ChannelMessage.platform_message_id` so lifecycle features
+    /// (`send_reaction`, edits) target the real message. Absent ⇒ a
+    /// UUID is generated (legacy behaviour; reactions won't resolve).
+    #[serde(default)]
+    pub message_id: Option<String>,
     /// Full structured content. When present, supersedes `text`.
     /// Legacy text-only adapters omit this and keep working.
     #[serde(default)]
@@ -218,6 +224,11 @@ pub struct SidecarInteractiveParams {
 pub struct SidecarStreamStartParams {
     pub channel_id: String,
     pub stream_id: String,
+    /// Thread to stream the reply into, if the inbound message was
+    /// threaded. `None` for a top-level reply. Skipped when absent so
+    /// adapters that ignore threads see the pre-thread wire shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 /// `stream_delta` command params (P0 skeleton — wired in P2).
@@ -577,8 +588,12 @@ async fn spawn_once(
                                         });
                                     let msg = ChannelMessage {
                                         channel: channel_type.clone(),
-                                        platform_message_id:
-                                            uuid::Uuid::new_v4().to_string(),
+                                        platform_message_id: params
+                                            .message_id
+                                            .unwrap_or_else(|| {
+                                                uuid::Uuid::new_v4()
+                                                    .to_string()
+                                            }),
                                         sender: ChannelUser {
                                             platform_id: params.user_id,
                                             display_name: params.user_name,
@@ -1160,9 +1175,14 @@ impl ChannelAdapter for SidecarAdapter {
     }
 
     fn typing_events(&self) -> Option<mpsc::Receiver<TypingEvent>> {
-        if !self.has_cap("typing_events") {
-            return None;
-        }
+        // NOT gated on `has_cap("typing_events")`: the bridge calls
+        // this synchronously right after `start()`, but `ready` (which
+        // populates caps) is processed asynchronously by the
+        // supervisor, so the cap is almost never set yet here and the
+        // bridge never asks again. Hand out the receiver
+        // unconditionally; the stdout reader only ever forwards
+        // `Typing` events the sidecar actually emits, so a sidecar
+        // without typing simply leaves this receiver idle.
         self.typing_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1202,16 +1222,22 @@ impl ChannelAdapter for SidecarAdapter {
         &self,
         user: &ChannelUser,
         mut delta_rx: mpsc::Receiver<String>,
-        _thread_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !self.has_cap("streaming") {
-            // Default behaviour: collect all deltas, send once.
+            // Default behaviour: collect all deltas, send once. Preserve
+            // thread context — `send_in_thread` itself degrades to
+            // `send` when the `thread` cap is also absent.
             let mut full_text = String::new();
             while let Some(delta) = delta_rx.recv().await {
                 full_text.push_str(&delta);
             }
             if !full_text.is_empty() {
-                self.send(user, ChannelContent::Text(full_text)).await?;
+                let content = ChannelContent::Text(full_text);
+                match thread_id {
+                    Some(tid) => self.send_in_thread(user, content, tid).await?,
+                    None => self.send(user, content).await?,
+                }
             }
             return Ok(());
         }
@@ -1220,6 +1246,7 @@ impl ChannelAdapter for SidecarAdapter {
             params: SidecarStreamStartParams {
                 channel_id: user.platform_id.clone(),
                 stream_id: stream_id.clone(),
+                thread_id: thread_id.map(|s| s.to_string()),
             },
         })
         .await?;
@@ -1461,6 +1488,7 @@ mod tests {
                 params: SidecarStreamStartParams {
                     channel_id: "c".to_string(),
                     stream_id: "s".to_string(),
+                    thread_id: None,
                 },
             },
             SidecarCommand::StreamDelta {
@@ -1724,6 +1752,54 @@ mod tests {
         assert_eq!(v2["thread_id"], "th-9");
     }
 
+    #[test]
+    fn test_inbound_message_id_is_preserved() {
+        // A platform-native message id must survive onto
+        // `SidecarMessageParams` so reactions/edits target the real
+        // message rather than a fabricated UUID.
+        let json = r#"{"method":"message","params":{
+            "user_id":"u","user_name":"n","text":"hi","message_id":"plat-42"
+        }}"#;
+        let SidecarEvent::Message { params } = serde_json::from_str::<SidecarEvent>(json).unwrap()
+        else {
+            panic!("expected Message");
+        };
+        assert_eq!(params.message_id.as_deref(), Some("plat-42"));
+
+        // Absent ⇒ None (reader then generates a UUID).
+        let bare = r#"{"method":"message","params":{"user_id":"u","user_name":"n"}}"#;
+        let SidecarEvent::Message { params } = serde_json::from_str::<SidecarEvent>(bare).unwrap()
+        else {
+            panic!("expected Message");
+        };
+        assert!(params.message_id.is_none());
+    }
+
+    #[test]
+    fn test_stream_start_thread_id_serialization() {
+        // thread_id is carried when present, omitted when absent so
+        // thread-unaware adapters see the pre-thread wire shape.
+        let with = serde_json::to_value(SidecarCommand::StreamStart {
+            params: SidecarStreamStartParams {
+                channel_id: "c".to_string(),
+                stream_id: "s".to_string(),
+                thread_id: Some("t-7".to_string()),
+            },
+        })
+        .unwrap();
+        assert_eq!(with["params"]["thread_id"], "t-7");
+
+        let without = serde_json::to_value(SidecarCommand::StreamStart {
+            params: SidecarStreamStartParams {
+                channel_id: "c".to_string(),
+                stream_id: "s".to_string(),
+                thread_id: None,
+            },
+        })
+        .unwrap();
+        assert!(without["params"].get("thread_id").is_none());
+    }
+
     // ── P2: capability negotiation ────────────────────────────────
 
     #[test]
@@ -1830,7 +1906,12 @@ mod tests {
         assert!(a.notification_recipients().is_empty());
         assert!(!a.suppress_error_responses());
         assert!(a.fetch_headers_for("https://x/y").is_empty());
-        assert!(a.typing_events().is_none());
+        // `typing_events()` is deliberately NOT cap-gated (the bridge
+        // queries it before the async `ready` lands): the receiver is
+        // handed out unconditionally, then `None` only because it was
+        // already taken.
+        assert!(a.typing_events().is_some());
+        assert!(a.typing_events().is_none(), "receiver handed out once");
     }
 
     #[tokio::test]
