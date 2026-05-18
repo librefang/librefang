@@ -1,4 +1,5 @@
 import { formatCost } from "../lib/format";
+import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
@@ -1800,11 +1801,11 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
-  // Textarea only locked while the agent is actively streaming text. Once the
-  // model emits `typing:stop` the user can start composing the next message
-  // even while background post-processing (memory save) is still running —
-  // the send button stays gated on `effectiveDisabled` until the `response`
-  // event arrives with final tokens/cost.
+  // Both the textarea and the send button unlock on `typing:stop` (`disabled`
+  // and `inputDisabled` both track `isStreaming`). The `response` frame still
+  // arrives later and attaches `memories_saved` to the correct message via its
+  // keyed `updateAgentMessages` call — the send-button gate does not need to
+  // wait for it.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
@@ -2662,12 +2663,10 @@ export function ChatPage() {
   }, [selectedAgentId, tts.stop]);
 
   const [showHandAgents, setShowHandAgents] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("librefang.chat.show_hand_agents") === "1";
+    return safeStorageGet("librefang.chat.show_hand_agents") === "1";
   });
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(
+    safeStorageSet(
       "librefang.chat.show_hand_agents",
       showHandAgents ? "1" : "0",
     );
@@ -2926,7 +2925,10 @@ export function ChatPage() {
     agent: AgentItem,
     role?: string,
     isCoordinator?: boolean,
-  ) => (
+  ) => {
+    const displayName =
+      role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name });
+    return (
     <button
       key={agent.id}
       onClick={() => selectAgent(agent.id)}
@@ -2941,7 +2943,7 @@ export function ChatPage() {
         : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
-        {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
+        {displayName.charAt(0).toUpperCase()}
         {(agent.state || "").toLowerCase() === "running" ? (
           <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
         ) : (
@@ -2950,8 +2952,11 @@ export function ChatPage() {
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
-            {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
+          <p
+            title={displayName}
+            className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}
+          >
+            {displayName}
           </p>
           {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
           {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
@@ -2959,18 +2964,25 @@ export function ChatPage() {
           {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
         </div>
         {isCoordinator ? (
-          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+          <p
+            title={t("chat.hand_coordinator", { defaultValue: "coordinator" })}
+            className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}
+          >
             {t("chat.hand_coordinator", { defaultValue: "coordinator" })}
           </p>
         ) : (
-          <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+          <p
+            title={agent.model_provider || t("common.unknown")}
+            className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}
+          >
             {agent.model_provider || t("common.unknown")}
           </p>
         )}
       </div>
       <ArrowRight className={`h-4 w-4 shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
     </button>
-  );
+    );
+  };
 
   return (
     <div className="flex h-[calc(100dvh-180px)] lg:h-[calc(100vh-140px)] flex-col min-h-0">
@@ -3249,7 +3261,7 @@ export function ChatPage() {
               onSend={sendMessage}
               onStop={stopMessage}
               isStreaming={isStreaming}
-              disabled={isLoading}
+              disabled={isStreaming}
               inputDisabled={isStreaming}
               placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
