@@ -254,8 +254,6 @@ use librefang_channels::signal::SignalAdapter;
 use librefang_channels::slack::SlackAdapter;
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-telegram")]
-use librefang_channels::telegram::TelegramAdapter;
 #[cfg(feature = "channel-twitch")]
 use librefang_channels::twitch::TwitchAdapter;
 #[cfg(feature = "channel-voice")]
@@ -332,8 +330,6 @@ use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
 use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
-#[cfg(feature = "channel-telegram")]
-use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -1938,23 +1934,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            // Telegram has the `message_coalesce_window_ms` alias (#4145)
-            // that feeds into `overrides.message_debounce_ms`; resolve via
-            // `effective_overrides()` rather than cloning `overrides` raw.
-            "telegram" => {
-                let entry = if let Some(aid) = account_id {
-                    channels
-                        .telegram
-                        .iter()
-                        .find(|c| c.account_id.as_deref() == Some(aid))
-                } else {
-                    channels.telegram.first()
-                };
-                (
-                    entry.map(|c| c.effective_overrides()),
-                    entry.and_then(|c| c.default_agent.clone()),
-                )
-            }
             "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
@@ -2642,7 +2621,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(telegram, "channel-telegram", "Telegram");
     check_channel!(discord, "channel-discord", "Discord");
     check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
@@ -2703,46 +2681,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Telegram
-    #[cfg(feature = "channel-telegram")]
-    for tg_config in config.telegram.iter() {
-        if let Some(token) = read_token(&tg_config.bot_token_env, "Telegram") {
-            let poll_interval = Duration::from_secs(tg_config.poll_interval_secs);
-            let base = TelegramAdapter::new(
-                token,
-                tg_config.allowed_users.clone(),
-                poll_interval,
-                tg_config.api_url.clone(),
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, tg_config.proxy.as_deref(), "Telegram", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(tg_config.account_id.clone())
-                    .with_thread_routes(tg_config.thread_routes.clone())
-                    .with_backoff(
-                        tg_config.initial_backoff_secs,
-                        tg_config.max_backoff_secs,
-                        tg_config.long_poll_timeout_secs,
-                    )
-                    .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
-                    .with_max_upload_bytes(
-                        usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
-                    ),
-            );
-            adapters.push((
-                adapter,
-                tg_config.default_agent.clone(),
-                tg_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Discord
     #[cfg(feature = "channel-discord")]
@@ -4709,7 +4647,6 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.telegram.is_none());
         assert!(config.channels.discord.is_none());
         assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());

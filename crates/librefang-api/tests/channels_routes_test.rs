@@ -29,7 +29,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::config::{ChannelsConfig, OneOrMany, TelegramConfig};
+use librefang_types::config::{ChannelsConfig, DiscordConfig, OneOrMany};
 use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -89,12 +89,12 @@ impl Drop for DiskHomeGuard {
     }
 }
 
-/// Write a `config.toml` containing one `[[channels.telegram]]` per pair.
+/// Write a `config.toml` containing one `[[channels.discord]]` per pair.
 /// Used by the disk-roundtrip tests below.
-fn write_telegram_instances(home: &Path, instances: &[&str]) {
+fn write_discord_instances(home: &Path, instances: &[&str]) {
     let mut content = String::new();
     for env_name in instances {
-        content.push_str("[[channels.telegram]]\n");
+        content.push_str("[[channels.discord]]\n");
         content.push_str(&format!("bot_token_env = \"{env_name}\"\n\n"));
     }
     std::fs::write(home.join("config.toml"), content).expect("write config.toml");
@@ -187,18 +187,18 @@ async fn channels_list_returns_full_registry_with_zero_configured() {
         );
     }
 
-    // Telegram MUST be present — it's the canonical adapter.
-    let telegram = arr
+    // Discord MUST be present — it's the canonical adapter.
+    let discord = arr
         .iter()
-        .find(|r| r["name"] == "telegram")
-        .expect("telegram must appear in registry");
-    assert_eq!(telegram["configured"], false);
+        .find(|r| r["name"] == "discord")
+        .expect("discord must appear in registry");
+    assert_eq!(discord["configured"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_list_flips_configured_flag_when_seeded() {
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
@@ -211,21 +211,21 @@ async fn channels_list_flips_configured_flag_when_seeded() {
     );
 
     let arr = body["items"].as_array().expect("array");
-    let telegram = arr
-        .iter()
-        .find(|r| r["name"] == "telegram")
-        .expect("telegram row");
-    assert_eq!(
-        telegram["configured"], true,
-        "seeded telegram must report configured=true: {telegram}"
-    );
-
-    // Other rows must NOT be flipped just because telegram is configured.
     let discord = arr
         .iter()
         .find(|r| r["name"] == "discord")
         .expect("discord row");
-    assert_eq!(discord["configured"], false);
+    assert_eq!(
+        discord["configured"], true,
+        "seeded discord must report configured=true: {discord}"
+    );
+
+    // Other rows must NOT be flipped just because discord is configured.
+    let slack = arr
+        .iter()
+        .find(|r| r["name"] == "slack")
+        .expect("slack row");
+    assert_eq!(slack["configured"], false);
 }
 
 // ---------------------------------------------------------------------------
@@ -235,10 +235,10 @@ async fn channels_list_flips_configured_flag_when_seeded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_get_returns_metadata_for_known_channel() {
     let h = boot().await;
-    let (status, body) = json_request(&h, Method::GET, "/api/channels/telegram", None).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels/discord", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["name"], "telegram");
-    assert_eq!(body["display_name"], "Telegram");
+    assert_eq!(body["name"], "discord");
+    assert_eq!(body["display_name"], "Discord");
     assert!(body["fields"].is_array());
     assert_eq!(body["configured"], false);
 }
@@ -304,7 +304,7 @@ async fn channels_configure_missing_fields_object_returns_400() {
     let (status, body) = json_request(
         &h,
         Method::POST,
-        "/api/channels/telegram/configure",
+        "/api/channels/discord/configure",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -374,7 +374,7 @@ async fn channels_test_unknown_channel_returns_404() {
 // The legacy `/configure` endpoints treat every channel as a single
 // `[channels.<name>]` table. The new `/instances` endpoints let the
 // dashboard manage `[[channels.<name>]]` array entries — supporting two
-// Telegram bots, three Slack workspaces, etc. on the same channel type.
+// Discord bots, three Slack workspaces, etc. on the same channel type.
 //
 // As with `/configure`, we deliberately do NOT exercise happy-path WRITES
 // here. POST/PUT mutate `~/.librefang/secrets.env` and process-wide env
@@ -392,9 +392,9 @@ async fn channels_test_unknown_channel_returns_404() {
 async fn channels_instances_list_empty_when_unconfigured() {
     let h = boot().await;
     let (status, body) =
-        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["channel"], "telegram");
+    assert_eq!(body["channel"], "discord");
     assert_eq!(body["total"], 0);
     let arr = body["items"].as_array().expect("items must be array");
     assert!(arr.is_empty(), "no instances seeded → items must be empty");
@@ -402,17 +402,17 @@ async fn channels_instances_list_empty_when_unconfigured() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_instances_list_returns_seeded_instances() {
-    // Seed two telegram instances and assert both come through with
+    // Seed two discord instances and assert both come through with
     // their configured fields and `index` values.
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![
-            TelegramConfig {
+        discord: OneOrMany(vec![
+            DiscordConfig {
                 bot_token_env: "TG_SUPPORT".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
-            TelegramConfig {
+            DiscordConfig {
                 bot_token_env: "TG_OPS".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
@@ -420,7 +420,7 @@ async fn channels_instances_list_returns_seeded_instances() {
     let h = boot_with_channels(channels).await;
 
     let (status, body) =
-        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["total"], 2, "two instances seeded: {body}");
     let arr = body["items"].as_array().expect("items array");
@@ -471,7 +471,7 @@ async fn channels_create_instance_missing_fields_returns_400() {
     let (status, body) = json_request(
         &h,
         Method::POST,
-        "/api/channels/telegram/instances",
+        "/api/channels/discord/instances",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -506,14 +506,14 @@ async fn channels_update_instance_out_of_range_returns_404() {
     // value here is fine since the range check fires first under the
     // write lock.
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/7",
+        "/api/channels/discord/instances/7",
         Some(serde_json::json!({
             "fields": {"default_agent": "x"},
             "signature": "stale-signature",
@@ -537,14 +537,14 @@ async fn channels_update_instance_missing_signature_returns_400() {
     // moved or modified since the client read it. A missing signature is
     // a clean 400 — the handler must not silently fall through to a write.
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({"fields": {"default_agent": "x"}})),
     )
     .await;
@@ -561,14 +561,14 @@ async fn channels_update_instance_missing_signature_returns_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_missing_fields_returns_400() {
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -591,7 +591,7 @@ async fn channels_delete_instance_unknown_channel_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_delete_instance_out_of_range_returns_404() {
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
@@ -600,7 +600,7 @@ async fn channels_delete_instance_out_of_range_returns_404() {
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/telegram/instances/3?signature=stale",
+        "/api/channels/discord/instances/3?signature=stale",
         None,
     )
     .await;
@@ -621,14 +621,14 @@ async fn channels_delete_instance_missing_signature_returns_400() {
     // disk — silently deleting based on an index alone is the bug class
     // the CAS token closes off.
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        discord: OneOrMany(vec![DiscordConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         None,
     )
     .await;
@@ -657,12 +657,12 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 async fn channels_update_instance_signature_mismatch_returns_409() {
     let _lock = ENV_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_telegram_instances(guard.home(), &["TG_DISK_A"]);
+    write_discord_instances(guard.home(), &["TG_DISK_A"]);
 
     let h = boot_with_channels(ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig {
+        discord: OneOrMany(vec![DiscordConfig {
             bot_token_env: "TG_DISK_A".into(),
-            ..TelegramConfig::default()
+            ..DiscordConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
@@ -674,7 +674,7 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "smoke" },
             "signature": "0".repeat(64),
@@ -700,17 +700,17 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
 async fn channels_delete_instance_signature_mismatch_returns_409() {
     let _lock = ENV_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_telegram_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
+    write_discord_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
 
     let h = boot_with_channels(ChannelsConfig {
-        telegram: OneOrMany(vec![
-            TelegramConfig {
+        discord: OneOrMany(vec![
+            DiscordConfig {
                 bot_token_env: "TG_DISK_B".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
-            TelegramConfig {
+            DiscordConfig {
                 bot_token_env: "TG_DISK_C".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
@@ -720,7 +720,7 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/telegram/instances/0?signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "/api/channels/discord/instances/0?signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         None,
     )
     .await;
@@ -747,12 +747,12 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
 async fn channels_update_instance_round_trips_real_signature() {
     let _lock = ENV_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_telegram_instances(guard.home(), &["TG_DISK_D"]);
+    write_discord_instances(guard.home(), &["TG_DISK_D"]);
 
     let h = boot_with_channels(ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig {
+        discord: OneOrMany(vec![DiscordConfig {
             bot_token_env: "TG_DISK_D".into(),
-            ..TelegramConfig::default()
+            ..DiscordConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
@@ -761,7 +761,7 @@ async fn channels_update_instance_round_trips_real_signature() {
     // GET the list to obtain the server-computed signature for the row
     // we're about to update.
     let (list_status, list_body) =
-        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
     assert_eq!(list_status, StatusCode::OK);
     let signature = list_body["items"][0]["signature"]
         .as_str()
@@ -775,7 +775,7 @@ async fn channels_update_instance_round_trips_real_signature() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "rotated" },
             "signature": signature,
@@ -800,23 +800,23 @@ async fn channels_update_instance_round_trips_real_signature() {
 async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     let _lock = ENV_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_telegram_instances(guard.home(), &["TG_LONELY"]);
+    write_discord_instances(guard.home(), &["TG_LONELY"]);
     // Prime `secrets.env` with the env var the instance is pointing at,
     // so we can assert the cleanup loop actually removed it.
     std::fs::write(guard.home().join("secrets.env"), "TG_LONELY=fake-token\n")
         .expect("seed secrets.env");
 
     let h = boot_with_channels(ChannelsConfig {
-        telegram: OneOrMany(vec![TelegramConfig {
+        discord: OneOrMany(vec![DiscordConfig {
             bot_token_env: "TG_LONELY".into(),
-            ..TelegramConfig::default()
+            ..DiscordConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
     .await;
 
     let (_, list_body) =
-        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
     let signature = list_body["items"][0]["signature"]
         .as_str()
         .expect("signature must be present")
@@ -828,7 +828,7 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "no-auth" },
             "signature": signature,
@@ -859,18 +859,18 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     // user setup if they hand-edited secrets.env). Clearing one
     // instance's ref must NOT remove the env var, since the sibling
     // is still using it.
-    write_telegram_instances(guard.home(), &["TG_SHARED", "TG_SHARED"]);
+    write_discord_instances(guard.home(), &["TG_SHARED", "TG_SHARED"]);
     std::fs::write(guard.home().join("secrets.env"), "TG_SHARED=fake\n").expect("seed secrets.env");
 
     let h = boot_with_channels(ChannelsConfig {
-        telegram: OneOrMany(vec![
-            TelegramConfig {
+        discord: OneOrMany(vec![
+            DiscordConfig {
                 bot_token_env: "TG_SHARED".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
-            TelegramConfig {
+            DiscordConfig {
                 bot_token_env: "TG_SHARED".into(),
-                ..TelegramConfig::default()
+                ..DiscordConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
@@ -878,7 +878,7 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     .await;
 
     let (_, list_body) =
-        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
     let signature = list_body["items"][0]["signature"]
         .as_str()
         .expect("signature")
@@ -887,7 +887,7 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/telegram/instances/0",
+        "/api/channels/discord/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "no-auth" },
             "signature": signature,
@@ -907,13 +907,13 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_list_includes_instance_count() {
-    // The dashboard's card subtitle ("Telegram · 2 bots") depends on
+    // The dashboard's card subtitle ("Discord · 2 bots") depends on
     // `instance_count` riding alongside the existing `configured` flag.
     let channels = ChannelsConfig {
-        telegram: OneOrMany(vec![
-            TelegramConfig::default(),
-            TelegramConfig::default(),
-            TelegramConfig::default(),
+        discord: OneOrMany(vec![
+            DiscordConfig::default(),
+            DiscordConfig::default(),
+            DiscordConfig::default(),
         ]),
         ..ChannelsConfig::default()
     };
@@ -921,21 +921,21 @@ async fn channels_list_includes_instance_count() {
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
     assert_eq!(status, StatusCode::OK);
     let arr = body["items"].as_array().expect("items");
-    let telegram = arr
-        .iter()
-        .find(|r| r["name"] == "telegram")
-        .expect("telegram row");
-    assert_eq!(
-        telegram["instance_count"], 3,
-        "telegram seeded with 3 instances must report instance_count=3: {telegram}"
-    );
     let discord = arr
         .iter()
         .find(|r| r["name"] == "discord")
         .expect("discord row");
     assert_eq!(
-        discord["instance_count"], 0,
-        "discord untouched must report instance_count=0: {discord}"
+        discord["instance_count"], 3,
+        "discord seeded with 3 instances must report instance_count=3: {discord}"
+    );
+    let slack = arr
+        .iter()
+        .find(|r| r["name"] == "slack")
+        .expect("slack row");
+    assert_eq!(
+        slack["instance_count"], 0,
+        "slack untouched must report instance_count=0: {slack}"
     );
 }
 
@@ -954,19 +954,19 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     // env-presence check trips this assertion.
     //
     // Note: this assertion is only meaningful while the test process has
-    // not exported `TELEGRAM_BOT_TOKEN`. The test harness never sets it,
+    // not exported `DISCORD_BOT_TOKEN`. The test harness never sets it,
     // and other tests in this file never call `set_var`, so the
     // pre-condition holds.
-    if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
+    if std::env::var("DISCORD_BOT_TOKEN").is_ok() {
         eprintln!(
             "skipping channels_test_known_channel_with_no_creds_reports_missing_env: \
-             TELEGRAM_BOT_TOKEN is set in the environment"
+             DISCORD_BOT_TOKEN is set in the environment"
         );
         return;
     }
 
     let h = boot().await;
-    let (status, body) = json_request(&h, Method::POST, "/api/channels/telegram/test", None).await;
+    let (status, body) = json_request(&h, Method::POST, "/api/channels/discord/test", None).await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body:?}");
     let msg = body["error"]["message"].as_str().unwrap_or("");
     assert!(

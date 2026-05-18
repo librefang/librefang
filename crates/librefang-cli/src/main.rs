@@ -244,7 +244,7 @@ enum Commands {
     /// Manage channel integrations (setup, test, enable, disable) [*].
     #[command(
         subcommand,
-        long_about = "Manage messaging channel integrations (Telegram, Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup telegram    # Interactive Telegram setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test telegram     # Send a test message\n  librefang channel enable telegram   # Enable a channel\n  librefang channel disable telegram  # Disable without removing config"
+        long_about = "Manage messaging channel integrations (Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup discord     # Interactive Discord setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test discord      # Send a test message\n  librefang channel enable discord    # Enable a channel\n  librefang channel disable discord   # Disable without removing config"
     )]
     Channel(ChannelCommands),
     /// Manage hands (list, activate, status, pause, info) [*].
@@ -925,7 +925,7 @@ enum ChannelCommands {
     List,
     /// Interactive setup wizard for a channel.
     #[command(
-        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup telegram   # Set up Telegram\n  librefang channel setup discord    # Set up Discord"
+        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup discord    # Set up Discord\n  librefang channel setup slack      # Set up Slack"
     )]
     Setup {
         /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
@@ -942,7 +942,7 @@ enum ChannelCommands {
         /// Target channel ID for Discord or Slack live message tests.
         #[arg(long = "channel", conflicts_with = "chat_id")]
         channel_id: Option<String>,
-        /// Target chat ID for Telegram live message tests.
+        /// Target chat/channel ID for live message tests.
         #[arg(long, conflicts_with = "channel_id")]
         chat_id: Option<String>,
     },
@@ -7928,7 +7928,6 @@ fn cmd_channel_list() {
 
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("telegram", "TELEGRAM_BOT_TOKEN"),
         ("discord", "DISCORD_BOT_TOKEN"),
         ("slack", "SLACK_BOT_TOKEN"),
         ("whatsapp", "WA_ACCESS_TOKEN"),
@@ -7973,7 +7972,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("telegram", "Telegram bot (BotFather)"),
                 ("discord", "Discord bot"),
                 ("slack", "Slack app (Socket Mode)"),
                 ("whatsapp", "WhatsApp Cloud API"),
@@ -8002,33 +8000,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
     };
 
     match channel.as_str() {
-        "telegram" => {
-            ui::section(&i18n::t("section-setup-telegram"));
-            ui::blank();
-            println!("  1. Open Telegram and message @BotFather");
-            println!("  2. Send /newbot and follow the prompts");
-            println!("  3. Copy the bot token");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error(&i18n::t("channel-no-token"));
-                return;
-            }
-
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("telegram", config_block);
-
-            // Save token to .env
-            match dotenv::save_env_key("TELEGRAM_BOT_TOKEN", &token) {
-                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
-                Err(_) => println!("    export TELEGRAM_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Telegram")]));
-            notify_daemon_restart();
-        }
         "discord" => {
             ui::section(&i18n::t("section-setup-discord"));
             ui::blank();

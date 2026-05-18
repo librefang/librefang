@@ -52,7 +52,6 @@ sidecar
 signal
 slack
 teams
-telegram
 threema
 twist
 twitch
