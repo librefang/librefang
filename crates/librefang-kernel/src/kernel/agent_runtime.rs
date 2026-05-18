@@ -201,10 +201,13 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self
-            .agents
+        // Propagate: if the in-memory state write fails, the API must not
+        // report success while `persist_agent_enabled` still flips disk —
+        // that leaves state/disk in disagreement (#5137).
+        self.agents
             .registry
-            .set_state(agent_id, AgentState::Suspended);
+            .set_state(agent_id, AgentState::Suspended)
+            .map_err(KernelError::LibreFang)?;
         // Stop every active session for the agent — same fan-out as
         // `stop_agent_run` so a multi-session agent is fully halted.
         let _ = self.stop_agent_run(agent_id);
@@ -220,10 +223,12 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self
-            .agents
+        // Propagate: same state/disk-mismatch hazard as `suspend_agent`
+        // — never report success if the in-memory write failed (#5137).
+        self.agents
             .registry
-            .set_state(agent_id, AgentState::Running);
+            .set_state(agent_id, AgentState::Running)
+            .map_err(KernelError::LibreFang)?;
         // Persist enabled=true to agent.toml
         self.persist_agent_enabled(agent_id, &entry.name, true);
         info!(agent_id = %agent_id, "Agent resumed");
