@@ -200,6 +200,7 @@ def ready(capabilities: Optional[List[str]] = None,
 
 def message(user_id: str, user_name: str, *, text: Optional[str] = None,
             content: Optional[Dict[str, Any]] = None,
+            message_id: Optional[str] = None,
             channel_id: Optional[str] = None,
             platform: Optional[str] = None,
             username: Optional[str] = None,
@@ -210,10 +211,15 @@ def message(user_id: str, user_name: str, *, text: Optional[str] = None,
             metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Build a ``message`` event. ``content`` (a :class:`Content`
     result) supersedes ``text``; legacy text-only adapters may pass
-    only ``text``."""
+    only ``text``. ``message_id`` is the platform's *native* id —
+    supply it so reactions/edits target the real message instead of a
+    server-generated UUID (the #5219+ daemon stores it as
+    ``platform_message_id``)."""
     params: Dict[str, Any] = {"user_id": user_id, "user_name": user_name}
     if text is not None:
         params["text"] = text
+    if message_id is not None:
+        params["message_id"] = message_id
     if content is not None:
         params["content"] = content
         # Back-compat: a pre-#5219 daemon ignores `content` and reads
@@ -303,6 +309,9 @@ class Interactive:
 class StreamStart:
     channel_id: str
     stream_id: str
+    #: Thread to stream the reply into; ``None`` for a top-level reply.
+    #: The #5219+ daemon sends this for threaded streamed replies.
+    thread_id: Optional[str] = None
 
 
 @dataclass
@@ -338,9 +347,15 @@ Command = Union[
 
 def parse_command(line: str) -> Command:
     """Parse one stdin line into a typed command. Raises
-    ``json.JSONDecodeError`` only on malformed JSON; unknown methods
-    become :class:`UnknownCommand`."""
+    ``json.JSONDecodeError`` on malformed JSON *and* on syntactically
+    valid JSON that is not an object (e.g. a bare number/array) — the
+    reader treats both the same: emit a protocol error and continue,
+    rather than letting an ``AttributeError`` escape and wedge the
+    adapter. Unknown methods become :class:`UnknownCommand`."""
     obj = json.loads(line)
+    if not isinstance(obj, dict):
+        raise json.JSONDecodeError(
+            "expected a JSON object", line, 0)
     method = obj.get("method")
     p = obj.get("params") or {}
     if method == "send":
@@ -359,7 +374,8 @@ def parse_command(line: str) -> Command:
     if method == "interactive":
         return Interactive(p.get("channel_id", ""), p.get("message", {}))
     if method == "stream_start":
-        return StreamStart(p.get("channel_id", ""), p.get("stream_id", ""))
+        return StreamStart(p.get("channel_id", ""), p.get("stream_id", ""),
+                           p.get("thread_id"))
     if method == "stream_delta":
         return StreamDelta(p.get("stream_id", ""), p.get("text", ""))
     if method == "stream_end":

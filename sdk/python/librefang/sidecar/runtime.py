@@ -158,6 +158,7 @@ async def run(
     keeps serving without flooding stdout."""
     acked = asyncio.Event()
     stop = asyncio.Event()
+    producer_error: Optional[BaseException] = None
 
     async def ready_loop() -> None:
         attempts = 0
@@ -179,12 +180,14 @@ async def run(
                 return
 
     async def producer() -> None:
+        nonlocal producer_error
         try:
             await adapter.produce(emit)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.error("producer crashed", error=str(e))
+            producer_error = e
             stop.set()
 
     async def reader() -> None:
@@ -227,6 +230,13 @@ async def run(
             await adapter.on_shutdown()
         except Exception as e:  # noqa: BLE001
             log.error("on_shutdown failed", error=str(e))
+    # A producer crash is a fatal, unhandled adapter failure — exit
+    # nonzero so it is distinguishable from a clean `shutdown`/EOF
+    # (cleanup above still ran). The daemon supervisor restarts on any
+    # non-shutdown exit; the nonzero code makes the failure explicit to
+    # operators and any non-supervised runner.
+    if producer_error is not None:
+        raise SystemExit(1)
 
 
 def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,

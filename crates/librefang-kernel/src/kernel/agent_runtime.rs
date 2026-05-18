@@ -285,8 +285,13 @@ impl LibreFangKernel {
     ///
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
-    pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        self.compact_agent_session_with_id(agent_id, None).await
+    pub async fn compact_agent_session(
+        &self,
+        agent_id: AgentId,
+        force: bool,
+    ) -> KernelResult<String> {
+        self.compact_agent_session_with_id(agent_id, None, force)
+            .await
     }
 
     /// Compact a specific session. When `session_id_override` is `Some`,
@@ -303,6 +308,7 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
         session_id_override: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String> {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{
@@ -372,7 +378,10 @@ impl LibreFangKernel {
             Some(&entry.manifest.model.system_prompt),
             None,
         );
-        if !needs_compaction(&session, &config)
+        // Forced /compact (#5202) bypasses the "nothing to do" short-circuit:
+        // the user explicitly asked to compact now regardless of thresholds.
+        if !force
+            && !needs_compaction(&session, &config)
             && !needs_compaction_by_tokens(estimated_tokens, &config)
         {
             return Ok(format!(

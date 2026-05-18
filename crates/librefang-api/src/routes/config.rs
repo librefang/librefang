@@ -2181,7 +2181,9 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
         {"key": "provider_regions", "struct_field": "provider_regions"},
         {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
-        {"key": "tool_timeouts", "struct_field": "tool_timeouts"}
+        {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
+        // Background autonomous-loop executor knobs (#5168).
+        {"key": "background", "struct_field": "background"}
     ])
 }
 
