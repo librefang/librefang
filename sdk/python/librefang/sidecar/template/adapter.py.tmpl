@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""<PLATFORM> sidecar channel adapter for LibreFang.
+
+Run by the daemon as a supervised subprocess. Configure in
+~/.librefang/config.toml:
+
+    [[sidecar_channels]]
+    name = "<platform>"
+    command = "python3"
+    args = ["adapters/adapter.py"]
+    env = { <PLATFORM>_TOKEN = "..." }
+
+The daemon restarts this process on crash (backoff + circuit-breaker),
+so keep no irreplaceable in-process state. Reconnecting your platform
+transport is *your* job — use `with_backoff` for that loop.
+"""
+import asyncio
+import os
+
+from librefang.sidecar import Content, SidecarAdapter, protocol, run_stdio, with_backoff
+from librefang.sidecar import logging as log
+
+
+class Adapter(SidecarAdapter):
+    # Declare only what you implement; absent caps degrade gracefully.
+    capabilities = ["typing"]
+
+    def __init__(self):
+        self.token = os.environ.get("EXAMPLE_TOKEN", "")
+
+    async def on_send(self, cmd):
+        # cmd.text is a best-effort flattening; cmd.content is the full
+        # structured ChannelContent (a dict like {"Text": "..."}).
+        log.info("sending", channel=cmd.channel_id)
+        # ... deliver cmd.text / cmd.content to your platform here ...
+
+    async def produce(self, emit):
+        async def loop():
+            # ... await one inbound platform message ...
+            emit(protocol.message(
+                user_id="user-123",
+                user_name="Alice",
+                content=Content.text("hello from the platform"),
+                channel_id="general",
+            ))
+            await asyncio.sleep(1)
+
+        # with_backoff retries the *platform* connection; the daemon
+        # handles *process* restarts separately.
+        await with_backoff(loop)
+
+
+if __name__ == "__main__":
+    run_stdio(Adapter())

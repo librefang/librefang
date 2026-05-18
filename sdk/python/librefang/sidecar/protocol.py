@@ -1,0 +1,346 @@
+"""Wire protocol for LibreFang sidecar channel adapters.
+
+Newline-delimited JSON over stdio:
+
+* **Events** (adapter -> LibreFang, written to **stdout**): ``ready``,
+  ``message``, ``error``, ``typing``.
+* **Commands** (LibreFang -> adapter, read from **stdin**): ``send``,
+  ``ready_ack``, ``typing``, ``reaction``, ``interactive``,
+  ``stream_start``, ``stream_delta``, ``stream_end``, ``heartbeat``,
+  ``shutdown``.
+
+The shapes mirror the Rust ``SidecarEvent`` / ``SidecarCommand`` enums
+field-for-field. ``content`` is the externally-tagged ``ChannelContent``
+enum (e.g. ``{"Text": "hi"}``, ``{"Image": {...}}``). Build it with
+:class:`Content`.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
+
+# --------------------------------------------------------------------------
+# ChannelContent — externally tagged, mirrors crate::types::ChannelContent
+# --------------------------------------------------------------------------
+
+
+class Content:
+    """Builders for every ``ChannelContent`` variant.
+
+    Each returns the externally-tagged dict the wire expects. Optional
+    fields are emitted as ``null`` only where the Rust side keeps them
+    (it uses ``#[serde(default)]`` / ``skip_serializing_if`` per field);
+    sending the explicit key is always accepted.
+    """
+
+    @staticmethod
+    def text(s: str) -> Dict[str, Any]:
+        return {"Text": s}
+
+    @staticmethod
+    def image(url: str, caption: Optional[str] = None,
+              mime_type: Optional[str] = None) -> Dict[str, Any]:
+        return {"Image": {"url": url, "caption": caption,
+                          "mime_type": mime_type}}
+
+    @staticmethod
+    def file(url: str, filename: str) -> Dict[str, Any]:
+        return {"File": {"url": url, "filename": filename}}
+
+    @staticmethod
+    def file_data(data: bytes, filename: str,
+                  mime_type: str) -> Dict[str, Any]:
+        """Inline bytes. Mirrors Rust ``FileData{data: Vec<u8>}``: serde
+        serialises the bytes as a JSON number array (there is no base64
+        shim — see P1). Prefer :meth:`file` with a URL for large
+        payloads."""
+        return {"FileData": {"data": list(data), "filename": filename,
+                             "mime_type": mime_type}}
+
+    @staticmethod
+    def voice(url: str, caption: Optional[str] = None,
+              duration_seconds: int = 0) -> Dict[str, Any]:
+        return {"Voice": {"url": url, "caption": caption,
+                          "duration_seconds": duration_seconds}}
+
+    @staticmethod
+    def video(url: str, caption: Optional[str] = None,
+              duration_seconds: int = 0,
+              filename: Optional[str] = None) -> Dict[str, Any]:
+        return {"Video": {"url": url, "caption": caption,
+                          "duration_seconds": duration_seconds,
+                          "filename": filename}}
+
+    @staticmethod
+    def location(lat: float, lon: float) -> Dict[str, Any]:
+        return {"Location": {"lat": lat, "lon": lon}}
+
+    @staticmethod
+    def command(name: str, args: List[str]) -> Dict[str, Any]:
+        return {"Command": {"name": name, "args": list(args)}}
+
+    @staticmethod
+    def interactive(text: str,
+                    buttons: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return {"Interactive": {"text": text, "buttons": buttons}}
+
+    @staticmethod
+    def button_callback(action: str,
+                        message_text: Optional[str] = None) -> Dict[str, Any]:
+        return {"ButtonCallback": {"action": action,
+                                   "message_text": message_text}}
+
+    @staticmethod
+    def delete_message(message_id: str) -> Dict[str, Any]:
+        return {"DeleteMessage": {"message_id": message_id}}
+
+    @staticmethod
+    def edit_interactive(message_id: str, text: str,
+                         buttons: List[List[Dict[str, Any]]]
+                         ) -> Dict[str, Any]:
+        return {"EditInteractive": {"message_id": message_id, "text": text,
+                                    "buttons": buttons}}
+
+    @staticmethod
+    def audio(url: str, caption: Optional[str] = None,
+              duration_seconds: int = 0, title: Optional[str] = None,
+              performer: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"url": url, "caption": caption,
+                                   "duration_seconds": duration_seconds}
+        if title is not None:
+            payload["title"] = title
+        if performer is not None:
+            payload["performer"] = performer
+        return {"Audio": payload}
+
+    @staticmethod
+    def animation(url: str, caption: Optional[str] = None,
+                  duration_seconds: int = 0) -> Dict[str, Any]:
+        return {"Animation": {"url": url, "caption": caption,
+                              "duration_seconds": duration_seconds}}
+
+    @staticmethod
+    def sticker(file_id: str) -> Dict[str, Any]:
+        return {"Sticker": {"file_id": file_id}}
+
+    @staticmethod
+    def media_group(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {"MediaGroup": {"items": items}}
+
+    @staticmethod
+    def poll(question: str, options: List[str], is_quiz: bool = False,
+             correct_option_id: Optional[int] = None,
+             explanation: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"question": question,
+                                   "options": list(options),
+                                   "is_quiz": is_quiz}
+        if correct_option_id is not None:
+            payload["correct_option_id"] = correct_option_id
+        if explanation is not None:
+            payload["explanation"] = explanation
+        return {"Poll": payload}
+
+    @staticmethod
+    def poll_answer(poll_id: str, option_ids: List[int]) -> Dict[str, Any]:
+        return {"PollAnswer": {"poll_id": poll_id,
+                               "option_ids": list(option_ids)}}
+
+    @staticmethod
+    def button(label: str, action: str, style: Optional[str] = None,
+               url: Optional[str] = None) -> Dict[str, Any]:
+        """An ``InteractiveButton`` for use in :meth:`interactive`."""
+        b: Dict[str, Any] = {"label": label, "action": action}
+        if style is not None:
+            b["style"] = style
+        if url is not None:
+            b["url"] = url
+        return b
+
+
+# --------------------------------------------------------------------------
+# Outbound events (adapter -> LibreFang, stdout)
+# --------------------------------------------------------------------------
+
+
+def ready(capabilities: Optional[List[str]] = None,
+          account_id: Optional[str] = None,
+          suppress_error_responses: bool = False,
+          notification_recipients: Optional[List[Dict[str, Any]]] = None,
+          header_rules: Optional[List[Any]] = None,
+          protocol_version: Optional[int] = None) -> Dict[str, Any]:
+    """Build a ``ready`` event declaring the adapter's capabilities."""
+    return {
+        "method": "ready",
+        "params": {
+            "capabilities": list(capabilities or []),
+            "account_id": account_id,
+            "suppress_error_responses": suppress_error_responses,
+            "notification_recipients": notification_recipients or [],
+            "header_rules": header_rules or [],
+            "protocol_version": protocol_version,
+        },
+    }
+
+
+def message(user_id: str, user_name: str, *, text: Optional[str] = None,
+            content: Optional[Dict[str, Any]] = None,
+            channel_id: Optional[str] = None,
+            platform: Optional[str] = None,
+            username: Optional[str] = None,
+            librefang_user: Optional[str] = None,
+            is_group: bool = False, thread_id: Optional[str] = None,
+            group_members: Optional[List[Dict[str, Any]]] = None,
+            group_participants: Optional[List[Dict[str, Any]]] = None,
+            metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build a ``message`` event. ``content`` (a :class:`Content`
+    result) supersedes ``text``; legacy text-only adapters may pass
+    only ``text``."""
+    params: Dict[str, Any] = {"user_id": user_id, "user_name": user_name}
+    if text is not None:
+        params["text"] = text
+    if content is not None:
+        params["content"] = content
+    if channel_id is not None:
+        params["channel_id"] = channel_id
+    if platform is not None:
+        params["platform"] = platform
+    if username is not None:
+        params["username"] = username
+    if librefang_user is not None:
+        params["librefang_user"] = librefang_user
+    if is_group:
+        params["is_group"] = True
+    if thread_id is not None:
+        params["thread_id"] = thread_id
+    if group_members:
+        params["group_members"] = group_members
+    if group_participants:
+        params["group_participants"] = group_participants
+    if metadata:
+        params["metadata"] = metadata
+    return {"method": "message", "params": params}
+
+
+def error(msg: str) -> Dict[str, Any]:
+    return {"method": "error", "params": {"message": msg}}
+
+
+def typing_event(user_id: str, user_name: str,
+                 is_typing: bool) -> Dict[str, Any]:
+    return {"method": "typing",
+            "params": {"user_id": user_id, "user_name": user_name,
+                       "is_typing": is_typing}}
+
+
+# --------------------------------------------------------------------------
+# Inbound commands (LibreFang -> adapter, stdin)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Send:
+    channel_id: str
+    text: str
+    content: Optional[Dict[str, Any]]
+    thread_id: Optional[str]
+    user: Dict[str, Any]
+
+
+@dataclass
+class ReadyAck:
+    pass
+
+
+@dataclass
+class Shutdown:
+    pass
+
+
+@dataclass
+class TypingCmd:
+    channel_id: str
+
+
+@dataclass
+class Reaction:
+    channel_id: str
+    message_id: str
+    reaction: str
+
+
+@dataclass
+class Interactive:
+    channel_id: str
+    message: Dict[str, Any]
+
+
+@dataclass
+class StreamStart:
+    channel_id: str
+    stream_id: str
+
+
+@dataclass
+class StreamDelta:
+    stream_id: str
+    text: str
+
+
+@dataclass
+class StreamEnd:
+    stream_id: str
+
+
+@dataclass
+class Heartbeat:
+    pass
+
+
+@dataclass
+class UnknownCommand:
+    """Forward-compat: a command method this SDK version doesn't model.
+    Adapters must tolerate these rather than crash (the daemon relies on
+    that symmetry — e.g. it sends ``ready_ack`` to older adapters)."""
+    method: str
+    raw: Dict[str, Any]
+
+
+Command = Union[
+    Send, ReadyAck, Shutdown, TypingCmd, Reaction, Interactive,
+    StreamStart, StreamDelta, StreamEnd, Heartbeat, UnknownCommand,
+]
+
+
+def parse_command(line: str) -> Command:
+    """Parse one stdin line into a typed command. Raises
+    ``json.JSONDecodeError`` only on malformed JSON; unknown methods
+    become :class:`UnknownCommand`."""
+    obj = json.loads(line)
+    method = obj.get("method")
+    p = obj.get("params") or {}
+    if method == "send":
+        return Send(p.get("channel_id", ""), p.get("text", ""),
+                    p.get("content"), p.get("thread_id"),
+                    p.get("user", {}))
+    if method == "ready_ack":
+        return ReadyAck()
+    if method == "shutdown":
+        return Shutdown()
+    if method == "typing":
+        return TypingCmd(p.get("channel_id", ""))
+    if method == "reaction":
+        return Reaction(p.get("channel_id", ""), p.get("message_id", ""),
+                        p.get("reaction", ""))
+    if method == "interactive":
+        return Interactive(p.get("channel_id", ""), p.get("message", {}))
+    if method == "stream_start":
+        return StreamStart(p.get("channel_id", ""), p.get("stream_id", ""))
+    if method == "stream_delta":
+        return StreamDelta(p.get("stream_id", ""), p.get("text", ""))
+    if method == "stream_end":
+        return StreamEnd(p.get("stream_id", ""))
+    if method == "heartbeat":
+        return Heartbeat()
+    return UnknownCommand(method or "", obj)
