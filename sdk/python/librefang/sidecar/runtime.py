@@ -12,6 +12,12 @@ messages), then ``run_stdio(MyAdapter())``. The framework owns:
 * keeping **stdout** free of anything but protocol frames (log via
   :mod:`librefang.sidecar.logging`, which writes stderr).
 
+The ``ready`` → ``ready_ack`` handshake assumes the **post-#5219**
+sidecar daemon (see :mod:`librefang.sidecar.protocol`). ``main``'s
+daemon has no ``ready_ack`` command, so against a pre-#5219 daemon the
+re-announce loop never terminates — this SDK is wire-complete ahead of
+#5219 landing, not a drop-in for the current ``main`` protocol.
+
 Responsibility split — read this:
 
 * **Process restart is the daemon's job.** LibreFang's supervisor

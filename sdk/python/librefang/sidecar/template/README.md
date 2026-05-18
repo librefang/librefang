@@ -2,6 +2,12 @@
 
 Scaffold for a new LibreFang sidecar channel adapter.
 
+> **Prerequisite:** this SDK speaks the post-#5219 sidecar protocol.
+> Until #5219 (P0–P3 channel parity) lands, the `main` daemon still
+> uses the minimal `text`-only protocol and will deliver an empty
+> message for a `content`-only emit. Build adapters now; run them
+> end-to-end once #5219 is merged.
+
 1. Copy `adapter.py.tmpl` to `adapter.py` and replace `<PLATFORM>`.
 2. `pip install -r requirements.txt`
 3. Implement `on_send` (deliver to your platform) and `produce`

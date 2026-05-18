@@ -9,10 +9,20 @@ Newline-delimited JSON over stdio:
   ``stream_start``, ``stream_delta``, ``stream_end``, ``heartbeat``,
   ``shutdown``.
 
-The shapes mirror the Rust ``SidecarEvent`` / ``SidecarCommand`` enums
-field-for-field. ``content`` is the externally-tagged ``ChannelContent``
-enum (e.g. ``{"Text": "hi"}``, ``{"Image": {...}}``). Build it with
-:class:`Content`.
+The event/command envelope targets the **post-#5219** sidecar protocol
+(the P0–P3 channel-parity work). It is NOT the protocol on ``main``:
+``main``'s Rust ``SidecarEvent`` is the minimal ``message`` / ``ready``
+(unit, no params) / ``error`` set with ``SidecarMessageParams`` =
+``{user_id, user_name, text, channel_id, platform}`` (no ``content``),
+and ``SidecarCommand`` is only ``send {channel_id, text}`` /
+``shutdown``. An adapter written with this SDK is therefore
+wire-compatible only once #5219 lands; against a pre-#5219 daemon
+``ready_ack`` never arrives (the handshake loop re-announces ``ready``
+indefinitely) and ``message`` ``content`` is dropped (the reader uses
+``text`` only). ``content`` is the externally-tagged
+``ChannelContent`` enum (e.g. ``{"Text": "hi"}``, ``{"Image": {...}}``)
+— this part IS byte-for-byte the existing
+``crate::types::ChannelContent``. Build it with :class:`Content`.
 """
 
 from __future__ import annotations
