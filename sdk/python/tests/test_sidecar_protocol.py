@@ -89,6 +89,25 @@ def test_message_event_omits_unset_optionals():
     assert "platform" not in p
 
 
+def test_text_content_mirrors_legacy_text_field():
+    # content-only plain text also populates legacy `text` so a
+    # pre-#5219 daemon (ignores `content`) doesn't get an empty message.
+    p = protocol.message("u", "n", content=Content.text("hi"))["params"]
+    assert p["content"] == {"Text": "hi"}
+    assert p["text"] == "hi"
+
+    # Non-text content can't be flattened — no spurious `text`.
+    p2 = protocol.message(
+        "u", "n", content=Content.image("https://x/i.png"))["params"]
+    assert "Image" in p2["content"]
+    assert "text" not in p2
+
+    # Explicit text is never overwritten by the mirror.
+    p3 = protocol.message(
+        "u", "n", text="explicit", content=Content.text("hi"))["params"]
+    assert p3["text"] == "explicit"
+
+
 def test_error_and_typing_events():
     assert protocol.error("boom") == {
         "method": "error", "params": {"message": "boom"}

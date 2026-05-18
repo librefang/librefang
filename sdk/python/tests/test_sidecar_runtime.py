@@ -70,6 +70,54 @@ async def test_ready_handshake_stops_after_ack():
     assert sum(1 for e in emitted2 if e["method"] == "ready") <= 2
 
 
+async def test_ready_reannounce_is_bounded_without_ack():
+    # No ack ever arrives (pre-#5219 daemon). The loop must stop
+    # re-announcing after ready_max_attempts instead of flooding
+    # stdout forever, while the run keeps serving until shutdown.
+    adapter = RecordingAdapter()
+    emitted = []
+    delivered = False
+
+    async def line_source():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            # > 3 * ready_interval, so the capped loop has finished.
+            await asyncio.sleep(0.2)
+            return '{"method":"shutdown"}'
+        return None
+
+    await asyncio.wait_for(
+        run(adapter, line_source=line_source, emit=emitted.append,
+            ready_interval=0.01, ready_max_attempts=3),
+        timeout=2.0,
+    )
+    readies = [e for e in emitted if e["method"] == "ready"]
+    assert len(readies) == 3  # capped, not unbounded
+    assert adapter.shutdown_called  # run lifecycle still intact
+
+    # ready_max_attempts=0 keeps the legacy unbounded behaviour.
+    adapter2 = RecordingAdapter()
+    emitted2 = []
+    delivered2 = False
+
+    async def line_source2():
+        nonlocal delivered2
+        if not delivered2:
+            delivered2 = True
+            await asyncio.sleep(0.1)
+            return '{"method":"shutdown"}'
+        return None
+
+    await asyncio.wait_for(
+        run(adapter2, line_source=line_source2, emit=emitted2.append,
+            ready_interval=0.01, ready_max_attempts=0),
+        timeout=2.0,
+    )
+    # ~0.1s / 0.01s interval ≫ 3: proves it did not self-cap.
+    assert sum(1 for e in emitted2 if e["method"] == "ready") > 3
+
+
 async def test_send_command_dispatched():
     adapter = RecordingAdapter()
     line = json.dumps({

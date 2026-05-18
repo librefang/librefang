@@ -212,6 +212,15 @@ def message(user_id: str, user_name: str, *, text: Optional[str] = None,
         params["text"] = text
     if content is not None:
         params["content"] = content
+        # Back-compat: a pre-#5219 daemon ignores `content` and reads
+        # only `text`, so a content-only plain-text message would be
+        # delivered empty. Mirror a `Content.text(...)` into `text`
+        # (post-#5219 the daemon prefers `content`, so this is
+        # harmless redundancy). Non-text content can't be flattened
+        # losslessly and is left for the #5219+ daemon.
+        if (text is None and isinstance(content, dict)
+                and isinstance(content.get("Text"), str)):
+            params["text"] = content["Text"]
     if channel_id is not None:
         params["channel_id"] = channel_id
     if platform is not None:

@@ -7,16 +7,22 @@ messages), then ``run_stdio(MyAdapter())``. The framework owns:
 * the stdin command-reader loop and JSON parsing;
 * the ``ready`` handshake — it re-announces ``ready`` (with your
   declared capabilities) every ``ready_interval`` until LibreFang sends
-  ``ready_ack``, so a fresh process is idempotently re-discovered;
+  ``ready_ack``, so a fresh process is idempotently re-discovered.
+  Re-announcing is bounded by ``ready_max_attempts`` (``0`` = forever):
+  after that many un-acked emits it stops re-announcing but keeps
+  running, so a pre-#5219 daemon (no ``ready_ack``) gets the first
+  ``ready`` and the adapter keeps working without spamming stdout;
 * graceful ``shutdown`` (runs :meth:`SidecarAdapter.on_shutdown`);
 * keeping **stdout** free of anything but protocol frames (log via
   :mod:`librefang.sidecar.logging`, which writes stderr).
 
-The ``ready`` → ``ready_ack`` handshake assumes the **post-#5219**
+The ``ready`` → ``ready_ack`` handshake targets the **post-#5219**
 sidecar daemon (see :mod:`librefang.sidecar.protocol`). ``main``'s
-daemon has no ``ready_ack`` command, so against a pre-#5219 daemon the
-re-announce loop never terminates — this SDK is wire-complete ahead of
-#5219 landing, not a drop-in for the current ``main`` protocol.
+daemon has no ``ready_ack`` command; against a pre-#5219 daemon the
+loop simply stops re-announcing after ``ready_max_attempts`` (the
+first ``ready`` is still delivered, so the adapter functions). This
+SDK is wire-complete ahead of #5219 landing — merge #5219 first for
+the full handshake; it degrades cleanly on the current ``main``.
 
 Responsibility split — read this:
 
@@ -139,20 +145,38 @@ async def run(
     line_source: LineSource,
     emit: EmitFn,
     ready_interval: float = 2.0,
+    ready_max_attempts: int = 5,
 ) -> None:
     """Drive an adapter against injectable I/O. ``line_source`` returns
     the next stdin line or ``None`` at EOF; ``emit`` writes one event.
-    Returns when LibreFang sends ``shutdown`` or stdin reaches EOF."""
+    Returns when LibreFang sends ``shutdown`` or stdin reaches EOF.
+
+    ``ready_max_attempts`` bounds the un-acked ``ready`` re-announce
+    (``0`` = re-announce forever). After the cap the loop stops
+    re-announcing but the run continues — a pre-#5219 daemon that never
+    sends ``ready_ack`` still gets the first ``ready`` and the adapter
+    keeps serving without flooding stdout."""
     acked = asyncio.Event()
     stop = asyncio.Event()
 
     async def ready_loop() -> None:
+        attempts = 0
         while not acked.is_set() and not stop.is_set():
             emit(adapter.ready_event())
+            attempts += 1
             try:
                 await asyncio.wait_for(acked.wait(), timeout=ready_interval)
             except asyncio.TimeoutError:
                 pass  # re-announce; ack is idempotent
+            if (not acked.is_set() and ready_max_attempts > 0
+                    and attempts >= ready_max_attempts):
+                log.warn(
+                    "no ready_ack received; assuming a pre-#5219 daemon "
+                    "(no ack command) and stopping ready re-announce — "
+                    "the adapter keeps running on the first ready",
+                    attempts=attempts,
+                )
+                return
 
     async def producer() -> None:
         try:
@@ -205,15 +229,19 @@ async def run(
             log.error("on_shutdown failed", error=str(e))
 
 
-def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0) -> None:
+def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
+              ready_max_attempts: int = 5) -> None:
     """Wire ``run`` to real stdio and run it to completion. stdout is
     written under a lock and carries only protocol frames; stdin is read
-    on a daemon thread (portable, unlike async stdin)."""
-    asyncio.run(_run_stdio(adapter, ready_interval=ready_interval))
+    on a daemon thread (portable, unlike async stdin). See :func:`run`
+    for ``ready_max_attempts``."""
+    asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
+                           ready_max_attempts=ready_max_attempts))
 
 
 async def _run_stdio(adapter: SidecarAdapter, *,
-                     ready_interval: float) -> None:
+                     ready_interval: float,
+                     ready_max_attempts: int) -> None:
     loop = asyncio.get_event_loop()
     queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
 
@@ -236,4 +264,5 @@ async def _run_stdio(adapter: SidecarAdapter, *,
             sys.stdout.flush()
 
     await run(adapter, line_source=line_source, emit=emit,
-              ready_interval=ready_interval)
+              ready_interval=ready_interval,
+              ready_max_attempts=ready_max_attempts)
