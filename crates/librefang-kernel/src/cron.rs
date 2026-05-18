@@ -825,17 +825,15 @@ impl CronScheduler {
                 // daemon doesn't push the retry absurdly far out. errors is
                 // in 1..MAX_CONSECUTIVE_ERRORS here. Issue #5136.
                 let now = Utc::now();
-                meta.job.next_run = Some(match compute_next_run_after_opt(
-                    &meta.job.schedule,
-                    now,
-                ) {
-                    Some(base) => {
-                        let backoff_steps = meta.consecutive_errors.saturating_sub(1).min(10);
-                        let backoff_secs: i64 = 60i64.saturating_mul(1i64 << backoff_steps);
-                        base + Duration::seconds(backoff_secs)
-                    }
-                    None => now + Duration::hours(1),
-                });
+                meta.job.next_run =
+                    Some(match compute_next_run_after_opt(&meta.job.schedule, now) {
+                        Some(base) => {
+                            let backoff_steps = meta.consecutive_errors.saturating_sub(1).min(10);
+                            let backoff_secs: i64 = 60i64.saturating_mul(1i64 << backoff_steps);
+                            base + Duration::seconds(backoff_secs)
+                        }
+                        None => now + Duration::hours(1),
+                    });
                 false
             }
         } else {
