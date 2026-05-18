@@ -317,8 +317,6 @@ use librefang_channels::gotify::GotifyAdapter;
 use librefang_channels::linkedin::LinkedInAdapter;
 #[cfg(feature = "channel-mumble")]
 use librefang_channels::mumble::MumbleAdapter;
-#[cfg(feature = "channel-ntfy")]
-use librefang_channels::ntfy::NtfyAdapter;
 #[cfg(feature = "channel-qq")]
 use librefang_channels::qq::QqAdapter;
 #[cfg(feature = "channel-wechat")]
@@ -1699,7 +1697,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .compact_agent_session(agent_id)
+            .compact_agent_session(agent_id, true)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1744,7 +1742,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
         self.kernel
-            .compact_agent_session_with_id(agent_id, Some(sid))
+            .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1995,7 +1993,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "dingtalk" => find_channel_info!(dingtalk),
             "discourse" => find_channel_info!(discourse),
             "gitter" => find_channel_info!(gitter),
-            "ntfy" => find_channel_info!(ntfy),
             "gotify" => find_channel_info!(gotify),
             "webhook" => find_channel_info!(webhook),
             "voice" => find_channel_info!(voice),
@@ -2684,7 +2681,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(qq, "channel-qq", "QQ");
     check_channel!(discourse, "channel-discourse", "Discourse");
     check_channel!(gitter, "channel-gitter", "Gitter");
-    check_channel!(ntfy, "channel-ntfy", "ntfy");
     check_channel!(gotify, "channel-gotify", "Gotify");
     check_channel!(webhook, "channel-webhook", "Webhook");
     check_channel!(voice, "channel-voice", "Voice");
@@ -3694,25 +3690,6 @@ pub async fn start_channel_bridge_with_config(
                 gt_config.account_id.clone(),
             ));
         }
-    }
-
-    // ntfy
-    #[cfg(feature = "channel-ntfy")]
-    for nf_config in config.ntfy.iter() {
-        let token = if nf_config.token_env.is_empty() {
-            String::new()
-        } else {
-            read_token(&nf_config.token_env, "ntfy").unwrap_or_default()
-        };
-        let adapter = Arc::new(
-            NtfyAdapter::new(nf_config.server_url.clone(), nf_config.topic.clone(), token)
-                .with_account_id(nf_config.account_id.clone()),
-        );
-        adapters.push((
-            adapter,
-            nf_config.default_agent.clone(),
-            nf_config.account_id.clone(),
-        ));
     }
 
     // Gotify
@@ -4771,7 +4748,6 @@ mod tests {
         assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.discourse.is_none());
         assert!(config.channels.gitter.is_none());
-        assert!(config.channels.ntfy.is_none());
         assert!(config.channels.gotify.is_none());
         assert!(config.channels.webhook.is_none());
         assert!(config.channels.linkedin.is_none());

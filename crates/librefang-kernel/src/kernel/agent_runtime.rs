@@ -201,10 +201,13 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self
-            .agents
+        // Propagate: if the in-memory state write fails, the API must not
+        // report success while `persist_agent_enabled` still flips disk —
+        // that leaves state/disk in disagreement (#5137).
+        self.agents
             .registry
-            .set_state(agent_id, AgentState::Suspended);
+            .set_state(agent_id, AgentState::Suspended)
+            .map_err(KernelError::LibreFang)?;
         // Stop every active session for the agent — same fan-out as
         // `stop_agent_run` so a multi-session agent is fully halted.
         let _ = self.stop_agent_run(agent_id);
@@ -220,10 +223,12 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self
-            .agents
+        // Propagate: same state/disk-mismatch hazard as `suspend_agent`
+        // — never report success if the in-memory write failed (#5137).
+        self.agents
             .registry
-            .set_state(agent_id, AgentState::Running);
+            .set_state(agent_id, AgentState::Running)
+            .map_err(KernelError::LibreFang)?;
         // Persist enabled=true to agent.toml
         self.persist_agent_enabled(agent_id, &entry.name, true);
         info!(agent_id = %agent_id, "Agent resumed");
@@ -280,8 +285,13 @@ impl LibreFangKernel {
     ///
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
-    pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        self.compact_agent_session_with_id(agent_id, None).await
+    pub async fn compact_agent_session(
+        &self,
+        agent_id: AgentId,
+        force: bool,
+    ) -> KernelResult<String> {
+        self.compact_agent_session_with_id(agent_id, None, force)
+            .await
     }
 
     /// Compact a specific session. When `session_id_override` is `Some`,
@@ -298,9 +308,13 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
         session_id_override: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String> {
         let cfg = self.config.load_full();
-        use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
+        use librefang_runtime::compactor::{
+            compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+            CompactionConfig,
+        };
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -326,18 +340,10 @@ impl LibreFangKernel {
 
         // #4976: merge per-agent [compaction] overrides on top of the
         // global config before deciding thresholds / summary budget.
-        let config = CompactionConfig::from_toml_with_overrides(
+        let mut config = CompactionConfig::from_toml_with_overrides(
             &cfg.compaction,
             entry.manifest.compaction.as_ref(),
         );
-
-        if !needs_compaction(&session, &config) {
-            return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
-                session.messages.len(),
-                config.threshold
-            ));
-        }
 
         // Strip provider prefix so the model name is valid for the upstream API.
         let model = librefang_runtime::agent_loop::strip_provider_prefix(
@@ -345,9 +351,13 @@ impl LibreFangKernel {
             &entry.manifest.model.provider,
         );
 
-        // Resolve the agent's actual context window from the model catalog.
-        // Filter out 0 so image/audio entries (no context window) fall back
-        // to the 200K default instead of feeding 0 into compaction math.
+        // Resolve the agent's actual context window from the model catalog
+        // BEFORE the gate so the gate's token-trigger comparison uses the
+        // real per-agent window (e.g. 128K GPT-4o, 1M Gemini) instead of
+        // the global 200K default that `CompactionConfig::from_toml_…`
+        // would otherwise hand us. Filter out 0 so image/audio entries
+        // (no context window) fall back to the 200K default instead of
+        // feeding 0 into compaction math.
         let agent_ctx_window = self
             .llm
             .model_catalog
@@ -356,6 +366,30 @@ impl LibreFangKernel {
             .map(|m| m.context_window as usize)
             .filter(|w| *w > 0)
             .unwrap_or(200_000);
+        config.context_window_tokens = agent_ctx_window;
+
+        // Match the pre-loop caller's estimator inputs in `messaging.rs`
+        // (`send_message_full` passes `Some(&manifest.model.system_prompt)`),
+        // otherwise this inner gate's estimate would skip the system prompt
+        // / tools budget and short-circuit even when the caller has already
+        // concluded compaction is warranted.
+        let estimated_tokens = estimate_token_count(
+            &session.messages,
+            Some(&entry.manifest.model.system_prompt),
+            None,
+        );
+        // Forced /compact (#5202) bypasses the "nothing to do" short-circuit:
+        // the user explicitly asked to compact now regardless of thresholds.
+        if !force
+            && !needs_compaction(&session, &config)
+            && !needs_compaction_by_tokens(estimated_tokens, &config)
+        {
+            return Ok(format!(
+                "No compaction needed ({} messages, threshold {})",
+                session.messages.len(),
+                config.threshold
+            ));
+        }
 
         // Compaction is a side task — route through the auxiliary chain when
         // configured (issue #3314) so users with `[llm.auxiliary] compression`
@@ -489,7 +523,11 @@ impl LibreFangKernel {
             })
             .or_else(|| {
                 let v = session.context_window_tokens as usize;
-                if v > 0 { Some(v) } else { None }
+                if v > 0 {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
 

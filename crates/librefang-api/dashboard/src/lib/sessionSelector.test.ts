@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { pickLatestSessionId } from "./sessionSelector";
+import { pickLatestSessionId, deriveDropdownActiveSessionId } from "./sessionSelector";
 import { useAgentSessions } from "./queries/agents";
 import * as httpClient from "./http/client";
 import { createQueryClientWrapper } from "./test/query-client";
@@ -43,6 +43,25 @@ describe("pickLatestSessionId", () => {
       { session_id: "dated", agent_id: "a1", created_at: "2020-01-01T00:00:00Z" },
     ];
     expect(pickLatestSessionId(list)).toBe("dated");
+  });
+});
+
+describe("deriveDropdownActiveSessionId", () => {
+  it("returns the session id when the URL is pinned", () => {
+    expect(deriveDropdownActiveSessionId("session-abc")).toBe("session-abc");
+  });
+
+  it("returns undefined when urlSessionId is null (unpinned connection)", () => {
+    expect(deriveDropdownActiveSessionId(null)).toBeUndefined();
+  });
+
+  it("returns undefined when urlSessionId is undefined", () => {
+    expect(deriveDropdownActiveSessionId(undefined)).toBeUndefined();
+  });
+
+  it("returns the value as-is — callers are responsible for not passing empty strings", () => {
+    // The function passes through whatever the URL param contains.
+    expect(deriveDropdownActiveSessionId("some-id")).toBe("some-id");
   });
 });
 

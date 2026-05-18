@@ -45,6 +45,7 @@ pub(super) async fn tool_agent_send(
     let message = input["message"]
         .as_str()
         .ok_or("Missing 'message' parameter")?;
+    let conversation_key = input["conversation_key"].as_str();
 
     // Self-send guard: sending a message to oneself would attempt to acquire
     // `agent_msg_locks[id]` while that lock is already held by the current
@@ -84,9 +85,14 @@ pub(super) async fn tool_agent_send(
             // parent `/stop` propagates into the callee (issue #3044).
             // System-initiated calls (caller_agent_id = None) fall back to
             // the legacy path.
-            match caller_agent_id {
-                Some(parent) => kh.send_to_agent_as(agent_id, message, parent).await,
-                None => kh.send_to_agent(agent_id, message).await,
+            match (caller_agent_id, conversation_key) {
+                (Some(parent), Some(key)) => {
+                    kh.send_to_agent_as_with_key(agent_id, message, parent, key)
+                        .await
+                }
+                (Some(parent), None) => kh.send_to_agent_as(agent_id, message, parent).await,
+                (None, Some(key)) => kh.send_to_agent_with_key(agent_id, message, key).await,
+                (None, None) => kh.send_to_agent(agent_id, message).await,
             }
         })
         .await

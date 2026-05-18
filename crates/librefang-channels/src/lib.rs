@@ -75,8 +75,6 @@ pub mod mumble;
 pub mod nextcloud;
 #[cfg(feature = "channel-nostr")]
 pub mod nostr;
-#[cfg(feature = "channel-ntfy")]
-pub mod ntfy;
 #[cfg(feature = "channel-pumble")]
 pub mod pumble;
 #[cfg(feature = "channel-qq")]

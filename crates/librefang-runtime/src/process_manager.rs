@@ -119,7 +119,9 @@ impl ProcessManager {
 
         // Spawn background readers for stdout/stderr. We keep the join
         // handles so the per-process reaper can await pipe drain before
-        // evicting the registry entry (#5144).
+        // evicting the registry entry (#5144), and surfaces panics so a
+        // crashed reader no longer silently truncates captured output
+        // (#5137).
         let stdout_reader = stdout.map(|out| {
             let buf = stdout_buf.clone();
             tokio::spawn(async move {
@@ -188,12 +190,31 @@ impl ProcessManager {
         // harmless no-op.
         let processes = self.processes.clone();
         let reap_id = id.clone();
+        let reap_agent = agent_id.to_string();
         tokio::spawn(async move {
             if let Some(h) = stdout_reader {
-                let _ = h.await;
+                if let Err(e) = h.await {
+                    if e.is_panic() {
+                        tracing::error!(
+                            agent = %reap_agent,
+                            process_id = %reap_id,
+                            error = %e,
+                            "stdout reader task panicked; process output truncated"
+                        );
+                    }
+                }
             }
             if let Some(h) = stderr_reader {
-                let _ = h.await;
+                if let Err(e) = h.await {
+                    if e.is_panic() {
+                        tracing::error!(
+                            agent = %reap_agent,
+                            process_id = %reap_id,
+                            error = %e,
+                            "stderr reader task panicked; process output truncated"
+                        );
+                    }
+                }
             }
             // Both pipes drained → the child has exited. Remove the
             // registry entry first (releasing the DashMap shard lock

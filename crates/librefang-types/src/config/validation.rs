@@ -641,13 +641,6 @@ impl KernelConfig {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
             }
         }
-        for nf in self.channels.ntfy.iter() {
-            if !nf.token_env.is_empty()
-                && std::env::var(&nf.token_env).unwrap_or_default().is_empty()
-            {
-                warnings.push(format!("ntfy configured but {} is not set", nf.token_env));
-            }
-        }
         for gf in self.channels.gotify.iter() {
             if std::env::var(&gf.app_token_env)
                 .unwrap_or_default()

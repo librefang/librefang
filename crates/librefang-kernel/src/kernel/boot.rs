@@ -1699,11 +1699,27 @@ impl LibreFangKernel {
                                                             persisted_hand_configs
                                                                 .get(&hand_id)
                                                                 .unwrap_or(&empty);
-                                                        let _ = apply_settings_block_to_manifest(
-                                                            &mut entry.manifest,
-                                                            &def.settings,
-                                                            cfg_for_settings,
-                                                        );
+                                                        // Capture the returned env-var allowlist
+                                                        // and re-inject it into
+                                                        // metadata["hand_allowed_env"] — mirroring
+                                                        // the activation path in
+                                                        // `activate_hand_with_id`. Discarding it
+                                                        // here meant hand-injected env passthrough
+                                                        // silently disappeared on every restart
+                                                        // until a manual re-activation (#5137).
+                                                        let allowed_env =
+                                                            apply_settings_block_to_manifest(
+                                                                &mut entry.manifest,
+                                                                &def.settings,
+                                                                cfg_for_settings,
+                                                            );
+                                                        if !allowed_env.is_empty() {
+                                                            entry.manifest.metadata.insert(
+                                                                "hand_allowed_env".to_string(),
+                                                                serde_json::to_value(&allowed_env)
+                                                                    .unwrap_or_default(),
+                                                            );
+                                                        }
                                                     }
 
                                                     // Re-render `## Reference Knowledge` and
@@ -2146,6 +2162,122 @@ impl LibreFangKernel {
                     webui_messages = webui_msgs,
                     canonical_messages = canonical_msgs,
                     "Adopted webui channel session as canonical (one-time migration)"
+                );
+            }
+        }
+
+        // Canonical-pointer recovery: on every boot, for each agent whose
+        // canonical pointer is either absent from the sessions table or
+        // lags behind a more-recently-updated unlabeled session, advance
+        // the pointer to the most-recently-updated unlabeled session.
+        //
+        // Motivation (#5198): when the daemon restarts after a WS-driven
+        // conversation, the canonical pointer (entry.session_id) stays
+        // correct for clean shutdowns, but may trail for crash or process-
+        // kill scenarios where in-memory writes were not flushed.  The
+        // post-message sessions table update (save_session_async) IS
+        // durable because it runs inside the spawned loop task, but
+        // update_session_id / save_agent are not called on the streaming
+        // path when effective_session_id already equals entry.session_id.
+        // The query here uses updated_at (the write timestamp in the
+        // sessions table) as the tiebreaker so we always advance to the
+        // session that received the most-recent write, irrespective of
+        // creation order.
+        //
+        // Safety conditions: we only advance, never retreat; we skip
+        // labeled sessions (the user explicitly named / switched to them);
+        // we skip the canonical if it's already labeled (same reason as
+        // the webui migration block above).
+        {
+            let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .agents
+                .registry
+                .list()
+                .iter()
+                .map(|e| (e.id, e.session_id))
+                .collect();
+            for (agent_id, canonical_session_id) in registry_snapshot {
+                // Skip agents whose canonical is already labeled — user
+                // explicitly manages those.
+                let canonical_session = kernel
+                    .memory
+                    .substrate
+                    .get_session(canonical_session_id)
+                    .ok()
+                    .flatten();
+                if canonical_session
+                    .as_ref()
+                    .and_then(|s| s.label.as_ref())
+                    .is_some()
+                {
+                    continue;
+                }
+                let canonical_msgs = canonical_session
+                    .as_ref()
+                    .map(|s| s.messages.len())
+                    .unwrap_or(0);
+
+                // Find the most-recently-updated session for this agent.
+                let recent_ids = match kernel
+                    .memory
+                    .substrate
+                    .list_agent_sessions_touched_since(agent_id, 0, 1, None)
+                {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        warn!(agent_id = %agent_id, "canonical recovery: failed to list sessions: {e}");
+                        continue;
+                    }
+                };
+                let most_recent_id = match recent_ids.into_iter().next() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let most_recent_sid = match most_recent_id.parse::<uuid::Uuid>() {
+                    Ok(u) => SessionId(u),
+                    Err(_) => continue,
+                };
+                if most_recent_sid == canonical_session_id {
+                    continue;
+                }
+                // Only advance to sessions that are unlabeled.
+                let candidate_session = match kernel
+                    .memory
+                    .substrate
+                    .get_session(most_recent_sid)
+                    .ok()
+                    .flatten()
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if candidate_session.label.is_some() {
+                    continue;
+                }
+                let candidate_msgs = candidate_session.messages.len();
+                if candidate_msgs <= canonical_msgs {
+                    continue;
+                }
+                if let Err(e) = kernel
+                    .agents
+                    .registry
+                    .update_session_id(agent_id, most_recent_sid)
+                {
+                    warn!(agent_id = %agent_id, "canonical recovery: failed to update pointer: {e}");
+                    continue;
+                }
+                if let Some(entry) = kernel.agents.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
+                        warn!(agent_id = %agent_id, "canonical recovery: failed to persist: {e}");
+                    }
+                }
+                info!(
+                    agent_id = %agent_id,
+                    from_session = %canonical_session_id,
+                    to_session = %most_recent_sid,
+                    candidate_messages = candidate_msgs,
+                    canonical_messages = canonical_msgs,
+                    "Advanced canonical pointer to most-recently-active session"
                 );
             }
         }

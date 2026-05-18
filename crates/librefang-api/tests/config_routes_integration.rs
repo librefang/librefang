@@ -1020,9 +1020,7 @@ poll_interval_secs = \"thirty-seconds\"
     // we abort at parse time with the field name and never reach auth.
     let lower = err.to_lowercase();
     assert!(
-        !lower.contains("auth")
-            && !lower.contains("bot token")
-            && !lower.contains("unauthorized"),
+        !lower.contains("auth") && !lower.contains("bot token") && !lower.contains("unauthorized"),
         "boot error must not be misclassified as an auth failure (the \
          pre-#5186 downstream symptom); got: {err}"
     );

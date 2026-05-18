@@ -125,6 +125,41 @@ pub trait AgentControl: Send + Sync {
         self.send_to_agent(agent_id, message).await
     }
 
+    /// Like [`send_to_agent`](Self::send_to_agent), but pins the callee to a
+    /// deterministic session derived from `conversation_key`. The kernel maps
+    /// the key to `SessionId::for_channel(target, "agent_send:<key>")`, so
+    /// the same key always resolves to the same session (history preserved)
+    /// and a different key always resolves to a distinct session. Defaults to
+    /// the plain `send_to_agent` behaviour for implementations that do not
+    /// support session pinning.
+    async fn send_to_agent_with_key(
+        &self,
+        agent_id: &str,
+        message: &str,
+        conversation_key: &str,
+    ) -> Result<String, KernelOpError> {
+        let _ = conversation_key;
+        self.send_to_agent(agent_id, message).await
+    }
+
+    /// Like [`send_to_agent_as`](Self::send_to_agent_as), but also pins the
+    /// callee session via `conversation_key` (see
+    /// [`send_to_agent_with_key`](Self::send_to_agent_with_key)). Explicit
+    /// `conversation_key` takes precedence over the target manifest
+    /// `session_mode`. Defaults to `send_to_agent_as` for implementations
+    /// that do not support session pinning.
+    async fn send_to_agent_as_with_key(
+        &self,
+        agent_id: &str,
+        message: &str,
+        parent_agent_id: &str,
+        conversation_key: &str,
+    ) -> Result<String, KernelOpError> {
+        let _ = conversation_key;
+        self.send_to_agent_as(agent_id, message, parent_agent_id)
+            .await
+    }
+
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 

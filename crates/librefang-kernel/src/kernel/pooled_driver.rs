@@ -71,7 +71,8 @@ impl PooledDriver {
     ///   any provider-side error as a reason to rotate.
     /// - `ModelUnavailable` / `Timeout`: don't mark the key — these are
     ///   provider-side issues, not key-specific.
-    /// - `ContextTooLong` / `Unknown`: propagate without marking.
+    /// - `ContextTooLong` / `Unknown` / `ChainExhausted`: propagate without
+    ///   marking — none of these classify the credential itself.
     fn handle_driver_error(&self, api_key: &str, error: &LlmError) {
         use librefang_llm_driver::llm_errors::FailoverReason;
         match error.failover_reason() {
@@ -88,6 +89,11 @@ impl PooledDriver {
                 self.pool.mark_exhausted(api_key);
             }
             FailoverReason::ModelUnavailable | FailoverReason::Timeout => {}
+            // ChainExhausted classifies the fallback chain as a whole, not
+            // this credential — leave the key untouched. Reaching this arm
+            // from a PooledDriver should be vanishingly rare (the wrapped
+            // driver is a concrete provider, not a FallbackChain), but the
+            // match must remain exhaustive.
             FailoverReason::ContextTooLong
             | FailoverReason::Unknown
             | FailoverReason::ChainExhausted => {}

@@ -507,6 +507,8 @@ export interface AgentSessionResponse {
   context_window_tokens?: number;
   label?: string;
   messages?: AgentSessionMessage[];
+  /** LLM-generated summary from the last compaction, null when none exists. */
+  compacted_summary?: string | null;
 }
 
 export interface AgentMessageResponse {

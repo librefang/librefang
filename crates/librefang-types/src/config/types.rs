@@ -2115,6 +2115,29 @@ pub enum ResponseFormat {
     },
 }
 
+/// Backpressure policy when the bounded inbound message buffer is full.
+///
+/// Selected via [`SidecarChannelConfig::overflow`].
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarOverflowPolicy {
+    /// Apply backpressure: the reader awaits buffer space (default).
+    /// Correct for chat — dropping a user message is worse than
+    /// slowing the producer.
+    #[default]
+    Block,
+    /// Shed load: drop the just-arrived message when the buffer is
+    /// full (counted + rate-limited warn). For high-volume,
+    /// loss-tolerant notification sidecars.
+    ///
+    /// Note: a tokio mpsc can't evict the *oldest* entry from the
+    /// producer side, so this drops the newest. Named for intent
+    /// (shed load).
+    DropNewest,
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2125,7 +2148,7 @@ pub enum ResponseFormat {
 /// [[sidecar_channels]]
 /// name = "my-telegram"
 /// command = "python3"
-/// args = ["adapters/telegram_adapter.py"]
+/// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2143,6 +2166,66 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Restart the subprocess automatically when it exits unexpectedly.
+    #[serde(default = "default_sidecar_restart")]
+    pub restart: bool,
+    /// Initial restart backoff in ms (doubles per consecutive failure).
+    #[serde(default = "default_sidecar_restart_initial_backoff_ms")]
+    pub restart_initial_backoff_ms: u64,
+    /// Cap on the restart backoff in ms.
+    #[serde(default = "default_sidecar_restart_max_backoff_ms")]
+    pub restart_max_backoff_ms: u64,
+    /// Consecutive failures before the supervisor gives up (circuit-break).
+    #[serde(default = "default_sidecar_restart_max_retries")]
+    pub restart_max_retries: u32,
+    /// Stable uptime (secs) after which the failure counter resets.
+    #[serde(default = "default_sidecar_restart_reset_after_secs")]
+    pub restart_reset_after_secs: u64,
+    /// How long (secs) to wait for the adapter's `ready` before
+    /// treating the spawn as failed.
+    #[serde(default = "default_sidecar_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
+    #[serde(default = "default_sidecar_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Bounded inbound message buffer (also the backpressure point).
+    #[serde(default = "default_sidecar_message_buffer")]
+    pub message_buffer: usize,
+    /// What to do when `message_buffer` is full.
+    #[serde(default)]
+    pub overflow: SidecarOverflowPolicy,
+}
+
+fn default_sidecar_restart() -> bool {
+    true
+}
+
+fn default_sidecar_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_sidecar_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+fn default_sidecar_restart_max_retries() -> u32 {
+    10
+}
+
+fn default_sidecar_restart_reset_after_secs() -> u64 {
+    60
+}
+
+fn default_sidecar_ready_timeout_secs() -> u64 {
+    30
+}
+
+fn default_sidecar_shutdown_grace_secs() -> u64 {
+    5
+}
+
+fn default_sidecar_message_buffer() -> usize {
+    256
 }
 
 // ---------------------------------------------------------------------------
@@ -6361,8 +6444,6 @@ pub struct ChannelsConfig {
     pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
-    /// ntfy.sh pub/sub configuration(s).
-    pub ntfy: OneOrMany<NtfyConfig>,
     /// Gotify notification configuration(s).
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
@@ -6464,7 +6545,6 @@ impl Default for ChannelsConfig {
             qq: OneOrMany::default(),
             discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
-            ntfy: OneOrMany::default(),
             gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
@@ -8234,39 +8314,6 @@ impl Default for GitterConfig {
         Self {
             token_env: "GITTER_TOKEN".to_string(),
             room_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NtfyConfig {
-    /// ntfy server URL.
-    pub server_url: String,
-    /// Topic to subscribe/publish to.
-    pub topic: String,
-    /// Env var name holding the auth token (optional for public topics).
-    pub token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: "https://ntfy.sh".to_string(),
-            topic: String::new(),
-            token_env: "NTFY_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

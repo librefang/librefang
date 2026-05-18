@@ -522,19 +522,18 @@ pub(super) fn generate_identity_files(
         }
     }
 
-    // TOOLS.md is auto-generated config — always rewrite so named workspace paths stay current
-    match OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(identity_dir.join("TOOLS.md"))
-    {
-        Ok(mut f) => {
-            let _ = f.write_all(tools_content.as_bytes());
-        }
-        Err(e) => {
-            tracing::warn!("Failed to write TOOLS.md for {}: {e}", workspace.display());
-        }
+    // TOOLS.md is auto-generated config — always rewrite so named workspace
+    // paths stay current. Write-then-rename atomically: the previous
+    // `truncate(true)` + swallowed `write_all` left an empty or half-written
+    // TOOLS.md on any partial-write failure, so the next agent boot rendered
+    // a broken prompt with no trace (#5137).
+    let tools_path = identity_dir.join("TOOLS.md");
+    if let Err(e) = super::cron_script::atomic_write_toml(&tools_path, &tools_content) {
+        tracing::error!(
+            path = %tools_path.display(),
+            error = %e,
+            "Failed to write TOOLS.md (atomic write); agent prompt may be stale"
+        );
     }
 
     // Write HEARTBEAT.md for autonomous agents

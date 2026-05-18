@@ -1128,7 +1128,9 @@ mod tests {
         );
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("deserialize") || msg.contains("default_model") || msg.contains("invalid type"),
+            msg.contains("deserialize")
+                || msg.contains("default_model")
+                || msg.contains("invalid type"),
             "error must name the offending field or describe the mismatch; got: {msg}"
         );
     }

@@ -228,6 +228,15 @@ jobs:
         # that still carry legacy shapes are listed in the script's
         # LEGACY_FILES allowlist with their cleanup follow-ups.
         run: bash scripts/check-error-shape.sh
+      - name: Sidecar-first channel policy (issue #5141 series)
+        # Authoritative gate: rejects in-process channel adapters not on
+        # crates/librefang-channels/src/channels-allowlist.txt. Runs on
+        # EVERY quality-job PR, independent of the full_run/selective
+        # split below (a focused "add one adapter" PR takes the
+        # selective branch and would otherwise skip `cargo xtask ci`).
+        # Build-free native scan; xtask is already compiled by the fmt
+        # step above.
+        run: cargo xtask channel-policy
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy

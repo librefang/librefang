@@ -1,0 +1,3 @@
+# A sidecar adapter only needs the LibreFang SDK (zero runtime deps
+# itself). Add your platform's client library below.
+librefang-sdk
