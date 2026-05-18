@@ -38,10 +38,30 @@ fn run_step(name: &str, cmd: &mut Command) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Sidecar-first policy: every `impl ChannelAdapter` under
+/// `cargo xtask channel-policy` — standalone, build-free entrypoint
+/// for the sidecar-first gate, so CI can run it on EVERY PR (the
+/// `quality` job's full `cargo xtask ci` only runs on a full_run).
+#[derive(Parser, Debug)]
+pub struct ChannelPolicyArgs {}
+
+pub fn run_channel_policy(_args: ChannelPolicyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    println!("=== channel policy ===");
+    let start = Instant::now();
+    check_channel_policy(&root)?;
+    println!("  Passed ({:.1}s)", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// Sidecar-first policy: every channel adapter under
 /// crates/librefang-channels/src/ must be grandfathered in
-/// channels-allowlist.txt. Mirrors the pre-commit hook tree-wide so an
-/// unset `core.hooksPath` can't bypass the gate.
+/// channels-allowlist.txt. Mirrors the pre-commit hook tree-wide.
+///
+/// Needle is `ChannelAdapter for` (not `impl ChannelAdapter`) so
+/// `impl<T> ChannelAdapter for …` and odd whitespace are still
+/// caught. Known, accepted limitation: a macro-generated impl, or a
+/// new adapter `impl` added *inside* an already-allowlisted file, is
+/// not detected — this is a policy ratchet, not a security boundary.
 fn check_channel_policy(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let chan_src = root.join("crates/librefang-channels/src");
     let allowlist_path = chan_src.join("channels-allowlist.txt");
@@ -56,7 +76,7 @@ fn check_channel_policy(root: &std::path::Path) -> Result<(), Box<dyn std::error
     let mut check = |base: &str, file: &std::path::Path, rel: String| {
         if !allow.contains(base) {
             let content = std::fs::read_to_string(file).unwrap_or_default();
-            if content.contains("impl ChannelAdapter") {
+            if content.contains("ChannelAdapter for") {
                 violations.push(rel);
             }
         }
@@ -69,11 +89,19 @@ fn check_channel_policy(root: &std::path::Path) -> Result<(), Box<dyn std::error
                 check(base, &path, rel);
             }
         } else if path.is_dir() {
-            let modrs = path.join("mod.rs");
-            if modrs.exists() {
-                if let Some(base) = path.file_name().and_then(|s| s.to_str()) {
-                    let rel = format!("crates/librefang-channels/src/{base}/mod.rs");
-                    check(base, &modrs, rel);
+            // Scan every .rs one level under src/<name>/, keyed by the
+            // directory name — not just mod.rs, so an adapter split
+            // into src/<name>/adapter.rs is still caught.
+            if let Some(base) = path.file_name().and_then(|s| s.to_str()).map(String::from) {
+                if let Ok(sub) = std::fs::read_dir(&path) {
+                    for e in sub {
+                        let p = e?.path();
+                        if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                            let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("mod.rs");
+                            let rel = format!("crates/librefang-channels/src/{base}/{fname}");
+                            check(&base, &p, rel);
+                        }
+                    }
                 }
             }
         }
@@ -90,8 +118,8 @@ fn check_channel_policy(root: &std::path::Path) -> Result<(), Box<dyn std::error
         }
         msg.push_str(
             "New channels must be sidecar adapters. Grandfathering an \
-             in-process adapter requires a maintainer decision: add its \
-             basename to \
+             in-process adapter requires explicit maintainer approval: \
+             add its basename to \
              crates/librefang-channels/src/channels-allowlist.txt.",
         );
         return Err(msg.into());
@@ -185,11 +213,13 @@ mod tests {
     }
 
     fn make_tree(allowlist: &str) -> TmpTree {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("lf-chanpol-{}-{nanos}", std::process::id()));
+        // A process-wide atomic counter guarantees uniqueness under
+        // parallel `cargo test` — wall-clock nanos alone can collide
+        // across threads and let one test's files contaminate another.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("lf-chanpol-{}-{seq}", std::process::id()));
         let src = root.join("crates/librefang-channels/src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("channels-allowlist.txt"), allowlist).unwrap();
@@ -231,5 +261,46 @@ mod tests {
         fs::write(sub.join("mod.rs"), "impl ChannelAdapter for S {}").unwrap();
         let err = check_channel_policy(&t.0).unwrap_err().to_string();
         assert!(err.contains("sneaky/mod.rs"), "got: {err}");
+    }
+
+    #[test]
+    fn subdir_non_mod_adapter_is_rejected() {
+        // src/<name>/adapter.rs (not mod.rs) must also be caught.
+        let t = make_tree("ok\n");
+        let sub = src(&t).join("sneaky");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("mod.rs"), "mod adapter;\n").unwrap();
+        fs::write(sub.join("adapter.rs"), "impl ChannelAdapter for S {}").unwrap();
+        let err = check_channel_policy(&t.0).unwrap_err().to_string();
+        assert!(err.contains("sneaky/adapter.rs"), "got: {err}");
+    }
+
+    #[test]
+    fn generic_impl_is_caught() {
+        // `impl<T> ChannelAdapter for X` has no literal
+        // `impl ChannelAdapter`; the `ChannelAdapter for` needle still
+        // catches it.
+        let t = make_tree("ok\n");
+        fs::write(
+            src(&t).join("gen.rs"),
+            "impl<T: Send> ChannelAdapter for Wrap<T> {}",
+        )
+        .unwrap();
+        let err = check_channel_policy(&t.0).unwrap_err().to_string();
+        assert!(err.contains("gen.rs"), "got: {err}");
+    }
+
+    #[test]
+    fn real_repo_tree_is_green() {
+        // Guards against allowlist drift: the committed allowlist must
+        // cover every in-process adapter in the actual tree. Fails if
+        // someone lands a new adapter (or deletes one) without updating
+        // channels-allowlist.txt. CARGO_MANIFEST_DIR == <repo>/xtask.
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        check_channel_policy(&repo_root)
+            .expect("committed allowlist must cover the real channel tree");
     }
 }

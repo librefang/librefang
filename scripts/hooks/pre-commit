@@ -115,43 +115,47 @@ if git diff --cached --name-only | grep -qx "openapi.json"; then
     fi
 fi
 
-# 5. Sidecar-first policy: block NEW in-process channel adapters.
-# A new in-process channel needs a new module under
-# crates/librefang-channels/src/ that `impl ChannelAdapter`. Such a
-# file is rejected unless its basename is grandfathered in
-# channels-allowlist.txt (which only ever shrinks). New channels must
-# be sidecar adapters. `cargo xtask ci` runs the same check tree-wide
-# so an unset core.hooksPath can't bypass it.
+# 5. Sidecar-first policy: block in-process channel adapters not on
+# the allowlist. Checks ADDED *and MODIFIED* staged files under
+# crates/librefang-channels/src/ — so a stub file + a follow-up commit
+# that adds the impl can't slip past the added-only window. New
+# channels must be sidecar adapters. This hook is fast feedback only;
+# `cargo xtask channel-policy` runs the same check tree-wide in CI on
+# every PR and is the authoritative gate (an unset core.hooksPath or
+# --no-verify can't bypass that). Known, accepted limitation: a
+# macro-generated impl, or a new adapter impl added inside an
+# already-allowlisted file, is not detected — this is a policy
+# ratchet, not a security boundary.
 ALLOWLIST="crates/librefang-channels/src/channels-allowlist.txt"
 if [ -f "$ALLOWLIST" ]; then
-    NEW_FILES=$(git diff --cached --name-only --diff-filter=A -- \
+    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- \
         'crates/librefang-channels/src/*.rs' \
-        'crates/librefang-channels/src/*/mod.rs' 2>/dev/null || true)
+        'crates/librefang-channels/src/*/*.rs' 2>/dev/null || true)
     VIOLATIONS=""
-    for f in $NEW_FILES; do
+    for f in $STAGED_FILES; do
         case "$f" in
-            crates/librefang-channels/src/*/mod.rs)
+            crates/librefang-channels/src/*/*.rs)
                 base=$(basename "$(dirname "$f")") ;;
             crates/librefang-channels/src/*.rs)
                 base=$(basename "$f" .rs) ;;
             *) continue ;;
         esac
-        if git show ":$f" 2>/dev/null | grep -q 'impl ChannelAdapter'; then
+        if git show ":$f" 2>/dev/null | grep -q 'ChannelAdapter for'; then
             if ! grep -qx "$base" "$ALLOWLIST"; then
                 VIOLATIONS="$VIOLATIONS $f"
             fi
         fi
     done
     if [ -n "$VIOLATIONS" ]; then
-        echo "Error: new in-process channel adapter(s) are not allowed:" >&2
+        echo "Error: in-process channel adapter(s) not allowed:" >&2
         for v in $VIOLATIONS; do echo "  - $v" >&2; done
         echo "" >&2
         echo "LibreFang is sidecar-first. Ship a new channel as an" >&2
         echo "out-of-process sidecar adapter (Python or any language):" >&2
         echo "  examples/sidecar-channel-python/ + the librefang.sidecar SDK" >&2
-        echo "Grandfathering an in-process adapter is a maintainer" >&2
-        echo "decision: add the basename to $ALLOWLIST in a separate," >&2
-        echo "reviewed commit (it requires an RFC)." >&2
+        echo "Grandfathering an in-process adapter needs explicit" >&2
+        echo "maintainer approval: add the basename to $ALLOWLIST in a" >&2
+        echo "separate, reviewed commit." >&2
         exit 1
     fi
 
