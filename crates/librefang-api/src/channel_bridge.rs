@@ -1680,7 +1680,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .compact_agent_session(agent_id)
+            .compact_agent_session(agent_id, true)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1725,7 +1725,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
         self.kernel
-            .compact_agent_session_with_id(agent_id, Some(sid))
+            .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
             .map_err(|e| format!("{e}"))
     }

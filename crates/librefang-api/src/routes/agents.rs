@@ -2230,6 +2230,22 @@ pub async fn get_agent_session(
             }
 
             let messages = built_messages;
+
+            // Expose the LLM-generated compaction summary only for the
+            // canonical session. A pinned ?sessionId= that is not canonical
+            // has no associated summary — return null rather than an error
+            // so the dashboard banner simply stays hidden.
+            let compacted_summary: Option<String> = if target_session_id == entry.session_id {
+                state
+                    .kernel
+                    .memory_substrate()
+                    .canonical_context(agent_id, None, Some(0))
+                    .ok()
+                    .and_then(|(summary, _)| summary)
+            } else {
+                None
+            };
+
             // #3511: tag session_id (and agent_id) so the access-log
             // middleware can emit them as structured fields.
             crate::extensions::with_session_id(
@@ -2245,6 +2261,7 @@ pub async fn get_agent_session(
                             "context_window_tokens": session.context_window_tokens,
                             "label": session.label,
                             "messages": messages,
+                            "compacted_summary": compacted_summary,
                         })),
                     ),
                 ),
@@ -2266,6 +2283,17 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
+            // For the canonical session (no pinned session_id override), expose
+            // any LLM-generated compaction summary even when the session row
+            // itself is not yet materialised (e.g. agent just spawned but
+            // store_llm_summary was called directly, as in tests).
+            let compacted_summary: Option<String> = state
+                .kernel
+                .memory_substrate()
+                .canonical_context(agent_id, None, Some(0))
+                .ok()
+                .and_then(|(summary, _)| summary);
+
             // #3511: tag both identifiers even for the empty-session case.
             crate::extensions::with_session_id(
                 entry.session_id,
@@ -2279,6 +2307,7 @@ pub async fn get_agent_session(
                             "message_count": 0,
                             "context_window_tokens": 0,
                             "messages": [],
+                            "compacted_summary": compacted_summary,
                         })),
                     ),
                 ),
@@ -3618,7 +3647,7 @@ pub async fn compact_session(
             )
         }
     };
-    match state.kernel.compact_agent_session(agent_id).await {
+    match state.kernel.compact_agent_session(agent_id, true).await {
         Ok(msg) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": msg})),

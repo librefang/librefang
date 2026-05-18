@@ -2538,7 +2538,7 @@ impl LibreFangKernel {
             if needs_compact && !loop_opts.is_fork {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
                 match kernel_clone
-                    .compact_agent_session_with_id(agent_id, Some(session.id))
+                    .compact_agent_session_with_id(agent_id, Some(session.id), false)
                     .await
                 {
                     Ok(msg) => {
@@ -2876,7 +2876,7 @@ impl LibreFangKernel {
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
                                 if let Err(e) =
-                                    kc.compact_agent_session_with_id(agent_id, Some(sid)).await
+                                    kc.compact_agent_session_with_id(agent_id, Some(sid), false).await
                                 {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
                                 }

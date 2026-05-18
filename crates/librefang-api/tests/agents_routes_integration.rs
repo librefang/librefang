@@ -1195,3 +1195,121 @@ async fn test_incognito_defaults_to_false_when_omitted() {
 // the `LoopOptions::incognito` guard at `finalize_successful_end_turn`
 // end-to-end against a `NormalDriver` canned response, which is the
 // minimum needed to actually verify the persistence-skip semantics.
+
+// ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session — compacted_summary field (#5202)
+// ---------------------------------------------------------------------------
+
+/// The `/session` endpoint must include a `compacted_summary` field. When no
+/// compaction has happened the field must be `null` (not absent — the client
+/// side uses a `null` check to hide the banner, not an undefined check).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_returns_null_compacted_summary_when_none() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "no-compact-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/session")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert!(
+        body.get("compacted_summary").is_some(),
+        "compacted_summary key must be present in response, got: {body:?}"
+    );
+    assert!(
+        body["compacted_summary"].is_null(),
+        "compacted_summary must be null before any compaction: {body:?}"
+    );
+}
+
+/// After a compaction the `/session` endpoint for the canonical session must
+/// return the summary text in `compacted_summary`. Uses `store_llm_summary`
+/// directly to isolate the endpoint behaviour from the compactor logic.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_returns_compacted_summary_after_force_compact() {
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "compact-summary-agent");
+
+    let kept: Vec<Message> = vec![
+        Message { role: Role::User, content: MessageContent::Text("u".into()), pinned: false, timestamp: None },
+        Message { role: Role::Assistant, content: MessageContent::Text("a".into()), pinned: false, timestamp: None },
+    ];
+
+    // Store a summary directly, as compact_agent_session_with_id would.
+    h.state
+        .kernel
+        .memory_substrate()
+        .store_llm_summary(id, "A test compaction summary.", kept)
+        .expect("store_llm_summary");
+
+    // The canonical session endpoint must surface the summary.
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/session")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert!(
+        !body["compacted_summary"].is_null(),
+        "compacted_summary must be non-null after compaction: {body:?}"
+    );
+    let summary = body["compacted_summary"].as_str().expect("compacted_summary must be a string");
+    assert_eq!(summary, "A test compaction summary.", "got: {summary}");
+}
+
+/// For a pinned ?session_id= that is NOT the canonical session, the
+/// `compacted_summary` field must be null even if the canonical session has a
+/// summary. The channel/per-session context doesn't share the canonical store.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
+    use librefang_memory::session::Session;
+    use librefang_types::agent::SessionId;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "non-canonical-summary-agent");
+
+    let messages: Vec<Message> = vec![
+        Message { role: Role::User, content: MessageContent::Text("u".into()), pinned: false, timestamp: None },
+        Message { role: Role::Assistant, content: MessageContent::Text("a".into()), pinned: false, timestamp: None },
+    ];
+    h.state
+        .kernel
+        .memory_substrate()
+        .store_llm_summary(id, "A test summary.", messages.clone())
+        .expect("store_llm_summary");
+
+    // Create a side session (non-canonical) and save it.
+    let side_sid = SessionId::for_channel(id, "test:side-session");
+    let side_session = Session {
+        id: side_sid,
+        agent_id: id,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&side_session)
+        .expect("save side session");
+
+    // Pinned to side session — should return null summary.
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/session?session_id={}", side_sid.0)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert!(
+        body["compacted_summary"].is_null(),
+        "non-canonical pinned session must have null compacted_summary: {body:?}"
+    );
+}

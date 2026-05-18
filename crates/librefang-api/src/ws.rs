@@ -1396,7 +1396,7 @@ async fn handle_text_message(
 
 /// Handle a WS command and return the response JSON.
 async fn handle_command(
-    _sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
+    sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
     agent_id: AgentId,
     cmd: &str,
@@ -1448,14 +1448,41 @@ async fn handle_command(
                 serde_json::json!({"type": "error", "content": format!("Reboot failed: {e}")})
             }
         },
-        "compact" => match state.kernel.compact_agent_session(agent_id).await {
-            Ok(msg) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
-            }
-            Err(e) => {
-                serde_json::json!({"type": "error", "content": format!("Compaction failed: {e}")})
-            }
-        },
+        "compact" => {
+            let kernel = Arc::clone(&state.kernel);
+            let sender_task = Arc::clone(sender);
+            tokio::spawn(async move {
+                match kernel.compact_agent_session(agent_id, true).await {
+                    Ok(msg) => {
+                        let _ = send_json(
+                            &sender_task,
+                            &serde_json::json!({
+                                "type": "compaction:complete",
+                                "command": "compact",
+                                "message": msg,
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_json(
+                            &sender_task,
+                            &serde_json::json!({
+                                "type": "compaction:error",
+                                "command": "compact",
+                                "content": format!("Compaction failed: {e}"),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+            });
+            serde_json::json!({
+                "type": "compaction:started",
+                "command": "compact",
+                "message": "Compaction started.",
+            })
+        }
         "stop" => match state.kernel.stop_agent_run(agent_id) {
             Ok(true) => {
                 serde_json::json!({"type": "command_result", "command": cmd, "message": "Run cancelled."})

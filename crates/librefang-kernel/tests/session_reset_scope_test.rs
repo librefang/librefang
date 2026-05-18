@@ -491,8 +491,10 @@ async fn compact_with_id_targets_the_requested_session() {
     save_session_with_jsonl(&kernel, agent_id, dashboard_sid, 2);
     save_session_with_jsonl(&kernel, agent_id, telegram_sid, 7);
 
+    // force=false so the below-threshold sessions produce the "No compaction
+    // needed (N messages, ...)" message that proves which session was loaded.
     let dash_report = kernel
-        .compact_agent_session_with_id(agent_id, Some(dashboard_sid))
+        .compact_agent_session_with_id(agent_id, Some(dashboard_sid), false)
         .await
         .expect("compact_agent_session_with_id(dashboard) succeeds");
     assert!(
@@ -502,12 +504,89 @@ async fn compact_with_id_targets_the_requested_session() {
     );
 
     let tg_report = kernel
-        .compact_agent_session_with_id(agent_id, Some(telegram_sid))
+        .compact_agent_session_with_id(agent_id, Some(telegram_sid), false)
         .await
         .expect("compact_agent_session_with_id(telegram) succeeds");
     assert!(
         tg_report.contains("14 messages"),
         "compact must have loaded the telegram session (14 = 7 turns × 2): \
          {tg_report}"
+    );
+}
+
+/// `force = true` bypasses the message-count gate: a session below the default
+/// threshold (30 messages) is still compacted when the caller explicitly
+/// requests it. This is the user-initiated `/compact` path.
+#[tokio::test(flavor = "multi_thread")]
+async fn force_compact_bypasses_threshold() {
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+        })
+        .build();
+
+    let agent_id = spawn_test_agent(&kernel, "force-compact-agent");
+    let session_id = kernel.agent_registry().get(agent_id).unwrap().session_id;
+
+    // 3 messages — well below the default threshold of 30.
+    save_session_with_jsonl(&kernel, agent_id, session_id, 1);
+    // Add an extra message so there are 3 total (2 from 1 turn + 1 more).
+    let session = kernel
+        .memory_substrate()
+        .get_session(session_id)
+        .expect("get_session ok")
+        .expect("session exists");
+    assert!(session.messages.len() < 30, "test requires a sub-threshold session");
+
+    // force = false → should no-op
+    let no_op = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id), false)
+        .await
+        .expect("force=false should not error");
+    assert!(
+        no_op.contains("No compaction needed"),
+        "force=false below threshold must return no-op message: {no_op}"
+    );
+
+    // force = true → should proceed (LLM driver will use stage-3 fallback on
+    // a test model; we check that the result does NOT say "No compaction needed")
+    let forced = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id), true)
+        .await
+        .expect("force=true should not error");
+    assert!(
+        !forced.contains("No compaction needed"),
+        "force=true below threshold must proceed past the gate: {forced}"
+    );
+}
+
+/// `force = false` on the auto-compaction path still no-ops when the session
+/// is below the message threshold. Regression guard for the gate change.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_compact_noops_below_threshold() {
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+        })
+        .build();
+
+    let agent_id = spawn_test_agent(&kernel, "auto-compact-noop-agent");
+    let session_id = kernel.agent_registry().get(agent_id).unwrap().session_id;
+
+    // 2 turns = 4 messages — below the 30-message default threshold.
+    save_session_with_jsonl(&kernel, agent_id, session_id, 2);
+
+    let report = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id), false)
+        .await
+        .expect("compact_agent_session_with_id succeeds");
+
+    assert!(
+        report.contains("No compaction needed"),
+        "auto path (force=false) below threshold must no-op: {report}"
     );
 }
