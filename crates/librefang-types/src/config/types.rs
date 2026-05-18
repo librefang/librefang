@@ -2115,20 +2115,9 @@ pub enum ResponseFormat {
     },
 }
 
-/// Configuration for a sidecar channel adapter (external process-based).
-///
-/// Sidecar adapters allow external processes written in any language to act as
-/// channel adapters. Communication uses newline-delimited JSON over stdin/stdout.
-///
-/// Configure in config.toml:
-/// ```toml
-/// [[sidecar_channels]]
-/// name = "my-telegram"
-/// command = "python3"
-/// args = ["adapters/telegram_adapter.py"]
-/// env = { TELEGRAM_BOT_TOKEN = "xxx" }
-/// ```
 /// Backpressure policy when the bounded inbound message buffer is full.
+///
+/// Selected via [`SidecarChannelConfig::overflow`].
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -2149,6 +2138,19 @@ pub enum SidecarOverflowPolicy {
     DropNewest,
 }
 
+/// Configuration for a sidecar channel adapter (external process-based).
+///
+/// Sidecar adapters allow external processes written in any language to act as
+/// channel adapters. Communication uses newline-delimited JSON over stdin/stdout.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [[sidecar_channels]]
+/// name = "my-telegram"
+/// command = "python3"
+/// args = ["adapters/telegram_adapter.py"]
+/// env = { TELEGRAM_BOT_TOKEN = "xxx" }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.

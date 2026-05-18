@@ -11704,6 +11704,7 @@
       "type": "object"
     },
     "SidecarChannelConfig": {
+      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"adapters/telegram_adapter.py\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
       "properties": {
         "args": {
           "default": [],
@@ -11808,7 +11809,7 @@
       "type": "object"
     },
     "SidecarOverflowPolicy": {
-      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"adapters/telegram_adapter.py\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ``` Backpressure policy when the bounded inbound message buffer is full.",
+      "description": "Backpressure policy when the bounded inbound message buffer is full.\n\nSelected via [`SidecarChannelConfig::overflow`].",
       "oneOf": [
         {
           "description": "Apply backpressure: the reader awaits buffer space (default). Correct for chat — dropping a user message is worse than slowing the producer.",

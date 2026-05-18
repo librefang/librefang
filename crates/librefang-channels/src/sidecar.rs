@@ -267,6 +267,14 @@ async fn write_command(
 
 /// Extract the lowercased host from a URL string, stripping scheme,
 /// userinfo and port. Returns `None` when there is no `://`.
+///
+/// IPv6 literal hosts (`https://[::1]:8443/`) are not parsed correctly
+/// — the naive `:` split truncates at the first colon. The only
+/// consumer is `fetch_headers_for`, which exact-matches against
+/// adapter-declared `header_rules`; a mangled host simply fails to
+/// match, so the failure mode is fail-closed (no auth header emitted),
+/// never a credential leak. IPv6 hosts in `header_rules` are
+/// unsupported, not unsafe.
 fn url_host(url: &str) -> Option<String> {
     let after = url.split("://").nth(1)?;
     let authority = after.split('/').next()?;
@@ -738,6 +746,11 @@ pub struct SidecarAdapter {
     caps: Arc<RwLock<Caps>>,
     /// `account_id` from `ready` — set once, returned as `&str` by
     /// `account_id()` (a sync `&str` return can't borrow a lock guard).
+    /// `OnceLock`: captured from the first `ready` only. A `ready` after
+    /// a supervised restart cannot change it (the `set` is a no-op once
+    /// initialized). This is intentional — `account_id` is stable
+    /// adapter identity; a restarted child reporting a different id
+    /// would indicate a misconfigured adapter, not a value to adopt.
     account_id_cell: Arc<OnceLock<Option<String>>>,
     /// Sender half feeding `typing_events()`. The reader pushes inbound
     /// `Typing` events here best-effort.

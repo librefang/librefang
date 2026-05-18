@@ -248,7 +248,7 @@ debounce_ms = 500
 # restart_reset_after_secs = 60         # stable uptime resets the counter
 # ready_timeout_secs = 30               # max wait for the adapter's `ready`
 # shutdown_grace_secs = 5               # clean-exit grace before SIGKILL
-# message_buffer = 256                  # bounded inbound buffer (backpressure)
+# message_buffer = 256                  # bounded inbound buffer (backpressure); 0 is clamped to 1
 # overflow = "block"                    # or "drop_newest" (shed load)
 
 # ── MCP Servers (external tool integration) ──────────────────
