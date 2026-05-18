@@ -1,0 +1,7 @@
+{
+  "method": "stream_delta",
+  "params": {
+    "stream_id": "s1",
+    "text": "Hel"
+  }
+}
