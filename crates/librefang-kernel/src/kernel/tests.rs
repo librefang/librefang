@@ -8748,6 +8748,246 @@ async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
     kernel.shutdown();
 }
 
+/// On boot the kernel advances the canonical session pointer when a more-
+/// recently-updated unlabeled session exists with more messages than the
+/// current canonical.  This covers the restart-context-loss path from
+/// issue #5198: after an unclean shutdown the canonical pointer may point at
+/// a stale / empty session while the conversation history lives in a session
+/// that was written last but never promoted.
+#[test]
+fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-canonical-recovery-5198");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // --- First kernel instance: register agent + seed sessions manually ---
+    let kernel1 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("first kernel should boot");
+
+    let agent_id = AgentId::new();
+    let stale_session_id = SessionId::new();
+
+    // Register the agent with a stale canonical pointer (0 messages).
+    let entry = librefang_types::agent::AgentEntry {
+        id: agent_id,
+        name: format!("recovery-agent-{}", agent_id),
+        manifest: librefang_types::agent::AgentManifest {
+            name: format!("recovery-agent-{}", agent_id),
+            description: "test".into(),
+            author: "test".into(),
+            module: "test".into(),
+            ..Default::default()
+        },
+        state: librefang_types::agent::AgentState::Running,
+        mode: librefang_types::agent::AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: stale_session_id,
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel1
+        .agents
+        .registry
+        .register(entry.clone())
+        .expect("register agent");
+    kernel1
+        .memory
+        .substrate
+        .save_agent(&entry)
+        .expect("persist agent");
+
+    // Save the stale (empty) session row — gives it an updated_at in the past.
+    let stale_session = librefang_memory::session::Session {
+        id: stale_session_id,
+        agent_id,
+        messages: vec![],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&stale_session)
+        .expect("save stale session");
+
+    // Give a tiny wall-clock gap so updated_at columns differ.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create a second session (the active one after the conversation) with
+    // messages — this simulates what happened before the crash.
+    let active_session_id = SessionId::new();
+    let active_session = librefang_memory::session::Session {
+        id: active_session_id,
+        agent_id,
+        messages: vec![
+            librefang_types::message::Message::user("hello"),
+            librefang_types::message::Message::assistant("world"),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&active_session)
+        .expect("save active session");
+
+    // Shut down first kernel — canonical pointer still points at stale_session_id.
+    kernel1.shutdown();
+
+    // Boot a second kernel against the same data directory — this triggers
+    // the canonical recovery pass.
+    let kernel2 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("second kernel should boot");
+
+    // After boot, the canonical pointer must have been advanced to active_session_id.
+    let restored = kernel2
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must survive boot");
+    assert_eq!(
+        restored.session_id, active_session_id,
+        "boot must advance canonical pointer to the most-recently-active session \
+         (issue #5198): expected {active_session_id} but got {}",
+        restored.session_id
+    );
+
+    // The DB must also be updated so subsequent boots agree.
+    let loaded = kernel2
+        .memory
+        .substrate
+        .load_agent(agent_id)
+        .expect("load_agent must not error")
+        .expect("agent must still exist in DB");
+    assert_eq!(
+        loaded.session_id, active_session_id,
+        "persisted agent entry must carry the advanced session pointer after boot"
+    );
+
+    kernel2.shutdown();
+}
+
+// Regression test for #5201: when a session is over the token threshold but
+// under threshold_messages, the inner gate in compact_agent_session_with_id
+// must NOT return "No compaction needed" — it must proceed to the compactor.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_runtime::compactor::{estimate_token_count, CompactionConfig};
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "compact-token-gate-test".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let entry = kernel.agents.registry.get(agent_id).unwrap();
+    let session_id = entry.session_id;
+    drop(entry);
+
+    // Build a session with fewer messages than threshold_messages (default 30)
+    // but enough token volume to exceed token_threshold_ratio × context_window
+    // (default 0.7 × 200_000 = 140_000 tokens).
+    // Each ~60K-char ASCII message estimates to ~15K tokens (chars/4).
+    // 10 such messages → ~150K tokens, which exceeds 140K.
+    let big_chunk = "word ".repeat(12_000); // ~60K chars ≈ 15K tokens
+    let messages: Vec<Message> = (0..10).map(|_| Message::user(big_chunk.clone())).collect();
+
+    // Sanity: message count is below the default threshold (30).
+    assert!(
+        messages.len() < CompactionConfig::default().threshold,
+        "test invariant: message count must be below threshold_messages"
+    );
+
+    // Sanity: token estimate exceeds the default token threshold.
+    let estimated = estimate_token_count(&messages, None, None);
+    let token_threshold = (CompactionConfig::default().context_window_tokens as f64
+        * CompactionConfig::default().token_threshold_ratio) as usize;
+    assert!(
+        estimated > token_threshold,
+        "test invariant: estimated tokens ({estimated}) must exceed token threshold ({token_threshold})"
+    );
+
+    // Persist the fat session so compact_agent_session_with_id can load it.
+    let session = MemSession {
+        id: session_id,
+        agent_id,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory
+        .substrate
+        .save_session(&session)
+        .expect("save_session should succeed");
+
+    // Call the function under test.  Without the fix it returns
+    // Ok("No compaction needed (10 messages, threshold 30)"); with the fix
+    // it proceeds past the gate and either compacts or errors at the LLM
+    // step (no provider configured in test).  Either way the result must
+    // not be the early-return sentinel.
+    let result = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id))
+        .await;
+
+    match &result {
+        Ok(msg) => {
+            assert!(
+                !msg.starts_with("No compaction needed"),
+                "gate must not short-circuit on token-only trigger; got: {msg}"
+            );
+        }
+        Err(_) => {
+            // An error from the LLM driver (no provider) is the expected
+            // outcome once the gate passes — this is correct behaviour.
+        }
+    }
+
+    kernel.shutdown();
+}
+
 /// Regression: `context_report` must resolve the context window from the
 /// model catalog rather than falling back to the 200K hardcoded placeholder
 /// (#5200). An agent on a 1M-window model must report a 1M denominator, not
@@ -8852,6 +9092,151 @@ fn test_context_report_honours_manifest_context_window_override() {
         report.context_window, 262_144,
         "manifest model.context_window override must be used as the denominator"
     );
+
+    kernel.shutdown();
+}
+
+/// #5137: `suspend_agent` / `resume_agent` previously discarded the
+/// `set_state` `Result` with `let _ =`, so the API could report success
+/// while the in-memory `AgentState` never changed — yet
+/// `persist_agent_enabled` still flipped the on-disk `enabled` flag,
+/// leaving state and disk in disagreement. With the fix the call
+/// propagates; on the happy path it must still succeed AND the in-memory
+/// state must actually be the new value (proving the write was observed,
+/// not silently dropped).
+#[test]
+fn suspend_resume_actually_transition_in_memory_state() {
+    use librefang_types::agent::AgentState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-resume-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "suspend-resume-agent".to_string(),
+                description: "exercises suspend/resume state propagation".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed on happy path");
+    let after_suspend = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after suspend");
+    assert_eq!(
+        after_suspend.state,
+        AgentState::Suspended,
+        "in-memory state must actually be Suspended — the set_state Result \
+         is now propagated, not swallowed (#5137)"
+    );
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed on happy path");
+    let after_resume = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after resume");
+    assert_eq!(
+        after_resume.state,
+        AgentState::Running,
+        "in-memory state must actually be Running after resume (#5137)"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5137: `sync_default_model_agents` previously returned `()` and
+/// discarded the `update_model_and_provider` / `save_agent` Results, so a
+/// provider switch could half-apply with no signal. It now returns a
+/// per-agent partial-failure list. On the happy path the list must be
+/// empty AND the eligible agent must have been migrated to the new
+/// provider/model — proving the writes are observed, not swallowed, and
+/// that the new return contract is wired through the trait.
+#[test]
+fn sync_default_model_agents_reports_no_failures_and_migrates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Agent spawned with provider="default" — eligible for default-model sync.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "default-tracking-agent".to_string(),
+                description: "tracks the kernel default model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "default".to_string(),
+                    model: "default".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::HashMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "anthropic/claude-3.5-sonnet".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
+    assert!(
+        failures.is_empty(),
+        "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
+    );
+
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after sync");
+    assert_eq!(
+        entry.manifest.model.provider, "openrouter",
+        "eligible agent must be migrated to the new provider — the \
+         update_model_and_provider Result is no longer swallowed (#5137)"
+    );
+    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
 }

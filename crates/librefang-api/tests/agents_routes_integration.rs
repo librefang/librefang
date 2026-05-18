@@ -1208,11 +1208,7 @@ async fn test_agent_session_returns_null_compacted_summary_when_none() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "no-compact-agent");
 
-    let (status, body) = send(
-        h.app.clone(),
-        get(&format!("/api/agents/{id}/session")),
-    )
-    .await;
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/session"))).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
     assert!(
         body.get("compacted_summary").is_some(),
@@ -1235,8 +1231,18 @@ async fn test_agent_session_returns_compacted_summary_after_force_compact() {
     let id = spawn_named(&h.state, "compact-summary-agent");
 
     let kept: Vec<Message> = vec![
-        Message { role: Role::User, content: MessageContent::Text("u".into()), pinned: false, timestamp: None },
-        Message { role: Role::Assistant, content: MessageContent::Text("a".into()), pinned: false, timestamp: None },
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("u".into()),
+            pinned: false,
+            timestamp: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("a".into()),
+            pinned: false,
+            timestamp: None,
+        },
     ];
 
     // Store a summary directly, as compact_agent_session_with_id would.
@@ -1247,17 +1253,15 @@ async fn test_agent_session_returns_compacted_summary_after_force_compact() {
         .expect("store_llm_summary");
 
     // The canonical session endpoint must surface the summary.
-    let (status, body) = send(
-        h.app.clone(),
-        get(&format!("/api/agents/{id}/session")),
-    )
-    .await;
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/session"))).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
     assert!(
         !body["compacted_summary"].is_null(),
         "compacted_summary must be non-null after compaction: {body:?}"
     );
-    let summary = body["compacted_summary"].as_str().expect("compacted_summary must be a string");
+    let summary = body["compacted_summary"]
+        .as_str()
+        .expect("compacted_summary must be a string");
     assert_eq!(summary, "A test compaction summary.", "got: {summary}");
 }
 
@@ -1274,8 +1278,18 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
     let id = spawn_named(&h.state, "non-canonical-summary-agent");
 
     let messages: Vec<Message> = vec![
-        Message { role: Role::User, content: MessageContent::Text("u".into()), pinned: false, timestamp: None },
-        Message { role: Role::Assistant, content: MessageContent::Text("a".into()), pinned: false, timestamp: None },
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("u".into()),
+            pinned: false,
+            timestamp: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("a".into()),
+            pinned: false,
+            timestamp: None,
+        },
     ];
     h.state
         .kernel
@@ -1304,7 +1318,10 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
     // Pinned to side session — should return null summary.
     let (status, body) = send(
         h.app.clone(),
-        get(&format!("/api/agents/{id}/session?session_id={}", side_sid.0)),
+        get(&format!(
+            "/api/agents/{id}/session?session_id={}",
+            side_sid.0
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");

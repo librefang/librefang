@@ -204,6 +204,39 @@ impl LibreFangKernel {
         .await
     }
 
+    /// Like [`Self::send_message_as`] but pins the callee to a deterministic
+    /// session derived from the caller-supplied `conversation_key`. The key is
+    /// namespaced to `(target_agent, "agent_send:<key>")` via
+    /// `SessionId::for_channel`, so the same key always maps to the same
+    /// session (history preserved) and a distinct key always starts an
+    /// independent thread. The derived `SessionId` is passed as
+    /// `session_id_override`, which takes precedence over the target manifest
+    /// `session_mode`.
+    pub async fn send_message_as_with_key(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        parent_agent_id: AgentId,
+        conversation_key: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let session_id =
+            SessionId::for_channel(agent_id, &format!("agent_send:{conversation_key}"));
+        let upstream = self.any_session_interrupt_for_agent(parent_agent_id);
+        self.send_message_full_with_upstream(
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            None,
+            None,
+            Some(session_id),
+            upstream,
+            false,
+        )
+        .await
+    }
+
     /// Send a message with a per-call deep-thinking override.
     ///
     /// `thinking_override`:
@@ -707,13 +740,23 @@ impl LibreFangKernel {
             let has_content = !result.response.trim().is_empty();
             let no_tool_errors = result.iterations > 0;
             let success = has_content && no_tool_errors;
-            let _ = self.record_experiment_request(
+            if let Err(e) = self.record_experiment_request(
                 &ctx.experiment_id.to_string(),
                 &ctx.variant_id.to_string(),
                 latency_ms,
                 cost,
                 success,
-            );
+            ) {
+                // Dropping this silently undercounts the experiment arm and
+                // lets the auto-selected winner run on incomplete data.
+                tracing::error!(
+                    agent_id = %agent_id,
+                    experiment_id = %ctx.experiment_id,
+                    variant_id = %ctx.variant_id,
+                    error = %e,
+                    "Failed to record A/B experiment request metrics"
+                );
+            }
         }
 
         let mut result = result;
@@ -2832,13 +2875,24 @@ impl LibreFangKernel {
                             let has_content = !result.response.trim().is_empty();
                             let no_tool_errors = result.iterations > 0;
                             let success = has_content && no_tool_errors;
-                            let _ = kernel_clone.record_experiment_request(
+                            if let Err(e) = kernel_clone.record_experiment_request(
                                 &ctx.experiment_id.to_string(),
                                 &ctx.variant_id.to_string(),
                                 latency_ms,
                                 cost,
                                 success,
-                            );
+                            ) {
+                                // Dropping this silently undercounts the
+                                // experiment arm and lets the auto-selected
+                                // winner run on incomplete data.
+                                tracing::error!(
+                                    agent_id = %agent_id,
+                                    experiment_id = %ctx.experiment_id,
+                                    variant_id = %ctx.variant_id,
+                                    error = %e,
+                                    "Failed to record A/B experiment request metrics (streaming)"
+                                );
+                            }
                         }
                     }
 
@@ -2875,8 +2929,9 @@ impl LibreFangKernel {
                                 info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
-                                if let Err(e) =
-                                    kc.compact_agent_session_with_id(agent_id, Some(sid), false).await
+                                if let Err(e) = kc
+                                    .compact_agent_session_with_id(agent_id, Some(sid), false)
+                                    .await
                                 {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
                                 }

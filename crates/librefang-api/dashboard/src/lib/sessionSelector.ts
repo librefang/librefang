@@ -26,3 +26,24 @@ export function pickLatestSessionId(
   }
   return best?.session_id;
 }
+
+/**
+ * Derive the "active" session id for the sessions dropdown from the URL-pinned
+ * session id only.
+ *
+ * When the chat was opened with only `?agentId=` (no `?sessionId=`), the WS
+ * connection rides the server-side canonical pointer.  Until the server
+ * confirms which session was used (and the URL is pinned via `?sessionId=`),
+ * we cannot know which session is actually receiving messages.  Returning
+ * `undefined` prevents the dropdown from highlighting a session that may not
+ * be the live one — the highlight would imply messages go there, which is
+ * only true once the URL is pinned.
+ *
+ * Pass `urlSessionId` (from the router search params) directly; do NOT pass
+ * a fallback derived from the session list.
+ */
+export function deriveDropdownActiveSessionId(
+  urlSessionId: string | null | undefined,
+): string | undefined {
+  return urlSessionId ?? undefined;
+}

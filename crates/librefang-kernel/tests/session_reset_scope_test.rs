@@ -538,7 +538,10 @@ async fn force_compact_bypasses_threshold() {
         .get_session(session_id)
         .expect("get_session ok")
         .expect("session exists");
-    assert!(session.messages.len() < 30, "test requires a sub-threshold session");
+    assert!(
+        session.messages.len() < 30,
+        "test requires a sub-threshold session"
+    );
 
     // force = false → should no-op
     let no_op = kernel

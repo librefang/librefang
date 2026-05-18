@@ -94,6 +94,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflows/runs/{run_id}/resume",
             axum::routing::post(resume_workflow_run),
         )
+        .route(
+            "/workflows/runs/{run_id}/operator",
+            axum::routing::post(operator_action_workflow_run),
+        )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
             "/workflow-templates",
@@ -1629,6 +1633,197 @@ pub async fn resume_workflow_run(
             .await;
         if let Err(e) = result {
             tracing::warn!(run_id = %run_id, error = %e, "Background workflow resume failed");
+        }
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "state": "running",
+        })),
+    )
+}
+
+/// POST /api/workflows/runs/:run_id/operator — Resolve a paused operator
+/// step with an operator decision and drive the workflow forward (#5133).
+///
+/// Auth: goes through the normal auth layer (NOT on the public allowlist).
+/// The authenticated operator is the security boundary for this resolution
+/// — no resume token is required (unlike the generic `/resume` endpoint).
+///
+/// - 200 `{"run_id":..,"state":"running"}` — resolution accepted; the run
+///   resumes asynchronously (Approve/Edit/Input) or has been marked Failed
+///   (Reject).
+/// - 400 — malformed run ID / unknown action / missing required payload.
+/// - 404 — run not found.
+/// - 409 — run not paused, not an operator-step pause, or the action is
+///   not authorised at this step.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/runs/{run_id}/operator",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID")),
+    responses(
+        (status = 200, description = "Operator action accepted", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed run ID / action / payload"),
+        (status = 404, description = "Run not found"),
+        (status = 409, description = "Not an operator pause or action not authorised")
+    )
+)]
+pub async fn operator_action_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::workflow::OperatorAction;
+
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    // Flat request shape (not the `OperatorAction` enum's
+    // externally-tagged serde) so channel adapters / the dashboard can
+    // post a simple `{"action":"approve"}` or
+    // `{"action":"edit","payload":"..."}`.
+    let action_str = match req["action"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing required field: action")
+                .into_json_tuple();
+        }
+    };
+    let field_opt = req["field"].as_str().map(|s| s.to_string());
+    let payload_opt = req["payload"].as_str().map(|s| s.to_string());
+
+    // Build the typed action from the flat request shape.
+    let action = match action_str.as_str() {
+        "approve" => OperatorAction::Approve,
+        "reject" => OperatorAction::Reject,
+        "edit" => OperatorAction::Edit,
+        "freeform_input" => OperatorAction::FreeformInput,
+        "provide_input" => match field_opt.clone() {
+            Some(f) if !f.is_empty() => OperatorAction::ProvideInput { field: f },
+            _ => {
+                return ApiErrorResponse::bad_request(
+                    "action 'provide_input' requires a non-empty 'field'",
+                )
+                .into_json_tuple();
+            }
+        },
+        other => {
+            return ApiErrorResponse::bad_request(format!(
+                "unknown operator action '{other}' (expected approve/reject/edit/\
+                 provide_input/freeform_input)"
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    // Pre-validate the pause synchronously so we can return 404/409 before
+    // spawning the (async) resume. Mirrors `resume_workflow_run`'s peek.
+    let engine = state.kernel.workflow_engine();
+    if engine.inspect_operator_pause(run_id).await.is_none() {
+        // Distinguish "run unknown" from "not an operator pause" for a
+        // useful status code.
+        if engine.get_run(run_id).await.is_none() {
+            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                .into_json_tuple();
+        }
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "not_operator_pause",
+                "message": format!("Run '{run_id}' is not paused at an operator step"),
+            })),
+        );
+    }
+
+    // Reject / payload-less actions need no payload; Edit / *Input do —
+    // surface the 400 synchronously rather than after the spawn.
+    let needs_payload = matches!(
+        action,
+        OperatorAction::Edit | OperatorAction::FreeformInput | OperatorAction::ProvideInput { .. }
+    );
+    if needs_payload && payload_opt.as_deref().unwrap_or("").is_empty() {
+        return ApiErrorResponse::bad_request(format!(
+            "action '{action_str}' requires a non-empty 'payload'"
+        ))
+        .into_json_tuple();
+    }
+
+    let payload = payload_opt.clone();
+    let state_for_resolver = state.clone();
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
+        use librefang_kernel::workflow::StepAgent;
+        match agent_ref {
+            StepAgent::ById { id } => {
+                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                let inherit = entry.manifest.inherit_parent_context;
+                Some((agent_id, entry.name.clone(), inherit))
+            }
+            StepAgent::ByName { name } => {
+                let entry = state_for_resolver
+                    .kernel
+                    .agent_registry()
+                    .find_by_name(name)?;
+                let inherit = entry.manifest.inherit_parent_context;
+                Some((entry.id, entry.name.clone(), inherit))
+            }
+        }
+    };
+
+    // Drive the resolution in the background; respond 200 immediately.
+    // Reject resolves synchronously inside `resolve_operator_step` (no
+    // subsequent steps), but spawning keeps the response shape uniform
+    // with `/resume` and avoids blocking the request on a long pipeline.
+    let state_for_engine = state.clone();
+    let state_for_send = state.clone();
+    tokio::spawn(async move {
+        let result = state_for_engine
+            .kernel
+            .workflow_engine()
+            .resolve_operator_step(
+                run_id,
+                action,
+                payload,
+                agent_resolver,
+                move |agent_id: librefang_types::agent::AgentId,
+                      message: String,
+                      session_mode_override: Option<
+                    librefang_types::agent::SessionMode,
+                >| {
+                    let sc = state_for_send.clone();
+                    async move {
+                        sc.kernel
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
+                            .await
+                            .map(|r| {
+                                (
+                                    r.response,
+                                    r.total_usage.input_tokens,
+                                    r.total_usage.output_tokens,
+                                )
+                            })
+                            .map_err(|e| format!("{e}"))
+                    }
+                },
+            )
+            .await;
+        if let Err(e) = result {
+            tracing::warn!(
+                run_id = %run_id,
+                error = %e,
+                "Operator action resolution failed (or run rejected/failed)"
+            );
         }
     });
 

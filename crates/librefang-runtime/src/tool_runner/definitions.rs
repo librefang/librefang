@@ -212,7 +212,11 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string", "description": "The target agent's UUID or name" },
-                    "message": { "type": "string", "description": "The message to send to the agent" }
+                    "message": { "type": "string", "description": "The message to send to the agent" },
+                    "conversation_key": {
+                        "type": "string",
+                        "description": "Optional key to control which conversation thread is used. Provide the same key across calls to preserve history and keep a multi-turn context with the callee. Omit to use the callee's default session mode. A fresh or unique key starts a new isolated thread."
+                    }
                 },
                 "required": ["agent_id", "message"]
             }),
