@@ -1363,15 +1363,6 @@
           "default": null,
           "description": "Nostr relay configuration(s)."
         },
-        "ntfy": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_NtfyConfig"
-            }
-          ],
-          "default": null,
-          "description": "ntfy.sh pub/sub configuration(s)."
-        },
         "pumble": {
           "allOf": [
             {
@@ -5807,80 +5798,6 @@
       ],
       "type": "object"
     },
-    "NtfyConfig": {
-      "description": "ntfy.sh pub/sub channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "server_url": {
-          "default": "https://ntfy.sh",
-          "description": "ntfy server URL.",
-          "type": "string"
-        },
-        "token_env": {
-          "default": "NTFY_TOKEN",
-          "description": "Env var name holding the auth token (optional for public topics).",
-          "type": "string"
-        },
-        "topic": {
-          "default": "",
-          "description": "Topic to subscribe/publish to.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "OAuthConfig": {
       "description": "OAuth client ID overrides for PKCE flows.\n\nConfigure in config.toml: ```toml [oauth] google_client_id = \"your-google-client-id\" github_client_id = \"your-github-client-id\" ```",
       "properties": {
@@ -8155,90 +8072,6 @@
         {
           "items": {
             "$ref": "#/definitions/NostrConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_NtfyConfig": {
-      "oneOf": [
-        {
-          "description": "ntfy.sh pub/sub channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "server_url": {
-              "default": "https://ntfy.sh",
-              "description": "ntfy server URL.",
-              "type": "string"
-            },
-            "token_env": {
-              "default": "NTFY_TOKEN",
-              "description": "Env var name holding the auth token (optional for public topics).",
-              "type": "string"
-            },
-            "topic": {
-              "default": "",
-              "description": "Topic to subscribe/publish to.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/NtfyConfig"
           },
           "type": "array"
         }
@@ -14934,7 +14767,6 @@
         "mumble": null,
         "nextcloud": null,
         "nostr": null,
-        "ntfy": null,
         "pumble": null,
         "qq": null,
         "reddit": null,

@@ -374,6 +374,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
   // because the load is gated on `sessionVersion` and `sessionCache`.
   const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [compactedSummary, setCompactedSummary] = useState<string | null>(null);
+  const [isCompacting, setIsCompacting] = useState(false);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
   // by agentId so switching away from a busy agent unblocks the new one,
@@ -561,11 +563,15 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
 
     setMessages([]);
+    setCompactedSummary(null);
     const loadId = agentId;
     setAgentLoading(loadId, true);
     queryClient
       .fetchQuery(agentQueries.session(loadId, sessionId))
       .then(session => {
+        if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
+          setCompactedSummary(session.compacted_summary ?? null);
+        }
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
             // The agent-scoped session endpoint (which this page uses)
@@ -731,6 +737,37 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           const handleCmdResponse = (event: MessageEvent) => {
             try {
               const data = JSON.parse(event.data as string);
+              // Compact command uses a two-phase ack/result protocol.
+              if (cmd === "compact") {
+                if (data.type === "compaction:started") {
+                  // Ack received — reset watchdog and show inline state.
+                  if (timer) clearTimeout(timer);
+                  setIsCompacting(true);
+                  setMessages(prev => [...prev,
+                    { id: makeMessageId("sys"), role: "system" as const, content: data.message || "Compaction started…", timestamp: new Date() },
+                  ]);
+                  // Compaction can take longer than 30s — give it 5 minutes.
+                  timer = setTimeout(() => { ctrl.abort(); }, 5 * 60_000);
+                  return;
+                }
+                if (data.type === "compaction:complete" || data.type === "compaction:error") {
+                  finalize();
+                  setIsCompacting(false);
+                  const responseText = data.message || data.content || "";
+                  setMessages(prev => [...prev,
+                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
+                  ]);
+                  if (data.type === "compaction:complete" && agentId) {
+                    // Refresh session to pick up the new compacted_summary field.
+                    queryClient
+                      .fetchQuery(agentQueries.session(agentId, sessionId))
+                      .then(session => { setCompactedSummary(session.compacted_summary ?? null); })
+                      .catch(() => {/* non-fatal */});
+                  }
+                  return;
+                }
+                return;
+              }
               if (data.type === "command_result" || data.type === "error") {
                 finalize();
                 const responseText = data.message || data.content || "";
@@ -764,10 +801,10 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
             pendingCommandsRef.current.delete(ctrl);
             if (!settled) {
               // We got aborted before the response landed — either the
-              // 30s timer expired or the WS dropped. Either way the user
-              // needs a visible "command lost" hint so the silent no-op
-              // doesn't repeat.
+              // watchdog expired or the WS dropped. Ensure compacting
+              // indicator is cleared.
               settled = true;
+              if (cmd === "compact") setIsCompacting(false);
               setMessages(prev => [...prev,
                 { id: makeMessageId("sys"), role: "system" as const, content: t("chat.command_timeout"), timestamp: new Date() }
               ]);
@@ -1143,7 +1180,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -1547,6 +1584,40 @@ interface PendingAttachment {
   /** Set on `status === "ready"`; absent until the server returns. */
   fileId?: string;
   errorMessage?: string;
+}
+
+// Collapsed banner surfacing the LLM-generated compaction summary above kept
+// messages. Click-to-expand reveals the full summary text; collapsed by default
+// because it can be long and the kept messages are what the user cares about.
+function CompactionSummaryBanner({ summary, isCompacting }: { summary: string | null; isCompacting: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  if (isCompacting) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-brand/10 border border-brand/20 text-xs text-brand font-medium">
+        <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+        <span>Compacting session…</span>
+      </div>
+    );
+  }
+  if (!summary) return null;
+  return (
+    <div className="rounded-xl border border-border-subtle bg-surface-raised overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-text-dim hover:text-text transition-colors text-left"
+      >
+        <Brain className="h-3.5 w-3.5 shrink-0" />
+        <span className="flex-1">Session summary (older messages compacted)</span>
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-0 text-xs text-text-dim whitespace-pre-wrap border-t border-border-subtle">
+          {summary}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Input box - with shortcut hints
@@ -2733,7 +2804,7 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
-  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -3250,6 +3321,7 @@ export function ChatPage() {
                     {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
                   </button>
                 )}
+                <CompactionSummaryBanner summary={compactedSummary} isCompacting={isCompacting} />
                 {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
                     key={msg.id}

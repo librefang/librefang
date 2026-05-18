@@ -201,14 +201,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn stop_session_run(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<bool>;
     fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()>;
     fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()>;
-    async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String>;
+    /// Compact the agent's canonical session. `force = true` bypasses the
+    /// message/token threshold gates (user-initiated `/compact`); `force =
+    /// false` applies the normal auto-compaction guard.
+    async fn compact_agent_session(&self, agent_id: AgentId, force: bool) -> KernelResult<String>;
     /// Compact a specific session id; channel `/compact` calls this with the
     /// per-channel session so it doesn't accidentally summarise the agent's
-    /// registry-pointer session (#4868).
+    /// registry-pointer session (#4868). `force = true` bypasses threshold
+    /// gates for user-initiated compaction.
     async fn compact_agent_session_with_id(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String>;
     /// Reset an agent's session(s). See [`ResetScope`] for the agent-wide vs.
     /// per-session split (#4868). Async because it acquires the same
@@ -873,15 +878,16 @@ impl KernelApi for LibreFangKernel {
     fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::resume_agent(self, agent_id)
     }
-    async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        Self::compact_agent_session(self, agent_id).await
+    async fn compact_agent_session(&self, agent_id: AgentId, force: bool) -> KernelResult<String> {
+        Self::compact_agent_session(self, agent_id, force).await
     }
     async fn compact_agent_session_with_id(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String> {
-        Self::compact_agent_session_with_id(self, agent_id, session_id).await
+        Self::compact_agent_session_with_id(self, agent_id, session_id, force).await
     }
     async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
         Self::reset_session(self, agent_id, scope).await

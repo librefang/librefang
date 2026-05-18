@@ -58,7 +58,7 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
     "docker", "extensions", "session", "queue",
     "compaction", "registry", "context_engine", "prompt_intelligence",
     "task_board", "rate_limit", "health_check", "heartbeat",
-    "telemetry", "notification",
+    "telemetry", "notification", "background",
   ],
 };
 

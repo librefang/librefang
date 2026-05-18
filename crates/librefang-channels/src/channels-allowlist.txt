@@ -41,7 +41,6 @@ mqtt
 mumble
 nextcloud
 nostr
-ntfy
 pumble
 qq
 reddit
