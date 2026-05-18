@@ -18,7 +18,8 @@ features explicitly when depending on this crate:
   MQTT, Bluesky, Nostr, …). Used by release CI.
 - Per-adapter: `channel-telegram`, `channel-discord`,
   `channel-slack`, `channel-webhook`, etc. ntfy migrated to a
-  sidecar — see `examples/sidecar-channel-python/ntfy_adapter.py`.
+  sidecar — see `librefang.sidecar.adapters.ntfy` in the SDK
+  (`sdk/python/librefang/sidecar/adapters/ntfy.py`).
 
 See `Cargo.toml` for the full feature list.
 

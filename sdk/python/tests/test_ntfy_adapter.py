@@ -1,4 +1,4 @@
-"""Tests for examples/sidecar-channel-python/ntfy_adapter.py.
+"""Tests for librefang.sidecar.adapters.ntfy.
 
 Deterministic, no network: urllib is monkeypatched. Asserts the
 sidecar ntfy adapter preserves the behaviour of the removed in-process
@@ -7,18 +7,11 @@ Rust `librefang-channels::ntfy` adapter.
 
 import io
 import os
-import sys
-from pathlib import Path
 
 import pytest
 
-# ntfy_adapter.py lives in the repo's examples dir (outside the sdk
-# package). repo root = <repo>/sdk/python/tests/ -> parents[3].
-_REPO = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(_REPO / "examples" / "sidecar-channel-python"))
-
 os.environ.setdefault("NTFY_TOPIC", "test-topic")
-import ntfy_adapter as na  # noqa: E402
+from librefang.sidecar.adapters import ntfy as na  # noqa: E402
 
 
 def _adapter(**env):

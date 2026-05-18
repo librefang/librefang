@@ -11,7 +11,7 @@ Usage in config.toml:
     [[sidecar_channels]]
     name = "telegram"
     command = "python3"
-    args = ["examples/sidecar-channel-python/telegram_adapter.py"]
+    args = ["-m", "librefang.sidecar.adapters.telegram"]
     env = { TELEGRAM_BOT_TOKEN = "your-bot-token-here" }
 
 Environment variables:

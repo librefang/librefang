@@ -623,7 +623,7 @@ model.
    ```
 
    Start from `sdk/python/librefang/sidecar/template/` and read
-   `examples/sidecar-channel-python/ntfy_adapter.py` — the canonical
+   `sdk/python/librefang/sidecar/adapters/ntfy.py` — the canonical
    migration (a real SSE-in / HTTP-out adapter, stdlib-only).
 
 3. Register it in `~/.librefang/config.toml`:

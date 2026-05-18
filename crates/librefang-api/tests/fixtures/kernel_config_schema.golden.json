@@ -11537,7 +11537,7 @@
       "type": "object"
     },
     "SidecarChannelConfig": {
-      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"adapters/telegram_adapter.py\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
+      "description": "Configuration for a sidecar channel adapter (external process-based).\n\nSidecar adapters allow external processes written in any language to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.\n\nConfigure in config.toml: ```toml [[sidecar_channels]] name = \"my-telegram\" command = \"python3\" args = [\"-m\", \"librefang.sidecar.adapters.telegram\"] env = { TELEGRAM_BOT_TOKEN = \"xxx\" } ```",
       "properties": {
         "args": {
           "default": [],

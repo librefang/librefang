@@ -131,8 +131,9 @@ not a security boundary.
 
 ## Worked example: ntfy
 
-`examples/sidecar-channel-python/ntfy_adapter.py` is the canonical
-migration (#5224). It replaced the former in-process
+`librefang.sidecar.adapters.ntfy` (ships in the `librefang-sdk` Python
+package; source at `sdk/python/librefang/sidecar/adapters/ntfy.py`) is
+the canonical migration (#5224). It replaced the former in-process
 `librefang-channels::ntfy` adapter with behaviour preserved (SSE
 subscribe, `/command` parsing, `title`→sender, `topic` metadata,
 chunked plain-text publish, optional Bearer auth, backoff reconnect).
@@ -140,7 +141,8 @@ chunked plain-text publish, optional Bearer auth, backoff reconnect).
 the allowlist, so the gate now permanently blocks an in-process ntfy.
 This was a **breaking config change**: an existing `[channels.ntfy]`
 block is re-declared as a `[[sidecar_channels]]` running
-`ntfy_adapter.py`. The separate ntfy *push-notification provider*
+`python3 -m librefang.sidecar.adapters.ntfy`. The separate ntfy
+*push-notification provider*
 (`push_provider = "ntfy"`) is an unrelated feature and was untouched.
 
 ## Long-tail migration backlog

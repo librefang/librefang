@@ -2148,7 +2148,7 @@ pub enum SidecarOverflowPolicy {
 /// [[sidecar_channels]]
 /// name = "my-telegram"
 /// command = "python3"
-/// args = ["adapters/telegram_adapter.py"]
+/// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
