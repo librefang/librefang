@@ -84,7 +84,8 @@ use self::skill::{
     tool_skill_evolve_remove_file, tool_skill_evolve_rollback, tool_skill_evolve_update,
     tool_skill_evolve_write_file, tool_skill_read_file,
 };
-use self::spill::{resolve_spill_config, spill_or_passthrough};
+pub(crate) use self::spill::resolve_spill_config;
+use self::spill::spill_or_passthrough;
 use self::system::{tool_location_get, tool_system_time};
 use self::taint::{
     check_taint_net_fetch, check_taint_outbound_header, check_taint_outbound_text,
