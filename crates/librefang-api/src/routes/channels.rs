@@ -695,8 +695,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     },
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy migrated to an out-of-process sidecar adapter
-    // (examples/sidecar-channel-python/ntfy_adapter.py); no longer an
-    // in-process channel.
+    // (librefang.sidecar.adapters.ntfy in the SDK package); no longer
+    // an in-process channel.
     ChannelMeta {
         name: "gotify", display_name: "Gotify", icon: "GF",
         description: "Gotify WebSocket notification adapter",

@@ -152,7 +152,7 @@ if [ -f "$ALLOWLIST" ]; then
         echo "" >&2
         echo "LibreFang is sidecar-first. Ship a new channel as an" >&2
         echo "out-of-process sidecar adapter (Python or any language):" >&2
-        echo "  examples/sidecar-channel-python/ + the librefang.sidecar SDK" >&2
+        echo "  examples/sidecar-channel-python/adapter.py (template) + the librefang.sidecar SDK" >&2
         echo "Grandfathering an in-process adapter needs explicit" >&2
         echo "maintainer approval: add the basename to $ALLOWLIST in a" >&2
         echo "separate, reviewed commit." >&2

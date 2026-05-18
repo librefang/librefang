@@ -19,7 +19,7 @@ Stdlib-only (the SDK has zero runtime deps). Configure via
     [[sidecar_channels]]
     name = "ntfy"
     command = "python3"
-    args = ["examples/sidecar-channel-python/ntfy_adapter.py"]
+    args = ["-m", "librefang.sidecar.adapters.ntfy"]
     channel_type = "ntfy"
     [sidecar_channels.env]
     NTFY_TOPIC = "my-topic"
