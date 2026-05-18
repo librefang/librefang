@@ -8787,9 +8787,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     // Each ~60K-char ASCII message estimates to ~15K tokens (chars/4).
     // 10 such messages → ~150K tokens, which exceeds 140K.
     let big_chunk = "word ".repeat(12_000); // ~60K chars ≈ 15K tokens
-    let messages: Vec<Message> = (0..10)
-        .map(|_| Message::user(big_chunk.clone()))
-        .collect();
+    let messages: Vec<Message> = (0..10).map(|_| Message::user(big_chunk.clone())).collect();
 
     // Sanity: message count is below the default threshold (30).
     assert!(
