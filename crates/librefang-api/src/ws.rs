@@ -1304,9 +1304,7 @@ async fn handle_text_message(
                             // in the URL — making subsequent navigations and
                             // reloads land on the same conversation.
                             if explicit_session.is_none() {
-                                if let Some(entry) =
-                                    state.kernel.agent_registry().get(agent_id)
-                                {
+                                if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                                     resp_json["session_id"] =
                                         serde_json::json!(entry.session_id.to_string());
                                 }

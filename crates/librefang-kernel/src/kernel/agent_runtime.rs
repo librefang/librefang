@@ -300,7 +300,10 @@ impl LibreFangKernel {
         session_id_override: Option<SessionId>,
     ) -> KernelResult<String> {
         let cfg = self.config.load_full();
-        use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
+        use librefang_runtime::compactor::{
+            compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+            CompactionConfig,
+        };
 
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -326,18 +329,10 @@ impl LibreFangKernel {
 
         // #4976: merge per-agent [compaction] overrides on top of the
         // global config before deciding thresholds / summary budget.
-        let config = CompactionConfig::from_toml_with_overrides(
+        let mut config = CompactionConfig::from_toml_with_overrides(
             &cfg.compaction,
             entry.manifest.compaction.as_ref(),
         );
-
-        if !needs_compaction(&session, &config) {
-            return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
-                session.messages.len(),
-                config.threshold
-            ));
-        }
 
         // Strip provider prefix so the model name is valid for the upstream API.
         let model = librefang_runtime::agent_loop::strip_provider_prefix(
@@ -345,9 +340,13 @@ impl LibreFangKernel {
             &entry.manifest.model.provider,
         );
 
-        // Resolve the agent's actual context window from the model catalog.
-        // Filter out 0 so image/audio entries (no context window) fall back
-        // to the 200K default instead of feeding 0 into compaction math.
+        // Resolve the agent's actual context window from the model catalog
+        // BEFORE the gate so the gate's token-trigger comparison uses the
+        // real per-agent window (e.g. 128K GPT-4o, 1M Gemini) instead of
+        // the global 200K default that `CompactionConfig::from_toml_…`
+        // would otherwise hand us. Filter out 0 so image/audio entries
+        // (no context window) fall back to the 200K default instead of
+        // feeding 0 into compaction math.
         let agent_ctx_window = self
             .llm
             .model_catalog
@@ -356,6 +355,27 @@ impl LibreFangKernel {
             .map(|m| m.context_window as usize)
             .filter(|w| *w > 0)
             .unwrap_or(200_000);
+        config.context_window_tokens = agent_ctx_window;
+
+        // Match the pre-loop caller's estimator inputs in `messaging.rs`
+        // (`send_message_full` passes `Some(&manifest.model.system_prompt)`),
+        // otherwise this inner gate's estimate would skip the system prompt
+        // / tools budget and short-circuit even when the caller has already
+        // concluded compaction is warranted.
+        let estimated_tokens = estimate_token_count(
+            &session.messages,
+            Some(&entry.manifest.model.system_prompt),
+            None,
+        );
+        if !needs_compaction(&session, &config)
+            && !needs_compaction_by_tokens(estimated_tokens, &config)
+        {
+            return Ok(format!(
+                "No compaction needed ({} messages, threshold {})",
+                session.messages.len(),
+                config.threshold
+            ));
+        }
 
         // Compaction is a side task — route through the auxiliary chain when
         // configured (issue #3314) so users with `[llm.auxiliary] compression`
@@ -467,18 +487,41 @@ impl LibreFangKernel {
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins
         let tools = self.available_tools(agent_id);
-        // Use 200K default or the model's known context window
-        let context_window = if session.context_window_tokens > 0 {
-            session.context_window_tokens
-        } else {
-            200_000
-        };
+
+        // Resolve context window with the same precedence chain the agent loop uses:
+        // 1. agent.toml `model.context_window` explicit override
+        // 2. ModelCatalog lookup (provider-aware, filters out 0)
+        // 3. Persisted session value (authoritative only when catalog has no entry)
+        // 4. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
+        let context_window: usize = entry
+            .manifest
+            .model
+            .context_window
+            .filter(|v| *v > 0)
+            .map(|v| v as usize)
+            .or_else(|| {
+                self.llm
+                    .model_catalog
+                    .load()
+                    .find_model(&entry.manifest.model.model)
+                    .map(|m| m.context_window as usize)
+                    .filter(|w| *w > 0)
+            })
+            .or_else(|| {
+                let v = session.context_window_tokens as usize;
+                if v > 0 {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
 
         Ok(generate_context_report(
             &session.messages,
             Some(system_prompt),
             Some(&tools),
-            context_window as usize,
+            context_window,
         ))
     }
 
