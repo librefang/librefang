@@ -22,8 +22,9 @@ port of the audited Rust (function-by-function, not re-derived):
 * DONE — full inbound parsing: text/bot-command, photo, document,
   audio, voice, animation, video, video_note, location, sticker;
   ``from`` / ``sender_chat`` sender extraction; ``callback_query`` →
-  ButtonCallback; ``edited_message``; reply-to context; getFile URL
-  resolution with text fallback; ALLOWED_USERS by id *and* username.
+  ButtonCallback; ``poll_answer`` → PollAnswer; ``edited_message``;
+  reply-to context; getFile URL resolution with text fallback;
+  ALLOWED_USERS by id *and* username.
 * DONE — full outbound dispatch for every ``ChannelContent`` variant
   (Image→sendPhoto, File→sendDocument/sendVoice, Voice/Video/Audio/
   Animation→send*, Sticker, Location, MediaGroup, Poll, Interactive,
@@ -1346,10 +1347,49 @@ class TelegramAdapter(SidecarAdapter):
             metadata={"callback_query_id": cqid},
         )
 
+    def _poll_answer_to_event(self, poll_answer: dict):
+        # Mirrors in-process telegram.rs:2129-2230. Telegram only fires
+        # `poll_answer` for non-anonymous polls in private chats, so
+        # `user.id` doubles as the DM chat_id — see the Rust comment
+        # near `SENDER_USER_ID_KEY` on line 2161.
+        poll_id = poll_answer.get("poll_id")
+        if not poll_id:
+            return None
+        user = poll_answer.get("user") or {}
+        uid = user.get("id")
+        if not isinstance(uid, int):
+            return None
+        username = user.get("username")
+        if not self._allowed(str(uid), username):
+            return None
+        first = user.get("first_name") or "Unknown"
+        last = user.get("last_name") or ""
+        name = first if not last else f"{first} {last}"
+        # Rust coerces each id to `u8` (Telegram uses 0-based option
+        # indices, max 9 per poll); non-int / negative entries are
+        # silently dropped, matching `filter_map(.. as u64 .. as u8)`.
+        option_ids = [
+            int(o) for o in (poll_answer.get("option_ids") or [])
+            if isinstance(o, int) and 0 <= o <= 255
+        ]
+        return protocol.message(
+            user_id=str(uid),
+            user_name=name,
+            content=protocol.Content.poll_answer(poll_id, option_ids),
+            message_id=poll_id,
+            channel_id=str(uid),
+            username=username,
+            is_group=False,
+            metadata={"user_id": str(uid), "sender_user_id": str(uid)},
+        )
+
     def _update_to_event(self, update: dict):
         callback = update.get("callback_query")
         if callback:
             return self._callback_to_event(callback)
+        poll_answer = update.get("poll_answer")
+        if poll_answer:
+            return self._poll_answer_to_event(poll_answer)
         message = update.get("message") or update.get("edited_message")
         if not message:
             return None
@@ -1385,7 +1425,8 @@ class TelegramAdapter(SidecarAdapter):
             f"{self.api_base}/getUpdates",
             {"offset": state["offset"], "timeout": LONGPOLL_SERVER_SECS,
              "allowed_updates": json.dumps(
-                 ["message", "edited_message", "callback_query"])},
+                 ["message", "edited_message", "callback_query",
+                  "poll_answer"])},
             LONGPOLL_CLIENT_SECS,
         )
         if not data.get("ok"):
