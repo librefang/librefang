@@ -594,6 +594,30 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<Option<String>, String> {
         Ok(None)
     }
+
+    /// Auto-describe an inbound channel image that has already been saved to
+    /// disk by the bridge. Mirror of `transcribe_inbound_audio` for vision:
+    /// when `[media] image_description = true`, the bridge calls this method
+    /// before dispatching the message so the inline `ImageFile` block is
+    /// accompanied by a `<image_description>` text block sourced from the
+    /// configured `image_provider` (default Gemini 2.5 Flash).
+    ///
+    /// Why this exists: vision-capable primary models (Sonnet, GPT-4o, …) do
+    /// their own OCR/visual reasoning when they see an inline image and tend
+    /// to hallucinate small text — fabricated dates, weekdays, prices.
+    /// Pre-describing via a cheap dedicated vision provider gives the primary
+    /// model an authoritative text anchor next to the image, suppressing the
+    /// fabrication.
+    ///
+    /// The default impl (used by mocks) is "feature off" — returns `Ok(None)`,
+    /// so the bridge passes the image through unannotated.
+    async fn describe_inbound_image(
+        &self,
+        _path: &std::path::Path,
+        _mime_type: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 struct PendingMessage {
@@ -1395,9 +1419,11 @@ impl BridgeManager {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
                                         let extra_headers = adapter_clone.fetch_headers_for(url);
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
-                                            _ => None,
+                                        let raw = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await;
+                                        if raw.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) {
+                                            Some(enrich_image_blocks_with_description(raw, &handle).await)
+                                        } else {
+                                            None
                                         }
                                     } else {
                                         None
@@ -3401,7 +3427,7 @@ async fn dispatch_message(
     {
         let upload_dir = handle.effective_channels_download_dir();
         let extra_headers = adapter.fetch_headers_for(url);
-        let blocks = download_image_to_blocks(
+        let raw = download_image_to_blocks(
             url,
             caption.as_deref(),
             mime_type.as_deref(),
@@ -3409,12 +3435,13 @@ async fn dispatch_message(
             &extra_headers,
         )
         .await;
-        if blocks.iter().any(|b| {
+        if raw.iter().any(|b| {
             matches!(
                 b,
                 ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
             )
         }) {
+            let blocks = enrich_image_blocks_with_description(raw, handle).await;
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -5444,6 +5471,80 @@ async fn download_image_to_blocks(
 
     blocks
 }
+
+/// Post-process inbound image blocks: when the bridge handle's
+/// `describe_inbound_image` returns `Some(text)`, prepend the description as a
+/// `<image_description>` text block so the LLM sees Gemini's authoritative
+/// OCR/visual text before the inline `ImageFile`. When the handle returns
+/// `None` (feature off) or `Err` (provider failure), passes the blocks
+/// through unmodified — the original caption + ImageFile path remain.
+///
+/// Searches for the first `ImageFile` block in the input. The base64
+/// `Image` fallback path (used when `tokio::fs::write` fails) is skipped on
+/// purpose: re-encoding a base64 payload back to a temp file just to feed
+/// `MediaEngine::describe_image` would defeat the no-disk fallback's reason
+/// for existing. Callers that hit the base64 path already lost the
+/// on-disk-anchor benefit; the auto-describe enhancement opts out cleanly
+/// rather than papering over the underlying disk-write failure.
+async fn enrich_image_blocks_with_description(
+    blocks: Vec<ContentBlock>,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+) -> Vec<ContentBlock> {
+    let target = blocks.iter().find_map(|b| match b {
+        ContentBlock::ImageFile { path, media_type } => Some((path.clone(), media_type.clone())),
+        _ => None,
+    });
+    let Some((path, mime)) = target else {
+        return blocks;
+    };
+    let path_buf = std::path::PathBuf::from(&path);
+    let fut = handle.describe_inbound_image(&path_buf, &mime);
+    let result = match tokio::time::timeout(INBOUND_DESCRIBE_TIMEOUT, fut).await {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            // Vision provider hung past budget — dispatch must move on so
+            // the per-(agent,channel) session doesn't pile up behind one
+            // slow describe call. Pass the image through unannotated; the
+            // primary LLM still sees the inline `ImageFile`, just without
+            // Gemini's anchor text. Mirror of the audio-timeout fallback.
+            tracing::warn!(
+                path = %path,
+                mime = %mime,
+                timeout_secs = INBOUND_DESCRIBE_TIMEOUT.as_secs(),
+                "Inbound image auto-describe timed out; passing image through unannotated"
+            );
+            return blocks;
+        }
+    };
+    match result {
+        Ok(Some(text)) if !text.trim().is_empty() => {
+            let desc = format!("<image_description>\n{}\n</image_description>", text.trim());
+            let mut out = Vec::with_capacity(blocks.len() + 1);
+            out.push(ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            });
+            out.extend(blocks);
+            out
+        }
+        Ok(_) => blocks,
+        Err(reason) => {
+            tracing::warn!(
+                error = %reason,
+                path = %path,
+                "Image auto-describe failed; passing image through unannotated"
+            );
+            blocks
+        }
+    }
+}
+
+/// Wall-clock budget for `describe_inbound_image` on the dispatch hot path.
+/// Mirrors [`INBOUND_TRANSCRIPTION_TIMEOUT`] (30s): long enough for
+/// `gemini-2.5-flash` to OCR a multi-line locandina with retries, short
+/// enough to keep the per-(agent,channel) session from stalling behind a
+/// single hung vision call.
+const INBOUND_DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Dispatch a multimodal message (content blocks) to an agent, handling routing
 /// and RBAC the same way as the text path.
@@ -9171,5 +9272,174 @@ mod tests {
             "operator-typed `Custom(\"cron\")` must NOT collide with the \
              kernel's cron-fire SessionId after sanitize"
         );
+    }
+
+    /// Regression coverage for the image auto-describe enrichment. Mirror of
+    /// `inbound_audio_transcription`. The primary LLM (Sonnet, GPT-4o, …)
+    /// hallucinates small in-image text — fabricated weekdays, dates, prices —
+    /// when it does its own OCR on an inline image. The fix runs the saved
+    /// image through `MediaEngine::describe_image` (default `gemini-2.5-flash`)
+    /// before dispatch and prepends an authoritative `<image_description>`
+    /// text block, so the primary model has a non-hallucinated text anchor.
+    mod inbound_image_describe {
+        use super::*;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        struct DescribeHandle {
+            calls: Mutex<Vec<(PathBuf, String)>>,
+            response: Result<Option<String>, String>,
+        }
+
+        #[async_trait]
+        impl ChannelBridgeHandle for DescribeHandle {
+            async fn send_message(
+                &self,
+                _agent_id: AgentId,
+                _message: &str,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(Vec::new())
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("unused".into())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+            async fn describe_inbound_image(
+                &self,
+                path: &std::path::Path,
+                mime_type: &str,
+            ) -> Result<Option<String>, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((path.to_path_buf(), mime_type.to_string()));
+                self.response.clone()
+            }
+        }
+
+        fn handle_with(
+            response: Result<Option<String>, String>,
+        ) -> (Arc<dyn ChannelBridgeHandle>, Arc<DescribeHandle>) {
+            let inner = Arc::new(DescribeHandle {
+                calls: Mutex::new(Vec::new()),
+                response,
+            });
+            let h: Arc<dyn ChannelBridgeHandle> = inner.clone();
+            (h, inner)
+        }
+
+        fn image_file_blocks() -> Vec<ContentBlock> {
+            vec![
+                ContentBlock::Text {
+                    text: "user caption".into(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ImageFile {
+                    media_type: "image/jpeg".into(),
+                    path: "/tmp/x.jpg".into(),
+                },
+            ]
+        }
+
+        #[tokio::test]
+        async fn enabled_success_prepends_image_description_block() {
+            // Kernel returns `Ok(Some("OCR text..."))` → enrich prepends a
+            // `<image_description>` Text block before the existing caption
+            // and ImageFile. This is the path that suppresses primary-model
+            // hallucination of in-image weekdays / dates / prices.
+            let (h, rec) = handle_with(Ok(Some("BACHATA DOMINICANA — Trieste".into())));
+            let out = enrich_image_blocks_with_description(image_file_blocks(), &h).await;
+            assert_eq!(out.len(), 3, "describe must prepend exactly one Text block");
+            match &out[0] {
+                ContentBlock::Text { text, .. } => {
+                    assert!(
+                        text.contains("<image_description>")
+                            && text.contains("BACHATA DOMINICANA — Trieste")
+                            && text.contains("</image_description>"),
+                        "first block must be the description wrapped in tags; got {text:?}"
+                    );
+                }
+                other => panic!("expected Text first, got {other:?}"),
+            }
+            // Original caption + ImageFile preserved in order.
+            assert!(matches!(&out[1], ContentBlock::Text { text, .. } if text == "user caption"));
+            assert!(matches!(&out[2], ContentBlock::ImageFile { .. }));
+            // Handle was invoked with the saved path + mime.
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, PathBuf::from("/tmp/x.jpg"));
+            assert_eq!(calls[0].1, "image/jpeg");
+        }
+
+        #[tokio::test]
+        async fn disabled_returns_blocks_unmodified() {
+            // `image_description = false` → kernel returns Ok(None) → enrich
+            // is a no-op. The blocks travel through unchanged so the existing
+            // inline-vision behavior is preserved when an operator has
+            // deliberately turned the feature off.
+            let (h, rec) = handle_with(Ok(None));
+            let input = image_file_blocks();
+            let out = enrich_image_blocks_with_description(input.clone(), &h).await;
+            assert_eq!(out.len(), input.len());
+            assert!(matches!(&out[0], ContentBlock::Text { text, .. } if text == "user caption"));
+            assert!(matches!(&out[1], ContentBlock::ImageFile { .. }));
+            // Trait call still happens — config gate is kernel-side.
+            assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn provider_failure_passes_image_through_unannotated() {
+            // Gemini 5xx / oversize / missing creds → `Err(reason)`. The
+            // image still reaches the agent: blocks are returned unmodified
+            // so the primary model can still attempt inline OCR. The raw
+            // reason is logged but never reaches the LLM prompt.
+            let (h, _rec) = handle_with(Err("gemini 503".into()));
+            let input = image_file_blocks();
+            let out = enrich_image_blocks_with_description(input.clone(), &h).await;
+            assert_eq!(out.len(), input.len(), "no Text prepend on Err path");
+            assert!(matches!(&out[0], ContentBlock::Text { text, .. } if text == "user caption"));
+            assert!(matches!(&out[1], ContentBlock::ImageFile { .. }));
+        }
+
+        #[tokio::test]
+        async fn empty_description_text_is_treated_as_none() {
+            // Some providers return an empty/whitespace-only string on
+            // unrecognised content. Treat as no-op rather than dropping a
+            // useless `<image_description>\n\n</image_description>` block
+            // into the prompt — it would burn tokens and confuse the model.
+            let (h, _rec) = handle_with(Ok(Some("   \n  ".into())));
+            let out = enrich_image_blocks_with_description(image_file_blocks(), &h).await;
+            assert_eq!(out.len(), 2);
+            assert!(matches!(&out[0], ContentBlock::Text { text, .. } if text == "user caption"));
+            assert!(matches!(&out[1], ContentBlock::ImageFile { .. }));
+        }
+
+        #[tokio::test]
+        async fn blocks_without_image_file_skip_describe_entirely() {
+            // base64 `Image` fallback (used when tokio::fs::write fails)
+            // is intentionally skipped — re-encoding the payload back to a
+            // tempfile for the media engine would defeat the no-disk
+            // fallback's reason for existing.
+            let (h, rec) = handle_with(Ok(Some("won't be called".into())));
+            let input = vec![ContentBlock::Image {
+                media_type: "image/jpeg".into(),
+                data: "AAAA".into(),
+            }];
+            let out = enrich_image_blocks_with_description(input.clone(), &h).await;
+            assert_eq!(out.len(), 1, "base64 Image path is left untouched");
+            assert!(matches!(&out[0], ContentBlock::Image { .. }));
+            assert_eq!(
+                rec.calls.lock().unwrap().len(),
+                0,
+                "describe must NOT be invoked when no ImageFile is present"
+            );
+        }
     }
 }
