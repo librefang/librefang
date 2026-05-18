@@ -369,6 +369,7 @@ function readWhatsAppConfig(configPath) {
     // set `[relay_intent].languages = ["en", "it", …]` in config.toml
     // to enable extra language packs.
     relay_intent_languages: ['en'],
+    api_key: '',
   };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
@@ -384,6 +385,7 @@ function readWhatsAppConfig(configPath) {
         Array.isArray(relay.languages) && relay.languages.length > 0
           ? relay.languages
           : defaults.relay_intent_languages,
+      api_key: typeof parsed?.api_key === 'string' ? parsed.api_key : '',
     };
     console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, stream_to_channel=${cfg.stream_to_channel}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}`);
     return cfg;
@@ -400,6 +402,11 @@ const tomlConfig = readWhatsAppConfig(CONFIG_PATH);
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const LIBREFANG_URL = (process.env.LIBREFANG_URL || 'http://127.0.0.1:4545').replace(/\/+$/, '');
+// API key for daemon's Bearer auth. Sourced from env LIBREFANG_API_KEY first
+// (so the spawn-by-kernel path can inject it without touching config.toml),
+// then from the top-level `api_key` field in config.toml. Empty when the
+// daemon has no auth configured — gateway requests omit the header.
+const LIBREFANG_API_KEY = process.env.LIBREFANG_API_KEY || tomlConfig.api_key || '';
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || tomlConfig.default_agent;
 const AGENT_NAME = DEFAULT_AGENT;
 
@@ -1345,7 +1352,8 @@ function resolveAgentId() {
         port: url.port || 4545,
         path: url.pathname,
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
+        headers: {
+          ...(LIBREFANG_API_KEY ? { Authorization: 'Bearer ' + LIBREFANG_API_KEY } : {}), 'Accept': 'application/json' },
         timeout: 10_000,
       },
       (res) => {
@@ -2640,6 +2648,7 @@ async function uploadToLibreFang(agentId, buffer, contentType, filename) {
           path: url.pathname,
           method: 'POST',
           headers: {
+          ...(LIBREFANG_API_KEY ? { Authorization: 'Bearer ' + LIBREFANG_API_KEY } : {}),
             'Content-Type': contentType,
             'X-Filename': filename,
             'Content-Length': buffer.length,
@@ -2853,6 +2862,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
         path: url.pathname,
         method: 'POST',
         headers: {
+          ...(LIBREFANG_API_KEY ? { Authorization: 'Bearer ' + LIBREFANG_API_KEY } : {}),
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payloadStr),
         },
@@ -3009,6 +3019,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         path: url.pathname,
         method: 'POST',
         headers: {
+          ...(LIBREFANG_API_KEY ? { Authorization: 'Bearer ' + LIBREFANG_API_KEY } : {}),
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payloadStr),
           Accept: 'text/event-stream',
