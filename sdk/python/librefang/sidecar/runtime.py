@@ -58,6 +58,18 @@ EmitFn = Callable[[Dict[str, Any]], None]
 LineSource = Callable[[], Awaitable[Optional[str]]]
 
 
+class ProducerCrashed(Exception):
+    """Raised from :func:`run` when :meth:`SidecarAdapter.produce` exits
+    with an unhandled error.
+
+    Cleanup (``on_shutdown``) has already run by the time this is raised.
+    :func:`run_stdio` converts it to ``SystemExit(1)`` so the daemon
+    supervisor sees a nonzero exit (distinguishable from a clean
+    ``shutdown``/EOF). Library callers using :func:`run` directly can
+    catch this to inspect ``__cause__`` (the original transport error)
+    before deciding how to surface the failure."""
+
+
 class SidecarAdapter:
     """Base class for a sidecar channel adapter.
 
@@ -230,13 +242,23 @@ async def run(
             await adapter.on_shutdown()
         except Exception as e:  # noqa: BLE001
             log.error("on_shutdown failed", error=str(e))
-    # A producer crash is a fatal, unhandled adapter failure — exit
-    # nonzero so it is distinguishable from a clean `shutdown`/EOF
-    # (cleanup above still ran). The daemon supervisor restarts on any
-    # non-shutdown exit; the nonzero code makes the failure explicit to
-    # operators and any non-supervised runner.
+    # A producer crash is a fatal, unhandled adapter failure. Surface it
+    # as a regular Exception (with the original error chained); the
+    # `run_stdio` wrapper converts that into a nonzero process exit so it
+    # is distinguishable from a clean `shutdown`/EOF (cleanup above still
+    # ran). The daemon supervisor restarts on any non-shutdown exit; the
+    # nonzero code makes the failure explicit to operators and any
+    # non-supervised runner. Raising a plain Exception here (rather than
+    # SystemExit) keeps `run` library-friendly: callers driving it from
+    # their own event loop can catch and inspect the failure without
+    # tripping interpreter-level exit semantics — and the assertion is
+    # portable across Python versions (a SystemExit raised from inside an
+    # awaited sub-Task short-circuits the event loop on <3.11, making the
+    # contract unobservable to test code on supported runtimes).
     if producer_error is not None:
-        raise SystemExit(1)
+        raise ProducerCrashed(
+            "sidecar producer crashed; cleanup ran"
+        ) from producer_error
 
 
 def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
@@ -244,9 +266,16 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
     """Wire ``run`` to real stdio and run it to completion. stdout is
     written under a lock and carries only protocol frames; stdin is read
     on a daemon thread (portable, unlike async stdin). See :func:`run`
-    for ``ready_max_attempts``."""
-    asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
-                           ready_max_attempts=ready_max_attempts))
+    for ``ready_max_attempts``.
+
+    A :class:`ProducerCrashed` from ``run`` becomes ``SystemExit(1)`` so
+    the daemon supervisor (and any non-supervised runner) sees a nonzero
+    exit code, distinguishable from a clean ``shutdown``/EOF."""
+    try:
+        asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
+                               ready_max_attempts=ready_max_attempts))
+    except ProducerCrashed:
+        raise SystemExit(1)
 
 
 async def _run_stdio(adapter: SidecarAdapter, *,

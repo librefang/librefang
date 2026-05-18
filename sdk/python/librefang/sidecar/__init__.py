@@ -42,9 +42,16 @@ from .protocol import (
     UnknownCommand,
     parse_command,
 )
-from .runtime import SidecarAdapter, run, run_stdio, with_backoff
+from .runtime import (
+    ProducerCrashed,
+    SidecarAdapter,
+    run,
+    run_stdio,
+    with_backoff,
+)
 
 __all__ = [
+    "ProducerCrashed",
     "SidecarAdapter",
     "run",
     "run_stdio",
