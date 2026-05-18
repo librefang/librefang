@@ -70,6 +70,47 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         Ok(result.response)
     }
 
+    async fn send_to_agent_with_key(
+        &self,
+        agent_id: &str,
+        message: &str,
+        conversation_key: &str,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        let id = self.resolve_agent_identifier(agent_id)?;
+        // No parent agent id is available for system-initiated sends — pass a
+        // nil UUID as a sentinel. `any_session_interrupt_for_agent` will find
+        // nothing registered for it (no cascade), but the session pin still
+        // applies via the `session_id_override` path.
+        let no_parent = AgentId(uuid::Uuid::nil());
+        let result = self
+            .send_message_as_with_key(id, message, no_parent, conversation_key)
+            .await
+            .map_err(|e| format!("Send failed: {e}"))?;
+        Ok(result.response)
+    }
+
+    async fn send_to_agent_as_with_key(
+        &self,
+        agent_id: &str,
+        message: &str,
+        parent_agent_id: &str,
+        conversation_key: &str,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        let id = self.resolve_agent_identifier(agent_id)?;
+        let parent_id = self
+            .resolve_agent_identifier(parent_agent_id)
+            .or_else(|_| {
+                parent_agent_id
+                    .parse::<AgentId>()
+                    .map_err(|e| format!("bad parent_agent_id: {e}"))
+            })?;
+        let result = self
+            .send_message_as_with_key(id, message, parent_id, conversation_key)
+            .await
+            .map_err(|e| format!("Send failed: {e}"))?;
+        Ok(result.response)
+    }
+
     fn list_agents(&self) -> Vec<kernel_handle::AgentInfo> {
         self.agents
             .registry
