@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from librefang.sidecar import SidecarAdapter, run
+from librefang.sidecar import ProducerCrashed, SidecarAdapter, run
 from librefang.sidecar.protocol import Send
 
 
@@ -185,8 +185,9 @@ async def test_blank_lines_are_skipped(bad):
 
 
 async def test_producer_crash_exits_nonzero_after_cleanup():
-    # A fatal, unhandled producer error must exit nonzero (not look
-    # like a clean shutdown), and on_shutdown cleanup must still run.
+    # A fatal, unhandled producer error must surface as ProducerCrashed
+    # (which run_stdio turns into a nonzero process exit, not a clean
+    # shutdown), and on_shutdown cleanup must still run before it.
     class Crashing(SidecarAdapter):
         def __init__(self):
             self.shutdown_called = False
@@ -201,7 +202,39 @@ async def test_producer_crash_exits_nonzero_after_cleanup():
             self.shutdown_called = True
 
     adapter = Crashing()
-    with pytest.raises(SystemExit) as ei:
+    with pytest.raises(ProducerCrashed) as ei:
         await _drive(adapter, [])
-    assert ei.value.code == 1
+    # __cause__ preserves the original transport error for diagnostics.
+    assert isinstance(ei.value.__cause__, RuntimeError)
+    assert "transport died unrecoverably" in str(ei.value.__cause__)
     assert adapter.shutdown_called, "cleanup must run before nonzero exit"
+
+
+def test_run_stdio_translates_producer_crash_to_nonzero_exit():
+    # run_stdio is the process entry point: a ProducerCrashed from run()
+    # must become SystemExit(1) so the daemon supervisor sees a nonzero
+    # exit, distinguishable from a clean shutdown/EOF. Exercised
+    # synchronously because run_stdio owns its own event loop.
+    from librefang.sidecar import run_stdio
+
+    class Crashing(SidecarAdapter):
+        async def on_send(self, cmd):
+            pass
+
+        async def produce(self, emit):
+            raise RuntimeError("transport died unrecoverably")
+
+    # Closed stdin -> reader thread hits EOF immediately; the producer
+    # crash still wins the race because `stop` is set before EOF reaches
+    # the loop. ready_max_attempts=1 caps the ready-loop quickly.
+    import io
+    import sys
+    saved_stdin, saved_stdout = sys.stdin, sys.stdout
+    sys.stdin = io.StringIO("")
+    sys.stdout = io.StringIO()
+    try:
+        with pytest.raises(SystemExit) as ei:
+            run_stdio(Crashing(), ready_interval=0.01, ready_max_attempts=1)
+        assert ei.value.code == 1
+    finally:
+        sys.stdin, sys.stdout = saved_stdin, saved_stdout
