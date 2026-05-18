@@ -1824,6 +1824,7 @@ pub async fn set_provider_url(
     request_body(content = Option<crate::types::JsonObject>, content_type = "application/json", description = "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default"),
     responses(
         (status = 200, description = "Default provider updated", body = crate::types::JsonObject),
+        (status = 207, description = "Default provider updated, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
         (status = 400, description = "No model found for provider"),
         (status = 404, description = "Provider not found")
     )

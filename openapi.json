@@ -7986,6 +7986,16 @@
               }
             }
           },
+          "207": {
+            "description": "Default provider updated, but one or more agents could not be migrated; response includes `sync_failures`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "400": {
             "description": "No model found for provider"
           },
