@@ -1,0 +1,66 @@
+# In-process channel adapter allowlist (sidecar-first policy).
+#
+# LibreFang is sidecar-first: new channels ship as out-of-process
+# sidecar adapters (see docs / examples/sidecar-channel-python).
+# This file grandfathers the in-process adapters that predate the
+# policy. The pre-commit hook and `cargo xtask channel-policy` (run in
+# CI on every PR) reject any file under
+# crates/librefang-channels/src/{<name>.rs, <name>/*.rs} containing
+# `ChannelAdapter for` whose basename is NOT listed here.
+#
+# Known, accepted limitation: a macro-generated impl, or a new adapter
+# impl added inside an already-allowlisted file, is not detected. This
+# is a policy ratchet, not a security boundary.
+#
+# This list only ever SHRINKS: when an adapter is migrated to a
+# sidecar and its module deleted, remove its name here so it can
+# never be reintroduced in-process. Adding a name back requires
+# explicit maintainer approval — it is not routine.
+#
+# One basename per line, no `.rs`. Keep sorted.
+bluesky
+dingtalk
+discord
+discourse
+email
+feishu
+flock
+gitter
+google_chat
+gotify
+guilded
+irc
+keybase
+line
+linkedin
+mastodon
+matrix
+mattermost
+messenger
+mqtt
+mumble
+nextcloud
+nostr
+ntfy
+pumble
+qq
+reddit
+revolt
+rocketchat
+sidecar
+signal
+slack
+teams
+telegram
+threema
+twist
+twitch
+viber
+voice
+webex
+webhook
+wechat
+wecom
+whatsapp
+xmpp
+zulip
