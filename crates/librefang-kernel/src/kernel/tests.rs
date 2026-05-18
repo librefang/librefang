@@ -8969,7 +8969,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     // step (no provider configured in test).  Either way the result must
     // not be the early-return sentinel.
     let result = kernel
-        .compact_agent_session_with_id(agent_id, Some(session_id))
+        .compact_agent_session_with_id(agent_id, Some(session_id), false)
         .await;
 
     match &result {
