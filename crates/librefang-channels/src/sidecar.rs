@@ -34,6 +34,13 @@ pub enum SidecarEvent {
     /// Adapter encountered an error.
     #[serde(rename = "error")]
     Error { params: SidecarErrorParams },
+    /// A typing indicator from the platform.
+    ///
+    /// P0 skeleton: not yet wired through to `ChannelAdapter::typing_events`
+    /// — that happens in P2. Present now so external adapters can be
+    /// developed against the final wire shape.
+    #[serde(rename = "typing")]
+    Typing { params: SidecarTypingParams },
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +57,14 @@ pub struct SidecarErrorParams {
     pub message: String,
 }
 
+/// Inbound typing indicator params (P0 skeleton — consumed in P2).
+#[derive(Debug, Deserialize)]
+pub struct SidecarTypingParams {
+    pub user_id: String,
+    pub user_name: String,
+    pub is_typing: bool,
+}
+
 /// Commands from LibreFang TO the sidecar process (one JSON per line on stdin).
 #[derive(Debug, Serialize)]
 #[serde(tag = "method")]
@@ -57,6 +72,38 @@ pub enum SidecarCommand {
     /// Send a message to the platform.
     #[serde(rename = "send")]
     Send { params: SidecarSendParams },
+    /// Acknowledge a `ready` event so the adapter stops re-announcing.
+    /// P0 skeleton — the ready/ack handshake is wired in P2.
+    #[serde(rename = "ready_ack")]
+    ReadyAck,
+    /// Send a typing indicator to the platform.
+    /// P0 skeleton — wired in P2.
+    #[serde(rename = "typing")]
+    Typing { params: SidecarTypingCmdParams },
+    /// Add a reaction to a platform message.
+    /// P0 skeleton — wired in P2.
+    #[serde(rename = "reaction")]
+    Reaction { params: SidecarReactionParams },
+    /// Send an interactive (buttons) message.
+    /// P0 skeleton — full button shape lands in P2.
+    #[serde(rename = "interactive")]
+    Interactive { params: SidecarInteractiveParams },
+    /// Begin a streamed response.
+    /// P0 skeleton — wired in P2.
+    #[serde(rename = "stream_start")]
+    StreamStart { params: SidecarStreamStartParams },
+    /// A chunk of a streamed response.
+    /// P0 skeleton — wired in P2.
+    #[serde(rename = "stream_delta")]
+    StreamDelta { params: SidecarStreamDeltaParams },
+    /// End a streamed response.
+    /// P0 skeleton — wired in P2.
+    #[serde(rename = "stream_end")]
+    StreamEnd { params: SidecarStreamEndParams },
+    /// Liveness ping.
+    /// P0 skeleton — optional keepalive wired in P2.
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
     /// Graceful shutdown request.
     #[serde(rename = "shutdown")]
     Shutdown,
@@ -66,6 +113,47 @@ pub enum SidecarCommand {
 pub struct SidecarSendParams {
     pub channel_id: String,
     pub text: String,
+}
+
+/// `typing` command params (P0 skeleton — wired in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarTypingCmdParams {
+    pub channel_id: String,
+}
+
+/// `reaction` command params (P0 skeleton — wired in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarReactionParams {
+    pub channel_id: String,
+    pub message_id: String,
+    pub reaction: String,
+}
+
+/// `interactive` command params (P0 skeleton — full button shape lands in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarInteractiveParams {
+    pub channel_id: String,
+    pub text: String,
+}
+
+/// `stream_start` command params (P0 skeleton — wired in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarStreamStartParams {
+    pub channel_id: String,
+    pub stream_id: String,
+}
+
+/// `stream_delta` command params (P0 skeleton — wired in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarStreamDeltaParams {
+    pub stream_id: String,
+    pub text: String,
+}
+
+/// `stream_end` command params (P0 skeleton — wired in P2).
+#[derive(Debug, Serialize)]
+pub struct SidecarStreamEndParams {
+    pub stream_id: String,
 }
 
 // ── Sidecar Adapter Implementation ─────────────────────────────────
@@ -296,6 +384,16 @@ impl ChannelAdapter for SidecarAdapter {
                                         let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                                         s.last_error = Some(params.message);
                                     }
+                                    Ok(other) => {
+                                        // P0 skeleton: protocol variants such as
+                                        // `Typing` are placeholders, wired in P2.
+                                        // Inert here — existing variant behaviour
+                                        // is unchanged.
+                                        debug!(
+                                            adapter = %adapter_name,
+                                            "Ignoring not-yet-wired sidecar event: {other:?}"
+                                        );
+                                    }
                                     Err(e) => {
                                         warn!(
                                             adapter = %adapter_name,
@@ -498,6 +596,110 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["method"], "send");
         assert_eq!(value["params"]["channel_id"], "test-channel");
+    }
+
+    // ── P0 skeleton: new protocol variant roundtrips ──────────────
+
+    #[test]
+    fn test_sidecar_event_typing_deserialization() {
+        let json =
+            r#"{"method":"typing","params":{"user_id":"u1","user_name":"Alice","is_typing":true}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        match event {
+            SidecarEvent::Typing { params } => {
+                assert_eq!(params.user_id, "u1");
+                assert_eq!(params.user_name, "Alice");
+                assert!(params.is_typing);
+            }
+            _ => panic!("Expected Typing variant"),
+        }
+    }
+
+    #[test]
+    fn test_legacy_events_still_parse_after_typing_added() {
+        // Regression guard: adding SidecarEvent::Typing must not change
+        // parsing of the pre-existing variants.
+        assert!(matches!(
+            serde_json::from_str::<SidecarEvent>(r#"{"method":"ready"}"#).unwrap(),
+            SidecarEvent::Ready
+        ));
+        assert!(matches!(
+            serde_json::from_str::<SidecarEvent>(
+                r#"{"method":"message","params":{"user_id":"u","user_name":"n"}}"#
+            )
+            .unwrap(),
+            SidecarEvent::Message { .. }
+        ));
+    }
+
+    #[test]
+    fn test_new_command_variants_serialize_with_distinct_tags() {
+        let cmds = vec![
+            SidecarCommand::ReadyAck,
+            SidecarCommand::Typing {
+                params: SidecarTypingCmdParams {
+                    channel_id: "c".to_string(),
+                },
+            },
+            SidecarCommand::Reaction {
+                params: SidecarReactionParams {
+                    channel_id: "c".to_string(),
+                    message_id: "m".to_string(),
+                    reaction: "👍".to_string(),
+                },
+            },
+            SidecarCommand::Interactive {
+                params: SidecarInteractiveParams {
+                    channel_id: "c".to_string(),
+                    text: "pick".to_string(),
+                },
+            },
+            SidecarCommand::StreamStart {
+                params: SidecarStreamStartParams {
+                    channel_id: "c".to_string(),
+                    stream_id: "s".to_string(),
+                },
+            },
+            SidecarCommand::StreamDelta {
+                params: SidecarStreamDeltaParams {
+                    stream_id: "s".to_string(),
+                    text: "chunk".to_string(),
+                },
+            },
+            SidecarCommand::StreamEnd {
+                params: SidecarStreamEndParams {
+                    stream_id: "s".to_string(),
+                },
+            },
+            SidecarCommand::Heartbeat,
+        ];
+
+        let mut tags = std::collections::BTreeSet::new();
+        for cmd in &cmds {
+            let v: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string(cmd).unwrap()).unwrap();
+            let tag = v["method"].as_str().unwrap().to_string();
+            assert!(tags.insert(tag.clone()), "duplicate method tag: {tag}");
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "ready_ack",
+            "typing",
+            "reaction",
+            "interactive",
+            "stream_start",
+            "stream_delta",
+            "stream_end",
+            "heartbeat",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(tags, expected);
+        // Legacy tags unchanged.
+        assert_eq!(
+            serde_json::to_string(&SidecarCommand::Shutdown).unwrap(),
+            r#"{"method":"shutdown"}"#
+        );
     }
 
     #[tokio::test]
