@@ -11,11 +11,13 @@
 //!     hot path.
 //!   * `default_model_override` — hot-reloadable overlay applied at
 //!     agent spawn.
+//!   * `credential_pools` — multi-key rotation pools per provider.
 
 use std::sync::{Arc, RwLock};
 
 use arc_swap::ArcSwap;
 use librefang_llm_driver::LlmDriver;
+use librefang_llm_drivers::ArcCredentialPool;
 use librefang_runtime::aux_client::AuxClient;
 use librefang_runtime::drivers::DriverCache;
 use librefang_runtime::embedding::EmbeddingDriver;
@@ -52,7 +54,7 @@ pub struct LlmSubsystem {
     pub(crate) embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     /// Lazy-loading driver cache — avoids recreating HTTP clients for
     /// the same provider/key/url combination on every agent message.
-    pub(crate) driver_cache: DriverCache,
+    pub(crate) driver_cache: Arc<DriverCache>,
     /// Model catalog registry. `ArcSwap` (#3384) so the hot
     /// `send_message_full` path can read the snapshot atomically — was
     /// previously `std::sync::RwLock`, which forced 5+ lock acquisitions
@@ -61,6 +63,9 @@ pub struct LlmSubsystem {
     /// Hot-reloadable default model override (set via config hot-reload,
     /// read at agent spawn).
     pub(crate) default_model_override: RwLock<Option<DefaultModelConfig>>,
+    /// Credential pools — multi-key rotation per provider.
+    /// Keyed by provider name.
+    pub(crate) credential_pools: dashmap::DashMap<String, ArcCredentialPool>,
 }
 
 impl LlmSubsystem {
@@ -69,14 +74,16 @@ impl LlmSubsystem {
         aux_client: AuxClient,
         embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
         model_catalog: ModelCatalog,
+        credential_pools: dashmap::DashMap<String, ArcCredentialPool>,
     ) -> Self {
         Self {
             default_driver,
             aux_client: ArcSwap::from_pointee(aux_client),
             embedding_driver,
-            driver_cache: DriverCache::new(),
+            driver_cache: Arc::new(DriverCache::new()),
             model_catalog: ArcSwap::from_pointee(model_catalog),
             default_model_override: RwLock::new(None),
+            credential_pools,
         }
     }
 
