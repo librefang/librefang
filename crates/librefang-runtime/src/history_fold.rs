@@ -522,12 +522,16 @@ async fn summarise_batch(
         prompt.push('\n');
     }
 
-    // Headroom for N short summaries plus the JSON wrapping.  256 was the
-    // pre-#4866 per-group cap; with N blocks per call we need linear
-    // headroom — 64 tokens per block is generous for 1-2 sentence outputs.
+    // Headroom for N short summaries plus JSON wrapping.  128 tokens/block
+    // gives comfortable slack for models that pretty-print (one field per
+    // line) rather than emitting compact single-line JSON — the previous 64
+    // tok/block budget was routinely overrun by verbose-output models such
+    // as ollama:gemma4, causing serde_json to fail with "EOF while parsing a
+    // string" and every fold pass to degrade to the raw-text bulk fallback
+    // (#5203).  Floor raised proportionally (4 blocks × 128 = 512).
     // Capped at MAX_FOLD_OUTPUT_TOKENS (see module-level const for the
     // rationale).
-    let max_tokens = std::cmp::max(256_usize, 64usize.saturating_mul(blocks.len()))
+    let max_tokens = std::cmp::max(512_usize, 128usize.saturating_mul(blocks.len()))
         .min(MAX_FOLD_OUTPUT_TOKENS) as u32;
 
     let request = CompletionRequest {
@@ -1520,5 +1524,110 @@ mod tests {
     fn strip_code_fence_returns_none_when_unfenced() {
         assert!(strip_code_fence("plain text").is_none());
         assert!(strip_code_fence("[1,2,3]").is_none());
+    }
+
+    /// Regression for #5203: a verbose-JSON fold model that pretty-prints
+    /// its output (one JSON key per line) must not be truncated mid-string.
+    ///
+    /// The 64 tok/block budget (256 floor) caused serde_json to fail with
+    /// "EOF while parsing a string" for models like ollama:gemma4 that emit
+    /// ~100+ tokens per block even for a 1-2 sentence summary.  This test
+    /// constructs a realistic pretty-printed JSON response for 4 blocks (the
+    /// smallest batch that reliably overran the old 256-token floor) and
+    /// asserts that `fold_stale_tool_results` succeeds at the JSON parse
+    /// level — i.e. `groups_used_fallback` stays 0 and each block receives
+    /// its own per-id summary.
+    #[tokio::test]
+    async fn verbose_json_fold_output_not_truncated_mid_string() {
+        // Build 4 stale tool-result messages (fold_after=2 with 6 total
+        // assistant turns leaves turns 0-3 stale).
+        let mut msgs = vec![user_msg("initial question")];
+        for i in 0..6 {
+            msgs.push(assistant_msg(&format!("assistant response {i}")));
+            msgs.push(tool_result_msg_with_id(
+                &format!("tid_{i}"),
+                "shell_exec",
+                &format!("output of turn {i}"),
+            ));
+        }
+
+        // Simulate a verbose pretty-printed response from a model like
+        // gemma4 — each entry spans ~6 lines (well over 64 tokens for 4
+        // blocks).  The total here is ~480 characters / ~120 tokens, which
+        // comfortably exceeded the old 256-token floor when pretty-printed.
+        let pretty_json = r#"[
+  {
+    "id": "tid_0",
+    "summary": "The shell command executed successfully and listed all files in the current working directory including hidden dotfiles and build artifacts."
+  },
+  {
+    "id": "tid_1",
+    "summary": "The read_file tool returned the contents of the configuration file, revealing the database connection string and API endpoint settings."
+  },
+  {
+    "id": "tid_2",
+    "summary": "The test runner completed all 47 unit tests with zero failures, confirming that the recent refactoring did not introduce regressions."
+  },
+  {
+    "id": "tid_3",
+    "summary": "The git commit tool staged and committed the changes to the feature branch with the conventional-commit message format as required."
+  }
+]"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(pretty_json.to_string()));
+
+        let (out, result) = fold_stale_tool_results(
+            msgs,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(
+            result.groups_used_fallback, 0,
+            "verbose-JSON pretty-printed response must parse successfully — \
+             groups_used_fallback > 0 indicates the old truncation bug is present"
+        );
+        assert_eq!(
+            result.groups_folded, 1,
+            "expected fold pass to have run for the 4 stale blocks"
+        );
+
+        // Verify each of the 4 stale blocks received its specific per-id summary.
+        let by_id: BTreeMap<String, String> = out
+            .iter()
+            .flat_map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => Some((tool_use_id.clone(), content.clone())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+
+        assert!(
+            by_id
+                .get("tid_0")
+                .is_some_and(|c| c.contains("listed all files")),
+            "tid_0 must carry its verbose per-id summary"
+        );
+        assert!(
+            by_id
+                .get("tid_3")
+                .is_some_and(|c| c.contains("feature branch")),
+            "tid_3 must carry its verbose per-id summary"
+        );
     }
 }
