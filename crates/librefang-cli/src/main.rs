@@ -1920,7 +1920,10 @@ struct DaemonConfigContext {
 }
 
 fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
-    let config = load_config(config);
+    let config = load_config(config).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; using default config values for this command");
+        librefang_types::config::KernelConfig::default()
+    });
     let api_key = {
         let trimmed = config.api_key.trim();
         if trimmed.is_empty() {
@@ -4633,7 +4636,10 @@ fn render_status_daemon(
         .api_key
         .as_deref()
         .and_then(|k| fetch_status_detail(base, k));
-    let cfg = load_config(config);
+    let cfg = load_config(config).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; using default config values for status display");
+        librefang_types::config::KernelConfig::default()
+    });
 
     let exit_code = classify_exit(health.as_ref());
     let is_public_bind = info
@@ -5152,7 +5158,10 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     // workflow templates just to print "daemon down". Pull what we can from
     // the config file alone.
     if quiet {
-        let cfg = load_config(config.as_deref());
+        let cfg = load_config(config.as_deref()).unwrap_or_else(|e| {
+            eprintln!("warning: {e}; using default config values for status display");
+            librefang_types::config::KernelConfig::default()
+        });
         println!(
             "librefang down home={} default={}/{}",
             cfg.home_dir.display(),
@@ -11161,7 +11170,13 @@ fn cmd_security_verify() {
 /// `--confirm`.
 fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
-    let kernel_config = load_config(config.as_deref());
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let db_path = kernel_config
         .memory
