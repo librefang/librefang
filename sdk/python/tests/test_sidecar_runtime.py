@@ -182,3 +182,26 @@ async def test_blank_lines_are_skipped(bad):
     adapter = RecordingAdapter()
     await _drive(adapter, [bad, '{"method":"shutdown"}'])
     assert adapter.shutdown_called
+
+
+async def test_producer_crash_exits_nonzero_after_cleanup():
+    # A fatal, unhandled producer error must exit nonzero (not look
+    # like a clean shutdown), and on_shutdown cleanup must still run.
+    class Crashing(SidecarAdapter):
+        def __init__(self):
+            self.shutdown_called = False
+
+        async def on_send(self, cmd):
+            pass
+
+        async def produce(self, emit):
+            raise RuntimeError("transport died unrecoverably")
+
+        async def on_shutdown(self):
+            self.shutdown_called = True
+
+    adapter = Crashing()
+    with pytest.raises(SystemExit) as ei:
+        await _drive(adapter, [])
+    assert ei.value.code == 1
+    assert adapter.shutdown_called, "cleanup must run before nonzero exit"

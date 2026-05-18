@@ -20,6 +20,20 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
+/// Deserialize `T`, mapping an explicit JSON `null` to `T::default()`.
+///
+/// `#[serde(default)]` alone only covers an *omitted* field; a present
+/// `"params": null` (emitted by many JSON-RPC libraries for no-arg
+/// notifications) would otherwise fail to deserialize into a struct and
+/// the whole event would be dropped.
+fn de_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 // ── JSON-RPC Protocol Types ────────────────────────────────────────
 
 /// Messages from the sidecar process TO LibreFang (one JSON per line on stdout).
@@ -35,11 +49,12 @@ pub enum SidecarEvent {
     #[serde(rename = "message")]
     Message { params: Box<SidecarMessageParams> },
     /// Adapter is ready to receive commands. Carries the declared
-    /// capability set + identity metadata. The bare legacy form
-    /// `{"method":"ready"}` still parses (`params` defaults).
+    /// capability set + identity metadata. Both the bare legacy form
+    /// `{"method":"ready"}` (field omitted) and the JSON-RPC
+    /// `{"method":"ready","params":null}` form parse to defaults.
     #[serde(rename = "ready")]
     Ready {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "de_null_default")]
         params: SidecarReadyParams,
     },
     /// Adapter encountered an error.
@@ -554,8 +569,13 @@ async fn spawn_once(
                                         );
                                     }
                                     if let Some(h) = params.username {
+                                        // `sender_username` is the key the
+                                        // bridge reads when building
+                                        // `SenderContext` and upserting the
+                                        // group roster; `"username"` was a
+                                        // dead key the bridge never consumed.
                                         metadata.insert(
-                                            "username".to_string(),
+                                            "sender_username".to_string(),
                                             serde_json::Value::String(h),
                                         );
                                     }
@@ -1319,6 +1339,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sidecar_event_ready_null_params_parses_to_default() {
+        // JSON-RPC libraries emit `params: null` for no-arg
+        // notifications. `#[serde(default)]` alone only covers an
+        // omitted field; explicit null must also fold to defaults or
+        // the supervisor never sees `ready` and churns on restart.
+        for json in [
+            r#"{"method":"ready","params":null}"#,
+            r#"{"method":"ready"}"#,
+        ] {
+            match serde_json::from_str::<SidecarEvent>(json).unwrap() {
+                SidecarEvent::Ready { params } => {
+                    assert!(params.capabilities.is_empty());
+                    assert!(params.account_id.is_none());
+                    assert!(params.protocol_version.is_none());
+                }
+                other => panic!("Expected Ready for {json}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_sidecar_event_ready_with_capabilities() {
         let json = r#"{"method":"ready","params":{
             "capabilities":["typing","streaming"],
@@ -2032,6 +2073,49 @@ mod tests {
         }
         adapter.stop().await.unwrap();
         assert!(!adapter.status().connected);
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_username_folds_to_sender_username_metadata() {
+        // Regression: the reader must fold `username` into
+        // `metadata["sender_username"]` — the key the bridge reads for
+        // SenderContext / roster — not the dead `"username"` key. The
+        // child also sends `ready` with `params: null` to exercise the
+        // null-params parse end-to-end.
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = concat!(
+            "import sys,json;",
+            "print(json.dumps({'method':'ready','params':None}),flush=True);",
+            "print(json.dumps({'method':'message','params':",
+            "{'user_id':'u','user_name':'n','text':'hi',",
+            "'username':'@handle'}}),flush=True);",
+            "sys.exit(0)"
+        );
+        let config = cfg(
+            "test-username",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config);
+        let mut stream = adapter.start().await.unwrap();
+        use futures::StreamExt;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for message")
+            .expect("stream ended unexpectedly");
+        assert_eq!(
+            msg.metadata.get("sender_username").and_then(|v| v.as_str()),
+            Some("@handle"),
+            "username must land under the bridge-consumed key"
+        );
+        assert!(
+            !msg.metadata.contains_key("username"),
+            "the dead `username` key must not be written"
+        );
+        adapter.stop().await.unwrap();
     }
 
     /// Find python3 or python on PATH.

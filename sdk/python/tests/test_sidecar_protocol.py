@@ -7,6 +7,8 @@ SidecarEvent/SidecarCommand + ChannelContent shapes byte-for-byte
 
 import json
 
+import pytest
+
 from librefang.sidecar import protocol
 from librefang.sidecar.protocol import (
     Content,
@@ -171,3 +173,33 @@ def test_parse_command_unknown_is_tolerated():
     assert isinstance(u, UnknownCommand)
     assert u.method == "some_future_thing"
     assert u.raw["params"] == {"x": 1}
+
+
+def test_parse_command_non_object_json_raises_decode_error():
+    # Syntactically valid JSON that is not an object must surface as a
+    # JSONDecodeError (the reader's existing handled path), not an
+    # AttributeError that escapes and wedges the adapter.
+    for bad in ("123", '"a string"', "[1,2,3]", "true", "null"):
+        with pytest.raises(json.JSONDecodeError):
+            parse_command(bad)
+
+
+def test_parse_command_stream_start_carries_thread_id():
+    ss = parse_command(json.dumps({
+        "method": "stream_start",
+        "params": {"channel_id": "c", "stream_id": "s", "thread_id": "t-1"},
+    }))
+    assert isinstance(ss, StreamStart)
+    assert ss.thread_id == "t-1"
+    # Absent → None (pre-thread wire shape).
+    ss2 = parse_command(
+        '{"method":"stream_start","params":{"channel_id":"c","stream_id":"s"}}')
+    assert isinstance(ss2, StreamStart) and ss2.thread_id is None
+
+
+def test_message_carries_platform_message_id():
+    p = protocol.message("u", "n", text="hi", message_id="plat-7")["params"]
+    assert p["message_id"] == "plat-7"
+    # Absent → omitted (server generates a UUID).
+    p2 = protocol.message("u", "n", text="hi")["params"]
+    assert "message_id" not in p2
