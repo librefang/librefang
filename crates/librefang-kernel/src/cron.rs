@@ -135,6 +135,37 @@ impl CronScheduler {
             self.jobs.insert(meta.job.id, meta);
         }
         info!(count, "Loaded cron jobs from disk");
+
+        // #5113 follow-up: surface any persisted cron jobs whose
+        // expression has no future fire time. Pre-#5113 daemons accepted
+        // these via `add_job` (or pre-#5113-followup PRs via
+        // `update_job`); replaying them silently here would leave the
+        // operator wondering why a job never runs. We deliberately do
+        // NOT auto-disable — the existing fallback path in `due_jobs`
+        // counts consecutive fallbacks and auto-disables after
+        // `MAX_CONSECUTIVE_ERRORS`, which keeps the behaviour
+        // observable from `last_status` instead of mutating live state
+        // at boot.
+        let now = Utc::now();
+        for entry in self.jobs.iter() {
+            let meta = entry.value();
+            if !meta.job.enabled {
+                continue;
+            }
+            if let CronSchedule::Cron { expr, .. } = &meta.job.schedule {
+                if compute_next_run_after_opt(&meta.job.schedule, now).is_none() {
+                    warn!(
+                        job_id = %meta.job.id,
+                        agent = %meta.job.agent_id,
+                        expr = %expr,
+                        "Cron: persisted schedule has no future fire time; \
+                         scheduler fallback will auto-disable after \
+                         consecutive misses (#5113)"
+                    );
+                }
+            }
+        }
+
         Ok(count)
     }
 
@@ -211,11 +242,11 @@ impl CronScheduler {
         // back to a `+1h` retry that burns LLM tokens forever. Probe the
         // schedule once at insert and reject if no real fire exists. Only
         // `Cron` is gated — `At`/`Every` always produce a concrete time.
-        if let CronSchedule::Cron { .. } = &job.schedule {
+        if let CronSchedule::Cron { expr, .. } = &job.schedule {
             if compute_next_run_after_opt(&job.schedule, Utc::now()).is_none() {
                 return Err(LibreFangError::InvalidInput(format!(
-                    "cron schedule has no future fire time: {:?}",
-                    &job.schedule
+                    "cron expression \"{expr}\" has no future fire time \
+                     (impossible day-of-month/month combination)"
                 )));
             }
         }
@@ -343,6 +374,29 @@ impl CronScheduler {
         candidate
             .validate(0)
             .map_err(LibreFangError::InvalidInput)?;
+
+        // #5113 follow-up: `validate(0)` only checks field count and
+        // character set of the cron expression — it doesn't detect
+        // semantically-impossible schedules like `"0 0 30 2 *"` (Feb 30,
+        // never fires). `add_job` probes for this with
+        // `compute_next_run_after_opt` and rejects pre-insert; without
+        // the same probe here, a PUT could install a wedged schedule on
+        // an existing job, after which `due_jobs` would fall back to a
+        // `+1h` retry every tick until `MAX_CONSECUTIVE_ERRORS` triggers
+        // auto-disable — five wasted LLM-token fires. Only probe when
+        // the schedule field was actually part of this update; otherwise
+        // we'd reject every update on an already-wedged row (e.g. one
+        // persisted by an older daemon) and lock users out of fixing it.
+        if schedule_updated {
+            if let CronSchedule::Cron { expr, .. } = &candidate.schedule {
+                if compute_next_run_after_opt(&candidate.schedule, Utc::now()).is_none() {
+                    return Err(LibreFangError::InvalidInput(format!(
+                        "cron expression \"{expr}\" has no future fire time \
+                         (impossible day-of-month/month combination)"
+                    )));
+                }
+            }
+        }
 
         // Recompute next_run when the schedule shape changed, OR when
         // the job is being re-enabled (mirrors the prior in-place
@@ -2197,6 +2251,54 @@ mod tests {
 
         // State invariant: targets must not have been partially written.
         assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    /// Issue #5113 follow-up: `update_job` must apply the same
+    /// "schedule has no future fire time" probe that `add_job` applies.
+    /// Without this, a PUT carrying a semantically-impossible cron
+    /// expression (e.g. Feb 30) bypasses the insert-time gate and
+    /// silently wedges an existing job; the `due_jobs` fallback then
+    /// burns up to `MAX_CONSECUTIVE_ERRORS` token-spending fires
+    /// before auto-disable triggers. This is the symmetric counterpart
+    /// to `test_add_job_rejects_cron_with_no_future_fire`.
+    #[test]
+    fn test_update_job_rejects_cron_with_no_future_fire() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        // Seed with a valid `Every` schedule so the row exists.
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        let original_schedule = sched.get_job(id).unwrap().schedule.clone();
+
+        // Try to PUT a wedged 5-field cron — passes `validate_cron_expr`
+        // (5 fields, valid charset) but `compute_next_run_after_opt`
+        // returns None because Feb 30 doesn't exist.
+        let updates = serde_json::json!({
+            "schedule": {"kind": "cron", "expr": "0 0 30 2 *", "tz": null}
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("wedged cron schedule must be refused on update");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no future fire time"),
+            "Expected #5113 no-future-fire rejection, got: {msg}"
+        );
+
+        // State invariant: failed validation must leave the schedule
+        // untouched. The candidate-validate-swap path in `update_job`
+        // means a None probe must not have mutated `meta.job`.
+        // `CronSchedule` doesn't derive `PartialEq`, so pattern-match
+        // the variant we seeded with and pin its field.
+        match (&sched.get_job(id).unwrap().schedule, &original_schedule) {
+            (CronSchedule::Every { every_secs: a }, CronSchedule::Every { every_secs: b }) => {
+                assert_eq!(a, b, "every_secs must be unchanged after rejected update")
+            }
+            (other, _) => panic!(
+                "rejected update must not partially mutate the live schedule; \
+                 expected Every, got {other:?}"
+            ),
+        }
     }
 
     /// Two-phase mutation guarantee (#4739 review): if any field in a
