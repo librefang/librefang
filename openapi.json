@@ -8075,6 +8075,16 @@
                 }
               }
             }
+          },
+          "207": {
+            "description": "API key saved and default provider switched, but one or more agents could not be migrated; response includes `sync_failures`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       },

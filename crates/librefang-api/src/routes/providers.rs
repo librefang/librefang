@@ -1033,7 +1033,17 @@ pub async fn remove_custom_model(
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
-#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = crate::types::JsonObject, responses((status = 200, description = "API key set", body = crate::types::JsonObject)))]
+#[utoipa::path(
+    post,
+    path = "/api/providers/{name}/key",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider name")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "API key set", body = crate::types::JsonObject),
+        (status = 207, description = "API key saved and default provider switched, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
+    )
+)]
 pub async fn set_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
