@@ -300,7 +300,16 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        check_channel_policy(&repo_root)
-            .expect("committed allowlist must cover the real channel tree");
+        if let Err(e) = check_channel_policy(&repo_root) {
+            panic!(
+                "sidecar-first policy violation in the committed tree \
+                 (NOT a flaky test): {e}\n\n\
+                 A new in-process channel adapter was added without \
+                 going through a sidecar, or an allowlisted module was \
+                 deleted without removing its line. Fix the adapter \
+                 (make it a sidecar) or update \
+                 crates/librefang-channels/src/channels-allowlist.txt."
+            );
+        }
     }
 }
