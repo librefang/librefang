@@ -547,6 +547,17 @@ where
 
     tokio::spawn(async move {
         let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
+            Err(e) if e.is_cancelled() => {
+                // Intentional: cancelled (superseded) turns report Err status so
+                // bridge consumers apply AgentPhase::Error + record_delivery(success=false).
+                // A superseded turn is one whose kernel handle was aborted because a newer
+                // message arrived for the same (agent, session) — see messaging.rs rapid-dispatch
+                // race. Treating this as a delivery failure is pre-existing behaviour; a future
+                // follow-up could teach the bridge to skip lifecycle/record_delivery on
+                // cancellation specifically.
+                warn!("Streaming kernel task was cancelled: {e}");
+                (None, Err("kernel task cancelled".to_string()))
+            }
             Err(e) => {
                 error!("Streaming kernel task panicked: {e}");
                 (
@@ -620,8 +631,16 @@ where
         }
         // Drop error_tx so rx will close once bridge_handle also finishes.
         drop(error_tx);
-        if let Err(e) = bridge_handle.await {
-            error!("Streaming bridge task panicked: {e}");
+        // Note: bridge_handle can be cancelled independently of kernel_handle
+        // (e.g. tokio runtime shutdown). In that scenario the kernel may have
+        // completed Ok, but the streaming text bridge was chopped mid-flush,
+        // potentially losing the final buffered chunk. status_tx still carries
+        // the kernel's actual result, so lifecycle/record_delivery remain correct;
+        // only the in-flight text stream may be truncated. Pre-existing behaviour.
+        match bridge_handle.await {
+            Err(e) if e.is_cancelled() => warn!("Streaming bridge task was cancelled: {e}"),
+            Err(e) => error!("Streaming bridge task panicked: {e}"),
+            Ok(()) => {}
         }
         // Report kernel terminal status to any caller that opted in. Sent
         // last so awaiters can be sure the text channel has fully drained.
@@ -4016,11 +4035,28 @@ pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
     // Stop existing bridge. Swap it out atomically so concurrent readers see
-    // None immediately, then unwrap the Arc to get owned access for stop().
+    // None immediately, then tear down the old instance.
+    //
+    // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
+    // exists — but `routes/agents.rs::push_message` does
+    // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
+    // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
+    // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old
+    // bridge's tokio tasks until the strong count happened to hit 1. We now
+    // ALWAYS call `abort()` (which only needs `&self`: fires the watch
+    // shutdown signal + aborts every tracked task handle). When we *did* get
+    // exclusive ownership we additionally run the graceful `stop()` for its
+    // clean join + per-adapter async cleanup.
     {
         let old = state.bridge_manager.swap(std::sync::Arc::new(None));
-        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
-            b.stop().await;
+        match std::sync::Arc::try_unwrap(old) {
+            Ok(Some(mut b)) => b.stop().await,
+            Ok(None) => {}
+            Err(still_shared) => {
+                if let Some(b) = still_shared.as_ref() {
+                    b.abort();
+                }
+            }
         }
     }
 
@@ -4637,6 +4673,42 @@ mod tests {
         assert!(
             status.is_ok(),
             "Timeout-with-partial-output is a soft success — status must be Ok, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_bridge_cancelled_reports_err_status() {
+        use librefang_types::error::LibreFangError;
+
+        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            futures::future::pending::<
+                Result<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>,
+            >()
+            .await
+        });
+        kernel_handle.abort();
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
+
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+        assert!(
+            received.is_empty(),
+            "Cancelled task must not produce user-facing text, got: {received:?}"
+        );
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_err(),
+            "Cancelled task must report Err status, got: {status:?}"
+        );
+        assert!(
+            status.as_ref().unwrap_err().contains("cancelled"),
+            "Error string must mention cancellation, got: {status:?}"
         );
     }
 

@@ -1004,6 +1004,60 @@ impl Default for WebhookTriggerConfig {
     }
 }
 
+/// Credential selection strategy for a credential pool.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPoolStrategy {
+    /// Always try the highest-priority available key first.
+    #[default]
+    FillFirst,
+    /// Cycle through available keys in priority order.
+    RoundRobin,
+    /// Choose a random available key.
+    Random,
+    /// Choose the key with the fewest successful requests so far.
+    LeastUsed,
+}
+
+/// A single API key entry inside a [`CredentialPoolConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolKeyConfig {
+    /// Environment variable holding the API key.
+    pub api_key_env: String,
+    /// Human-readable label for this key (e.g. "Primary", "Backup").
+    pub label: String,
+    /// Higher-priority keys are tried first in FillFirst / RoundRobin.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub priority: u32,
+}
+
+/// Multi-key credential pool for a single provider.
+///
+/// Configurable in `config.toml` as `[[credential_pools]]`:
+/// ```toml
+/// [[credential_pools]]
+/// provider = "openai"
+/// strategy = "round_robin"
+///
+/// [[credential_pools.keys]]
+/// api_key_env = "OPENAI_API_KEY_1"
+/// label = "Primary"
+/// priority = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolConfig {
+    /// Provider name (e.g., "openai", "anthropic").
+    pub provider: String,
+    /// Key selection strategy.
+    #[serde(default)]
+    pub strategy: CredentialPoolStrategy,
+    /// List of API keys in the pool.
+    pub keys: Vec<CredentialPoolKeyConfig>,
+}
+
 /// Fallback provider chain — tried in order if the primary provider fails.
 ///
 /// Configurable in `config.toml` under `[[fallback_providers]]`:
@@ -2862,6 +2916,10 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
+    /// Credential pools — multi-key rotation per provider.
+    /// Configure in config.toml as `[[credential_pools]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_pools: Vec<CredentialPoolConfig>,
     /// `[llm]` section — currently carries the auxiliary side-task chain
     /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
     #[serde(default)]
@@ -3288,6 +3346,12 @@ pub struct KernelConfig {
     /// Default: `None` (unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_total_timeout_secs: Option<u64>,
+    /// Background autonomous-loop executor knobs (issue #5168).
+    /// Currently governs the rate-limit circuit breaker that stops a
+    /// continuous / periodic loop from re-firing forever when the LLM
+    /// provider is rate-limited or quota-exhausted.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4680,6 +4744,46 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// Background autonomous-loop executor configuration (issue #5168).
+///
+/// Tunes the circuit breaker that stops a continuous / periodic background
+/// loop from re-firing forever when the LLM provider is rate-limited or
+/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
+/// `librefang_kernel::background` for the rationale.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [background]
+/// max_consecutive_rate_limits = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Maximum number of *consecutive* background ticks whose agent turn
+    /// failed because the LLM provider was rate-limited / quota-exhausted
+    /// before the continuous / periodic loop stops re-firing the agent.
+    ///
+    /// A single non-rate-limited tick resets the counter, so transient
+    /// blips do not permanently park a healthy agent. Set to `0` to
+    /// disable the breaker entirely (the loop re-fires forever — only
+    /// appropriate when running against a provider with no quota).
+    /// Default: `5`.
+    #[serde(default = "default_max_consecutive_rate_limits")]
+    pub max_consecutive_rate_limits: u32,
+}
+
+fn default_max_consecutive_rate_limits() -> u32 {
+    5
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -5515,6 +5619,7 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
+            credential_pools: Vec::new(),
             llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
@@ -5603,6 +5708,7 @@ impl Default for KernelConfig {
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
+            background: BackgroundConfig::default(),
         }
     }
 }
@@ -5694,6 +5800,10 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "fallback_providers",
                 &format!("{} provider(s)", self.fallback_providers.len()),
+            )
+            .field(
+                "credential_pools",
+                &format!("{} pool(s)", self.credential_pools.len()),
             )
             .field("browser", &self.browser)
             .field("extensions", &self.extensions)
