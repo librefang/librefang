@@ -15,11 +15,15 @@ The event/command envelope targets the **post-#5219** sidecar protocol
 (unit, no params) / ``error`` set with ``SidecarMessageParams`` =
 ``{user_id, user_name, text, channel_id, platform}`` (no ``content``),
 and ``SidecarCommand`` is only ``send {channel_id, text}`` /
-``shutdown``. An adapter written with this SDK is therefore
-wire-compatible only once #5219 lands; against a pre-#5219 daemon
-``ready_ack`` never arrives (the handshake loop re-announces ``ready``
-indefinitely) and ``message`` ``content`` is dropped (the reader uses
-``text`` only). ``content`` is the externally-tagged
+``shutdown``. An adapter written with this SDK is fully wire-correct
+only once #5219 lands, but it **degrades cleanly on the current
+``main``**: a pre-#5219 daemon never sends ``ready_ack``, so the
+handshake loop stops re-announcing after ``ready_max_attempts`` (see
+:mod:`librefang.sidecar.runtime`) rather than flooding stdout; and
+:func:`message` mirrors plain-text ``content`` into the legacy
+``text`` field so a ``content``-only text message is still delivered
+non-empty (non-text ``content`` has no lossless ``text`` form and is
+seen only by a #5219+ daemon). ``content`` is the externally-tagged
 ``ChannelContent`` enum (e.g. ``{"Text": "hi"}``, ``{"Image": {...}}``)
 — this part IS byte-for-byte the existing
 ``crate::types::ChannelContent``. Build it with :class:`Content`.
