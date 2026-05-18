@@ -611,8 +611,7 @@ async fn agent_send_no_key_with_caller_routes_to_send_to_agent_as() {
     let kernel: Arc<dyn KernelHandle> = cap.clone();
     let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
 
-    let result =
-        super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await;
+    let result = super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await;
 
     assert_eq!(result.unwrap(), "no-key-with-parent");
     let calls = cap.calls.lock().unwrap();

@@ -9096,7 +9096,6 @@ fn test_context_report_honours_manifest_context_window_override() {
     kernel.shutdown();
 }
 
-
 /// #5137: `suspend_agent` / `resume_agent` previously discarded the
 /// `set_state` `Result` with `let _ =`, so the API could report success
 /// while the in-memory `AgentState` never changed — yet
