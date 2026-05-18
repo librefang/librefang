@@ -16,6 +16,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-http = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
@@ -31,6 +34,8 @@ rand = { workspace = true }
 serial_test = "3"
 tempfile = { workspace = true }
 wiremock = "0.6"
+opentelemetry_sdk = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
