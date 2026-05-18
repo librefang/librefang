@@ -94,6 +94,27 @@ const FALLBACK_SUMMARY: &str = "[summarisation unavailable]";
 /// is the simplest safe default until a fold pass actually exceeds it.
 const MAX_FOLD_OUTPUT_TOKENS: usize = 8_192;
 
+/// Per-block token budget for the summariser.  Sized so a pretty-printing
+/// model (one JSON key per line, plus an ~80-token 1-2 sentence summary)
+/// fits without overrunning the JSON contract mid-string.  See #5203
+/// post-mortem on the 64 tok/block regression.
+///
+/// **Cap interaction**: when `blocks.len() * FOLD_TOKENS_PER_BLOCK`
+/// exceeds [`MAX_FOLD_OUTPUT_TOKENS`] (currently at `blocks.len() > 64`)
+/// the per-block budget is silently clamped down by the cap.  The
+/// summariser emits a `warn!` in that regime so operators can spot
+/// truncation risk; the long-term fix is a catalog-driven per-model
+/// cap.  See [`summarise_batch`] for the warn site.
+const FOLD_TOKENS_PER_BLOCK: usize = 128;
+
+/// Minimum `max_tokens` floor for a fold call, regardless of block
+/// count.  Keeps the smallest size-1 fold pass (which is the most
+/// common case after #4866 persistence) from being starved by a
+/// pretty-printing model.  Sized at `4 × FOLD_TOKENS_PER_BLOCK` — the
+/// same headroom four blocks would receive — so a tiny fold pass is
+/// never less generous than a small batched one.
+const FOLD_TOKENS_FLOOR: usize = 512;
+
 /// Result of a single fold pass.
 #[derive(Debug, Default)]
 pub struct FoldResult {
@@ -522,17 +543,36 @@ async fn summarise_batch(
         prompt.push('\n');
     }
 
-    // Headroom for N short summaries plus JSON wrapping.  128 tokens/block
-    // gives comfortable slack for models that pretty-print (one field per
-    // line) rather than emitting compact single-line JSON — the previous 64
-    // tok/block budget was routinely overrun by verbose-output models such
-    // as ollama:gemma4, causing serde_json to fail with "EOF while parsing a
-    // string" and every fold pass to degrade to the raw-text bulk fallback
-    // (#5203).  Floor raised proportionally (4 blocks × 128 = 512).
-    // Capped at MAX_FOLD_OUTPUT_TOKENS (see module-level const for the
-    // rationale).
-    let max_tokens = std::cmp::max(512_usize, 128usize.saturating_mul(blocks.len()))
-        .min(MAX_FOLD_OUTPUT_TOKENS) as u32;
+    // Headroom for N short summaries plus JSON wrapping.
+    // `FOLD_TOKENS_PER_BLOCK` gives comfortable slack for models that
+    // pretty-print (one field per line) rather than emitting compact
+    // single-line JSON — the previous 64 tok/block budget was routinely
+    // overrun by verbose-output models such as ollama:gemma4, causing
+    // serde_json to fail with "EOF while parsing a string" and every fold
+    // pass to degrade to the raw-text bulk fallback (#5203).  Floor
+    // (`FOLD_TOKENS_FLOOR`) sized at 4 × per-block so a size-1 pass
+    // (#4866 steady state) is never less generous than a small batch.
+    // Capped at `MAX_FOLD_OUTPUT_TOKENS` (provider 400 ceiling); when
+    // the requested per-block budget exceeds the cap we warn so operators
+    // can spot the truncation risk that the cap silently re-introduces.
+    let requested = std::cmp::max(
+        FOLD_TOKENS_FLOOR,
+        FOLD_TOKENS_PER_BLOCK.saturating_mul(blocks.len()),
+    );
+    if requested > MAX_FOLD_OUTPUT_TOKENS {
+        let effective_per_block = MAX_FOLD_OUTPUT_TOKENS / blocks.len().max(1);
+        warn!(
+            block_count = blocks.len(),
+            requested_max_tokens = requested,
+            capped_max_tokens = MAX_FOLD_OUTPUT_TOKENS,
+            effective_per_block_tokens = effective_per_block,
+            fold_tokens_per_block = FOLD_TOKENS_PER_BLOCK,
+            "history_fold: per-block token budget exceeds MAX_FOLD_OUTPUT_TOKENS — \
+             verbose-JSON responses may still be truncated for large batches \
+             (see #5203). Effective per-block budget is reduced by the cap."
+        );
+    }
+    let max_tokens = requested.min(MAX_FOLD_OUTPUT_TOKENS) as u32;
 
     let request = CompletionRequest {
         model: model.to_string(),
@@ -741,6 +781,100 @@ mod tests {
             Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
                     text: self.0.clone(),
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    /// Driver that truncates its response to `max_tokens * 4` bytes
+    /// (the rough provider convention of ~4 chars/token).  Models that
+    /// pretty-print JSON saturate their `max_tokens` budget on payload
+    /// shape rather than substance, so a too-tight budget cuts the
+    /// response mid-string — the exact failure mode #5203 was filed
+    /// against.  Used by the regression test to prove that bumping the
+    /// per-block budget to `FOLD_TOKENS_PER_BLOCK` (and the floor to
+    /// `FOLD_TOKENS_FLOOR`) actually lets a realistic verbose response
+    /// survive the round-trip.
+    struct TruncatingDriver {
+        full_response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for TruncatingDriver {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            // Mirror the provider convention: ~4 characters per token.
+            // A pretty-printing model emits one JSON key per line, so a
+            // tight token budget cuts the response mid-string and
+            // serde_json fails with "EOF while parsing a string".
+            let byte_limit = (req.max_tokens as usize).saturating_mul(4);
+            let truncated: String = self.full_response.chars().take(byte_limit).collect();
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: truncated,
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    /// Driver that records the `max_tokens` it was asked for, then
+    /// returns a benign per-id JSON.  Used to assert that the
+    /// production budget arithmetic produces the expected per-block
+    /// allocation under both small (floor-bound) and large (per-block
+    /// scaled) batches.
+    struct MaxTokensRecordingDriver {
+        observed: Arc<std::sync::Mutex<Vec<u32>>>,
+    }
+
+    impl MaxTokensRecordingDriver {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<u32>>>) {
+            let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                MaxTokensRecordingDriver {
+                    observed: Arc::clone(&observed),
+                },
+                observed,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for MaxTokensRecordingDriver {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.observed.lock().unwrap().push(req.max_tokens);
+            // Echo back a per-id summary for every stale block in the
+            // prompt so the fold succeeds end-to-end — we only care
+            // about the recorded `max_tokens` here, not the content.
+            let prompt = match &req.messages[0].content {
+                MessageContent::Blocks(blocks) => match &blocks[0] {
+                    ContentBlock::Text { text, .. } => text.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            // Recover the labelled ids from the prompt (format: `[id] tool: ...`).
+            let mut entries: Vec<String> = Vec::new();
+            for line in prompt.lines() {
+                if let Some(rest) = line.strip_prefix('[') {
+                    if let Some(end) = rest.find(']') {
+                        let id = &rest[..end];
+                        entries.push(format!("{{\"id\":\"{id}\",\"summary\":\"ok\"}}"));
+                    }
+                }
+            }
+            let body = format!("[{}]", entries.join(","));
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: body,
                     provider_metadata: None,
                 }],
                 tool_calls: vec![],
@@ -1527,16 +1661,27 @@ mod tests {
     }
 
     /// Regression for #5203: a verbose-JSON fold model that pretty-prints
-    /// its output (one JSON key per line) must not be truncated mid-string.
+    /// its output (one JSON key per line) must not be truncated mid-string
+    /// at the production per-block token budget.
     ///
-    /// The 64 tok/block budget (256 floor) caused serde_json to fail with
-    /// "EOF while parsing a string" for models like ollama:gemma4 that emit
-    /// ~100+ tokens per block even for a 1-2 sentence summary.  This test
-    /// constructs a realistic pretty-printed JSON response for 4 blocks (the
-    /// smallest batch that reliably overran the old 256-token floor) and
-    /// asserts that `fold_stale_tool_results` succeeds at the JSON parse
-    /// level — i.e. `groups_used_fallback` stays 0 and each block receives
-    /// its own per-id summary.
+    /// The driver here is a [`TruncatingDriver`] that mirrors the real
+    /// provider convention of ~4 characters per token: any response longer
+    /// than `max_tokens * 4` bytes gets cut off.  With the pre-#5203 budget
+    /// (64 tok/block, 256 floor) a realistic ~1680-byte verbose response is
+    /// chopped mid-string and serde_json fails with "EOF while parsing a
+    /// string" — every fold pass falls back to bulk-summary semantics.
+    ///
+    /// This test asserts both halves of the regression guard:
+    /// 1. **Old budget would have failed** — when the response is
+    ///    truncated at the pre-#5203 budget (256 tok × 4 chars/tok =
+    ///    1024 bytes for a 4-block batch) the pretty-printed JSON gets
+    ///    cut mid-summary and the parse step reports failure.  This is
+    ///    exercised against [`parse_labeled_summaries`] directly so we
+    ///    don't have to plumb a custom budget through `summarise_batch`.
+    /// 2. **Current budget survives** — at the production floor
+    ///    (`FOLD_TOKENS_FLOOR = 512`) the same verbose response parses
+    ///    cleanly and each stale block receives its specific per-id
+    ///    summary.
     #[tokio::test]
     async fn verbose_json_fold_output_not_truncated_mid_string() {
         // Build 4 stale tool-result messages (fold_after=2 with 6 total
@@ -1551,29 +1696,54 @@ mod tests {
             ));
         }
 
-        // Simulate a verbose pretty-printed response from a model like
-        // gemma4 — each entry spans ~6 lines (well over 64 tokens for 4
-        // blocks).  The total here is ~480 characters / ~120 tokens, which
-        // comfortably exceeded the old 256-token floor when pretty-printed.
+        // Realistic verbose pretty-printed response from a model like
+        // gemma4 — each entry spans ~9 lines with longer summaries,
+        // total ~1680 chars.  This is well above the pre-#5203
+        // 256-token (1024-byte) ceiling but comfortably under the
+        // post-fix 512-token (2048-byte) floor, so the byte-budget
+        // simulation in [`TruncatingDriver`] separates the two regimes.
         let pretty_json = r#"[
   {
     "id": "tid_0",
-    "summary": "The shell command executed successfully and listed all files in the current working directory including hidden dotfiles and build artifacts."
+    "summary": "The shell command executed successfully and listed all files in the current working directory including hidden dotfiles, build artifacts, vendored dependencies, the test fixture directory containing all the integration test data, the documentation tree under docs/, the build scripts in scripts/, and the workspace-level Cargo.lock recording every transitive crate version."
   },
   {
     "id": "tid_1",
-    "summary": "The read_file tool returned the contents of the configuration file, revealing the database connection string and API endpoint settings."
+    "summary": "The read_file tool returned the contents of the configuration file, revealing the database connection string, API endpoint settings, retry policy knobs, the cache eviction thresholds for the in-memory layer, the rate-limit defaults per provider, the OAuth client registration entries for each MCP server, and the telemetry exporter endpoints configured for the observability pipeline."
   },
   {
     "id": "tid_2",
-    "summary": "The test runner completed all 47 unit tests with zero failures, confirming that the recent refactoring did not introduce regressions."
+    "summary": "The test runner completed all forty-seven unit tests with zero failures across the workspace crates, confirming that the recent refactoring of the persistence adapter did not introduce any regressions in the durability path, the message-history trimming logic, the trigger dispatch concurrency guards, or the agent-loop tool-result rewriting pipeline that the fold persistence axis depends on."
   },
   {
     "id": "tid_3",
-    "summary": "The git commit tool staged and committed the changes to the feature branch with the conventional-commit message format as required."
+    "summary": "The git commit tool staged and committed the changes to the feature branch with the conventional-commit message format as required by the contribution guide and the project's commit-msg server-side hook, then verified the working tree returned to a clean state with no leftover untracked files or staged hunks that could leak into a follow-up PR."
   }
 ]"#;
-        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(pretty_json.to_string()));
+
+        // Sanity-check the regression itself: at the OLD budget the
+        // driver would truncate the response, so the parser should
+        // report failure.  This is the "test can actually falsify the
+        // bug" half of the regression guard — without it, the happy-
+        // path assertion below would pass even at the buggy 64/256
+        // budget (because no real truncation was simulated).
+        let old_budget_max_tokens: u32 = 256; // pre-#5203 floor (4 blocks × 64)
+        let old_byte_limit = (old_budget_max_tokens as usize) * 4;
+        let old_truncated: String = pretty_json.chars().take(old_byte_limit).collect();
+        let parsed_old = parse_labeled_summaries(&old_truncated);
+        assert!(
+            parsed_old.is_err(),
+            "pre-#5203 budget should truncate verbose JSON mid-string and fail to parse; \
+             got Ok({:?}) which means the test cannot falsify the bug",
+            parsed_old.ok()
+        );
+
+        // Happy path: production budget (`FOLD_TOKENS_FLOOR = 512`)
+        // leaves the response intact.  Drive it through the full fold
+        // pass so the per-block rewrite path is also exercised.
+        let driver: Arc<dyn LlmDriver> = Arc::new(TruncatingDriver {
+            full_response: pretty_json.to_string(),
+        });
 
         let (out, result) = fold_stale_tool_results(
             msgs,
@@ -1591,7 +1761,7 @@ mod tests {
         assert_eq!(
             result.groups_used_fallback, 0,
             "verbose-JSON pretty-printed response must parse successfully — \
-             groups_used_fallback > 0 indicates the old truncation bug is present"
+             groups_used_fallback > 0 indicates the truncation bug regressed"
         );
         assert_eq!(
             result.groups_folded, 1,
@@ -1628,6 +1798,79 @@ mod tests {
                 .get("tid_3")
                 .is_some_and(|c| c.contains("feature branch")),
             "tid_3 must carry its verbose per-id summary"
+        );
+    }
+
+    /// Behavioural guard for the per-block budget arithmetic (#5203
+    /// review P1.2).  Asserts that `summarise_batch` requests at
+    /// least `FOLD_TOKENS_FLOOR` for any small batch and at least
+    /// `FOLD_TOKENS_PER_BLOCK * n` for any batch large enough to
+    /// exceed the floor — capped only by `MAX_FOLD_OUTPUT_TOKENS`.
+    /// Catches accidental regressions of the magic-number budget
+    /// even without staging a real truncation driver.
+    #[tokio::test]
+    async fn summarise_batch_max_tokens_respects_floor_and_per_block() {
+        // Small batch (1 block) → floor-bound.
+        // 3 turns with fold_after=2 leaves turn 0 stale → 1 block.
+        let small_msgs = build_history(3);
+
+        let (rec, observed) = MaxTokensRecordingDriver::new();
+        let driver: Arc<dyn LlmDriver> = Arc::new(rec);
+
+        let _ = fold_stale_tool_results(
+            small_msgs,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        let small_observed = observed.lock().unwrap().clone();
+        assert_eq!(
+            small_observed.len(),
+            1,
+            "expected exactly one batched call for the small fold pass"
+        );
+        assert!(
+            small_observed[0] >= FOLD_TOKENS_FLOOR as u32,
+            "small-batch max_tokens={} must be >= FOLD_TOKENS_FLOOR ({})",
+            small_observed[0],
+            FOLD_TOKENS_FLOOR
+        );
+
+        // Larger batch (8 blocks) → per-block-scaled.
+        // 10 turns with fold_after=2 leaves turns 0-7 stale → 8 blocks.
+        let large_msgs = build_history(10);
+
+        let (rec2, observed2) = MaxTokensRecordingDriver::new();
+        let driver2: Arc<dyn LlmDriver> = Arc::new(rec2);
+
+        let _ = fold_stale_tool_results(
+            large_msgs,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver2,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        let large_observed = observed2.lock().unwrap().clone();
+        assert_eq!(large_observed.len(), 1);
+        // 8 stale blocks × 128 tok/block = 1024, well under the cap.
+        assert!(
+            large_observed[0] >= (8 * FOLD_TOKENS_PER_BLOCK) as u32,
+            "large-batch max_tokens={} must be >= 8 * FOLD_TOKENS_PER_BLOCK ({})",
+            large_observed[0],
+            8 * FOLD_TOKENS_PER_BLOCK
         );
     }
 }
