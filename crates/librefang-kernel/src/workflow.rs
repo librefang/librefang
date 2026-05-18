@@ -2859,6 +2859,14 @@ impl WorkflowEngine {
             if let Some(mut run) = self.runs.get_mut(&run_id) {
                 run.clear_pause_state();
             }
+            // Drop the operator timeout watchdog notifier entry if this
+            // run was paused at an operator step. Without this, cancels
+            // on operator-paused runs leak entries in
+            // `operator_resume_notify` (the watchdog task itself exits
+            // because `is_paused()` recheck fails, but the DashMap entry
+            // it allocated never gets removed). The function is a no-op
+            // when no entry exists, so it's safe for non-operator pauses.
+            self.cancel_operator_timeout_watchdog(run_id);
         }
 
         // Persist immediately so a restart does not revert to Running/Pending.
@@ -2970,6 +2978,14 @@ impl WorkflowEngine {
                 })?
         };
 
+        // If this resume targets an operator-paused run, clean up the
+        // watchdog notifier entry so it cannot race the resumed
+        // execution and so `operator_resume_notify` doesn't grow
+        // unboundedly across resume cycles. No-op when no entry exists
+        // (regular `pause_run` / `resume_run` flows that never went
+        // through the operator path).
+        self.cancel_operator_timeout_watchdog(run_id);
+
         // Re-enter the sequential path. It looks at paused_step_index /
         // paused_variables / paused_current_input on the run and resumes
         // from there. The dispatch over has_dag_deps mirrors execute_run.
@@ -3061,19 +3077,25 @@ impl WorkflowEngine {
     /// #5135 — push the artifact + allowed-action instructions to every
     /// configured `notify` recipient through the installed notifier.
     ///
+    /// Spawns a detached `tokio::task` and returns immediately so a slow
+    /// recipient (HTTP webhook retry, dead Telegram bridge) cannot block
+    /// the workflow executor coroutine. The run is already `Paused +
+    /// persisted` at the call site, so a notification that lands seconds
+    /// later is still observable through the HTTP inspect path.
+    ///
     /// Best-effort: a single recipient failing is logged at WARN but never
     /// aborts the pause (the run is already Paused + persisted and
     /// resumable via the HTTP layer regardless). When no notifier is
     /// installed (tests / pre-boot) this degrades to the pre-#5135
     /// behaviour of logging which recipients *would* have been notified.
-    async fn dispatch_operator_notifications(
+    fn dispatch_operator_notifications(
         &self,
         run_id: WorkflowRunId,
         step_name: &str,
         notify: &[String],
         message: &str,
     ) {
-        let Some(notifier) = self.operator_notifier.get() else {
+        let Some(notifier) = self.operator_notifier.get().cloned() else {
             info!(
                 run_id = %run_id,
                 step = %step_name,
@@ -3083,30 +3105,36 @@ impl WorkflowEngine {
             );
             return;
         };
-        let mut ok = 0usize;
-        let mut failed = 0usize;
-        for recipient in notify {
-            match notifier.notify_operator(recipient, message).await {
-                Ok(()) => ok += 1,
-                Err(e) => {
-                    failed += 1;
-                    warn!(
-                        run_id = %run_id,
-                        step = %step_name,
-                        recipient = %recipient,
-                        error = %e,
-                        "Operator notify: delivery to recipient failed"
-                    );
+        // Clone everything the detached task needs into 'static storage.
+        let step_name = step_name.to_string();
+        let recipients: Vec<String> = notify.to_vec();
+        let message = message.to_string();
+        tokio::spawn(async move {
+            let mut ok = 0usize;
+            let mut failed = 0usize;
+            for recipient in &recipients {
+                match notifier.notify_operator(recipient, &message).await {
+                    Ok(()) => ok += 1,
+                    Err(e) => {
+                        failed += 1;
+                        warn!(
+                            run_id = %run_id,
+                            step = %step_name,
+                            recipient = %recipient,
+                            error = %e,
+                            "Operator notify: delivery to recipient failed"
+                        );
+                    }
                 }
             }
-        }
-        info!(
-            run_id = %run_id,
-            step = %step_name,
-            delivered = ok,
-            failed,
-            "Operator notify dispatched"
-        );
+            info!(
+                run_id = %run_id,
+                step = %step_name,
+                delivered = ok,
+                failed,
+                "Operator notify dispatched"
+            );
+        });
     }
 
     /// #5134 — spawn a detached watchdog that auto-resolves the pause with
@@ -4937,8 +4965,7 @@ impl WorkflowEngine {
                             &step.name,
                             notify,
                             &notify_message,
-                        )
-                        .await;
+                        );
 
                         // #5134 — spawn the timeout watchdog. `Continue`
                         // (the default) leaves the run Paused forever, so
@@ -11272,7 +11299,17 @@ name = "topic"
             .await
             .expect("operator pause returns Ok");
 
-        let calls = notifier.calls.lock().unwrap().clone();
+        // Notification dispatch is now spawned detached (it must never
+        // block the workflow executor on a slow recipient), so poll for
+        // both deliveries to land rather than reading once and racing.
+        let mut calls = Vec::new();
+        for _ in 0..50 {
+            calls = notifier.calls.lock().unwrap().clone();
+            if calls.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let recipients: Vec<&str> = calls.iter().map(|(r, _)| r.as_str()).collect();
         assert!(
             recipients.contains(&"telegram:@alice") && recipients.contains(&"slack:#ops"),
@@ -11595,6 +11632,167 @@ name = "topic"
         assert!(
             engine.get_run(run_id).await.unwrap().state.is_paused(),
             "run must stay Paused when the action was not authorised"
+        );
+    }
+
+    /// #5133 regression — cancelling an operator-paused run must remove
+    /// the per-run `operator_resume_notify` entry. Without this cleanup
+    /// the DashMap grows by one entry per cancelled run, even though the
+    /// watchdog task itself exits via the `is_paused()` recheck. The
+    /// watchdog needs a non-zero budget so the entry actually gets
+    /// allocated by `spawn_operator_timeout_watchdog`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_run_clears_operator_watchdog_entry() {
+        let engine = WorkflowEngine::new();
+        let mut wf = workflow_with_operator_step();
+        wf.steps[0].mode = StepMode::Operator {
+            notify: vec!["telegram:@op".to_string()],
+            actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+            // Long enough that the watchdog cannot fire before cancel
+            // observes the entry.
+            timeout_secs: Some(60),
+            timeout_action: OperatorTimeoutAction::Reject,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "artifact".to_string())
+            .await
+            .expect("create_run");
+
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("operator pause returns Ok");
+        assert!(
+            engine.get_run(run_id).await.unwrap().state.is_paused(),
+            "run must be Paused right after the operator step"
+        );
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_some(),
+            "watchdog must have allocated a notifier entry for the paused run"
+        );
+
+        engine.cancel_run(run_id).await.expect("cancel_run");
+
+        assert!(
+            matches!(
+                engine.get_run(run_id).await.unwrap().state,
+                WorkflowRunState::Cancelled
+            ),
+            "run must transition to Cancelled"
+        );
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_none(),
+            "cancel_run on an operator-paused run must drop the watchdog \
+             notifier entry"
+        );
+    }
+
+    /// #5133 regression — `resume_run` must drop any stale
+    /// `operator_resume_notify` entry attached to the run. The operator
+    /// pause path stores only the hashed resume token (the plaintext is
+    /// never recoverable from outside), so we exercise the cleanup
+    /// contract by combining a non-operator `pause_run` with a manually
+    /// injected watchdog entry — that's the exact shape of a
+    /// real-world leak: a watchdog entry left behind by a prior
+    /// operator pause + a subsequent resume that takes the generic
+    /// `resume_run` path (the ops escape hatch). The contract is:
+    /// after `resume_run` validates the token and re-enters execution,
+    /// no entry must remain.
+    ///
+    /// Token validation happens BEFORE the cleanup is reached, which
+    /// preserves the security invariant that a bad token cannot evict
+    /// the watchdog. We assert that explicitly too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_run_clears_operator_watchdog_entry() {
+        let engine = WorkflowEngine::new();
+        // Plain sequential workflow — exercised via pause_run +
+        // resume_run, which lets us hold the plaintext token.
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "resume-cleanup".to_string(),
+            description: "regression".to_string(),
+            steps: vec![WorkflowStep {
+                name: "only".to_string(),
+                agent: StepAgent::ByName {
+                    name: "noop".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "artifact".to_string())
+            .await
+            .expect("create_run");
+
+        // Lodge a pause + grab the plaintext token before the executor
+        // runs, so we can resume with the correct token.
+        let token = engine.pause_run(run_id, "test").await.expect("pause_run");
+        // Drive the executor: it observes the pause_request at the
+        // loop-top gate and parks the run in Paused state.
+        engine
+            .execute_run(run_id, mock_resolver, |_id, _p, _m| async {
+                Ok(("done".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("pause honoured");
+        assert!(
+            engine.get_run(run_id).await.unwrap().state.is_paused(),
+            "run must be Paused after pause_run + execute_run"
+        );
+
+        // Simulate a stale watchdog entry — exactly what a prior
+        // operator pause + cancel/resume cycle could leave behind
+        // before this fix. The notifier is a real
+        // `tokio::sync::Notify`, same shape as
+        // `spawn_operator_timeout_watchdog` allocates.
+        engine
+            .operator_resume_notify
+            .insert(run_id, Arc::new(tokio::sync::Notify::new()));
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_some(),
+            "stale entry must be present before resume_run"
+        );
+
+        // Bad token must NOT evict the watchdog — confirms the cleanup
+        // sits AFTER token validation (security boundary).
+        let bogus = Uuid::new_v4();
+        let err = engine
+            .resume_run(run_id, bogus, mock_resolver, |_id, _p, _m| async {
+                Ok(("x".to_string(), 0, 0))
+            })
+            .await;
+        assert!(err.is_err(), "bogus token must error");
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_some(),
+            "token mismatch must not drop the watchdog entry"
+        );
+
+        // Correct token: cleanup must run.
+        engine
+            .resume_run(run_id, token, mock_resolver, |_id, _p, _m| async {
+                Ok(("done".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("resume_run with correct token must succeed");
+        assert!(
+            engine.operator_resume_notify.get(&run_id).is_none(),
+            "resume_run on a paused run must drop the (stale) watchdog \
+             entry"
         );
     }
 }
