@@ -6,15 +6,15 @@
 
 use crate::types::{
     ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
-    GroupMember, ParticipantRef,
+    GroupMember, InteractiveMessage, LifecycleReaction, ParticipantRef, TypingEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -34,9 +34,14 @@ pub enum SidecarEvent {
     /// serde and field access (incl. partial moves) are transparent.
     #[serde(rename = "message")]
     Message { params: Box<SidecarMessageParams> },
-    /// Adapter is ready to receive commands.
+    /// Adapter is ready to receive commands. Carries the declared
+    /// capability set + identity metadata. The bare legacy form
+    /// `{"method":"ready"}` still parses (`params` defaults).
     #[serde(rename = "ready")]
-    Ready,
+    Ready {
+        #[serde(default)]
+        params: SidecarReadyParams,
+    },
     /// Adapter encountered an error.
     #[serde(rename = "error")]
     Error { params: SidecarErrorParams },
@@ -91,12 +96,39 @@ pub struct SidecarErrorParams {
     pub message: String,
 }
 
-/// Inbound typing indicator params (P0 skeleton — consumed in P2).
+/// Inbound typing indicator params — fed to `typing_events()`.
 #[derive(Debug, Deserialize)]
 pub struct SidecarTypingParams {
     pub user_id: String,
     pub user_name: String,
     pub is_typing: bool,
+}
+
+/// Capability + identity payload an adapter declares in its `ready`
+/// event. Every field is optional so the bare legacy
+/// `{"method":"ready"}` still deserializes (all defaults).
+///
+/// `capabilities` strings gate the optional `ChannelAdapter` methods:
+/// `typing`, `reaction`, `interactive`, `thread`, `streaming`,
+/// `typing_events`. An adapter that declares nothing degrades to the
+/// pre-P2 behaviour (plain text only).
+#[derive(Debug, Default, Deserialize)]
+pub struct SidecarReadyParams {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub suppress_error_responses: bool,
+    #[serde(default)]
+    pub notification_recipients: Vec<ChannelUser>,
+    /// Per-host header rules for `fetch_headers_for`. `(host, headers)`;
+    /// auth is only emitted for URLs whose host matches exactly.
+    #[serde(default)]
+    pub header_rules: Vec<(String, Vec<(String, String)>)>,
+    /// Reserved for skew diagnostics (logged, never enforced).
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
 }
 
 /// Commands from LibreFang TO the sidecar process (one JSON per line on stdin).
@@ -174,11 +206,11 @@ pub struct SidecarReactionParams {
     pub reaction: String,
 }
 
-/// `interactive` command params (P0 skeleton — full button shape lands in P2).
+/// `interactive` command params — full button shape.
 #[derive(Debug, Serialize)]
 pub struct SidecarInteractiveParams {
     pub channel_id: String,
-    pub text: String,
+    pub message: InteractiveMessage,
 }
 
 /// `stream_start` command params (P0 skeleton — wired in P2).
@@ -203,6 +235,50 @@ pub struct SidecarStreamEndParams {
 
 // ── Sidecar Adapter Implementation ─────────────────────────────────
 
+type StdinHandle = Arc<Mutex<Option<tokio::process::ChildStdin>>>;
+
+/// Capability set + identity an adapter declared via its `ready` event.
+/// Populated by the stdout reader; read by the cap-gated trait methods.
+#[derive(Debug, Default)]
+struct Caps {
+    set: HashSet<String>,
+    suppress_errors: bool,
+    notification_recipients: Vec<ChannelUser>,
+    header_rules: Vec<(String, Vec<(String, String)>)>,
+}
+
+/// Write one newline-delimited JSON command to the child's stdin.
+/// Shared by `SidecarAdapter::send_command` and the stdout reader
+/// (which needs to emit `ReadyAck` without a `&self`).
+async fn write_command(
+    stdin_tx: &StdinHandle,
+    cmd: &SidecarCommand,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut guard = stdin_tx.lock().await;
+    let stdin = guard
+        .as_mut()
+        .ok_or("Sidecar process stdin not available")?;
+    let mut line = serde_json::to_string(cmd)?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+/// Extract the lowercased host from a URL string, stripping scheme,
+/// userinfo and port. Returns `None` when there is no `://`.
+fn url_host(url: &str) -> Option<String> {
+    let after = url.split("://").nth(1)?;
+    let authority = after.split('/').next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
 /// A channel adapter that delegates to an external subprocess via JSON-RPC
 /// over stdin/stdout.
 pub struct SidecarAdapter {
@@ -212,7 +288,7 @@ pub struct SidecarAdapter {
     env: HashMap<String, String>,
     channel_type: ChannelType,
     /// Shared handle to the child's stdin for sending commands.
-    stdin_tx: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    stdin_tx: StdinHandle,
     /// Handle to the child process (kept alive to prevent kill_on_drop).
     child: Arc<Mutex<Option<tokio::process::Child>>>,
     /// Shutdown signal.
@@ -220,6 +296,17 @@ pub struct SidecarAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Current status.
     status: Arc<std::sync::Mutex<ChannelStatus>>,
+    /// Capabilities declared by the adapter's `ready` event.
+    caps: Arc<RwLock<Caps>>,
+    /// `account_id` from `ready` — set once, returned as `&str` by
+    /// `account_id()` (a sync `&str` return can't borrow a lock guard).
+    account_id_cell: Arc<OnceLock<Option<String>>>,
+    /// Sender half feeding `typing_events()`. The reader pushes inbound
+    /// `Typing` events here best-effort.
+    typing_tx: mpsc::Sender<TypingEvent>,
+    /// Receiver half, handed out once by `typing_events()` (sync — uses
+    /// a std Mutex, never held across `.await`).
+    typing_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<TypingEvent>>>>,
 }
 
 impl SidecarAdapter {
@@ -231,6 +318,7 @@ impl SidecarAdapter {
             .as_ref()
             .map(|s| ChannelType::Custom(s.clone()))
             .unwrap_or_else(|| ChannelType::Custom(config.name.clone()));
+        let (typing_tx, typing_rx) = mpsc::channel::<TypingEvent>(64);
 
         Self {
             name: config.name.clone(),
@@ -243,7 +331,19 @@ impl SidecarAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             status: Arc::new(std::sync::Mutex::new(ChannelStatus::default())),
+            caps: Arc::new(RwLock::new(Caps::default())),
+            account_id_cell: Arc::new(OnceLock::new()),
+            typing_tx,
+            typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
         }
+    }
+
+    /// Whether the adapter declared capability `c` in its `ready` event.
+    fn has_cap(&self, c: &str) -> bool {
+        self.caps
+            .read()
+            .map(|g| g.set.contains(c))
+            .unwrap_or_else(|p| p.into_inner().set.contains(c))
     }
 
     /// Write a command to the sidecar process stdin.
@@ -251,15 +351,7 @@ impl SidecarAdapter {
         &self,
         cmd: &SidecarCommand,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut guard = self.stdin_tx.lock().await;
-        let stdin = guard
-            .as_mut()
-            .ok_or("Sidecar process stdin not available")?;
-        let mut line = serde_json::to_string(cmd)?;
-        line.push('\n');
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
-        Ok(())
+        write_command(&self.stdin_tx, cmd).await
     }
 }
 
@@ -334,6 +426,10 @@ impl ChannelAdapter for SidecarAdapter {
         let adapter_name = self.name.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let status = self.status.clone();
+        let caps = self.caps.clone();
+        let account_id_cell = self.account_id_cell.clone();
+        let reader_stdin = self.stdin_tx.clone();
+        let typing_tx = self.typing_tx.clone();
 
         // Mark as connected
         {
@@ -368,8 +464,77 @@ impl ChannelAdapter for SidecarAdapter {
                                     continue;
                                 }
                                 match serde_json::from_str::<SidecarEvent>(&line) {
-                                    Ok(SidecarEvent::Ready) => {
-                                        info!(adapter = %adapter_name, "Sidecar adapter ready");
+                                    Ok(SidecarEvent::Ready { params }) => {
+                                        let cap_count = params.capabilities.len();
+                                        match caps.write() {
+                                            Ok(mut g) => {
+                                                g.set = params
+                                                    .capabilities
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect();
+                                                g.suppress_errors =
+                                                    params.suppress_error_responses;
+                                                g.notification_recipients =
+                                                    params.notification_recipients.clone();
+                                                g.header_rules =
+                                                    params.header_rules.clone();
+                                            }
+                                            Err(p) => {
+                                                let mut g = p.into_inner();
+                                                g.set = params
+                                                    .capabilities
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect();
+                                                g.suppress_errors =
+                                                    params.suppress_error_responses;
+                                                g.notification_recipients =
+                                                    params.notification_recipients.clone();
+                                                g.header_rules =
+                                                    params.header_rules.clone();
+                                            }
+                                        }
+                                        // First `ready` wins (a restart that
+                                        // re-announces keeps the original id).
+                                        let _ = account_id_cell
+                                            .set(params.account_id.clone());
+                                        info!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            protocol_version =
+                                                params.protocol_version,
+                                            "Sidecar adapter ready"
+                                        );
+                                        // Ack so an SDK adapter can stop
+                                        // re-announcing. Best-effort: an
+                                        // adapter that never reads it (or
+                                        // ignores unknown commands) is fine.
+                                        if let Err(e) = write_command(
+                                            &reader_stdin,
+                                            &SidecarCommand::ReadyAck,
+                                        )
+                                        .await
+                                        {
+                                            debug!(
+                                                adapter = %adapter_name,
+                                                "Failed to send ReadyAck: {e}"
+                                            );
+                                        }
+                                    }
+                                    Ok(SidecarEvent::Typing { params }) => {
+                                        // Best-effort: typing is ephemeral.
+                                        // Dropped if nobody took the receiver
+                                        // or the bounded buffer is full.
+                                        let _ = typing_tx.try_send(TypingEvent {
+                                            channel: channel_type.clone(),
+                                            sender: ChannelUser {
+                                                platform_id: params.user_id,
+                                                display_name: params.user_name,
+                                                librefang_user: None,
+                                            },
+                                            is_typing: params.is_typing,
+                                        });
                                     }
                                     Ok(SidecarEvent::Message { params }) => {
                                         // Unbox once: the field moves below
@@ -468,16 +633,6 @@ impl ChannelAdapter for SidecarAdapter {
                                         );
                                         let mut s = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                                         s.last_error = Some(params.message);
-                                    }
-                                    Ok(other) => {
-                                        // P0 skeleton: protocol variants such as
-                                        // `Typing` are placeholders, wired in P2.
-                                        // Inert here — existing variant behaviour
-                                        // is unchanged.
-                                        debug!(
-                                            adapter = %adapter_name,
-                                            "Ignoring not-yet-wired sidecar event: {other:?}"
-                                        );
                                     }
                                     Err(e) => {
                                         warn!(
@@ -596,6 +751,180 @@ impl ChannelAdapter for SidecarAdapter {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.has_cap("typing") {
+            return Ok(());
+        }
+        self.send_command(&SidecarCommand::Typing {
+            params: SidecarTypingCmdParams {
+                channel_id: user.platform_id.clone(),
+            },
+        })
+        .await
+    }
+
+    fn fetch_headers_for(&self, url: &str) -> Vec<(String, String)> {
+        let host = match url_host(url) {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
+        let guard = self.caps.read().unwrap_or_else(|p| p.into_inner());
+        // Only emit auth for an exact host the adapter declared — a
+        // credential leak to a model-controlled host would let a forged
+        // inbound message exfiltrate the token (see trait doc).
+        for (rule_host, headers) in &guard.header_rules {
+            if rule_host.to_ascii_lowercase() == host {
+                return headers.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    async fn send_reaction(
+        &self,
+        user: &ChannelUser,
+        message_id: &str,
+        reaction: &LifecycleReaction,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.has_cap("reaction") {
+            return Ok(());
+        }
+        self.send_command(&SidecarCommand::Reaction {
+            params: SidecarReactionParams {
+                channel_id: user.platform_id.clone(),
+                message_id: message_id.to_string(),
+                reaction: reaction.emoji.clone(),
+            },
+        })
+        .await
+    }
+
+    async fn send_interactive(
+        &self,
+        user: &ChannelUser,
+        message: &InteractiveMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.has_cap("interactive") {
+            return self
+                .send_command(&SidecarCommand::Interactive {
+                    params: SidecarInteractiveParams {
+                        channel_id: user.platform_id.clone(),
+                        message: message.clone(),
+                    },
+                })
+                .await;
+        }
+        // No cap: same degraded text render as the trait default.
+        let mut text = message.text.clone();
+        for row in &message.buttons {
+            text.push('\n');
+            for btn in row {
+                text.push_str(&format!("  [{}]", btn.label));
+            }
+        }
+        self.send(user, ChannelContent::Text(text)).await
+    }
+
+    fn suppress_error_responses(&self) -> bool {
+        self.caps
+            .read()
+            .map(|g| g.suppress_errors)
+            .unwrap_or_else(|p| p.into_inner().suppress_errors)
+    }
+
+    fn typing_events(&self) -> Option<mpsc::Receiver<TypingEvent>> {
+        if !self.has_cap("typing_events") {
+            return None;
+        }
+        self.typing_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.has_cap("thread") {
+            return self.send(user, content).await;
+        }
+        let text = match &content {
+            ChannelContent::Text(t) => t.clone(),
+            other => serde_json::to_string(other)?,
+        };
+        self.send_command(&SidecarCommand::Send {
+            params: SidecarSendParams {
+                channel_id: user.platform_id.clone(),
+                text,
+                content: Some(content),
+                thread_id: Some(thread_id.to_string()),
+                user: user.clone(),
+            },
+        })
+        .await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.has_cap("streaming")
+    }
+
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        _thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.has_cap("streaming") {
+            // Default behaviour: collect all deltas, send once.
+            let mut full_text = String::new();
+            while let Some(delta) = delta_rx.recv().await {
+                full_text.push_str(&delta);
+            }
+            if !full_text.is_empty() {
+                self.send(user, ChannelContent::Text(full_text)).await?;
+            }
+            return Ok(());
+        }
+        let stream_id = uuid::Uuid::new_v4().to_string();
+        self.send_command(&SidecarCommand::StreamStart {
+            params: SidecarStreamStartParams {
+                channel_id: user.platform_id.clone(),
+                stream_id: stream_id.clone(),
+            },
+        })
+        .await?;
+        while let Some(delta) = delta_rx.recv().await {
+            self.send_command(&SidecarCommand::StreamDelta {
+                params: SidecarStreamDeltaParams {
+                    stream_id: stream_id.clone(),
+                    text: delta,
+                },
+            })
+            .await?;
+        }
+        self.send_command(&SidecarCommand::StreamEnd {
+            params: SidecarStreamEndParams { stream_id },
+        })
+        .await
+    }
+
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        self.caps
+            .read()
+            .map(|g| g.notification_recipients.clone())
+            .unwrap_or_else(|p| p.into_inner().notification_recipients.clone())
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id_cell.get().and_then(|o| o.as_deref())
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -623,9 +952,45 @@ mod tests {
 
     #[test]
     fn test_sidecar_event_ready_deserialization() {
+        // Bare legacy `ready` must still parse, with default params.
         let json = r#"{"method":"ready"}"#;
         let event: SidecarEvent = serde_json::from_str(json).unwrap();
-        assert!(matches!(event, SidecarEvent::Ready));
+        match event {
+            SidecarEvent::Ready { params } => {
+                assert!(params.capabilities.is_empty());
+                assert!(params.account_id.is_none());
+                assert!(!params.suppress_error_responses);
+                assert!(params.notification_recipients.is_empty());
+                assert!(params.header_rules.is_empty());
+                assert!(params.protocol_version.is_none());
+            }
+            other => panic!("Expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sidecar_event_ready_with_capabilities() {
+        let json = r#"{"method":"ready","params":{
+            "capabilities":["typing","streaming"],
+            "account_id":"bot-1",
+            "suppress_error_responses":true,
+            "notification_recipients":[
+                {"platform_id":"adm","display_name":"Admin","librefang_user":null}
+            ],
+            "header_rules":[["media.example.com",[["Authorization","Bearer x"]]]],
+            "protocol_version":1
+        }}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        let SidecarEvent::Ready { params } = event else {
+            panic!("expected Ready");
+        };
+        assert_eq!(params.capabilities, vec!["typing", "streaming"]);
+        assert_eq!(params.account_id.as_deref(), Some("bot-1"));
+        assert!(params.suppress_error_responses);
+        assert_eq!(params.notification_recipients.len(), 1);
+        assert_eq!(params.header_rules.len(), 1);
+        assert_eq!(params.header_rules[0].0, "media.example.com");
+        assert_eq!(params.protocol_version, Some(1));
     }
 
     #[test]
@@ -728,7 +1093,7 @@ mod tests {
         // parsing of the pre-existing variants.
         assert!(matches!(
             serde_json::from_str::<SidecarEvent>(r#"{"method":"ready"}"#).unwrap(),
-            SidecarEvent::Ready
+            SidecarEvent::Ready { .. }
         ));
         assert!(matches!(
             serde_json::from_str::<SidecarEvent>(
@@ -758,7 +1123,15 @@ mod tests {
             SidecarCommand::Interactive {
                 params: SidecarInteractiveParams {
                     channel_id: "c".to_string(),
-                    text: "pick".to_string(),
+                    message: InteractiveMessage {
+                        text: "pick".to_string(),
+                        buttons: vec![vec![InteractiveButton {
+                            label: "Yes".to_string(),
+                            action: "yes".to_string(),
+                            style: None,
+                            url: None,
+                        }]],
+                    },
                 },
             },
             SidecarCommand::StreamStart {
@@ -1026,6 +1399,65 @@ mod tests {
         };
         let v2 = serde_json::to_value(&p2).unwrap();
         assert_eq!(v2["thread_id"], "th-9");
+    }
+
+    // ── P2: capability negotiation ────────────────────────────────
+
+    #[test]
+    fn test_url_host_extraction() {
+        assert_eq!(
+            url_host("https://media.example.com/path?q=1").as_deref(),
+            Some("media.example.com")
+        );
+        assert_eq!(
+            url_host("https://user:pw@Host.EXAMPLE.com:8443/x").as_deref(),
+            Some("host.example.com")
+        );
+        assert_eq!(url_host("not-a-url").as_deref(), None);
+        assert_eq!(url_host("https:///nohost").as_deref(), None);
+    }
+
+    fn dummy_adapter() -> SidecarAdapter {
+        SidecarAdapter::new(&librefang_types::config::SidecarChannelConfig {
+            name: "dummy".to_string(),
+            command: "true".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            channel_type: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_cap_gated_methods_default_without_ready() {
+        // No `ready` was received → no caps. Every optional method must
+        // degrade exactly like the pre-P2 trait defaults (no stdin
+        // touched, so these resolve without a live subprocess).
+        let a = dummy_adapter();
+        let user = ChannelUser {
+            platform_id: "c".to_string(),
+            display_name: "U".to_string(),
+            librefang_user: None,
+        };
+        assert!(!a.has_cap("typing"));
+        assert!(a.send_typing(&user).await.is_ok());
+        assert!(a
+            .send_reaction(
+                &user,
+                "m1",
+                &LifecycleReaction {
+                    phase: crate::types::AgentPhase::Thinking,
+                    emoji: "👍".to_string(),
+                    remove_previous: false,
+                },
+            )
+            .await
+            .is_ok());
+        assert!(!a.supports_streaming());
+        assert!(a.account_id().is_none());
+        assert!(a.notification_recipients().is_empty());
+        assert!(!a.suppress_error_responses());
+        assert!(a.fetch_headers_for("https://x/y").is_empty());
+        assert!(a.typing_events().is_none());
     }
 
     #[tokio::test]
