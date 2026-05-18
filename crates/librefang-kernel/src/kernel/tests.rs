@@ -8968,8 +8968,12 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     // it proceeds past the gate and either compacts or errors at the LLM
     // step (no provider configured in test).  Either way the result must
     // not be the early-return sentinel.
+    //
+    // `force = false` — this test pins the *token-trigger gate* (#5210),
+    // not the user-forced bypass path (#5213). The force=true case is
+    // covered separately.
     let result = kernel
-        .compact_agent_session_with_id(agent_id, Some(session_id))
+        .compact_agent_session_with_id(agent_id, Some(session_id), false)
         .await;
 
     match &result {
