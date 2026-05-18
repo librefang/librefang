@@ -40,6 +40,23 @@ fn secrets_file_path() -> Option<PathBuf> {
 /// `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
 pub fn load_dotenv() {
     DOTENV_LOADED.call_once(|| {
+        // #5139: the vault master key may itself live in `~/.librefang/.env`
+        // (or `secrets.env`). `Vault::resolve_master_key()` reads
+        // `LIBREFANG_VAULT_KEY` directly from `std::env`, so if the dotenv
+        // files aren't parsed *before* `load_vault()` the key isn't present
+        // yet and vault unlock fails silently — every vault-stored secret
+        // (provider keys, MCP client_ids, OAuth tokens) then becomes
+        // unavailable for the whole process lifetime. Pre-seed ONLY that one
+        // key here so the documented priority order (system env > vault >
+        // .env > secrets.env) is otherwise unchanged: every other key is
+        // still resolved vault-first below, and an already-set process env
+        // var is never overridden (see `preseed_vault_key_from`).
+        if let Some(p) = env_file_path() {
+            preseed_vault_key_from(&p);
+        }
+        if let Some(p) = secrets_file_path() {
+            preseed_vault_key_from(&p);
+        }
         load_vault();
         if let Some(p) = env_file_path() {
             load_env_file(&p);
@@ -48,6 +65,40 @@ pub fn load_dotenv() {
             load_env_file(&p);
         }
     });
+}
+
+/// Name of the vault master-key env var. Mirrors
+/// `librefang_extensions::vault`'s `VAULT_KEY_ENV` (kept as a local literal
+/// because that constant is private to the `vault` module).
+const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
+
+/// Parse `path` and, if it defines `LIBREFANG_VAULT_KEY` and the process env
+/// does not already have it, set it so the subsequent `load_vault()` call can
+/// resolve the master key. Only this single key is pre-seeded — all other
+/// entries keep their vault-first priority via the later `load_env_file`.
+fn preseed_vault_key_from(path: &Path) {
+    // Already provided by the real system environment — that wins, do nothing.
+    if std::env::var(VAULT_KEY_ENV).is_ok() {
+        return;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = parse_env_line(trimmed) {
+            if key == VAULT_KEY_ENV {
+                // SAFETY: called before the tokio runtime starts (from
+                // synchronous main()); no other threads exist yet.
+                unsafe { std::env::set_var(&key, &value) };
+                return;
+            }
+        }
+    }
 }
 
 /// Try to unlock the credential vault and inject secrets into process env.
@@ -414,6 +465,64 @@ mod tests {
         assert_eq!(escaped, r"\\\n");
         assert!(!escaped.contains('\n'));
         assert_eq!(unescape_env_value(&escaped), raw);
+    }
+
+    /// #5139: `preseed_vault_key_from` must pull `LIBREFANG_VAULT_KEY` out of
+    /// a `.env`-shaped file so `load_vault()` (which reads it straight from
+    /// `std::env`) can resolve the master key on first unlock. Before the fix
+    /// the key sat unread until `load_env_file` ran *after* `load_vault()`,
+    /// so the vault silently failed to unlock and every vault-stored secret
+    /// became unavailable.
+    #[test]
+    #[serial_test::serial]
+    fn test_preseed_vault_key_from_env_file() {
+        let key = VAULT_KEY_ENV;
+        // SAFETY: #[serial] serialises every env-mutating test in this binary.
+        unsafe { std::env::remove_var(key) };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            format!("# comment\nUNRELATED=x\n{key}=bXktMzItYnl0ZS1iYXNlNjQta2V5\n"),
+        )
+        .unwrap();
+
+        preseed_vault_key_from(&path);
+
+        assert_eq!(
+            std::env::var(key).ok().as_deref(),
+            Some("bXktMzItYnl0ZS1iYXNlNjQta2V5"),
+            "vault key from .env must be in process env before load_vault()"
+        );
+        // Only the vault key — not unrelated entries — is pre-seeded here.
+        assert!(std::env::var("UNRELATED").is_err());
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    /// A real system env var for `LIBREFANG_VAULT_KEY` must win over the
+    /// `.env` value (documented priority: system env > vault > .env).
+    #[test]
+    #[serial_test::serial]
+    fn test_preseed_vault_key_does_not_override_system_env() {
+        let key = VAULT_KEY_ENV;
+        // SAFETY: #[serial] serialises env mutation in this binary.
+        unsafe { std::env::set_var(key, "system-wins") };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".env");
+        std::fs::write(&path, format!("{key}=from-dotenv\n")).unwrap();
+
+        preseed_vault_key_from(&path);
+
+        assert_eq!(
+            std::env::var(key).unwrap(),
+            "system-wins",
+            "system env LIBREFANG_VAULT_KEY must not be overridden by .env"
+        );
+
+        unsafe { std::env::remove_var(key) };
     }
 
     /// `load_env_file` must not override existing process env vars —

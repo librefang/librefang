@@ -626,9 +626,10 @@ impl LibreFangKernel {
                 })?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::with_concurrency(
+        let background = BackgroundExecutor::with_config(
             supervisor.subscribe(),
             config.max_concurrent_bg_llm,
+            config.background.max_consecutive_rate_limits,
         );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)

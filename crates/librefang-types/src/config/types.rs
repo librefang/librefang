@@ -7,6 +7,18 @@ use std::path::PathBuf;
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
+/// Hard ceiling on messages persisted per session, enforced by
+/// `librefang_memory::session::SessionStore::save_session` before the
+/// blob is written to SQLite (#5121 / #5138).
+///
+/// This is the single source of truth shared between the substrate (which
+/// enforces it) and config validation (which warns when an operator's
+/// `cron_session_max_messages` exceeds it, since the substrate will
+/// silently truncate beyond this point regardless of the cron cap). 2000
+/// keeps a worst-case session blob at roughly ~2 MB while leaving room
+/// for unusually long cron-driven sessions.
+pub const MAX_PERSISTED_SESSION_MESSAGES: usize = 2000;
+
 /// DM (direct message) policy for a channel.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -2968,6 +2980,15 @@ pub struct KernelConfig {
     /// each cron fire. Applied in addition to `cron_session_max_tokens`.
     ///
     /// `None` (default) disables message-count pruning.
+    ///
+    /// NOTE (#5138): the memory substrate independently enforces a hard
+    /// persistence ceiling of [`MAX_PERSISTED_SESSION_MESSAGES`] messages
+    /// per session, applied at `save_session` regardless of this value. A
+    /// `cron_session_max_messages` set *above* that ceiling cannot keep
+    /// more than [`MAX_PERSISTED_SESSION_MESSAGES`] across daemon restarts —
+    /// the tail beyond the ceiling is silently truncated on save. Config
+    /// validation emits a warning when this value exceeds the ceiling so
+    /// the discrepancy is not invisible.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
     /// Fraction of the effective token budget (post-prune) at which the
@@ -3325,6 +3346,12 @@ pub struct KernelConfig {
     /// Default: `None` (unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_total_timeout_secs: Option<u64>,
+    /// Background autonomous-loop executor knobs (issue #5168).
+    /// Currently governs the rate-limit circuit breaker that stops a
+    /// continuous / periodic loop from re-firing forever when the LLM
+    /// provider is rate-limited or quota-exhausted.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4717,6 +4744,46 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// Background autonomous-loop executor configuration (issue #5168).
+///
+/// Tunes the circuit breaker that stops a continuous / periodic background
+/// loop from re-firing forever when the LLM provider is rate-limited or
+/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
+/// `librefang_kernel::background` for the rationale.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [background]
+/// max_consecutive_rate_limits = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Maximum number of *consecutive* background ticks whose agent turn
+    /// failed because the LLM provider was rate-limited / quota-exhausted
+    /// before the continuous / periodic loop stops re-firing the agent.
+    ///
+    /// A single non-rate-limited tick resets the counter, so transient
+    /// blips do not permanently park a healthy agent. Set to `0` to
+    /// disable the breaker entirely (the loop re-fires forever — only
+    /// appropriate when running against a provider with no quota).
+    /// Default: `5`.
+    #[serde(default = "default_max_consecutive_rate_limits")]
+    pub max_consecutive_rate_limits: u32,
+}
+
+fn default_max_consecutive_rate_limits() -> u32 {
+    5
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -5641,6 +5708,7 @@ impl Default for KernelConfig {
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
+            background: BackgroundConfig::default(),
         }
     }
 }

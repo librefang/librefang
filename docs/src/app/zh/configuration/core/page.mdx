@@ -695,6 +695,21 @@ trusted_manifest_signers   = []
 
 ---
 
+### 后台自治循环执行器
+
+控速断路器(issue #5168):当 LLM provider 限速/配额耗尽时,阻止 continuous/periodic 后台循环无限自我重发。任意一次非限速 tick 重置计数器,所以瞬时抖动不会永久封死健康 agent。
+
+```toml
+[background]
+max_consecutive_rate_limits = 5
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_consecutive_rate_limits` | u32 | `5` | 循环自我终止前允许的连续被限速 tick 数。`0` 完全关闭断路器(循环永远重发 — 仅在 provider 无配额时安全)。 |
+
+---
+
 ### Dashboard 鉴权(顶层字段)
 
 从非 loopback 地址访问 dashboard?设用户名密码,首次启动时 LibreFang 自动把密码哈希成 Argon2id。
