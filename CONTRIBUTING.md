@@ -586,57 +586,76 @@ Summarize the following email thread in 3 bullet points:
 
 ## How to Add a New Channel Adapter
 
-Channel adapters live in `crates/librefang-channels/src/`. Each adapter implements the `ChannelAdapter` trait.
+**Channels are sidecar-first.** A new channel adapter is an
+out-of-process subprocess (Python or any language) that speaks
+newline-delimited JSON-RPC over stdin/stdout. New *in-process* Rust
+adapters are rejected by a policy gate (see the maintainers-only note
+below). See `docs/architecture/sidecar-channels.md` for the full
+model.
 
-### Steps
+### Add a sidecar channel adapter
 
-1. Create a new file: `crates/librefang-channels/src/myplatform.rs`
+1. Install the SDK: `pip install librefang-sdk` (source:
+   `sdk/python/`).
 
-2. Implement the `ChannelAdapter` trait (defined in `types.rs`):
+2. Subclass `SidecarAdapter`. Implement `on_send` (deliver to the
+   platform) and, for platforms you poll, `produce` (push inbound
+   messages via `emit`). Declare the rich features you support in
+   `capabilities` — anything you don't declare degrades to plain text
+   automatically.
 
-```rust
-use crate::types::{ChannelAdapter, ChannelMessage, ChannelType};
-use async_trait::async_trait;
+   ```python
+   from librefang.sidecar import Content, SidecarAdapter, protocol, run_stdio
 
-pub struct MyPlatformAdapter {
-    // token, client, config fields
-}
+   class MyAdapter(SidecarAdapter):
+       capabilities = ["typing"]
 
-#[async_trait]
-impl ChannelAdapter for MyPlatformAdapter {
-    fn channel_type(&self) -> ChannelType {
-        ChannelType::Custom("myplatform".to_string())
-    }
+       async def on_send(self, cmd):
+           ...  # deliver cmd.text / cmd.content to the platform
 
-    async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Start polling/listening for messages
-        Ok(())
-    }
+       async def produce(self, emit):
+           async for m in my_platform_stream():
+               emit(protocol.message(m.user_id, m.user_name,
+                                     content=Content.text(m.text)))
 
-    async fn send(&self, channel_id: &str, content: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Send a message back to the platform
-        Ok(())
-    }
+   if __name__ == "__main__":
+       run_stdio(MyAdapter())
+   ```
 
-    async fn stop(&mut self) {
-        // Clean shutdown
-    }
-}
-```
+   Start from `sdk/python/librefang/sidecar/template/` and read
+   `examples/sidecar-channel-python/ntfy_adapter.py` — the canonical
+   migration (a real SSE-in / HTTP-out adapter, stdlib-only).
 
-3. Register the module in `crates/librefang-channels/src/lib.rs`:
+3. Register it in `~/.librefang/config.toml`:
 
-```rust
-pub mod myplatform;
-```
+   ```toml
+   [[sidecar_channels]]
+   name = "myplatform"
+   command = "python3"
+   args = ["adapters/my_adapter.py"]
+   # restart / backoff / ready_timeout / message_buffer / overflow …
+   # are all optional — see librefang.toml.example for defaults.
+   ```
 
-4. Wire it up in the channel bridge (`crates/librefang-api/src/channel_bridge.rs`) so the daemon starts it alongside other adapters.
+4. **stdout is the protocol channel** — never `print()` to it. Log via
+   `from librefang.sidecar import logging`. The daemon supervises the
+   process (crash → backoff restart → circuit-break); your job is
+   platform reconnection (`with_backoff`) and being crash-safe.
 
-5. Add configuration support in `librefang-types` config structs (add a `[channels.myplatform]` section).
+5. Add tests (the `librefang.sidecar` SDK is unit-test-friendly with
+   injectable I/O — see `sdk/python/tests/`) and submit a PR.
 
-6. Add CLI setup wizard instructions in `crates/librefang-cli/src/main.rs` under `cmd_channel_setup`.
+### In-process Rust adapter — maintainers only
 
-7. Write tests and submit a PR.
+The ~46 pre-existing in-process adapters under
+`crates/librefang-channels/src/` are grandfathered in
+`channels-allowlist.txt`. `scripts/hooks/pre-commit` and
+`cargo xtask channel-policy` (run in CI) **reject any new** file that
+`impl`s `ChannelAdapter` and is not on that allowlist. Adding a new
+in-process adapter requires an explicit maintainer decision and an
+allowlist entry in a separate reviewed commit — it is not the normal
+path. Such adapters still owe a `tests/<channel>_wiremock.rs`
+send-path test (see `crates/librefang-channels/CLAUDE.md`).
 
 ---
 
