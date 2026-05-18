@@ -928,12 +928,12 @@ enum ChannelCommands {
         long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup discord    # Set up Discord\n  librefang channel setup slack      # Set up Slack"
     )]
     Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
+        /// Channel name (discord, slack, whatsapp, etc.). Shows picker if omitted.
         channel: Option<String>,
     },
     /// Test a channel by sending a test message.
     #[command(
-        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test telegram --chat-id 123456789\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890"
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890\n  librefang channel test whatsapp --chat-id 123456789"
     )]
     Test {
         /// Channel name.
