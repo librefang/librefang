@@ -461,3 +461,66 @@ async fn goals_templates_returns_built_in_catalog() {
     assert!(first["name"].as_str().is_some());
     assert!(first["goals"].as_array().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// #5138 — `__librefang_goals` RMW race: concurrent writers must not lose
+// each other's goals.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_goal_creates_lose_no_writes_5138() {
+    // Before the fix, `create_goal` did `structured_get -> push ->
+    // structured_set` with no transaction: N concurrent POSTs each loaded
+    // the same array, each appended one goal, and the last writer's blob
+    // clobbered every other writer's append. The substrate-level
+    // `structured_modify` (BEGIN IMMEDIATE) serializes the RMW so every
+    // POST that returns 201 is present in the final list.
+    let h = boot().await;
+    let app = h.app.clone();
+
+    let n = 16usize;
+    let mut handles = Vec::new();
+    for i in 0..n {
+        let app = app.clone();
+        handles.push(tokio::spawn(async move {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "title": format!("goal-{i}")
+            }))
+            .unwrap();
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/goals")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            resp.status()
+        }));
+    }
+
+    let mut created = 0usize;
+    for hd in handles {
+        let status = hd.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "each POST must succeed");
+        created += 1;
+    }
+    assert_eq!(created, n);
+
+    // Every accepted create must be readable back — no lost update.
+    let (status, body) = json_request(&h, Method::GET, "/api/goals", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        n,
+        "all {n} concurrently-created goals must persist; lost-update race not fixed"
+    );
+    let mut titles: Vec<String> = items
+        .iter()
+        .map(|g| g["title"].as_str().unwrap().to_string())
+        .collect();
+    titles.sort();
+    let mut expected: Vec<String> = (0..n).map(|i| format!("goal-{i}")).collect();
+    expected.sort();
+    assert_eq!(titles, expected, "no individual goal may be clobbered");
+}

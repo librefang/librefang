@@ -2176,6 +2176,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         // ── Newly exposed collection-typed sections (#4678) ──
         {"key": "taint_rules", "struct_field": "taint_rules"},
         {"key": "fallback_providers", "struct_field": "fallback_providers"},
+        {"key": "credential_pools", "struct_field": "credential_pools"},
         {"key": "sidecar_channels", "struct_field": "sidecar_channels"},
         {"key": "provider_urls", "struct_field": "provider_urls"},
         {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},

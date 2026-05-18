@@ -473,8 +473,19 @@ impl ApprovalManager {
                 if elapsed >= TOTP_LOCKOUT_SECS {
                     None // Lockout has expired — don't restore
                 } else {
-                    // Reconstruct an Instant that is `elapsed` seconds in the past
-                    Some(Instant::now() - std::time::Duration::from_secs(elapsed))
+                    // Reconstruct an Instant that is `elapsed` seconds in the
+                    // past. `Instant - Duration` panics when the result would
+                    // predate the platform's monotonic origin (on Linux that
+                    // is process boot, so a long `elapsed` recovered from a
+                    // restored lockout panics within the first minute of a
+                    // cold start). `checked_sub` returns None instead; fall
+                    // back to "now" (treat the lockout as having just begun —
+                    // conservative: it expires slightly later, never earlier).
+                    let now = Instant::now();
+                    Some(
+                        now.checked_sub(std::time::Duration::from_secs(elapsed))
+                            .unwrap_or(now),
+                    )
                 }
             });
             // If lockout_start is None but failures >= threshold, the lockout
@@ -831,7 +842,46 @@ impl ApprovalManager {
             }
         }
 
+        // Piggyback the stale-TOTP-entry sweep on the existing periodic
+        // pending-request expiry pass (driven by `spawn_approval_sweep_task`,
+        // ~every 10s) instead of introducing a second background task
+        // (#5144).
+        self.gc_expired_totp_entries();
+
         (escalated, expired)
+    }
+
+    /// Drop TOTP grace / failure map entries that can no longer affect a
+    /// decision, so the maps stay bounded by *currently-relevant* sender
+    /// IDs rather than every sender ID seen over the daemon's lifetime
+    /// (#5144).
+    ///
+    /// - A grace entry is dead once `last.elapsed() >= totp_grace_period_secs`
+    ///   (it can no longer satisfy `is_within_totp_grace`). When the policy
+    ///   sets `totp_grace_period_secs == 0` grace is never honoured, so all
+    ///   grace entries are dead.
+    /// - A failure entry is dead once its lockout window has elapsed
+    ///   (`lockout_start.elapsed() >= TOTP_LOCKOUT_SECS`). Entries that
+    ///   never reached the lockout threshold (`lockout_start == None`)
+    ///   still gate brute-force counting, so they are kept — they are
+    ///   bounded by the in-flight failing senders and cleared on the
+    ///   next success or on lockout expiry inside `record_totp_failure`.
+    fn gc_expired_totp_entries(&self) {
+        let grace_secs = {
+            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            policy.totp_grace_period_secs
+        };
+        {
+            let mut grace = self.totp_grace.lock().unwrap_or_else(|e| e.into_inner());
+            grace.retain(|_, last| grace_secs > 0 && last.elapsed().as_secs() < grace_secs);
+        }
+        {
+            let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+            failures.retain(|_, (_, lockout_start)| match lockout_start {
+                Some(started) => started.elapsed().as_secs() < TOTP_LOCKOUT_SECS,
+                None => true,
+            });
+        }
     }
 
     /// Resolve a pending request (called by API/UI).
@@ -2951,6 +3001,59 @@ mod tests {
         assert!(!mgr.is_within_totp_grace("admin", &policy));
     }
 
+    /// Regression (#5144): `gc_expired_totp_entries` must drop grace
+    /// entries that can no longer satisfy `is_within_totp_grace` and
+    /// failure entries whose lockout window has elapsed, so the maps
+    /// stay bounded by *currently-relevant* sender IDs instead of every
+    /// sender seen over the daemon's lifetime. Entries that still gate a
+    /// decision (pre-threshold failure counters) must be preserved.
+    #[test]
+    fn gc_drops_only_dead_totp_entries() {
+        // grace_period == 0 → no grace entry can ever be honoured, so a
+        // sweep must drop every grace entry regardless of age. This
+        // exercises the GC deterministically without real-time waits.
+        let policy = ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            totp_grace_period_secs: 0,
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        mgr.record_totp_grace("alice");
+        mgr.record_totp_grace("bob");
+        assert_eq!(
+            mgr.totp_grace.lock().unwrap().len(),
+            2,
+            "grace entries recorded before sweep"
+        );
+
+        // Two pre-threshold failures (count < TOTP_MAX_FAILURES, so
+        // lockout_start stays None) — these must survive the sweep
+        // because they still gate brute-force counting.
+        let _ = mgr.record_totp_failure("charlie");
+        let _ = mgr.record_totp_failure("charlie");
+        assert_eq!(
+            mgr.totp_failures.lock().unwrap().len(),
+            1,
+            "pre-threshold failure entry recorded"
+        );
+
+        mgr.gc_expired_totp_entries();
+
+        assert_eq!(
+            mgr.totp_grace.lock().unwrap().len(),
+            0,
+            "grace entries must be reaped when grace is disabled"
+        );
+        assert_eq!(
+            mgr.totp_failures.lock().unwrap().len(),
+            1,
+            "pre-threshold failure entry must be preserved (still gates counting)"
+        );
+        // Charlie's counter must be intact.
+        assert!(!mgr.is_totp_locked_out("charlie"));
+    }
+
     #[test]
     fn test_reject_does_not_require_totp() {
         let policy = ApprovalPolicy {
@@ -3245,6 +3348,51 @@ mod tests {
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.
         assert!(mgr.is_totp_code_used("987654"));
+    }
+
+    /// #5136: `load_totp_lockout` reconstructs `Instant::now() - elapsed`.
+    /// `Instant - Duration` panics when the result predates the platform's
+    /// monotonic origin (Linux: process boot) — so a lockout row restored
+    /// within the first `elapsed` seconds of a cold-started daemon panicked.
+    /// The `checked_sub(..).unwrap_or(now)` guard must keep the restore
+    /// path total: a stale-but-unexpired row yields `Some(Instant)` (never a
+    /// future instant) and never panics.
+    #[test]
+    fn issue_5136_load_totp_lockout_does_not_panic_on_stale_row() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            // locked_at far in the past but still inside the 300s window
+            // (elapsed = 290s): exercises the Instant-reconstruction branch
+            // with a large `elapsed`, the exact shape that underflows on a
+            // freshly-booted process.
+            conn.execute(
+                "INSERT INTO totp_lockout (sender_id, failures, locked_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params!["stale-sender", TOTP_MAX_FAILURES as i64, now_unix - 290],
+            )
+            .unwrap();
+        }
+
+        // Must not panic regardless of how young this test process is.
+        let map = ApprovalManager::load_totp_lockout(&pool);
+        let (failures, lockout_start) = map.get("stale-sender").expect("stale lockout restored");
+        assert_eq!(*failures, TOTP_MAX_FAILURES);
+        let started = lockout_start.expect("lockout_start reconstructed");
+        // The reconstructed instant must not be in the future (worst case it
+        // is the `now` fallback, i.e. <= Instant::now()).
+        assert!(
+            started <= Instant::now(),
+            "reconstructed lockout_start must not be in the future"
+        );
     }
 
     /// `record_totp_code_used_for` MUST surface a DB write failure as `Err`,

@@ -56,6 +56,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
+import { safeStorageGet } from "../lib/safeStorage";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
 import type { AuditQueryEntry } from "../api";
@@ -106,7 +107,7 @@ async function downloadExport(
   format: "csv" | "json",
 ): Promise<void> {
   const url = buildExportUrl(filters, format);
-  const token = localStorage.getItem("librefang-api-key") || "";
+  const token = safeStorageGet("librefang-api-key") || "";
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
   // lint-disable-next-line dashboard/no-inline-fetch -- blob download requires raw fetch

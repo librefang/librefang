@@ -473,6 +473,37 @@ struct OaiRequest {
     extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Merge `extra_body` provider-extension params into a serialized request
+/// body so they override any standard field with the same name.
+///
+/// Prompt-cache determinism (#3298, #5143): the body is sent on every LLM
+/// request, so its byte layout is part of the Anthropic/OpenAI prompt-cache
+/// key. `extra_body` is a `HashMap`, whose iteration order varies across
+/// processes. Today the merged result is still byte-stable *only* because
+/// the workspace `Cargo.toml` does not enable `serde_json`'s
+/// `preserve_order` feature, so `serde_json::Map` is a `BTreeMap` and
+/// re-sorts on insert. That is an implicit, fragile invariant — enabling
+/// `preserve_order` (e.g. for nicer dashboard JSON dumps) would silently
+/// re-introduce HashMap-order leakage into every request body with ≥2
+/// `extra_body` keys and invalidate the prompt cache.
+///
+/// This helper makes the invariant explicit and `preserve_order`-proof:
+/// the keys are collected and sorted before insertion, so the merge order
+/// is deterministic regardless of which `serde_json::Map` backend is
+/// active. See `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
+fn merge_extra_body(
+    extra: &Option<HashMap<String, serde_json::Value>>,
+    body: &mut serde_json::Value,
+) {
+    if let (Some(extra), Some(obj)) = (extra, body.as_object_mut()) {
+        let mut keys: Vec<&String> = extra.keys().collect();
+        keys.sort();
+        for k in keys {
+            obj.insert(k.clone(), extra[k].clone());
+        }
+    }
+}
+
 /// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
 fn oai_response_format(rf: &ResponseFormat) -> Option<serde_json::Value> {
     match rf {
@@ -1080,11 +1111,7 @@ impl LlmDriver for OpenAIDriver {
             // override any standard field with the same name.
             let mut body =
                 serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
-            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
-                for (k, v) in extra {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
+            merge_extra_body(&oai_request.extra_body, &mut body);
 
             let mut req_builder = self
                 .client
@@ -1504,11 +1531,7 @@ impl LlmDriver for OpenAIDriver {
             // override any standard field with the same name.
             let mut body =
                 serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
-            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
-                for (k, v) in extra {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
+            merge_extra_body(&oai_request.extra_body, &mut body);
 
             let mut req_builder = self
                 .client
@@ -3449,13 +3472,9 @@ mod tests {
             extra_body: Some(extra),
         };
 
-        // Simulate the merge logic used in complete() / stream()
+        // Use the exact merge logic used in complete() / stream().
         let mut body = serde_json::to_value(&req).unwrap();
-        if let (Some(extra), Some(obj)) = (&req.extra_body, body.as_object_mut()) {
-            for (k, v) in extra {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
+        merge_extra_body(&req.extra_body, &mut body);
 
         // extra_body values should override standard fields
         assert_eq!(body.get("temperature").unwrap(), &serde_json::json!(1.0));
@@ -3466,6 +3485,71 @@ mod tests {
             raw.matches("temperature").count(),
             1,
             "There should be exactly ONE temperature key after merge. Raw: {raw}"
+        );
+    }
+
+    // Issue #5143 — `extra_body` is a HashMap merged into the wire request
+    // body, which is part of the provider prompt-cache key. The merge MUST
+    // produce a byte-identical body regardless of HashMap insertion order,
+    // and MUST stay deterministic even if `serde_json/preserve_order` is
+    // ever enabled workspace-wide. `merge_extra_body` sorts keys before
+    // insertion to enforce this. This pins byte equality across two
+    // different insertion orders, mirroring
+    // `mcp_summary_is_byte_identical_across_input_orders`.
+    #[test]
+    fn extra_body_merge_is_byte_identical_across_insertion_orders() {
+        fn build(order: &[(&str, serde_json::Value)]) -> String {
+            let mut extra = HashMap::new();
+            for (k, v) in order {
+                extra.insert((*k).to_string(), v.clone());
+            }
+            let req = OaiRequest {
+                model: "qwen3.6".to_string(),
+                messages: vec![OaiMessage {
+                    role: "user".to_string(),
+                    content: Some(OaiMessageContent::Text("hello".to_string())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                }],
+                max_tokens: Some(4096),
+                max_completion_tokens: None,
+                temperature: Some(0.7),
+                tools: vec![],
+                tool_choice: None,
+                stream: false,
+                stream_options: None,
+                thinking: None,
+                response_format: None,
+                extra_body: Some(extra),
+            };
+            let mut body = serde_json::to_value(&req).unwrap();
+            merge_extra_body(&req.extra_body, &mut body);
+            serde_json::to_string(&body).unwrap()
+        }
+
+        // Same three keys, two different HashMap insertion orders.
+        let a = build(&[
+            ("aaa_param", serde_json::json!(1)),
+            ("mmm_param", serde_json::json!("two")),
+            ("zzz_param", serde_json::json!([3, 4])),
+        ]);
+        let b = build(&[
+            ("zzz_param", serde_json::json!([3, 4])),
+            ("aaa_param", serde_json::json!(1)),
+            ("mmm_param", serde_json::json!("two")),
+        ]);
+        assert_eq!(
+            a, b,
+            "extra_body merge must yield a byte-identical request body across insertion orders (#5143)"
+        );
+        // And the merged keys must appear in sorted order in the body.
+        let ai = a.find("aaa_param").unwrap();
+        let mi = a.find("mmm_param").unwrap();
+        let zi = a.find("zzz_param").unwrap();
+        assert!(
+            ai < mi && mi < zi,
+            "merged extra_body keys must be in sorted order: {a}"
         );
     }
 
