@@ -8747,3 +8747,145 @@ async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
 
     kernel.shutdown();
 }
+
+/// On boot the kernel advances the canonical session pointer when a more-
+/// recently-updated unlabeled session exists with more messages than the
+/// current canonical.  This covers the restart-context-loss path from
+/// issue #5198: after an unclean shutdown the canonical pointer may point at
+/// a stale / empty session while the conversation history lives in a session
+/// that was written last but never promoted.
+#[test]
+fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-canonical-recovery-5198");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // --- First kernel instance: register agent + seed sessions manually ---
+    let kernel1 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("first kernel should boot");
+
+    let agent_id = AgentId::new();
+    let stale_session_id = SessionId::new();
+
+    // Register the agent with a stale canonical pointer (0 messages).
+    let entry = librefang_types::agent::AgentEntry {
+        id: agent_id,
+        name: format!("recovery-agent-{}", agent_id),
+        manifest: librefang_types::agent::AgentManifest {
+            name: format!("recovery-agent-{}", agent_id),
+            description: "test".into(),
+            author: "test".into(),
+            module: "test".into(),
+            ..Default::default()
+        },
+        state: librefang_types::agent::AgentState::Running,
+        mode: librefang_types::agent::AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: stale_session_id,
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel1
+        .agents
+        .registry
+        .register(entry.clone())
+        .expect("register agent");
+    kernel1
+        .memory
+        .substrate
+        .save_agent(&entry)
+        .expect("persist agent");
+
+    // Save the stale (empty) session row — gives it an updated_at in the past.
+    let stale_session = librefang_memory::session::Session {
+        id: stale_session_id,
+        agent_id,
+        messages: vec![],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&stale_session)
+        .expect("save stale session");
+
+    // Give a tiny wall-clock gap so updated_at columns differ.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create a second session (the active one after the conversation) with
+    // messages — this simulates what happened before the crash.
+    let active_session_id = SessionId::new();
+    let active_session = librefang_memory::session::Session {
+        id: active_session_id,
+        agent_id,
+        messages: vec![
+            librefang_types::message::Message::user("hello"),
+            librefang_types::message::Message::assistant("world"),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&active_session)
+        .expect("save active session");
+
+    // Shut down first kernel — canonical pointer still points at stale_session_id.
+    kernel1.shutdown();
+
+    // Boot a second kernel against the same data directory — this triggers
+    // the canonical recovery pass.
+    let kernel2 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("second kernel should boot");
+
+    // After boot, the canonical pointer must have been advanced to active_session_id.
+    let restored = kernel2
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must survive boot");
+    assert_eq!(
+        restored.session_id, active_session_id,
+        "boot must advance canonical pointer to the most-recently-active session \
+         (issue #5198): expected {active_session_id} but got {}",
+        restored.session_id
+    );
+
+    // The DB must also be updated so subsequent boots agree.
+    let loaded = kernel2
+        .memory
+        .substrate
+        .load_agent(agent_id)
+        .expect("load_agent must not error")
+        .expect("agent must still exist in DB");
+    assert_eq!(
+        loaded.session_id, active_session_id,
+        "persisted agent entry must carry the advanced session pointer after boot"
+    );
+
+    kernel2.shutdown();
+}
