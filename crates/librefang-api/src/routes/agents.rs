@@ -1514,6 +1514,88 @@ pub fn inject_attachments_into_session(
     kernel.inject_attachment_blocks(agent_id, attachment_blocks);
 }
 
+/// Post-process attachment content blocks: when `[media] image_description`
+/// is enabled, run every inline `ContentBlock::Image` through
+/// `MediaEngine::describe_image` (default `gemini-2.5-flash`) and prepend a
+/// `<image_description>` text block before the image. Counterpart of the
+/// channel-bridge helper from PR #5239 for the upload + stream injection path
+/// (`POST /api/agents/{id}/upload` followed by
+/// `POST /api/agents/{id}/message{,/stream}` with file_id references): images
+/// arrive here pre-decoded as base64 in the attachment registry, never going
+/// through `download_image_to_blocks` in the channel bridge, so the
+/// bridge-side enrichment never fires and the primary LLM ends up doing its
+/// own OCR on the inline image — fabricating weekdays / dates / prices on
+/// small in-image text.
+///
+/// On `Ok(None)` (config disabled) or `Err` (provider failure / timeout) the
+/// image passes through unannotated; the raw provider reason is logged but
+/// never reaches the LLM prompt. 30-second timeout cap mirrors the
+/// `INBOUND_DESCRIBE_TIMEOUT` on the channel-bridge side.
+pub async fn enrich_attachment_blocks_with_description(
+    state: &AppState,
+    blocks: Vec<librefang_types::message::ContentBlock>,
+) -> Vec<librefang_types::message::ContentBlock> {
+    if !state.kernel.config_ref().media.image_description {
+        return blocks;
+    }
+    let mut out: Vec<librefang_types::message::ContentBlock> = Vec::with_capacity(blocks.len() * 2);
+    for block in blocks {
+        if let librefang_types::message::ContentBlock::Image {
+            ref media_type,
+            ref data,
+        } = block
+        {
+            let attachment = librefang_types::media::MediaAttachment {
+                media_type: librefang_types::media::MediaType::Image,
+                mime_type: media_type.clone(),
+                source: librefang_types::media::MediaSource::Base64 {
+                    data: data.clone(),
+                    mime_type: media_type.clone(),
+                },
+                // Approximate decoded size from base64 length (3 bytes per 4
+                // chars). Only used for the kernel's size cap pre-check.
+                size_bytes: (data.len() as u64 * 3) / 4,
+            };
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                state.kernel.media().describe_image(&attachment),
+            )
+            .await
+            {
+                Ok(Ok(result)) if !result.description.trim().is_empty() => {
+                    let desc = format!(
+                        "<image_description>\n{}\n</image_description>",
+                        result.description.trim()
+                    );
+                    out.push(librefang_types::message::ContentBlock::Text {
+                        text: desc,
+                        provider_metadata: None,
+                    });
+                    out.push(block);
+                }
+                Ok(Ok(_)) => out.push(block),
+                Ok(Err(reason)) => {
+                    tracing::warn!(
+                        error = %reason,
+                        "Attachment image auto-describe failed; passing image through unannotated"
+                    );
+                    out.push(block);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = 30,
+                        "Attachment image auto-describe timed out; passing image through unannotated"
+                    );
+                    out.push(block);
+                }
+            }
+        } else {
+            out.push(block);
+        }
+    }
+    out
+}
+
 /// Resolve URL-based attachments into image content blocks.
 ///
 /// Downloads each attachment URL, base64-encodes images, and returns
@@ -1789,7 +1871,11 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = enrich_attachment_blocks_with_description(
+            &state,
+            resolve_attachments(&state, &req.attachments),
+        )
+        .await;
         if !image_blocks.is_empty() {
             inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
         }
@@ -2836,7 +2922,11 @@ pub async fn send_message_stream(
 
     // Resolve file attachments into image content blocks (same as non-streaming)
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&state, &req.attachments);
+        let image_blocks = enrich_attachment_blocks_with_description(
+            &state,
+            resolve_attachments(&state, &req.attachments),
+        )
+        .await;
         if !image_blocks.is_empty() {
             inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
         }

@@ -1015,7 +1015,12 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = crate::routes::resolve_attachments(state, &refs);
+                    let image_blocks =
+                        crate::routes::agents::enrich_attachment_blocks_with_description(
+                            state,
+                            crate::routes::resolve_attachments(state, &refs),
+                        )
+                        .await;
                     if !image_blocks.is_empty() {
                         has_images = true;
                         crate::routes::inject_attachments_into_session(
