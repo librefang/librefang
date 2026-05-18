@@ -4070,7 +4070,16 @@ pub async fn reload_channels_from_disk(
 
     // Re-read config from disk
     let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = kernel_load_config(Some(&config_path));
+    let fresh_config = match kernel_load_config(Some(&config_path)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Channel hot-reload: config file cannot be loaded; keeping current channel config"
+            );
+            return Err(e);
+        }
+    };
 
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
