@@ -2883,7 +2883,7 @@ pub struct KernelConfig {
     pub memory_wiki: MemoryWikiConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Channel bridge configuration (Telegram, etc.).
+    /// Channel bridge configuration (Discord, Slack, etc.).
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.

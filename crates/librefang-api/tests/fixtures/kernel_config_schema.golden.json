@@ -14501,7 +14501,7 @@
         "xmpp": null,
         "zulip": null
       },
-      "description": "Channel bridge configuration (Telegram, etc.)."
+      "description": "Channel bridge configuration (Discord, Slack, etc.)."
     },
     "compaction": {
       "allOf": [
