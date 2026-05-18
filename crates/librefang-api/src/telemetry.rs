@@ -145,6 +145,15 @@ pub fn init_otel_tracing(
         )
         .build();
 
+    // Register the global W3C Trace Context propagator so outbound HTTP
+    // clients (LLM drivers) can inject a `traceparent` header that downstream
+    // sidecars (e.g. `jarvis-llm-proxy`) auto-extract, stitching their spans
+    // into the same trace. TraceContext only — no Baggage/composite — to keep
+    // the propagation surface minimal.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     let tracer = provider.tracer(service_name.to_string());
 
     // Build the tracing-opentelemetry layer and swap it into the reload slot

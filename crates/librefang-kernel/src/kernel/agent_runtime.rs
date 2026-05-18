@@ -544,6 +544,15 @@ impl LibreFangKernel {
         agent_id: AgentId,
         purge_identity: bool,
     ) -> KernelResult<()> {
+        // Abort every in-flight LLM loop for this agent BEFORE the registry
+        // entry is removed (#5142). Without this the killed agent's streaming
+        // request keeps burning provider tokens until the provider returns,
+        // and the orphaned `running_tasks` entry would only be reaped by the
+        // periodic GC sweep — which (pre-#5142) dropped the `AbortHandle`
+        // instead of firing it. `suspend_agent` already does this fan-out;
+        // `kill_agent` must too. Fans out across all `(agent, session)`
+        // loops; a no-op `Ok(false)` when the agent had nothing running.
+        let _ = self.stop_agent_run(agent_id);
         let entry = self
             .agents
             .registry

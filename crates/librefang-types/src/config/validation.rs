@@ -923,6 +923,25 @@ impl KernelConfig {
             }
         }
 
+        // #5138: `cron_session_max_messages` above the substrate's hard
+        // persistence ceiling can never actually keep that many messages
+        // across daemon restarts — `save_session` truncates the tail
+        // beyond MAX_PERSISTED_SESSION_MESSAGES regardless of the cron cap.
+        // Surface the discrepancy at config load instead of letting the
+        // operator silently lose context.
+        if let Some(n) = self.cron_session_max_messages {
+            if n > super::MAX_PERSISTED_SESSION_MESSAGES {
+                warnings.push(format!(
+                    "cron_session_max_messages = {n} exceeds the substrate \
+                     persistence ceiling of {} messages per session; history \
+                     beyond {} is silently truncated on save and will not \
+                     survive a daemon restart (#5138)",
+                    super::MAX_PERSISTED_SESSION_MESSAGES,
+                    super::MAX_PERSISTED_SESSION_MESSAGES,
+                ));
+            }
+        }
+
         warnings
     }
 

@@ -28,15 +28,48 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
         agent_id: librefang_types::agent::AgentId,
         message: librefang_types::message::Message,
     ) {
-        // Acquire the per-agent lock using block_in_place so this is safe
-        // from both async contexts and spawn_blocking threads.
-        let lock = self
-            .agents
-            .agent_msg_locks
-            .entry(agent_id)
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = tokio::task::block_in_place(|| lock.blocking_lock());
+        // #5126: this path runs from inside `channel_send`'s mirror
+        // (`mirror_channel_send_to_session`). When the resolved channel
+        // `owner` is the *same* agent whose turn is currently executing,
+        // the outer `send_message_full(owner)` already holds
+        // `agent_msg_locks[owner]` on THIS task. Re-acquiring it here via
+        // `block_in_place(|| lock.blocking_lock())` would self-deadlock —
+        // `block_in_place` runs on the same task and does not release the
+        // held async mutex; no other task exists to wake the blocking
+        // waiter.
+        //
+        // Correctness of the lockless path (chosen over "skip the write"):
+        // the mirror writes `SessionId::for_sender_scope(owner, channel,
+        // recipient)` — a uuid_v5-derived session id *distinct* from the
+        // agent loop's own `entry.session_id`. The outer
+        // `send_message_full` never writes this mirror session on its own
+        // path, so skipping here would silently lose the mirror message
+        // (#4824's whole point). The `agent_msg_locks[owner]` mutex exists
+        // *only* to serialize concurrent cross-task writers to this agent's
+        // sessions; if this task already holds it, mutual exclusion
+        // guarantees there is no other writer for the duration, so this
+        // task has exclusive access and can perform the read-modify-write
+        // directly. We therefore proceed WITHOUT re-locking instead of
+        // skipping. The held-set is populated at the single agent-scoped
+        // acquisition site in `send_message_full_inner`, and the task-local
+        // is visible inside `block_in_place` (same task).
+        let already_held = librefang_runtime::held_agent_locks::is_held(agent_id);
+        let _guard: Option<tokio::sync::OwnedMutexGuard<()>> = if already_held {
+            None
+        } else {
+            // Acquire the per-agent lock using block_in_place so this is safe
+            // from both async contexts and spawn_blocking threads.
+            // `blocking_lock_owned` (vs `blocking_lock`) yields an owned
+            // guard so it can be held in this `Option` past the lock
+            // `Arc`'s local scope.
+            let lock = self
+                .agents
+                .agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(tokio::task::block_in_place(|| lock.blocking_lock_owned()))
+        };
 
         // Load existing session or create a fresh one for this (agent, session) pair.
         let mut session = match self.memory.substrate.get_session(session_id) {
@@ -95,13 +128,29 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
         // Serialize with any concurrent write to the same agent's session.
         // block_in_place is safe from both async worker threads and
         // spawn_blocking threads (unlike blocking_lock which panics in async).
-        let lock = self
-            .agents
-            .agent_msg_locks
-            .entry(agent_id)
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = tokio::task::block_in_place(|| lock.blocking_lock());
+        //
+        // Same #5126 self-re-entry guard as `append_to_session`: if THIS
+        // task already holds `agent_msg_locks[agent_id]` (an outer
+        // `send_message_full` frame), re-acquiring would self-deadlock.
+        // Today this method is only reached from the HTTP attachment-upload
+        // path (a fresh task that holds no agent lock, so `is_held` is
+        // `false` and behaviour is unchanged) — the guard is defensive
+        // against any future in-turn caller and keeps both writer methods
+        // consistent. Lockless rationale identical to `append_to_session`:
+        // holding the lock already implies exclusive access, so the
+        // read-modify-write is safe without re-locking.
+        let already_held = librefang_runtime::held_agent_locks::is_held(agent_id);
+        let _guard: Option<tokio::sync::OwnedMutexGuard<()>> = if already_held {
+            None
+        } else {
+            let lock = self
+                .agents
+                .agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(tokio::task::block_in_place(|| lock.blocking_lock_owned()))
+        };
 
         let mut session = match self.memory.substrate.get_session(entry.session_id) {
             Ok(Some(s)) => s,

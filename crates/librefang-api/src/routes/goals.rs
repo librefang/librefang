@@ -181,32 +181,42 @@ pub async fn create_goal(
         entry["agent_id"] = serde_json::Value::String(aid.clone());
     }
 
-    // Single read-then-write to reduce TOCTOU window between parent validation and list append
+    // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
+    // validation, append, and persist all happen inside one transaction so
+    // a concurrent create / update / delete cannot clobber this goal (the
+    // last-writer-wins lost-update race the snapshot-then-set pattern had).
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> = match state
-        .kernel
-        .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
-    {
-        Ok(Some(serde_json::Value::Array(arr))) => arr,
-        _ => Vec::new(),
-    };
+    // Marker error so a missing parent maps to 404, not 500.
+    const PARENT_MISSING: &str = "__goal_parent_missing__";
+    let modify_result =
+        state
+            .kernel
+            .memory_substrate()
+            .structured_modify(shared_id, GOALS_KEY, |current| {
+                let mut goals: Vec<serde_json::Value> = match current {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    _ => Vec::new(),
+                };
+                if let Some(ref pid) = parent_id {
+                    let parent_exists =
+                        goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
+                    if !parent_exists {
+                        return Err(librefang_types::error::LibreFangError::InvalidInput(
+                            format!("{PARENT_MISSING}{pid}"),
+                        ));
+                    }
+                }
+                goals.push(entry.clone());
+                Ok((serde_json::Value::Array(goals), ()))
+            });
 
-    // Validate parent_id exists within the same snapshot
-    if let Some(ref pid) = parent_id {
-        let parent_exists = goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
-        if !parent_exists {
-            return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
-                .into_json_tuple();
+    if let Err(e) = modify_result {
+        if let librefang_types::error::LibreFangError::InvalidInput(ref msg) = e {
+            if let Some(pid) = msg.strip_prefix(PARENT_MISSING) {
+                return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                    .into_json_tuple();
+            }
         }
-    }
-
-    goals.push(entry.clone());
-    if let Err(e) = state.kernel.memory_substrate().structured_set(
-        shared_id,
-        GOALS_KEY,
-        serde_json::Value::Array(goals),
-    ) {
         tracing::warn!("Failed to save goal: {e}");
         return ApiErrorResponse::internal(format!("Failed to save goal: {e}")).into_json_tuple();
     }
@@ -221,16 +231,8 @@ pub async fn update_goal_by_id(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> = match state
-        .kernel
-        .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
-    {
-        Ok(Some(serde_json::Value::Array(arr))) => arr,
-        _ => Vec::new(),
-    };
 
-    // --- Validate inputs before mutating ---
+    // --- Stateless validation (no goals snapshot needed) ---
 
     if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
         if title.is_empty() {
@@ -261,98 +263,133 @@ pub async fn update_goal_by_id(
         }
     }
 
-    // Validate parent_id: detect self-reference, verify existence, and detect indirect cycles
     if let Some(parent_id) = req.get("parent_id") {
-        if !parent_id.is_null() {
-            if let Some(pid) = parent_id.as_str() {
-                if pid == id {
-                    return ApiErrorResponse::bad_request("A goal cannot be its own parent")
-                        .into_json_tuple();
-                }
-                // Verify the target parent exists
-                if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
-                    return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
-                        .into_json_tuple();
-                }
-                // Detect indirect cycles: walk ancestor chain from `pid` upward.
-                // Use a seen set to guard against infinite loops on corrupted data.
-                let mut ancestor = Some(pid.to_string());
-                let mut seen = HashSet::new();
-                seen.insert(id.clone());
-                while let Some(ref anc_id) = ancestor {
-                    if !seen.insert(anc_id.clone()) {
-                        break; // already visited — corrupted data, stop walking
-                    }
-                    let anc_parent = goals.iter().find_map(|gg| {
-                        if gg["id"].as_str() == Some(anc_id) {
-                            gg["parent_id"].as_str().map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    });
-                    match anc_parent {
-                        Some(ref ap) if ap == &id => {
-                            return ApiErrorResponse::bad_request(
-                                "Circular parent reference detected",
-                            )
-                            .into_json_tuple();
-                        }
-                        Some(ap) => ancestor = Some(ap),
-                        None => break,
-                    }
-                }
+        if let Some(pid) = parent_id.as_str() {
+            if pid == id {
+                return ApiErrorResponse::bad_request("A goal cannot be its own parent")
+                    .into_json_tuple();
             }
         }
     }
 
-    // --- Apply mutations ---
+    // --- Atomic validate-then-mutate under BEGIN IMMEDIATE (#5138) ---
+    //
+    // Parent existence, cycle detection, the goal lookup, and the write all
+    // run inside one transaction so a concurrent create / update / delete
+    // can't slip a stale snapshot past validation or clobber this write
+    // (the prior get→mutate→set was a lost-update race). Validation failures
+    // are signalled via typed marker errors so they map back to the right
+    // HTTP status without leaking a 500.
+    const PARENT_MISSING: &str = "__goal_parent_missing__";
+    const CIRCULAR: &str = "__goal_circular__";
+    const NOT_FOUND: &str = "__goal_not_found__";
+    use librefang_types::error::LibreFangError;
 
-    let mut updated: Option<serde_json::Value> = None;
-    for g in goals.iter_mut() {
-        if g["id"].as_str() == Some(&id) {
-            if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
-                g["title"] = serde_json::Value::String(title.to_string());
-            }
-            if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
-                g["description"] = serde_json::Value::String(description.to_string());
-            }
-            if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
-                g["status"] = serde_json::Value::String(status.to_string());
-            }
-            if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
-                g["progress"] = serde_json::json!(progress);
-            }
+    let modify_result: Result<serde_json::Value, LibreFangError> = state
+        .kernel
+        .memory_substrate()
+        .structured_modify(shared_id, GOALS_KEY, |current| {
+            let mut goals: Vec<serde_json::Value> = match current {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
+
+            // Parent existence + indirect-cycle detection on the live snapshot.
             if let Some(parent_id) = req.get("parent_id") {
-                if parent_id.is_null() {
-                    g.as_object_mut().map(|obj| obj.remove("parent_id"));
-                } else if let Some(pid) = parent_id.as_str() {
-                    g["parent_id"] = serde_json::Value::String(pid.to_string());
+                if !parent_id.is_null() {
+                    if let Some(pid) = parent_id.as_str() {
+                        if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
+                            return Err(LibreFangError::InvalidInput(format!(
+                                "{PARENT_MISSING}{pid}"
+                            )));
+                        }
+                        let mut ancestor = Some(pid.to_string());
+                        let mut seen = HashSet::new();
+                        seen.insert(id.clone());
+                        while let Some(ref anc_id) = ancestor {
+                            if !seen.insert(anc_id.clone()) {
+                                break;
+                            }
+                            let anc_parent = goals.iter().find_map(|gg| {
+                                if gg["id"].as_str() == Some(anc_id) {
+                                    gg["parent_id"].as_str().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                            match anc_parent {
+                                Some(ref ap) if ap == &id => {
+                                    return Err(LibreFangError::InvalidInput(CIRCULAR.to_string()));
+                                }
+                                Some(ap) => ancestor = Some(ap),
+                                None => break,
+                            }
+                        }
+                    }
                 }
             }
-            if let Some(agent_id) = req.get("agent_id") {
-                if agent_id.is_null() {
-                    g.as_object_mut().map(|obj| obj.remove("agent_id"));
-                } else if let Some(aid) = agent_id.as_str() {
-                    g["agent_id"] = serde_json::Value::String(aid.to_string());
+
+            let mut updated: Option<serde_json::Value> = None;
+            for g in goals.iter_mut() {
+                if g["id"].as_str() == Some(&id) {
+                    if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
+                        g["title"] = serde_json::Value::String(title.to_string());
+                    }
+                    if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
+                        g["description"] = serde_json::Value::String(description.to_string());
+                    }
+                    if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
+                        g["status"] = serde_json::Value::String(status.to_string());
+                    }
+                    if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
+                        g["progress"] = serde_json::json!(progress);
+                    }
+                    if let Some(parent_id) = req.get("parent_id") {
+                        if parent_id.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("parent_id"));
+                        } else if let Some(pid) = parent_id.as_str() {
+                            g["parent_id"] = serde_json::Value::String(pid.to_string());
+                        }
+                    }
+                    if let Some(agent_id) = req.get("agent_id") {
+                        if agent_id.is_null() {
+                            g.as_object_mut().map(|obj| obj.remove("agent_id"));
+                        } else if let Some(aid) = agent_id.as_str() {
+                            g["agent_id"] = serde_json::Value::String(aid.to_string());
+                        }
+                    }
+                    g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+                    updated = Some(g.clone());
+                    break;
                 }
             }
-            g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
-            updated = Some(g.clone());
-            break;
+
+            let Some(entity) = updated else {
+                return Err(LibreFangError::InvalidInput(NOT_FOUND.to_string()));
+            };
+
+            Ok((serde_json::Value::Array(goals), entity))
+        });
+
+    let entity = match modify_result {
+        Ok(e) => e,
+        Err(LibreFangError::InvalidInput(ref msg)) if msg == NOT_FOUND => {
+            return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
         }
-    }
-
-    let Some(entity) = updated else {
-        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
+        Err(LibreFangError::InvalidInput(ref msg)) if msg == CIRCULAR => {
+            return ApiErrorResponse::bad_request("Circular parent reference detected")
+                .into_json_tuple();
+        }
+        Err(LibreFangError::InvalidInput(ref msg)) if msg.starts_with(PARENT_MISSING) => {
+            let pid = msg.strip_prefix(PARENT_MISSING).unwrap_or_default();
+            return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                .into_json_tuple();
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to update goal: {e}"))
+                .into_json_tuple();
+        }
     };
-
-    if let Err(e) = state.kernel.memory_substrate().structured_set(
-        shared_id,
-        GOALS_KEY,
-        serde_json::Value::Array(goals),
-    ) {
-        return ApiErrorResponse::internal(format!("Failed to update goal: {e}")).into_json_tuple();
-    }
 
     // Issue #3832: return the mutated entity so the dashboard can `setQueryData`
     // without an extra round-trip GET. Aligns with `create_goal`'s response shape.
@@ -365,51 +402,61 @@ pub async fn delete_goal(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> = match state
+    // Atomic cascade-delete under BEGIN IMMEDIATE (#5138): collecting
+    // descendants and the retain must see the same snapshot the write
+    // commits, otherwise a concurrent create / update is lost.
+    const NOT_FOUND: &str = "__goal_not_found__";
+    use librefang_types::error::LibreFangError;
+
+    let modify_result: Result<(), LibreFangError> = state
         .kernel
         .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
-    {
-        Ok(Some(serde_json::Value::Array(arr))) => arr,
-        _ => Vec::new(),
-    };
+        .structured_modify(shared_id, GOALS_KEY, |current| {
+            let mut goals: Vec<serde_json::Value> = match current {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
 
-    let before = goals.len();
+            let before = goals.len();
 
-    // Collect all IDs to remove: the target goal + all descendants
-    let mut ids_to_remove: HashSet<String> = HashSet::new();
-    ids_to_remove.insert(id.clone());
-    let mut queue = vec![id.clone()];
-    while let Some(current_id) = queue.pop() {
-        for g in &goals {
-            if g["parent_id"].as_str() == Some(&current_id) {
-                if let Some(child_id) = g["id"].as_str() {
-                    if ids_to_remove.insert(child_id.to_string()) {
-                        queue.push(child_id.to_string());
+            // Collect all IDs to remove: the target goal + all descendants
+            let mut ids_to_remove: HashSet<String> = HashSet::new();
+            ids_to_remove.insert(id.clone());
+            let mut queue = vec![id.clone()];
+            while let Some(current_id) = queue.pop() {
+                for g in &goals {
+                    if g["parent_id"].as_str() == Some(&current_id) {
+                        if let Some(child_id) = g["id"].as_str() {
+                            if ids_to_remove.insert(child_id.to_string()) {
+                                queue.push(child_id.to_string());
+                            }
+                        }
                     }
                 }
             }
+
+            goals.retain(|g| {
+                g["id"]
+                    .as_str()
+                    .map(|gid| !ids_to_remove.contains(gid))
+                    .unwrap_or(true)
+            });
+
+            if goals.len() == before {
+                return Err(LibreFangError::InvalidInput(NOT_FOUND.to_string()));
+            }
+
+            Ok((serde_json::Value::Array(goals), ()))
+        });
+
+    if let Err(e) = modify_result {
+        if let LibreFangError::InvalidInput(ref msg) = e {
+            if msg == NOT_FOUND {
+                return ApiErrorResponse::not_found("Goal not found")
+                    .into_json_tuple()
+                    .into_response();
+            }
         }
-    }
-
-    goals.retain(|g| {
-        g["id"]
-            .as_str()
-            .map(|gid| !ids_to_remove.contains(gid))
-            .unwrap_or(true)
-    });
-
-    if goals.len() == before {
-        return ApiErrorResponse::not_found("Goal not found")
-            .into_json_tuple()
-            .into_response();
-    }
-
-    if let Err(e) = state.kernel.memory_substrate().structured_set(
-        shared_id,
-        GOALS_KEY,
-        serde_json::Value::Array(goals),
-    ) {
         return ApiErrorResponse::internal(format!("Failed to delete goal: {e}"))
             .into_json_tuple()
             .into_response();
