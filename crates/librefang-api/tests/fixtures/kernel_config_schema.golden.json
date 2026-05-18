@@ -1141,7 +1141,7 @@
       "type": "object"
     },
     "ChannelsConfig": {
-      "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`) and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.",
+      "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`) and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.",
       "properties": {
         "bluesky": {
           "allOf": [
@@ -1434,15 +1434,6 @@
           ],
           "default": null,
           "description": "Microsoft Teams configuration(s)."
-        },
-        "telegram": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_TelegramConfig"
-            }
-          ],
-          "default": null,
-          "description": "Telegram bot configuration(s)."
         },
         "threema": {
           "allOf": [
@@ -2468,7 +2459,7 @@
           "description": "Per-channel behavior overrides."
         },
         "proxy": {
-          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy.\n\nWhen unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var. Accepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init. This is the canonical proxy doc; other channel configs refer back to `DiscordConfig::proxy`.",
           "type": [
             "string",
             "null"
@@ -4672,7 +4663,7 @@
           "description": "Per-channel behavior overrides."
         },
         "proxy": {
-          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `DiscordConfig::proxy` for accepted URL shapes and env-var interaction.",
           "type": [
             "string",
             "null"
@@ -6239,7 +6230,7 @@
               "description": "Per-channel behavior overrides."
             },
             "proxy": {
-              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy.\n\nWhen unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var. Accepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init. This is the canonical proxy doc; other channel configs refer back to `DiscordConfig::proxy`.",
               "type": [
                 "string",
                 "null"
@@ -7694,7 +7685,7 @@
               "description": "Per-channel behavior overrides."
             },
             "proxy": {
-              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `DiscordConfig::proxy` for accepted URL shapes and env-var interaction.",
               "type": [
                 "string",
                 "null"
@@ -8733,7 +8724,7 @@
               "description": "Per-channel behavior overrides."
             },
             "proxy": {
-              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `DiscordConfig::proxy` for accepted URL shapes and env-var interaction.",
               "type": [
                 "string",
                 "null"
@@ -8857,150 +8848,6 @@
         {
           "items": {
             "$ref": "#/definitions/TeamsConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_TelegramConfig": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "Telegram channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_users": {
-              "default": [],
-              "description": "Telegram user IDs allowed to interact (empty = allow all). Accepts strings for consistency; numeric TOML integers are coerced to strings.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "api_url": {
-              "default": null,
-              "description": "Custom Telegram Bot API base URL for proxies or mirrors. Defaults to `https://api.telegram.org` when not set.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "bot_token_env": {
-              "default": "TELEGRAM_BOT_TOKEN",
-              "description": "Env var name holding the bot token (NOT the token itself).",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "initial_backoff_secs": {
-              "default": 1,
-              "description": "Initial backoff in seconds on API failures (default: 1).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "long_poll_timeout_secs": {
-              "default": 30,
-              "description": "Long-poll timeout in seconds sent to getUpdates (default: 30).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "max_backoff_secs": {
-              "default": 60,
-              "description": "Maximum backoff in seconds on API failures (default: 60).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "message_coalesce_window_ms": {
-              "default": null,
-              "description": "Message coalescing window in milliseconds for Telegram-specific ergonomics (#4145). When set, messages from the same sender arriving within this window are buffered and dispatched to the agent as a single batched context. This prevents out-of-order processing in the common pattern where a user forwards a message and immediately follows up with a comment.\n\nThis is a thin alias for [`ChannelOverrides::message_debounce_ms`]: if `overrides.message_debounce_ms` is non-zero it wins; otherwise the value here is applied. `Some(0)` explicitly disables coalescing. `None` (default) leaves behavior unchanged.",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "poll_interval_secs": {
-              "default": 1,
-              "description": "Polling interval in seconds.",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "proxy": {
-              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "thread_routes": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
-              "type": "object"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/TelegramConfig"
           },
           "type": "array"
         }
@@ -11909,7 +11756,7 @@
           "description": "Per-channel behavior overrides."
         },
         "proxy": {
-          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `DiscordConfig::proxy` for accepted URL shapes and env-var interaction.",
           "type": [
             "string",
             "null"
@@ -12232,140 +12079,6 @@
           "format": "uint16",
           "minimum": 0.0,
           "type": "integer"
-        }
-      },
-      "type": "object"
-    },
-    "TelegramConfig": {
-      "additionalProperties": false,
-      "description": "Telegram channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_users": {
-          "default": [],
-          "description": "Telegram user IDs allowed to interact (empty = allow all). Accepts strings for consistency; numeric TOML integers are coerced to strings.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "api_url": {
-          "default": null,
-          "description": "Custom Telegram Bot API base URL for proxies or mirrors. Defaults to `https://api.telegram.org` when not set.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "bot_token_env": {
-          "default": "TELEGRAM_BOT_TOKEN",
-          "description": "Env var name holding the bot token (NOT the token itself).",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "initial_backoff_secs": {
-          "default": 1,
-          "description": "Initial backoff in seconds on API failures (default: 1).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "long_poll_timeout_secs": {
-          "default": 30,
-          "description": "Long-poll timeout in seconds sent to getUpdates (default: 30).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "max_backoff_secs": {
-          "default": 60,
-          "description": "Maximum backoff in seconds on API failures (default: 60).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "message_coalesce_window_ms": {
-          "default": null,
-          "description": "Message coalescing window in milliseconds for Telegram-specific ergonomics (#4145). When set, messages from the same sender arriving within this window are buffered and dispatched to the agent as a single batched context. This prevents out-of-order processing in the common pattern where a user forwards a message and immediately follows up with a comment.\n\nThis is a thin alias for [`ChannelOverrides::message_debounce_ms`]: if `overrides.message_debounce_ms` is non-zero it wins; otherwise the value here is applied. `Some(0)` explicitly disables coalescing. `None` (default) leaves behavior unchanged.",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "poll_interval_secs": {
-          "default": 1,
-          "description": "Polling interval in seconds.",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "proxy": {
-          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "thread_routes": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
-          "type": "object"
         }
       },
       "type": "object"
@@ -14775,7 +14488,6 @@
         "signal": null,
         "slack": null,
         "teams": null,
-        "telegram": null,
         "threema": null,
         "twist": null,
         "twitch": null,

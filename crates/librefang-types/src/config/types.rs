@@ -5662,11 +5662,6 @@ fn default_signal_poll_interval_secs() -> u64 {
     2
 }
 
-/// Default Telegram long-poll timeout (30s).
-fn default_telegram_long_poll_timeout_secs() -> u64 {
-    30
-}
-
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -6362,13 +6357,11 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
-/// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`)
+/// and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Telegram bot configuration(s).
-    pub telegram: OneOrMany<TelegramConfig>,
     /// Discord bot configuration(s).
     pub discord: OneOrMany<DiscordConfig>,
     /// Slack bot configuration(s).
@@ -6508,7 +6501,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            telegram: OneOrMany::default(),
             discord: OneOrMany::default(),
             slack: OneOrMany::default(),
             whatsapp: OneOrMany::default(),
@@ -6578,128 +6570,14 @@ impl ChannelsConfig {
     }
 }
 
-/// Telegram channel adapter configuration.
-//
-// `deny_unknown_fields` catches typos inside `[[channels.telegram]]`
-// elements at deserialize time. The detect_unknown_nested_fields walker
-// can't see into repeated-table elements (#5130), so the only way to
-// surface a typo here is for serde itself to reject it.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct TelegramConfig {
-    /// Env var name holding the bot token (NOT the token itself).
-    pub bot_token_env: String,
-    /// Telegram user IDs allowed to interact (empty = allow all).
-    /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Polling interval in seconds.
-    pub poll_interval_secs: u64,
-    /// Custom Telegram Bot API base URL for proxies or mirrors.
-    /// Defaults to `https://api.telegram.org` when not set.
-    #[serde(default)]
-    pub api_url: Option<String>,
-    /// Initial backoff in seconds on API failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on API failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
-    #[serde(default = "default_telegram_long_poll_timeout_secs")]
-    pub long_poll_timeout_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Message coalescing window in milliseconds for Telegram-specific
-    /// ergonomics (#4145). When set, messages from the same sender arriving
-    /// within this window are buffered and dispatched to the agent as a
-    /// single batched context. This prevents out-of-order processing in the
-    /// common pattern where a user forwards a message and immediately follows
-    /// up with a comment.
-    ///
-    /// This is a thin alias for [`ChannelOverrides::message_debounce_ms`]:
-    /// if `overrides.message_debounce_ms` is non-zero it wins; otherwise the
-    /// value here is applied. `Some(0)` explicitly disables coalescing.
-    /// `None` (default) leaves behavior unchanged.
-    #[serde(default)]
-    pub message_coalesce_window_ms: Option<u64>,
-    /// Thread-based agent routing for forum topics.
-    ///
-    /// Maps Telegram `message_thread_id` (as string) to an agent name.
-    /// Messages in a matched thread are routed to that agent instead of
-    /// the `default_agent`. Unmatched threads fall back to normal routing.
-    ///
-    /// ```toml
-    /// [channels.telegram.thread_routes]
-    /// "12345" = "research-agent"
-    /// "67890" = "coding-agent"
-    /// ```
-    #[serde(default)]
-    pub thread_routes: std::collections::HashMap<String, String>,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
-    /// adapter's REST client (#4795). When unset, the adapter follows
-    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
-    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
-    /// overrides any env var.
-    ///
-    /// Accepted schemes: `http://`, `https://`, `socks5://`,
-    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
-    /// Invalid URLs are rejected at adapter init.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            poll_interval_secs: 1,
-            api_url: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
-            overrides: ChannelOverrides::default(),
-            message_coalesce_window_ms: None,
-            thread_routes: std::collections::HashMap::new(),
-            proxy: None,
-        }
-    }
-}
-
-impl TelegramConfig {
-    /// Returns a [`ChannelOverrides`] with the Telegram-specific
-    /// `message_coalesce_window_ms` alias applied to
-    /// [`ChannelOverrides::message_debounce_ms`].
-    ///
-    /// Resolution rules (#4145):
-    /// 1. If `overrides.message_debounce_ms` is non-zero, it wins.
-    /// 2. Otherwise, if `message_coalesce_window_ms` is `Some`, that value
-    ///    is copied into `message_debounce_ms` (including `Some(0)`, which
-    ///    is a no-op since the existing field is already 0).
-    /// 3. Otherwise the unmodified clone of `overrides` is returned.
-    pub fn effective_overrides(&self) -> ChannelOverrides {
-        let mut ov = self.overrides.clone();
-        if ov.message_debounce_ms == 0 {
-            if let Some(window) = self.message_coalesce_window_ms {
-                ov.message_debounce_ms = window;
-            }
-        }
-        ov
-    }
-}
-
 /// Discord channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` catches typos inside `[[channels.discord]]`
+// elements at deserialize time. The detect_unknown_nested_fields walker
+// can't see into repeated-table elements (#5130), so the only way to
+// surface a typo here is for serde itself to reject it. This is the
+// canonical statement of the rationale; the other channel configs in
+// this module refer back to `DiscordConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
@@ -6740,8 +6618,16 @@ pub struct DiscordConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the gateway WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
-    /// and env-var interaction.
+    /// proxy.
+    ///
+    /// When unset, the adapter follows reqwest's normal env-var
+    /// fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+    /// `NO_PROXY`). When set, the per-channel value overrides any env
+    /// var. Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init. This is the canonical
+    /// proxy doc; other channel configs refer back to
+    /// `DiscordConfig::proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
 }
@@ -6767,7 +6653,7 @@ impl Default for DiscordConfig {
 
 /// Slack channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
@@ -6804,7 +6690,7 @@ pub struct SlackConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
     /// adapter's REST client (#4795). Affects Web API calls only —
     /// the Socket Mode WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// proxy. See `DiscordConfig::proxy` for accepted URL shapes
     /// and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -6830,7 +6716,7 @@ impl Default for SlackConfig {
 
 /// WhatsApp Cloud API channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
@@ -7128,7 +7014,7 @@ impl Default for TeamsConfig {
 
 /// Mattermost channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
@@ -7156,7 +7042,7 @@ pub struct MattermostConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// through the proxy. See `DiscordConfig::proxy` for accepted
     /// URL shapes and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -8781,58 +8667,6 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn telegram_message_coalesce_window_default_is_none() {
-        let tg = TelegramConfig::default();
-        assert!(tg.message_coalesce_window_ms.is_none());
-        // Backward compat: effective overrides leaves debounce disabled.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_alias_fills_debounce() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 2000);
-    }
-
-    #[test]
-    fn telegram_explicit_overrides_debounce_wins_over_alias() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            overrides: ChannelOverrides {
-                message_debounce_ms: 500,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        // The explicit `overrides.message_debounce_ms` is non-zero, so the
-        // alias must NOT clobber it.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 500);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_zero_keeps_disabled() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_parses_from_toml() {
-        let toml_str = r#"
-            bot_token_env = "TG"
-            message_coalesce_window_ms = 1500
-        "#;
-        let tg: TelegramConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(tg.message_coalesce_window_ms, Some(1500));
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 1500);
-    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {

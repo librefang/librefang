@@ -51,7 +51,6 @@ all-channels = [
     "channel-signal",
     "channel-slack",
     "channel-teams",
-    "channel-telegram",
     "channel-threema",
     "channel-twist",
     "channel-twitch",
@@ -67,7 +66,6 @@ all-channels = [
 ]
 
 # Individual channel features
-channel-telegram = []
 channel-discord = []
 channel-slack = []
 channel-matrix = ["dep:pulldown-cmark"]
