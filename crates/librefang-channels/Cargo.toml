@@ -43,7 +43,6 @@ all-channels = [
     "channel-mumble",
     "channel-nextcloud",
     "channel-nostr",
-    "channel-ntfy",
     "channel-pumble",
     "channel-qq",
     "channel-reddit",
@@ -108,7 +107,6 @@ channel-gitter = []
 channel-gotify = []
 channel-linkedin = []
 channel-mumble = []
-channel-ntfy = []
 channel-qq = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]

@@ -693,22 +693,10 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Generate an OAuth token at twitchapps.com/tmi", "Enter token, nick, and channel below"],
         config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
     },
-    // ── Notifications (4) ───────────────────────────────────────────
-    ChannelMeta {
-        name: "ntfy", display_name: "ntfy", icon: "NF",
-        description: "ntfy.sh pub/sub notification adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Just enter a topic name",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "topic", label: "Topic", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang-alerts", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://ntfy.sh", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("NTFY_TOKEN"), required: false, placeholder: "tk_abc123...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Pick a topic name", "Enter it below — that's it!"],
-        config_template: "[channels.ntfy]\ntopic = \"\"",
-    },
+    // ── Notifications (3) ───────────────────────────────────────────
+    // ntfy migrated to an out-of-process sidecar adapter
+    // (examples/sidecar-channel-python/ntfy_adapter.py); no longer an
+    // in-process channel.
     ChannelMeta {
         name: "gotify", display_name: "Gotify", icon: "GF",
         description: "Gotify WebSocket notification adapter",
@@ -862,7 +850,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
         "twitch" => config.twitch.is_some(),
-        "ntfy" => config.ntfy.is_some(),
         "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
         "voice" => config.voice.is_some(),
@@ -1135,10 +1122,6 @@ fn channel_config_values(
             .gitter
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "ntfy" => config
-            .ntfy
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "gotify" => config
             .gotify
             .as_ref()
@@ -1215,7 +1198,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
         "twitch" => config.twitch.len(),
-        "ntfy" => config.ntfy.len(),
         "gotify" => config.gotify.len(),
         "webhook" => config.webhook.len(),
         "voice" => config.voice.len(),
@@ -1282,7 +1264,6 @@ fn channel_instances_serialized(
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
         "twitch" => ser(&config.twitch),
-        "ntfy" => ser(&config.ntfy),
         "gotify" => ser(&config.gotify),
         "webhook" => ser(&config.webhook),
         "voice" => ser(&config.voice),

@@ -6444,8 +6444,6 @@ pub struct ChannelsConfig {
     pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
-    /// ntfy.sh pub/sub configuration(s).
-    pub ntfy: OneOrMany<NtfyConfig>,
     /// Gotify notification configuration(s).
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
@@ -6547,7 +6545,6 @@ impl Default for ChannelsConfig {
             qq: OneOrMany::default(),
             discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
-            ntfy: OneOrMany::default(),
             gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
@@ -8317,39 +8314,6 @@ impl Default for GitterConfig {
         Self {
             token_env: "GITTER_TOKEN".to_string(),
             room_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NtfyConfig {
-    /// ntfy server URL.
-    pub server_url: String,
-    /// Topic to subscribe/publish to.
-    pub topic: String,
-    /// Env var name holding the auth token (optional for public topics).
-    pub token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: "https://ntfy.sh".to_string(),
-            topic: String::new(),
-            token_env: "NTFY_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

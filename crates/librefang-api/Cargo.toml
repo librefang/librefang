@@ -132,7 +132,6 @@ channel-gitter = ["librefang-channels/channel-gitter"]
 channel-gotify = ["librefang-channels/channel-gotify"]
 channel-linkedin = ["librefang-channels/channel-linkedin"]
 channel-mumble = ["librefang-channels/channel-mumble"]
-channel-ntfy = ["librefang-channels/channel-ntfy"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
@@ -149,7 +148,6 @@ core-channels = [
     "channel-discord",
     "channel-slack",
     "channel-webhook",
-    "channel-ntfy",
 ]
 
 all-channels = [
@@ -162,7 +160,7 @@ all-channels = [
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-gotify", "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
@@ -178,7 +176,7 @@ all-channels-no-email = [
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-gotify", "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 

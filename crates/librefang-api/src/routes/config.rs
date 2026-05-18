@@ -835,7 +835,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(qq);
         ch!(discourse);
         ch!(gitter);
-        ch!(ntfy);
         ch!(gotify);
         ch!(webhook);
         ch!(linkedin);
