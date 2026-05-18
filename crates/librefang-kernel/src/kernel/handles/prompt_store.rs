@@ -228,13 +228,28 @@ impl kernel_handle::PromptStore for LibreFangKernel {
                     kernel_handle::KernelOpError::Internal(format!("Failed to get experiment: {e}"))
                 })? {
                     if let Some(variant) = exp.variants.iter().find(|v| v.id == winner.variant_id) {
-                        let _ = store.set_active_version(variant.prompt_version_id, exp.agent_id);
-                        tracing::info!(
-                            experiment_id = %id,
-                            winner_variant = %winner.variant_name,
-                            success_rate = winner.success_rate,
-                            "Auto-activated winning variant's prompt version"
-                        );
+                        match store.set_active_version(variant.prompt_version_id, exp.agent_id) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    experiment_id = %id,
+                                    winner_variant = %winner.variant_name,
+                                    success_rate = winner.success_rate,
+                                    "Auto-activated winning variant's prompt version"
+                                );
+                            }
+                            Err(e) => {
+                                // Don't emit the success log when activation
+                                // failed — the agent keeps running the old
+                                // prompt version and the operator must know.
+                                tracing::error!(
+                                    experiment_id = %id,
+                                    winner_variant = %winner.variant_name,
+                                    prompt_version_id = %variant.prompt_version_id,
+                                    error = %e,
+                                    "Failed to auto-activate winning variant's prompt version"
+                                );
+                            }
+                        }
                     }
                 }
             }

@@ -12,7 +12,7 @@ Usage in config.toml:
     [[sidecar_channels]]
     name = "webhook"
     command = "python3"
-    args = ["examples/sidecar-channel-python/webhook_adapter.py"]
+    args = ["-m", "librefang.sidecar.adapters.webhook"]
     env = { WEBHOOK_PORT = "9090", WEBHOOK_SECRET = "my-secret" }
 
 Environment variables:

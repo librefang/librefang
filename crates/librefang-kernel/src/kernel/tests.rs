@@ -1737,19 +1737,53 @@ fn test_evaluate_condition_unknown_format() {
 
 #[test]
 fn test_peer_scoped_key() {
-    // With peer_id: key is namespaced
+    use librefang_runtime::kernel_handle::KernelOpError;
+
+    // With a colon-free, non-empty peer_id: key is namespaced.
     assert_eq!(
-        peer_scoped_key("car", Some("user-123")),
+        peer_scoped_key("car", Some("user-123")).expect("colon-free peer_id ok"),
         "peer:user-123:car"
     );
+
+    // Without peer_id: key is unchanged (global scope).
     assert_eq!(
-        peer_scoped_key("prefs.color", Some("u:456")),
-        "peer:u:456:prefs.color"
+        peer_scoped_key("car", None).expect("None peer_id ok"),
+        "car"
+    );
+    assert_eq!(
+        peer_scoped_key("global_setting", None).expect("None peer_id ok"),
+        "global_setting"
     );
 
-    // Without peer_id: key is unchanged
-    assert_eq!(peer_scoped_key("car", None), "car");
-    assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
+    // SECURITY (#5119): peer_id containing ':' is rejected — the historical
+    // `peer:{pid}:{key}` framing is only injective when pid is colon-free.
+    assert!(matches!(
+        peer_scoped_key("prefs.color", Some("u:456")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("car", Some("T1:U2")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5119 / review #3): an empty peer_id is rejected — `peer::{key}`
+    // is ambiguous with a `None`-scope key literally named `:{key}` and would
+    // split / shadow a namespace.
+    assert!(matches!(
+        peer_scoped_key("car", Some("")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+
+    // SECURITY (#5120): key starting with reserved `peer:` prefix is rejected
+    // so an LLM-supplied key cannot collide with the internal namespace.
+    assert!(matches!(
+        peer_scoped_key("peer:victim:user_name", None),
+        Err(KernelOpError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        peer_scoped_key("peer:anything", Some("alice")),
+        Err(KernelOpError::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -3814,6 +3848,281 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
     // Cleanup: cancel session_b too so the runtime drops cleanly.
     let _ = kernel.stop_session_run(agent_id, session_b);
     drop(rt);
+    kernel.shutdown();
+}
+
+/// #5142 regression: `kill_agent` must abort the agent's in-flight LLM
+/// loop, not merely tear down the registry entry and leave the streaming
+/// task burning provider tokens. Pre-#5142, `kill_agent_with_purge` removed
+/// the registry/scheduler entries but never called `stop_agent_run`, and the
+/// orphaned `running_tasks` entry was only reaped by the GC sweep — which
+/// *dropped* the `AbortHandle` instead of firing it. `suspend_agent` did the
+/// right thing; `kill_agent` did not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_agent_aborts_in_flight_run_5142() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-kill-abort-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "victim".to_string(),
+        description: "agent whose run must be aborted on kill".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session = SessionId::new();
+
+    // A genuine long-lived task standing in for an in-flight LLM stream.
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let abort = task.abort_handle();
+    kernel.agents.running_tasks.insert(
+        (agent_id, session),
+        RunningTask {
+            abort: abort.clone(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    assert!(
+        !abort.is_finished(),
+        "sanity: the simulated in-flight run must be alive before kill"
+    );
+    assert!(kernel.agent_has_active_session(agent_id));
+
+    kernel
+        .kill_agent(agent_id)
+        .expect("kill_agent should succeed");
+
+    // The running_tasks entry must be gone AND the underlying task aborted.
+    assert!(
+        !kernel.agent_has_active_session(agent_id),
+        "kill_agent must remove the in-flight run entry"
+    );
+    // `AbortHandle::abort()` cancels at the next .await; give the runtime a
+    // moment to actually drop the task, then assert it is finished.
+    for _ in 0..50 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        abort.is_finished(),
+        "kill_agent must fire abort() on the in-flight LLM task (#5142) — \
+         the task is still running, so it would keep burning provider tokens"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5142 follow-up regression: the streaming-dispatch path must not
+/// register an orphan `RunningTask` when a `kill_agent` lands in the
+/// window between `entry = registry.get(agent_id)` (line 1717) and the
+/// `running_tasks.insert((agent, session), …)` at the bottom of
+/// `send_message_streaming_*`. Pre-fix, the kill's `stop_agent_run` ran
+/// before the dispatcher had inserted its handle, so the kill found
+/// nothing to abort; then the dispatcher inserted a handle for an agent
+/// that was no longer in the registry. The handle survived until the
+/// next periodic GC sweep — long enough to keep burning provider tokens.
+///
+/// The fix is the post-insert registry recheck + `remove_if` self-eject
+/// in `send_message_streaming_with_routing_…`. This test exercises that
+/// exact protocol at the running_tasks layer: spawn N concurrent
+/// "dispatchers" that follow the protocol against an agent another
+/// thread is repeatedly killing, and assert no orphan entries survive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_agent_dispatch_insert_race_leaves_no_orphan_5142() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-dispatch-race-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+
+    let manifest = AgentManifest {
+        name: "race-victim".to_string(),
+        description: "agent for kill/dispatch race".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Count how many dispatchers observed the kill via the post-insert
+    // recheck and self-ejected. Used only for diagnostic output.
+    let self_ejected = Arc::new(AtomicUsize::new(0));
+
+    // Thread A: kill the agent. The kill's `stop_agent_run` runs before
+    // some dispatchers' inserts (the racy window) and `registry.remove`
+    // runs before the rest.
+    let killer_kernel = Arc::clone(&kernel);
+    let killer = tokio::spawn(async move {
+        // Brief yield so the dispatchers have spun up their loops.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let _ = killer_kernel.kill_agent(agent_id);
+    });
+
+    // Thread B (x N): simulate the streaming dispatch insert protocol.
+    // We do NOT call `send_message_streaming_*` directly because that
+    // would require a real LLM driver fixture; instead we replicate the
+    // exact insert-side sequence (snapshot-entry → spawn → post-insert
+    // recheck) at the running_tasks layer the fix touches.
+    let mut dispatchers = Vec::new();
+    for i in 0..32 {
+        let kernel_b = Arc::clone(&kernel);
+        let self_ejected_b = Arc::clone(&self_ejected);
+        dispatchers.push(tokio::spawn(async move {
+            // (1) Snapshot the entry the way `send_message_full` does at
+            //     line 819 / `send_message_streaming_*` at line 1717.
+            let entry_snapshot = kernel_b.agents.registry.get(agent_id);
+            if entry_snapshot.is_none() {
+                // Kill already won — dispatcher would have errored at the
+                // registry.get above and returned without spawning. No
+                // orphan possible on this branch.
+                return;
+            }
+
+            // (2) Spawn a long-lived task standing in for the in-flight
+            //     LLM stream.
+            let task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            });
+            let abort = task.abort_handle();
+
+            // Variable delay across dispatchers so insert/kill interleave
+            // exercises every race position.
+            tokio::time::sleep(std::time::Duration::from_micros(i * 50)).await;
+
+            // (3) Insert into running_tasks (matches messaging.rs:2911).
+            let session = SessionId::new();
+            let turn_task_id = uuid::Uuid::new_v4();
+            kernel_b.agents.running_tasks.insert(
+                (agent_id, session),
+                RunningTask {
+                    abort: abort.clone(),
+                    started_at: chrono::Utc::now(),
+                    task_id: turn_task_id,
+                },
+            );
+
+            // (4) Post-insert recheck + self-eject (the fix itself —
+            //     mirrors messaging.rs:2927-2942).
+            if kernel_b.agents.registry.get(agent_id).is_none() {
+                if let Some((_, evicted)) = kernel_b
+                    .agents
+                    .running_tasks
+                    .remove_if(&(agent_id, session), |_, v| v.task_id == turn_task_id)
+                {
+                    evicted.abort.abort();
+                    self_ejected_b.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    killer.await.expect("killer must finish");
+    for d in dispatchers {
+        d.await.expect("dispatcher must finish");
+    }
+
+    // The invariant: after kill + every dispatcher's insert protocol has
+    // run, the running_tasks map must hold no entries for this agent.
+    // Without the post-insert recheck, dispatchers that lost the race
+    // would have left an orphan that only the next gc_sweep tick could
+    // reap — and pre-#5142 the sweep dropped the AbortHandle on the
+    // floor anyway.
+    let leftovers: Vec<_> = kernel
+        .agents
+        .running_tasks
+        .iter()
+        .filter(|e| e.key().0 == agent_id)
+        .map(|e| *e.key())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "kill_agent + concurrent dispatch insert must not leave orphan running_tasks; \
+         {} leftover(s) after {} dispatchers self-ejected",
+        leftovers.len(),
+        self_ejected.load(Ordering::Relaxed),
+    );
+
+    kernel.shutdown();
+}
+
+/// #5142 regression: the periodic GC sweep must FIRE the `AbortHandle` for a
+/// dead agent's leftover `running_tasks` entry, not just drop it. Pre-#5142
+/// the sweep `running_tasks.remove(&key)` discarded the handle without
+/// `abort()`, so a task that outlived its agent (e.g. a kill that raced the
+/// dispatcher) kept running until the provider returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_aborts_orphaned_running_task_5142() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-abort-5142");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Agent ID that is NOT in the registry → the sweep classifies its
+    // running_tasks entry as belonging to a dead agent and must reap it.
+    let dead_agent = AgentId(uuid::Uuid::new_v4());
+    let session = SessionId::new();
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let abort = task.abort_handle();
+    kernel.agents.running_tasks.insert(
+        (dead_agent, session),
+        RunningTask {
+            abort: abort.clone(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    assert!(!abort.is_finished(), "sanity: orphan task alive pre-sweep");
+
+    kernel.gc_sweep();
+
+    assert!(
+        kernel
+            .agents
+            .running_tasks
+            .get(&(dead_agent, session))
+            .is_none(),
+        "GC sweep must remove the dead agent's running_tasks entry"
+    );
+    for _ in 0..50 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        abort.is_finished(),
+        "GC sweep must fire abort() on the orphaned task (#5142), not just \
+         drop the AbortHandle"
+    );
+
     kernel.shutdown();
 }
 
@@ -7943,6 +8252,995 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
         post_boot_provider,
         "live default_model.provider must be preserved when the on-disk file is unparseable"
     );
+
+    kernel.shutdown();
+}
+
+// ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
+
+/// Happy-path regression for #5117: `kill_agent_with_purge` previously
+/// discarded the substrate `remove_agent` result with `let _ = …`, so a DB
+/// failure (lock contention, schema drift, FS error) would silently leave the
+/// row on disk and the agent would resurrect on next daemon boot. After the
+/// fix, the error is propagated as `KernelError::LibreFang(LibreFangError)`.
+/// This test pins the success path so the refactor cannot regress the
+/// common case: kill returns `Ok(())` AND the SQLite `agents` row is
+/// scrubbed.
+#[test]
+fn kill_agent_with_purge_removes_agent_row_from_sqlite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-5117-happy");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let manifest = AgentManifest {
+        name: "agent-5117".to_string(),
+        description: "agent for #5117 regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent before kill")
+            .is_some(),
+        "agent row must exist in SQLite before kill"
+    );
+
+    kernel
+        .kill_agent_with_purge(agent_id, true)
+        .expect("kill_agent_with_purge should succeed on happy path");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .load_agent(agent_id)
+            .expect("load_agent after kill")
+            .is_none(),
+        "agent row must be gone from SQLite after successful kill_agent_with_purge (#5117)"
+    );
+
+    kernel.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// #5125 / #5126: same-task re-entrant `agent_msg_locks` acquisition.
+//
+// Both issues are the same root cause — the same async task re-acquires
+// `agent_msg_locks[agent_id]` (a non-reentrant `tokio::sync::Mutex`) that an
+// outer `send_message_full` frame already holds, silently parking the worker
+// thread. The fix tracks held locks in a task-local registry
+// (`librefang_runtime::held_agent_locks`) populated at the single agent-scoped
+// acquisition site in `send_message_full_inner`, so:
+//   - #5125: the transitive `A -> B -> A` `agent_send` cycle is rejected with
+//     an error *before* the second `lock.lock().await`, instead of hanging.
+//   - #5126: `append_to_session`'s `block_in_place(blocking_lock)` is skipped
+//     in favour of a lockless write when this task already holds the lock,
+//     instead of self-deadlocking; the mirror write still lands.
+// The fix must NOT relax cross-task mutual exclusion (third test).
+//
+// Each test runs the deadlock-prone work under `tokio::time::timeout`: without
+// the fix the future never resolves and the timeout fires (test fails); with
+// the fix it resolves promptly.
+// ---------------------------------------------------------------------------
+
+/// Build a kernel + one spawned agent for the re-entrancy tests.
+fn reentrant_test_kernel() -> (Arc<LibreFangKernel>, AgentId) {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::mem::forget(dir); // keep tempdir alive until process exit
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    // `send_message_full` builds its kernel-handle arg via `kernel_handle()`,
+    // which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+    let agent_id = kernel
+        .spawn_agent(test_manifest("reentrant-a", "agent A", vec![]))
+        .expect("spawn A should succeed");
+    (kernel, agent_id)
+}
+
+/// #5125: a transitive `A -> B -> A` cycle must be rejected, not deadlock.
+///
+/// We simulate the outer turn for A exactly as `send_message_full_inner` does:
+/// inside `held_agent_locks::scope`, acquire the real `agent_msg_locks[A]`
+/// guard and register A in the task-local held set. Then call
+/// `send_message_full(A, ...)` on the *same task* — the inner re-entrant
+/// acquisition. With the fix it returns the cycle-rejection error before the
+/// (would-be deadlocking) `lock.lock().await`. Without the fix the inner call
+/// blocks forever on the held mutex and the timeout fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5125_transitive_cycle_is_rejected_not_deadlocked() {
+    let (kernel, agent_a) = reentrant_test_kernel();
+    let lock_a = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent_a)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let kernel_clone = Arc::clone(&kernel);
+    let fut = librefang_runtime::held_agent_locks::scope(async move {
+        // Outer turn for A: hold the lock + register, like the real site.
+        let _outer_guard = lock_a.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
+        assert!(
+            librefang_runtime::held_agent_locks::is_held(agent_a),
+            "A's lock must be registered as held on this task"
+        );
+
+        // Inner re-entrant send to A (the B->A leg of A->B->A), same task.
+        kernel_clone
+            .send_message_full(
+                agent_a,
+                "callback into A",
+                kernel_clone.kernel_handle(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+    });
+
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+    let inner = res.expect(
+        "re-entrant send_message_full(A) must NOT hang — without the fix this \
+         times out because the task self-deadlocks on agent_msg_locks[A]",
+    );
+    let err = inner.expect_err("re-entrant send must be rejected, not succeed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("re-entrant") && msg.contains("deadlock"),
+        "rejection must name the re-entrant deadlock; got: {msg}"
+    );
+    assert!(
+        msg.contains(&agent_a.to_string()),
+        "rejection must name the cycle agent {agent_a}; got: {msg}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5126: `channel_send`'s mirror (`append_to_session`) from inside the
+/// channel owner's own turn must complete (lockless write) and persist the
+/// message, not deadlock on the already-held `agent_msg_locks[owner]`.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let (kernel, owner) = reentrant_test_kernel();
+    let lock_owner = kernel
+        .agents
+        .agent_msg_locks
+        .entry(owner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    // Mirror session id, derived exactly like mirror_channel_send_to_session.
+    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-42"));
+    let mirror_msg = Message {
+        role: Role::User,
+        content: MessageContent::Text("{\"mirror_from\":\"owner\",\"body\":\"reply\"}".to_string()),
+        pinned: false,
+        timestamp: Some(chrono::Utc::now()),
+    };
+
+    let kernel_clone = Arc::clone(&kernel);
+    let owner_copy = owner;
+    let sid_copy = channel_sid;
+    let msg_copy = mirror_msg.clone();
+    let fut = librefang_runtime::held_agent_locks::scope(async move {
+        // Outer turn for `owner` holds agent_msg_locks[owner] + registered.
+        let _outer_guard = lock_owner.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
+
+        // Mirror path resolves owner == caller -> append_to_session. Without
+        // the fix this block_in_place(blocking_lock)s the held mutex on this
+        // same task and never returns. `append_to_session` is sync; running
+        // it on a blocking thread keeps the runtime healthy while still
+        // exercising the same task-local (block_in_place stays on-task).
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
+        });
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+        .await
+        .expect(
+            "owner-caller mirror append must NOT hang — without the fix this \
+             times out because block_in_place re-locks the held agent_msg_lock",
+        );
+
+    // The mirror write must actually be present (lockless-write, not skip).
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(channel_sid)
+        .expect("get_session must not error")
+        .expect("mirror session row must exist after append_to_session");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the mirrored channel_send message must be persisted, not silently dropped"
+    );
+
+    kernel.shutdown();
+}
+
+/// The fix must ONLY relax SAME-task re-entry. Two DIFFERENT tasks must still
+/// serialize on the same agent's `agent_msg_locks` entry. Task 1 holds the
+/// real lock (with no held-set scope — it is a plain cross-task holder); Task 2
+/// calls `append_to_session` for the same agent. Task 2 must block until Task 1
+/// releases (proving the `block_in_place(blocking_lock)` path is still taken
+/// across tasks), then complete.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_task_serialization_on_agent_msg_lock_is_preserved() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (kernel, agent) = reentrant_test_kernel();
+
+    // Sanity: `is_held` is false outside any scope and across tasks — the
+    // task-local never bleeds between tasks, so the cross-task path always
+    // takes the real lock.
+    assert!(
+        !librefang_runtime::held_agent_locks::is_held(agent),
+        "is_held must be false outside any held_agent_locks::scope"
+    );
+
+    let lock = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let holder_released = Arc::new(AtomicBool::new(false));
+    let writer_started = Arc::new(AtomicBool::new(false));
+
+    // Task 1: hold the real lock for 400ms (NOT in a held-set scope, so this
+    // is a genuine cross-task holder the writer must wait behind).
+    let lock_t1 = Arc::clone(&lock);
+    let released_t1 = Arc::clone(&holder_released);
+    let writer_started_t1 = Arc::clone(&writer_started);
+    let holder = tokio::spawn(async move {
+        let _g = lock_t1.lock().await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // The writer must NOT have completed while we still hold the lock; it
+        // may have *started* (spawned) but its blocking_lock must be parked.
+        assert!(
+            writer_started_t1.load(Ordering::SeqCst),
+            "writer task should have started while holder held the lock"
+        );
+        released_t1.store(true, Ordering::SeqCst);
+    });
+
+    // Give the holder time to acquire the lock first.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Task 2: a different task calls append_to_session for the SAME agent. It
+    // must block on the real mutex until Task 1 releases.
+    let kernel_w = Arc::clone(&kernel);
+    let sid = SessionId::for_sender_scope(agent, "telegram", Some("c1"));
+    let released_w = Arc::clone(&holder_released);
+    let writer_started_w = Arc::clone(&writer_started);
+    let writer = tokio::spawn(async move {
+        writer_started_w.store(true, Ordering::SeqCst);
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(
+                &*kernel_w,
+                sid,
+                agent,
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("cross-task".to_string()),
+                    pinned: false,
+                    timestamp: Some(chrono::Utc::now()),
+                },
+            );
+        });
+        // By the time the writer acquires the lock, the holder must have
+        // already released it — proving mutual exclusion held.
+        assert!(
+            released_w.load(Ordering::SeqCst),
+            "cross-task writer acquired agent_msg_lock before holder released \
+             it — cross-task mutual exclusion was wrongly relaxed"
+        );
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        holder.await.expect("holder task");
+        writer.await.expect("writer task");
+    })
+    .await
+    .expect("cross-task path must complete once the holder releases");
+
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(sid)
+        .expect("get_session")
+        .expect("session row must exist");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "cross-task write must still land after serialized acquisition"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5125 (streaming path): the re-entrancy fix must cover the streaming send
+/// path too. The streaming entry (`send_message_streaming_with_sender_and_opts`)
+/// acquires `agent_msg_locks[A]` *inside its spawned task*, not on the caller's
+/// task. Without wrapping that spawn body in `held_agent_locks::scope` and
+/// registering a `HeldLockGuard`, an `agent_send` tool call back to A from
+/// inside the streaming agent loop would re-acquire the same per-agent mutex
+/// on the spawned task and silently deadlock — identical to the non-streaming
+/// failure mode of #5125, just routed through the streaming entry that
+/// dashboards / WS / SSE actually use.
+///
+/// This test simulates the streaming spawn body's exact lock state — fresh
+/// task, `scope` established, agent-scoped `agent_msg_locks[A]` held, A
+/// registered in the held set — and verifies that an inner `send_message_full`
+/// re-entrant call rejects the cycle instead of hanging. The pattern mirrors
+/// `issue_5125_transitive_cycle_is_rejected_not_deadlocked` (the non-streaming
+/// dimension), but the work runs on a `tokio::spawn`ed task to model that the
+/// streaming-entry's spawned task is the one doing the re-acquisition.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5125_streaming_spawn_body_rejects_reentrant_cycle() {
+    let (kernel, agent_a) = reentrant_test_kernel();
+    let lock_a = kernel
+        .agents
+        .agent_msg_locks
+        .entry(agent_a)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let kernel_clone = Arc::clone(&kernel);
+    // Mirror exactly what the patched streaming spawn body does: a fresh task,
+    // wrap in `held_agent_locks::scope`, take the per-agent lock, register the
+    // held guard, then drive the agent-loop body (here represented by an inner
+    // `send_message_full(A)` standing in for an `agent_send` tool call). The
+    // streaming entry is a sync fn returning a `JoinHandle`, so the spawned
+    // task — not the caller — is where re-entrancy detection has to work.
+    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
+        let _session_guard = lock_a.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_a);
+        assert!(
+            librefang_runtime::held_agent_locks::is_held(agent_a),
+            "A's lock must be registered as held on this spawned task — without \
+             the streaming-path fix, the spawn body never calls `scope` so this \
+             would fail and the inner send below would silently deadlock"
+        );
+
+        // Inner re-entrant send to A from inside the streaming spawn body —
+        // the streaming-turn analogue of an `agent_send(A)` tool call.
+        kernel_clone
+            .send_message_full(
+                agent_a,
+                "callback into A from streaming turn",
+                kernel_clone.kernel_handle(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+    }));
+
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), inner).await;
+    let join_result = res.expect(
+        "spawned streaming-turn simulation must NOT hang — without the \
+         streaming-path fix the inner re-entrant send blocks forever on the \
+         held agent_msg_lock and this timeout fires",
+    );
+    let inner_result = join_result.expect("spawned task panicked");
+    let err = inner_result.expect_err(
+        "re-entrant send from inside the streaming spawn body must be rejected, \
+         not succeed",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("re-entrant") && msg.contains("deadlock"),
+        "rejection must name the re-entrant deadlock; got: {msg}"
+    );
+    assert!(
+        msg.contains(&agent_a.to_string()),
+        "rejection must name the cycle agent {agent_a}; got: {msg}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5126 (streaming path): the `channel_send` mirror (`append_to_session`)
+/// fired from inside a streaming turn must complete via the lockless-write
+/// path, not deadlock on the already-held `agent_msg_locks[owner]`. Same
+/// signal as `issue_5126_owner_caller_mirror_write_is_lockless_not_deadlocked`,
+/// but the work runs on a `tokio::spawn`ed task to model the streaming entry's
+/// own spawn — confirming the held-set registration is set up *inside* that
+/// spawned task (which the streaming-path fix is exactly what installs).
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_5126_streaming_spawn_body_mirror_write_is_lockless() {
+    use librefang_runtime::kernel_handle::SessionWriter;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let (kernel, owner) = reentrant_test_kernel();
+    let lock_owner = kernel
+        .agents
+        .agent_msg_locks
+        .entry(owner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let channel_sid = SessionId::for_sender_scope(owner, "telegram", Some("chat-stream"));
+    let mirror_msg = Message {
+        role: Role::User,
+        content: MessageContent::Text(
+            "{\"mirror_from\":\"owner-stream\",\"body\":\"reply\"}".to_string(),
+        ),
+        pinned: false,
+        timestamp: Some(chrono::Utc::now()),
+    };
+
+    let kernel_clone = Arc::clone(&kernel);
+    let owner_copy = owner;
+    let sid_copy = channel_sid;
+    let msg_copy = mirror_msg.clone();
+    // Replicate the streaming spawn body's lock-and-scope setup on a fresh
+    // task. The `channel_send` mirror inside the agent loop resolves
+    // owner == caller and falls through to `append_to_session`; without the
+    // streaming-path fix that block_in_place(blocking_lock)s the held
+    // `agent_msg_locks[owner]` on this same task and never returns.
+    let inner = tokio::spawn(librefang_runtime::held_agent_locks::scope(async move {
+        let _session_guard = lock_owner.lock().await;
+        let _held = librefang_runtime::held_agent_locks::HeldLockGuard::register(owner_copy);
+
+        tokio::task::block_in_place(|| {
+            SessionWriter::append_to_session(&*kernel_clone, sid_copy, owner_copy, msg_copy);
+        });
+    }));
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), inner)
+        .await
+        .expect(
+            "streaming-turn mirror append must NOT hang — without the \
+             streaming-path fix this times out because block_in_place re-locks \
+             the held agent_msg_lock from the streaming spawn body",
+        )
+        .expect("spawned task panicked");
+
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(channel_sid)
+        .expect("get_session must not error")
+        .expect("mirror session row must exist after append_to_session");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the mirrored channel_send message from the streaming turn must be \
+         persisted, not silently dropped"
+    );
+
+    kernel.shutdown();
+}
+
+/// On boot the kernel advances the canonical session pointer when a more-
+/// recently-updated unlabeled session exists with more messages than the
+/// current canonical.  This covers the restart-context-loss path from
+/// issue #5198: after an unclean shutdown the canonical pointer may point at
+/// a stale / empty session while the conversation history lives in a session
+/// that was written last but never promoted.
+#[test]
+fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-canonical-recovery-5198");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // --- First kernel instance: register agent + seed sessions manually ---
+    let kernel1 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("first kernel should boot");
+
+    let agent_id = AgentId::new();
+    let stale_session_id = SessionId::new();
+
+    // Register the agent with a stale canonical pointer (0 messages).
+    let entry = librefang_types::agent::AgentEntry {
+        id: agent_id,
+        name: format!("recovery-agent-{}", agent_id),
+        manifest: librefang_types::agent::AgentManifest {
+            name: format!("recovery-agent-{}", agent_id),
+            description: "test".into(),
+            author: "test".into(),
+            module: "test".into(),
+            ..Default::default()
+        },
+        state: librefang_types::agent::AgentState::Running,
+        mode: librefang_types::agent::AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: stale_session_id,
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel1
+        .agents
+        .registry
+        .register(entry.clone())
+        .expect("register agent");
+    kernel1
+        .memory
+        .substrate
+        .save_agent(&entry)
+        .expect("persist agent");
+
+    // Save the stale (empty) session row — gives it an updated_at in the past.
+    let stale_session = librefang_memory::session::Session {
+        id: stale_session_id,
+        agent_id,
+        messages: vec![],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&stale_session)
+        .expect("save stale session");
+
+    // Give a tiny wall-clock gap so updated_at columns differ.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create a second session (the active one after the conversation) with
+    // messages — this simulates what happened before the crash.
+    let active_session_id = SessionId::new();
+    let active_session = librefang_memory::session::Session {
+        id: active_session_id,
+        agent_id,
+        messages: vec![
+            librefang_types::message::Message::user("hello"),
+            librefang_types::message::Message::assistant("world"),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel1
+        .memory
+        .substrate
+        .save_session(&active_session)
+        .expect("save active session");
+
+    // Shut down first kernel — canonical pointer still points at stale_session_id.
+    kernel1.shutdown();
+
+    // Boot a second kernel against the same data directory — this triggers
+    // the canonical recovery pass.
+    let kernel2 = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("second kernel should boot");
+
+    // After boot, the canonical pointer must have been advanced to active_session_id.
+    let restored = kernel2
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must survive boot");
+    assert_eq!(
+        restored.session_id, active_session_id,
+        "boot must advance canonical pointer to the most-recently-active session \
+         (issue #5198): expected {active_session_id} but got {}",
+        restored.session_id
+    );
+
+    // The DB must also be updated so subsequent boots agree.
+    let loaded = kernel2
+        .memory
+        .substrate
+        .load_agent(agent_id)
+        .expect("load_agent must not error")
+        .expect("agent must still exist in DB");
+    assert_eq!(
+        loaded.session_id, active_session_id,
+        "persisted agent entry must carry the advanced session pointer after boot"
+    );
+
+    kernel2.shutdown();
+}
+
+// Regression test for #5201: when a session is over the token threshold but
+// under threshold_messages, the inner gate in compact_agent_session_with_id
+// must NOT return "No compaction needed" — it must proceed to the compactor.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_runtime::compactor::{estimate_token_count, CompactionConfig};
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "compact-token-gate-test".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let entry = kernel.agents.registry.get(agent_id).unwrap();
+    let session_id = entry.session_id;
+    drop(entry);
+
+    // Build a session with fewer messages than threshold_messages (default 30)
+    // but enough token volume to exceed token_threshold_ratio × context_window
+    // (default 0.7 × 200_000 = 140_000 tokens).
+    // Each ~60K-char ASCII message estimates to ~15K tokens (chars/4).
+    // 10 such messages → ~150K tokens, which exceeds 140K.
+    let big_chunk = "word ".repeat(12_000); // ~60K chars ≈ 15K tokens
+    let messages: Vec<Message> = (0..10).map(|_| Message::user(big_chunk.clone())).collect();
+
+    // Sanity: message count is below the default threshold (30).
+    assert!(
+        messages.len() < CompactionConfig::default().threshold,
+        "test invariant: message count must be below threshold_messages"
+    );
+
+    // Sanity: token estimate exceeds the default token threshold.
+    let estimated = estimate_token_count(&messages, None, None);
+    let token_threshold = (CompactionConfig::default().context_window_tokens as f64
+        * CompactionConfig::default().token_threshold_ratio) as usize;
+    assert!(
+        estimated > token_threshold,
+        "test invariant: estimated tokens ({estimated}) must exceed token threshold ({token_threshold})"
+    );
+
+    // Persist the fat session so compact_agent_session_with_id can load it.
+    let session = MemSession {
+        id: session_id,
+        agent_id,
+        messages,
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory
+        .substrate
+        .save_session(&session)
+        .expect("save_session should succeed");
+
+    // Call the function under test.  Without the fix it returns
+    // Ok("No compaction needed (10 messages, threshold 30)"); with the fix
+    // it proceeds past the gate and either compacts or errors at the LLM
+    // step (no provider configured in test).  Either way the result must
+    // not be the early-return sentinel.
+    //
+    // `force = false` — this test pins the *token-trigger gate* (#5210),
+    // not the user-forced bypass path (#5213). The force=true case is
+    // covered separately.
+    let result = kernel
+        .compact_agent_session_with_id(agent_id, Some(session_id), false)
+        .await;
+
+    match &result {
+        Ok(msg) => {
+            assert!(
+                !msg.starts_with("No compaction needed"),
+                "gate must not short-circuit on token-only trigger; got: {msg}"
+            );
+        }
+        Err(_) => {
+            // An error from the LLM driver (no provider) is the expected
+            // outcome once the gate passes — this is correct behaviour.
+        }
+    }
+
+    kernel.shutdown();
+}
+
+/// Regression: `context_report` must resolve the context window from the
+/// model catalog rather than falling back to the 200K hardcoded placeholder
+/// (#5200). An agent on a 1M-window model must report a 1M denominator, not
+/// 200K.
+#[test]
+fn test_context_report_uses_catalog_context_window_not_200k() {
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-ctx-report-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    // Insert a catalog entry for a fictional 1M-window model so the
+    // resolver finds it via L2 (registry lookup) without needing real
+    // provider files on disk.
+    kernel.model_catalog_update(|cat| {
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "fake-1m-model".to_string(),
+            display_name: "Fake 1M Model".to_string(),
+            provider: "fake-provider".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 1_000_000,
+            ..Default::default()
+        });
+    });
+
+    let manifest = AgentManifest {
+        name: "ctx-report-test-agent".to_string(),
+        description: "agent for context_report regression test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        model: ModelConfig {
+            provider: "fake-provider".to_string(),
+            model: "fake-1m-model".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("agent spawn");
+    let report = kernel
+        .context_report(agent_id)
+        .expect("context_report must succeed");
+
+    assert_ne!(
+        report.context_window, 200_000,
+        "context_report must not use the 200K hardcoded placeholder (#5200)"
+    );
+    assert_eq!(
+        report.context_window, 1_000_000,
+        "context_report must resolve the catalog's 1M window for fake-1m-model"
+    );
+
+    kernel.shutdown();
+}
+
+/// `context_report` must honour the agent manifest's explicit
+/// `model.context_window` override (L1 in the resolution chain) over the
+/// catalog value (#5200).
+#[test]
+fn test_context_report_honours_manifest_context_window_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-ctx-override-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let manifest = AgentManifest {
+        name: "ctx-override-test-agent".to_string(),
+        description: "agent with explicit context_window in manifest".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        model: ModelConfig {
+            provider: "ollama".to_string(),
+            model: "some-local-model".to_string(),
+            context_window: Some(262_144),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("agent spawn");
+    let report = kernel
+        .context_report(agent_id)
+        .expect("context_report must succeed");
+
+    assert_eq!(
+        report.context_window, 262_144,
+        "manifest model.context_window override must be used as the denominator"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5137: `suspend_agent` / `resume_agent` previously discarded the
+/// `set_state` `Result` with `let _ =`, so the API could report success
+/// while the in-memory `AgentState` never changed — yet
+/// `persist_agent_enabled` still flipped the on-disk `enabled` flag,
+/// leaving state and disk in disagreement. With the fix the call
+/// propagates; on the happy path it must still succeed AND the in-memory
+/// state must actually be the new value (proving the write was observed,
+/// not silently dropped).
+#[test]
+fn suspend_resume_actually_transition_in_memory_state() {
+    use librefang_types::agent::AgentState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-resume-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "suspend-resume-agent".to_string(),
+                description: "exercises suspend/resume state propagation".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed on happy path");
+    let after_suspend = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after suspend");
+    assert_eq!(
+        after_suspend.state,
+        AgentState::Suspended,
+        "in-memory state must actually be Suspended — the set_state Result \
+         is now propagated, not swallowed (#5137)"
+    );
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed on happy path");
+    let after_resume = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after resume");
+    assert_eq!(
+        after_resume.state,
+        AgentState::Running,
+        "in-memory state must actually be Running after resume (#5137)"
+    );
+
+    kernel.shutdown();
+}
+
+/// #5137: `sync_default_model_agents` previously returned `()` and
+/// discarded the `update_model_and_provider` / `save_agent` Results, so a
+/// provider switch could half-apply with no signal. It now returns a
+/// per-agent partial-failure list. On the happy path the list must be
+/// empty AND the eligible agent must have been migrated to the new
+/// provider/model — proving the writes are observed, not swallowed, and
+/// that the new return contract is wired through the trait.
+#[test]
+fn sync_default_model_agents_reports_no_failures_and_migrates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-sync-default-5137");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Agent spawned with provider="default" — eligible for default-model sync.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "default-tracking-agent".to_string(),
+                description: "tracks the kernel default model".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    provider: "default".to_string(),
+                    model: "default".to_string(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    system_prompt: String::new(),
+                    api_key_env: None,
+                    base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    extra_params: std::collections::HashMap::new(),
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let new_dm = DefaultModelConfig {
+        provider: "openrouter".to_string(),
+        model: "anthropic/claude-3.5-sonnet".to_string(),
+        api_key_env: "OPENROUTER_API_KEY".to_string(),
+        base_url: None,
+        ..Default::default()
+    };
+
+    let failures = kernel.sync_default_model_agents("anthropic", &new_dm);
+    assert!(
+        failures.is_empty(),
+        "happy-path sync must report zero per-agent failures, got: {failures:?} (#5137)"
+    );
+
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry after sync");
+    assert_eq!(
+        entry.manifest.model.provider, "openrouter",
+        "eligible agent must be migrated to the new provider — the \
+         update_model_and_provider Result is no longer swallowed (#5137)"
+    );
+    assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
 }

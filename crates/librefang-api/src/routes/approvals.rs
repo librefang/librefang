@@ -249,6 +249,7 @@ pub async fn get_approval(
 /// when an agent invokes a tool that requires approval. This endpoint exists
 /// for external integrations that need to inject approval gates.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateApprovalRequest {
     pub agent_id: String,
     pub tool_name: String,
@@ -316,6 +317,7 @@ pub async fn create_approval(
 ///
 /// When TOTP is enabled, the request body must include a `totp_code` field.
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ApproveRequestBody {
     #[serde(default)]
     totp_code: Option<String>,
@@ -596,6 +598,7 @@ pub async fn reject_request(
 
 /// POST /api/approvals/{id}/modify — Return a pending request with feedback for modification.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ModifyRequestBody {
     #[serde(default)]
     feedback: String,
@@ -652,6 +655,7 @@ pub async fn modify_request(
 
 /// POST /api/approvals/batch — Batch resolve multiple pending requests.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BatchResolveRequest {
     ids: Vec<String>,
     decision: String,
@@ -814,6 +818,7 @@ pub async fn list_approvals_for_session(
 /// resolve_all=True)`.  TOTP pre-check is enforced — if any pending request
 /// requires TOTP, the entire batch is rejected before any mutation.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ApproveAllForSessionRequest {
     /// Optional count of approvals the caller expects to be pending.
     /// If provided, the server verifies the actual pending count matches
@@ -1083,6 +1088,7 @@ pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// If TOTP is already confirmed, the request body must include a valid
 /// `current_code` (TOTP or recovery code) to authorize the reset.
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TotpSetupBody {
     /// Required when resetting an already-confirmed TOTP enrollment.
     #[serde(default)]
@@ -1261,6 +1267,7 @@ pub async fn totp_setup(
 
 /// POST /api/approvals/totp/confirm — Confirm TOTP enrollment by verifying a code.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TotpConfirmBody {
     code: String,
 }
@@ -1380,6 +1387,7 @@ pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoRespons
 ///
 /// Requires a valid TOTP or recovery code to authorize revocation.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TotpRevokeBody {
     code: String,
 }

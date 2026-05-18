@@ -261,7 +261,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -270,11 +270,19 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            Ok((agent_str, messages_blob, tokens, label, model_override))
+            let messages_generation: i64 = row.get(5).unwrap_or(0);
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                model_override,
+                messages_generation,
+            ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, model_override)) => {
+            Ok((agent_str, messages_blob, tokens, label, model_override, messages_generation)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -287,7 +295,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label,
                     model_override,
-                    messages_generation: 0,
+                    messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                 }))
             }
@@ -303,7 +311,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -313,6 +321,7 @@ impl SessionStore {
             let label: Option<String> = row.get(3).unwrap_or(None);
             let created_at: String = row.get(4)?;
             let model_override: Option<String> = row.get(5).unwrap_or(None);
+            let messages_generation: i64 = row.get(6).unwrap_or(0);
             Ok((
                 agent_str,
                 messages_blob,
@@ -320,11 +329,20 @@ impl SessionStore {
                 label,
                 created_at,
                 model_override,
+                messages_generation,
             ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, created_at, model_override)) => {
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                created_at,
+                model_override,
+                messages_generation,
+            )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -338,7 +356,7 @@ impl SessionStore {
                         context_window_tokens: tokens as u64,
                         label,
                         model_override,
-                        messages_generation: 0,
+                        messages_generation: messages_generation.max(0) as u64,
                         last_repaired_generation: None,
                     },
                     created_at,
@@ -349,13 +367,34 @@ impl SessionStore {
         }
     }
 
-    /// Maximum number of messages persisted per session.  Older messages beyond
-    /// this limit are trimmed before the blob is written to SQLite.  The
-    /// in-memory limit (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`, also
-    /// overridable per-agent and globally) is much lower, so this cap only
-    /// affects sessions that were built up over many turns that were
-    /// individually trimmed in memory but accumulated on disk.
-    const MAX_PERSISTED_MESSAGES: usize = 200;
+    /// Hard ceiling on messages persisted per session, applied as a final
+    /// defense-in-depth guard before the blob is written to SQLite.
+    ///
+    /// This cap exists to bound worst-case DB blob size and cold-reload RAM
+    /// (introduced in #2929 to keep the 256 MB fly.io deployment from OOMing
+    /// when a long-running session is loaded back in). It is intentionally
+    /// set well above the runtime trim cap so it is normally inert.
+    ///
+    /// The runtime trim cap (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`,
+    /// configurable per-agent via `AgentManifest.max_history_messages` and
+    /// globally via `KernelConfig.max_history_messages`) is what actually
+    /// shapes persisted history under normal operation. Pre-#5121 this cap
+    /// was 200, low enough that a deliberately configured
+    /// `max_history_messages > 200` would silently lose context across
+    /// daemon restarts — `clamp_max_history` only enforces a floor, not a
+    /// ceiling. 2000 leaves room for unusually long cron-driven sessions
+    /// while still bounding the worst case at ~2 MB per blob assuming a
+    /// ~1 KB average message.
+    ///
+    /// When truncation does fire, `save_session` emits a `warn!` log with
+    /// `agent_id`, `session_id`, `requested_count`, and `cap` so operators
+    /// are not blind to silent context loss.
+    ///
+    /// The value is sourced from
+    /// [`librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES`] (#5138)
+    /// so the substrate enforcement and the config-load warning for
+    /// `cron_session_max_messages` cannot drift apart.
+    const MAX_PERSISTED_MESSAGES: usize = librefang_types::config::MAX_PERSISTED_SESSION_MESSAGES;
 
     /// Save a session to the database and update the FTS5 index.
     ///
@@ -367,12 +406,23 @@ impl SessionStore {
         // Trim the tail of the message history before serialising so the
         // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
         // *most recent* messages (slice from the end) so context is preserved.
-        let messages_to_persist: &[Message] =
-            if session.messages.len() > Self::MAX_PERSISTED_MESSAGES {
-                &session.messages[session.messages.len() - Self::MAX_PERSISTED_MESSAGES..]
-            } else {
-                &session.messages
-            };
+        // The cap is set well above the runtime in-memory clamp, so in
+        // practice this branch only fires for misconfigured agents or
+        // long-running cron sessions; when it does fire, emit a `warn!`
+        // so the silent context loss surfaces in logs (#5121).
+        let requested_count = session.messages.len();
+        let messages_to_persist: &[Message] = if requested_count > Self::MAX_PERSISTED_MESSAGES {
+            warn!(
+                agent_id = %session.agent_id.0,
+                session_id = %session.id.0,
+                requested_count,
+                cap = Self::MAX_PERSISTED_MESSAGES,
+                "session history exceeds persistence cap; truncating to most-recent window"
+            );
+            &session.messages[requested_count - Self::MAX_PERSISTED_MESSAGES..]
+        } else {
+            &session.messages
+        };
         let messages_blob =
             rmp_serde::to_vec_named(messages_to_persist).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
@@ -399,10 +449,15 @@ impl SessionStore {
         // derived by decoding the blob.
         let message_count = messages_to_persist.len() as i64;
 
+        // Persist `messages_generation` (#5138) so the repair-skip
+        // optimisation in the runtime survives a reload. Without the
+        // column, every cold load reset the counter to 0 and forced a
+        // full repair pass on the first post-load save even when the
+        // stored blob was already repaired.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, updated_at = ?7",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, updated_at = ?8",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -410,6 +465,7 @@ impl SessionStore {
                 session.context_window_tokens as i64,
                 session.label.as_deref(),
                 message_count,
+                session.messages_generation as i64,
                 now,
             ],
         )
@@ -1034,7 +1090,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -1045,11 +1101,19 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let lbl: Option<String> = row.get(3).unwrap_or(None);
             let model_override: Option<String> = row.get(4).unwrap_or(None);
-            Ok((id_str, messages_blob, tokens, lbl, model_override))
+            let messages_generation: i64 = row.get(5).unwrap_or(0);
+            Ok((
+                id_str,
+                messages_blob,
+                tokens,
+                lbl,
+                model_override,
+                messages_generation,
+            ))
         });
 
         match result {
-            Ok((id_str, messages_blob, tokens, lbl, model_override)) => {
+            Ok((id_str, messages_blob, tokens, lbl, model_override, messages_generation)) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
                     .map_err(LibreFangError::memory)?;
@@ -1062,7 +1126,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label: lbl,
                     model_override,
-                    messages_generation: 0,
+                    messages_generation: messages_generation.max(0) as u64,
                     last_repaired_generation: None,
                 }))
             }
@@ -1785,6 +1849,39 @@ mod tests {
         let store = setup();
         let result = store.get_session(SessionId::new()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn messages_generation_round_trips_across_reload_5138() {
+        // #5138: the generation counter must survive a save/load cycle
+        // so the runtime's repair-skip optimisation does not pay a full
+        // repair pass on every cold load.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.push_message(Message::user("a"));
+        session.push_message(Message::assistant("b"));
+        session.mark_messages_mutated();
+        let gen_before = session.messages_generation;
+        assert!(gen_before > 0, "counter should have advanced");
+        store.save_session(&session).unwrap();
+
+        // get_session
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.messages_generation, gen_before,
+            "messages_generation must persist (get_session)"
+        );
+
+        // get_session_with_created_at
+        let (loaded2, _created) = store
+            .get_session_with_created_at(session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded2.messages_generation, gen_before,
+            "messages_generation must persist (get_session_with_created_at)"
+        );
     }
 
     #[test]
@@ -3062,5 +3159,119 @@ mod tests {
 
         // Agents with only stale activity are absent.
         assert!(!bulk.contains_key(&AgentId::new().0.to_string()));
+    }
+
+    /// Regression for #5121: persisting a history that exceeds the historical
+    /// 200-message cap but stays below the new defense-in-depth ceiling must
+    /// round-trip without silent truncation. Pre-fix the SQLite blob only kept
+    /// the most-recent 200, so an agent configured with `max_history_messages`
+    /// above 200 lost messages 200..N across daemon restarts with no log.
+    #[test]
+    fn test_save_session_preserves_history_above_legacy_cap() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+
+        // 300 messages > old MAX_PERSISTED_MESSAGES (200) and < new cap (2000).
+        // Use unique payloads so a tail-only persist would be detectable on
+        // reload by checking the *first* surviving message id.
+        const N: usize = 300;
+        for i in 0..N {
+            // Alternate roles so the blob round-trips as a well-formed chat
+            // history (Role::User then Role::Assistant); the test only cares
+            // about count + first-element identity, not turn semantics.
+            let body = format!("msg-{i:04}");
+            if i % 2 == 0 {
+                session.messages.push(Message::user(body));
+            } else {
+                session.messages.push(Message::assistant(body));
+            }
+        }
+        assert_eq!(session.messages.len(), N);
+
+        store.save_session(&session).unwrap();
+
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            N,
+            "history below the persistence cap must round-trip in full \
+             (regression for the old 200-message silent truncation, #5121)"
+        );
+
+        // Confirm the *first* message survived — a tail-only persist would
+        // start at msg-0100 instead of msg-0000 under the old 200 cap.
+        let first_text = loaded.messages[0].content.text_content();
+        assert!(
+            first_text.contains("msg-0000"),
+            "oldest message must survive when N <= cap; got first text = {first_text:?}"
+        );
+
+        // Confirm the denormalised message_count column matches the blob.
+        let conn = store.pool.get().unwrap();
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            row_count as usize, N,
+            "denormalised message_count must match the persisted blob length"
+        );
+    }
+
+    /// Companion to the above: when the history genuinely exceeds the
+    /// defense-in-depth ceiling, the cap still fires and we keep the
+    /// most-recent window. The accompanying `warn!` log carries the
+    /// agent / session / requested_count / cap fields documented in #5121;
+    /// asserting structured-log emission requires a `tracing` subscriber
+    /// fixture and is out of scope here — the behavioural contract
+    /// (truncation point + window position) is what this test pins.
+    #[test]
+    fn test_save_session_truncates_above_defense_in_depth_cap() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+
+        let cap = SessionStore::MAX_PERSISTED_MESSAGES;
+        let n = cap + 500;
+        for i in 0..n {
+            let body = format!("msg-{i:05}");
+            if i % 2 == 0 {
+                session.messages.push(Message::user(body));
+            } else {
+                session.messages.push(Message::assistant(body));
+            }
+        }
+
+        store.save_session(&session).unwrap();
+
+        let loaded = store.get_session(session.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            cap,
+            "history above the cap must be truncated to exactly MAX_PERSISTED_MESSAGES"
+        );
+
+        // The *most-recent* window survived: first persisted message is
+        // index (n - cap) in the original sequence.
+        let expected_first = format!("msg-{:05}", n - cap);
+        let first_text = loaded.messages[0].content.text_content();
+        assert!(
+            first_text.contains(&expected_first),
+            "truncation must keep the most-recent window; expected first to contain \
+             {expected_first:?}, got {first_text:?}"
+        );
+
+        // And the very last message is preserved.
+        let expected_last = format!("msg-{:05}", n - 1);
+        let last_text = loaded.messages[cap - 1].content.text_content();
+        assert!(
+            last_text.contains(&expected_last),
+            "most-recent message must always survive; expected last to contain \
+             {expected_last:?}, got {last_text:?}"
+        );
     }
 }

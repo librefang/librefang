@@ -15,8 +15,17 @@ import {
   useResumeAgent,
   useCreateAgentSession,
   useResolveApproval,
+  useSendAgentMessage,
 } from "./agents";
-import { agentKeys, handKeys, sessionKeys, overviewKeys, approvalKeys } from "../queries/keys";
+import {
+  agentKeys,
+  approvalKeys,
+  budgetKeys,
+  handKeys,
+  overviewKeys,
+  sessionKeys,
+  usageKeys,
+} from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -33,6 +42,7 @@ vi.mock("../http/client", () => ({
   deleteAgent: vi.fn().mockResolvedValue({}),
   createAgentSession: vi.fn().mockResolvedValue({}),
   resolveApproval: vi.fn().mockResolvedValue({}),
+  sendAgentMessage: vi.fn().mockResolvedValue({}),
 }));
 
 describe("useSwitchAgentSession", () => {
@@ -307,5 +317,52 @@ describe("useResolveApproval", () => {
     await result.current.mutateAsync({ id: "approval-1", approved: true });
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: approvalKeys.all });
+  });
+});
+
+describe("useSendAgentMessage", () => {
+  it("invalidates session snapshot, sessions list, stats, budget, and usage", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useSendAgentMessage(), { wrapper });
+
+    await result.current.mutateAsync({
+      agentId: "agent-1",
+      message: "hello",
+      options: { session_id: "session-1" },
+    });
+
+    // Per-session snapshot — explicit sessionId in the 4-element key.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.session("agent-1", "session-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.sessions("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.stats("agent-1"),
+    });
+    // #5122 — the topbar Budget chip and Analytics page must refresh after a
+    // completed turn moves spend. Asserting both factory `all` prefixes pins
+    // the JSDoc promise against a future "we only invalidate session keys"
+    // regression.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: budgetKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: usageKeys.all });
+  });
+
+  it("falls back to the null-sessionId snapshot slot when no session_id is provided", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useSendAgentMessage(), { wrapper });
+
+    await result.current.mutateAsync({ agentId: "agent-1", message: "hi" });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.session("agent-1", null),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: budgetKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: usageKeys.all });
   });
 });

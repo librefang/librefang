@@ -1,0 +1,7 @@
+{
+  "method": "stream_start",
+  "params": {
+    "channel_id": "c1",
+    "stream_id": "s1"
+  }
+}

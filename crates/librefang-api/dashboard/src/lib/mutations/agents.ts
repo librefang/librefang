@@ -29,7 +29,15 @@ import {
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
-import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
+import {
+  agentKeys,
+  approvalKeys,
+  budgetKeys,
+  handKeys,
+  overviewKeys,
+  sessionKeys,
+  usageKeys,
+} from "../queries/keys";
 
 /**
  * Unified payload type for the two agent-config PATCH endpoints.
@@ -465,6 +473,11 @@ export function useSendAgentMessage() {
       });
       qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.stats(variables.agentId) });
+      // Topbar Budget chip and Analytics page derive from the budget / usage
+      // domains; a completed turn moves spend, so the JSDoc promise of
+      // refreshing them only holds if we actually invalidate here.
+      qc.invalidateQueries({ queryKey: budgetKeys.all });
+      qc.invalidateQueries({ queryKey: usageKeys.all });
     },
   });
 }

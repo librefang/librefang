@@ -1,8 +1,16 @@
 # Sidecar Channel Adapter — Python Example
 
-This is an example sidecar channel adapter for LibreFang. It demonstrates how to
-write a channel adapter in Python (or any language) that communicates with
+This directory now holds **only** the generic template adapter
+(`adapter.py`) — a minimal, deletable starting point for writing your
+own channel adapter in Python (or any language) that communicates with
 LibreFang via JSON-RPC over stdin/stdout.
+
+> **First-party adapters moved.** The production ntfy / Telegram /
+> webhook adapters used to live here as `*_adapter.py`. They now ship
+> inside the SDK package (`librefang-sdk`) under
+> `librefang.sidecar.adapters` — `pip install librefang-sdk` once and
+> point `[[sidecar_channels]].args` at the module. See "Running a
+> first-party adapter" below.
 
 ## How It Works
 
@@ -68,7 +76,35 @@ Fields `text`, `channel_id`, and `platform` are optional.
 
 The adapter should clean up and exit.
 
-## Configuration
+## Running a first-party adapter
+
+`ntfy`, `telegram`, and `webhook` ship inside the SDK package. Install
+the SDK once and reference the module from your config:
+
+```bash
+pip install librefang-sdk   # or: pip install -e sdk/python  (from a checkout)
+```
+
+```toml
+# ~/.librefang/config.toml — ntfy example
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_TOPIC = "my-topic"
+# NTFY_SERVER_URL = "https://ntfy.sh"   # default
+# NTFY_TOKEN = "tk_..."                 # omit for public topics
+```
+
+The same pattern works for the other two:
+`-m librefang.sidecar.adapters.telegram` (needs `TELEGRAM_BOT_TOKEN`,
+also `pip install requests`) and `-m librefang.sidecar.adapters.webhook`
+(stdlib-only HTTP receiver). See each module's docstring for the full
+env-var list.
+
+## Configuration for a custom adapter
 
 Add to your `~/.librefang/config.toml`:
 

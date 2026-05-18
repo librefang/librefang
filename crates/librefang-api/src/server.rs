@@ -665,6 +665,7 @@ pub(crate) async fn dashboard_logout(
 
 /// Request body for POST /api/auth/change-password.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ChangePasswordRequest {
     pub current_password: String,
     /// New password — optional, omit to keep the current password.

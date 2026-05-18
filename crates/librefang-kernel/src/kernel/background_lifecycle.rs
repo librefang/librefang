@@ -1224,11 +1224,16 @@ impl LibreFangKernel {
                         ..Default::default()
                     };
                     match k.send_message_with_sender_context(aid, &msg, &sender).await {
-                        Ok(_) => {}
+                        Ok(_) => crate::background::TickOutcome::Ok,
                         Err(e) => {
                             // send_message already records the panic in supervisor,
                             // just log the background context here
                             warn!(agent_id = %aid, error = %e, "Background tick failed");
+                            // Classify so the background loop can stop
+                            // re-firing an agent stuck on a provider
+                            // rate-limit instead of burning quota forever
+                            // (issue #5168).
+                            crate::background::classify_tick_error(&e.to_string())
                         }
                     }
                 })

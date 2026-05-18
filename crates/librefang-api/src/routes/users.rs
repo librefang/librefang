@@ -109,6 +109,7 @@ impl From<&UserConfig> for UserView {
 /// pre-hashed (Argon2 phc string) — the dashboard hashes locally before
 /// sending. `None` clears any existing hash on update; absent on create.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UserUpsert {
     pub name: String,
     #[serde(default = "default_role")]
@@ -126,6 +127,7 @@ fn default_role() -> String {
 /// Bulk-import payload. `rows` are pre-parsed by the frontend (drag-drop
 /// CSV, dialect-aware). `dry_run = true` returns counts without persisting.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkImportRequest {
     #[serde(default)]
     pub rows: Vec<UserUpsert>,

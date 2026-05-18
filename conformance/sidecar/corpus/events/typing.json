@@ -1,0 +1,8 @@
+{
+  "method": "typing",
+  "params": {
+    "user_id": "u",
+    "user_name": "n",
+    "is_typing": true
+  }
+}

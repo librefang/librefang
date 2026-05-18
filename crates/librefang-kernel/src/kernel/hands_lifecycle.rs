@@ -193,7 +193,17 @@ impl LibreFangKernel {
                     .cron_scheduler
                     .reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
-                    let _ = self.workflows.cron_scheduler.persist();
+                    // Without this, the migrated cron→agent mappings live
+                    // only in memory and are lost on the next restart, so a
+                    // reassigned hand agent silently stops firing its cron
+                    // jobs. Mirror the warn pattern used at the
+                    // restoration-persist site below.
+                    if let Err(e) = self.workflows.cron_scheduler.persist() {
+                        warn!(
+                            error = %e,
+                            "Failed to persist cron jobs after hand-agent reassignment"
+                        );
+                    }
                 }
             }
         }
@@ -387,8 +397,30 @@ impl LibreFangKernel {
             if !hand_toml_path.exists() {
                 if let Err(e) = std::fs::create_dir_all(&hand_dir) {
                     warn!(path = %hand_dir.display(), "Failed to create dir: {e}");
-                } else if let Ok(toml_str) = toml::to_string_pretty(&def) {
-                    let _ = std::fs::write(&hand_toml_path, &toml_str);
+                } else {
+                    match toml::to_string_pretty(&def) {
+                        Ok(toml_str) => {
+                            // The workspace hand.toml is an informational
+                            // mirror of the canonical in-memory registry
+                            // (set via `hand_registry.set_agents` below). A
+                            // failed write previously vanished silently, so
+                            // the on-disk copy was missing with no trace.
+                            if let Err(e) = std::fs::write(&hand_toml_path, &toml_str) {
+                                warn!(
+                                    path = %hand_toml_path.display(),
+                                    error = %e,
+                                    "Failed to write hand.toml to workspace"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                hand = %hand_id,
+                                error = %e,
+                                "Failed to serialize hand definition to TOML"
+                            );
+                        }
+                    }
                 }
             }
             last_manifest_path = Some(hand_toml_path.clone());

@@ -13,7 +13,7 @@ Adapters are gated behind cargo features (`channel-xxx`).
 `default = []`. Every workspace consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets `default-features = false` and forwards an explicit subset.
 
 - `all-channels` — every adapter (matrix, IMAP, MQTT, Bluesky, Nostr, …). Used by release CI.
-- Per-adapter: `channel-telegram`, `channel-discord`, `channel-slack`, `channel-webhook`, `channel-ntfy`, etc.
+- Per-adapter: `channel-telegram`, `channel-discord`, `channel-slack`, `channel-webhook`, etc. (ntfy migrated to a sidecar — see `librefang.sidecar.adapters.ntfy` in the SDK, `sdk/python/librefang/sidecar/adapters/ntfy.py`.)
 
 See `Cargo.toml` for the full feature matrix.
 
@@ -54,12 +54,24 @@ Inbound parsing has 795 tests. Outbound `send()` has historically had ~zero (#38
 
 ## Adding a new channel
 
-1. New file `src/<channel>/mod.rs` implementing `ChannelAdapter`.
-2. New cargo feature `channel-<name>` in `Cargo.toml`.
-3. Default-feature decision: every channel ships off-by-default. The `all-channels` feature aggregates them.
-4. Wire HTTP webhook (if needed) in `librefang-api/src/routes/channels.rs`.
-5. Add a `tests/<channel>_wiremock.rs` covering at least the send() happy path + one error response.
-6. Document any required env vars in the adapter's doc comment.
+Sidecar-first. A new channel is an out-of-process sidecar adapter, not
+a new module here. See `CONTRIBUTING.md` ("Add a sidecar channel
+adapter"), `docs/architecture/sidecar-channels.md`, and the
+`librefang.sidecar` SDK (`sdk/python/`).
+
+A new in-process `impl ChannelAdapter` is **rejected** by
+`scripts/hooks/pre-commit` and `cargo xtask channel-policy` (CI) unless
+its basename is in `src/channels-allowlist.txt` — that list only
+shrinks (a sidecar migration deletes the module and its line). Adding
+a name back is an explicit maintainer decision in a separate reviewed
+commit, not routine.
+
+The grandfathered in-process adapters still obey the existing rules:
+new `send()` work owes a `tests/<channel>_wiremock.rs` (happy path +
+one error); HTTP webhooks wire through
+`librefang-api/src/routes/channels.rs`; channels ship off-by-default
+behind `channel-<name>`; required env vars go in the adapter's doc
+comment.
 
 ## Taboos
 

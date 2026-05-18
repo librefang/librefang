@@ -114,3 +114,64 @@ if git diff --cached --name-only | grep -qx "openapi.json"; then
         fi
     fi
 fi
+
+# 5. Sidecar-first policy: block in-process channel adapters not on
+# the allowlist. Checks ADDED *and MODIFIED* staged files under
+# crates/librefang-channels/src/ — so a stub file + a follow-up commit
+# that adds the impl can't slip past the added-only window. New
+# channels must be sidecar adapters. This hook is fast feedback only;
+# `cargo xtask channel-policy` runs the same check tree-wide in CI on
+# every PR and is the authoritative gate (an unset core.hooksPath or
+# --no-verify can't bypass that). Known, accepted limitation: a
+# macro-generated impl, or a new adapter impl added inside an
+# already-allowlisted file, is not detected — this is a policy
+# ratchet, not a security boundary.
+ALLOWLIST="crates/librefang-channels/src/channels-allowlist.txt"
+if [ -f "$ALLOWLIST" ]; then
+    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- \
+        'crates/librefang-channels/src/*.rs' \
+        'crates/librefang-channels/src/*/*.rs' 2>/dev/null || true)
+    VIOLATIONS=""
+    for f in $STAGED_FILES; do
+        case "$f" in
+            crates/librefang-channels/src/*/*.rs)
+                base=$(basename "$(dirname "$f")") ;;
+            crates/librefang-channels/src/*.rs)
+                base=$(basename "$f" .rs) ;;
+            *) continue ;;
+        esac
+        if git show ":$f" 2>/dev/null | grep -q 'ChannelAdapter for'; then
+            if ! grep -qx "$base" "$ALLOWLIST"; then
+                VIOLATIONS="$VIOLATIONS $f"
+            fi
+        fi
+    done
+    if [ -n "$VIOLATIONS" ]; then
+        echo "Error: in-process channel adapter(s) not allowed:" >&2
+        for v in $VIOLATIONS; do echo "  - $v" >&2; done
+        echo "" >&2
+        echo "LibreFang is sidecar-first. Ship a new channel as an" >&2
+        echo "out-of-process sidecar adapter (Python or any language):" >&2
+        echo "  examples/sidecar-channel-python/adapter.py (template) + the librefang.sidecar SDK" >&2
+        echo "Grandfathering an in-process adapter needs explicit" >&2
+        echo "maintainer approval: add the basename to $ALLOWLIST in a" >&2
+        echo "separate, reviewed commit." >&2
+        exit 1
+    fi
+
+    # Defense-in-depth (soft warn only): a new in-process registration
+    # in channel_bridge.rs also implies a new adapter, but that file
+    # is edited often for *existing* channels and feature names differ
+    # from module basenames, so a hard match would false-positive.
+    # The file check above is the authoritative gate.
+    if git diff --cached --name-only \
+        | grep -qx "crates/librefang-api/src/channel_bridge.rs"; then
+        if git diff --cached -U0 -- \
+            crates/librefang-api/src/channel_bridge.rs 2>/dev/null \
+            | grep -qE '^\+.*Adapter::new'; then
+            echo "note: channel_bridge.rs adds an *Adapter::new call." >&2
+            echo "  If this wires a NEW in-process channel, it must" >&2
+            echo "  instead be a sidecar adapter (see the policy above)." >&2
+        fi
+    fi
+fi
