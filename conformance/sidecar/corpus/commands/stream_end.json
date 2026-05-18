@@ -1,0 +1,6 @@
+{
+  "method": "stream_end",
+  "params": {
+    "stream_id": "s1"
+  }
+}

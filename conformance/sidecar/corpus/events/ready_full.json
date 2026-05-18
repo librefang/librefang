@@ -1,0 +1,11 @@
+{
+  "method": "ready",
+  "params": {
+    "capabilities": ["typing", "reaction", "interactive", "thread", "streaming"],
+    "account_id": "bot-1",
+    "suppress_error_responses": false,
+    "notification_recipients": [],
+    "header_rules": [],
+    "protocol_version": 1
+  }
+}
