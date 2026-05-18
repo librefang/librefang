@@ -204,6 +204,39 @@ impl LibreFangKernel {
         .await
     }
 
+    /// Like [`Self::send_message_as`] but pins the callee to a deterministic
+    /// session derived from the caller-supplied `conversation_key`. The key is
+    /// namespaced to `(target_agent, "agent_send:<key>")` via
+    /// `SessionId::for_channel`, so the same key always maps to the same
+    /// session (history preserved) and a distinct key always starts an
+    /// independent thread. The derived `SessionId` is passed as
+    /// `session_id_override`, which takes precedence over the target manifest
+    /// `session_mode`.
+    pub async fn send_message_as_with_key(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        parent_agent_id: AgentId,
+        conversation_key: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let session_id =
+            SessionId::for_channel(agent_id, &format!("agent_send:{conversation_key}"));
+        let upstream = self.any_session_interrupt_for_agent(parent_agent_id);
+        self.send_message_full_with_upstream(
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            None,
+            None,
+            Some(session_id),
+            upstream,
+            false,
+        )
+        .await
+    }
+
     /// Send a message with a per-call deep-thinking override.
     ///
     /// `thinking_override`:

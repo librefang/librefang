@@ -19,6 +19,7 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
+import { deriveDropdownActiveSessionId } from "../lib/sessionSelector";
 import {
   chatSessionCacheKey,
   deleteCachedChatMessages,
@@ -1047,6 +1048,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                     }
                   : m
               ));
+              // When the connection was not pinned to a specific session
+              // (?sessionId= absent), the server includes the resolved
+              // session id in the response so the URL can be updated.
+              // Pinning makes the chat bookmarkable and ensures a daemon
+              // restart does not silently switch context.
+              if (!sessionId && typeof data.session_id === "string" && data.session_id) {
+                onNewSession?.(data.session_id);
+              }
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             }
@@ -2829,17 +2838,30 @@ export function ChatPage() {
     // the dropdown still highlights something rather than going blank.
     return (newest ?? sessions[0]).session_id;
   }, [sessionsQuery.data]);
-  const activeSessionId = urlSessionId ?? fallbackSessionId;
+  // `activeSessionId` is the session that the connection is *known* to be
+  // bound to — set only when the URL carries an explicit ?sessionId=.  When
+  // the connection rides the canonical pointer (unpinned), we do not know
+  // which session the next message will land in until the server confirms it,
+  // so showing any session as "active" in the dropdown would be misleading.
+  // After the first message in an unpinned chat, the server emits session_id
+  // in the response and handleBackendNewSession pins the URL, at which point
+  // this becomes non-null and the highlight is correct.
+  const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
+  // Best-effort resolved session id, used only for features that need *some*
+  // session reference (SSE attach viewer) but do not imply a UI "active"
+  // guarantee.  Falls back to the most-recently-created session when the URL
+  // is not yet pinned.
+  const resolvedSessionId = urlSessionId ?? fallbackSessionId;
 
   // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
   // server-side route ships in a separate PR; until that lands the hook
   // silently no-ops on the 404 it returns. We watch a session that another
   // client (CLI, desktop, second browser tab) may already be driving over
   // its own /message/stream connection.
-  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!activeSessionId;
+  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!resolvedSessionId;
   const sessionStream = useSessionStream(
     attachEnabled ? selectedAgentId : null,
-    attachEnabled ? activeSessionId ?? null : null,
+    attachEnabled ? resolvedSessionId ?? null : null,
   );
 
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's

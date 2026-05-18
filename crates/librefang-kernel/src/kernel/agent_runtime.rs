@@ -514,7 +514,11 @@ impl LibreFangKernel {
             })
             .or_else(|| {
                 let v = session.context_window_tokens as usize;
-                if v > 0 { Some(v) } else { None }
+                if v > 0 {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
 

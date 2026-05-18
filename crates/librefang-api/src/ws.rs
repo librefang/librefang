@@ -1354,6 +1354,18 @@ async fn handle_text_message(
                             if let Some(ref t) = thinking_trace {
                                 resp_json["thinking"] = serde_json::json!(t);
                             }
+                            // When the client connected without a ?session_id=
+                            // param it rides the canonical pointer, which may
+                            // flip across restarts.  Emit the session the kernel
+                            // actually used so the frontend can pin ?sessionId=
+                            // in the URL — making subsequent navigations and
+                            // reloads land on the same conversation.
+                            if explicit_session.is_none() {
+                                if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                                    resp_json["session_id"] =
+                                        serde_json::json!(entry.session_id.to_string());
+                                }
+                            }
                             send_json_or_close(sender, &resp_json).await?;
                         }
                         Ok(Err(e)) => {
