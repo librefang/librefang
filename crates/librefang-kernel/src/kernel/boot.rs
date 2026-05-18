@@ -27,7 +27,8 @@ impl LibreFangKernel {
 
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
-        let config = load_config(config_path);
+        let config = load_config(config_path)
+            .map_err(|e| crate::error::KernelError::LibreFang(LibreFangError::Config(e)))?;
         Self::boot_with_config(config)
     }
 
@@ -814,13 +815,23 @@ impl LibreFangKernel {
         let config = if migrated {
             let cfg_path = config.home_dir.join("config.toml");
             if cfg_path.is_file() {
-                let reloaded = load_config(Some(&cfg_path));
-                // Defensive: only accept the reloaded view if it didn't drop
-                // any `[[mcp_servers]]` entries the caller already had.
-                if reloaded.mcp_servers.len() >= config.mcp_servers.len() {
-                    reloaded
-                } else {
-                    config
+                match load_config(Some(&cfg_path)) {
+                    Ok(reloaded) => {
+                        // Defensive: only accept the reloaded view if it didn't drop
+                        // any `[[mcp_servers]]` entries the caller already had.
+                        if reloaded.mcp_servers.len() >= config.mcp_servers.len() {
+                            reloaded
+                        } else {
+                            config
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to re-read migrated config; using in-memory copy"
+                        );
+                        config
+                    }
                 }
             } else {
                 config
