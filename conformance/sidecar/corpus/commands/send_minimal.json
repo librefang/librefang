@@ -1,0 +1,12 @@
+{
+  "method": "send",
+  "params": {
+    "channel_id": "c1",
+    "text": "hi",
+    "user": {
+      "platform_id": "c1",
+      "display_name": "Bob",
+      "librefang_user": null
+    }
+  }
+}

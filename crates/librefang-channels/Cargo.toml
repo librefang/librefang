@@ -169,6 +169,7 @@ criterion = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
 tower = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "dispatch"
