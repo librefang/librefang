@@ -381,7 +381,7 @@ pub fn format_context_report(report: &ContextReport) -> String {
         "**Context Usage:** {bar} {:.1}% ({} / {} tokens)\n\n\
          **Breakdown:**\n\
          - System prompt: ~{} tokens\n\
-         - Messages ({}): ~{} tokens\n\
+         - Messages ({}, estimated, retained messages only): ~{} tokens\n\
          - Tool definitions: ~{} tokens\n\n\
          **Pressure:** {:?}\n\
          **Recommendation:** {}",
