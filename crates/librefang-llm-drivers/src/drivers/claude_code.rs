@@ -442,7 +442,7 @@ impl ClaudeCodeDriver {
     /// with no actionable detail.
     ///
     /// Resolution order:
-    ///   1. `LIBREFANG_HOME` — the documented kernel-boot override, set by
+    ///   1. `CLAUDE_CODE_HOME` — the documented kernel-boot override, set by
     ///      the wrapper / Lazycat init (see `CLAUDE.md` "Environment").
     ///   2. The platform's home variable: `$HOME` on Unix,
     ///      `%USERPROFILE%` on Windows.
@@ -462,7 +462,7 @@ impl ClaudeCodeDriver {
         #[cfg(windows)]
         let env_var = "USERPROFILE";
 
-        let candidate = std::env::var_os("LIBREFANG_HOME")
+        let candidate = std::env::var_os("CLAUDE_CODE_HOME")
             .or_else(|| std::env::var_os(env_var))
             .filter(|p| !p.is_empty())
             .filter(|p| std::path::Path::new(p).is_dir());
@@ -1967,27 +1967,27 @@ mod tests {
 
     /// Pin: when the daemon inherited `HOME=/nonexistent` (Lazycat-style
     /// containers default uid-without-passwd to that path), `ensure_home_env`
-    /// MUST override it with `LIBREFANG_HOME` or the spawned `claude.exe`
+    /// MUST override it with `CLAUDE_CODE_HOME` or the spawned `claude.exe`
     /// can't find its credentials and the next `stdin.write_all` hits
     /// `Broken pipe`.
     ///
     /// `#[serial]` because every test in this module that mutates `HOME` /
-    /// `LIBREFANG_HOME` must run sequentially: `std::env::{set,remove}_var`
+    /// `CLAUDE_CODE_HOME` must run sequentially: `std::env::{set,remove}_var`
     /// is UB while other threads exist, and `cargo test` /  `cargo nextest`
     /// run tests concurrently by default.
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
-    fn ensure_home_env_overrides_nonexistent_when_libfang_home_set() {
+    fn ensure_home_env_overrides_nonexistent_when_claude_code_home_set() {
         // A real on-disk directory so the new `is_dir()` filter accepts it.
         let dir = tempfile::tempdir().unwrap();
         let saved_home = std::env::var_os("HOME");
-        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
         // SAFETY: #[serial_test::serial] serialises every env-mutating test
         // in this binary, so no other thread reads or writes these vars.
         unsafe {
             std::env::set_var("HOME", "/nonexistent");
-            std::env::set_var("LIBREFANG_HOME", dir.path());
+            std::env::set_var("CLAUDE_CODE_HOME", dir.path());
         }
         let mut cmd = tokio::process::Command::new("/bin/true");
         ClaudeCodeDriver::ensure_home_env(&mut cmd);
@@ -2010,9 +2010,9 @@ mod tests {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
             }
-            match saved_libfang {
-                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
-                None => std::env::remove_var("LIBREFANG_HOME"),
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
             }
         }
         assert_eq!(
@@ -2027,14 +2027,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
-    fn ensure_home_env_keeps_real_home_when_no_libfang_home() {
+    fn ensure_home_env_keeps_real_home_when_no_claude_code_home() {
         let dir = tempfile::tempdir().unwrap();
         let saved_home = std::env::var_os("HOME");
-        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
         // SAFETY: see the comment on the test above.
         unsafe {
             std::env::set_var("HOME", dir.path());
-            std::env::remove_var("LIBREFANG_HOME");
+            std::env::remove_var("CLAUDE_CODE_HOME");
         }
         let mut cmd = tokio::process::Command::new("/bin/true");
         ClaudeCodeDriver::ensure_home_env(&mut cmd);
@@ -2054,9 +2054,9 @@ mod tests {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
             }
-            match saved_libfang {
-                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
-                None => std::env::remove_var("LIBREFANG_HOME"),
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
             }
         }
         assert_eq!(
@@ -2073,15 +2073,15 @@ mod tests {
     #[serial_test::serial]
     fn ensure_home_env_leaves_command_alone_when_no_candidate() {
         let saved_home = std::env::var_os("HOME");
-        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
         // SAFETY: see the comment on the first test in this group.
         unsafe {
             std::env::set_var("HOME", "/nonexistent");
-            std::env::remove_var("LIBREFANG_HOME");
+            std::env::remove_var("CLAUDE_CODE_HOME");
         }
         let mut cmd = tokio::process::Command::new("/bin/true");
         ClaudeCodeDriver::ensure_home_env(&mut cmd);
-        // No HOME override should be added when neither LIBREFANG_HOME nor a
+        // No HOME override should be added when neither CLAUDE_CODE_HOME nor a
         // valid HOME is available. The child will inherit the broken HOME and
         // we surface the underlying issue via the existing diagnostic.
         let resolved: Vec<(String, Option<String>)> = cmd
@@ -2099,9 +2099,9 @@ mod tests {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
             }
-            match saved_libfang {
-                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
-                None => std::env::remove_var("LIBREFANG_HOME"),
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
             }
         }
         assert!(
@@ -2121,7 +2121,7 @@ mod tests {
     #[serial_test::serial]
     fn ensure_home_env_rejects_broader_placeholders() {
         let saved_home = std::env::var_os("HOME");
-        let saved_libfang = std::env::var_os("LIBREFANG_HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
 
         // `/dev/null` exists but is a character device, not a directory.
         // `/this/.../does/not/exist` is the catch-all for unknown sentinels.
@@ -2130,7 +2130,7 @@ mod tests {
             // SAFETY: see the comment on the first test in this group.
             unsafe {
                 std::env::set_var("HOME", placeholder);
-                std::env::remove_var("LIBREFANG_HOME");
+                std::env::remove_var("CLAUDE_CODE_HOME");
             }
             let mut cmd = tokio::process::Command::new("/bin/true");
             ClaudeCodeDriver::ensure_home_env(&mut cmd);
@@ -2151,9 +2151,9 @@ mod tests {
                     Some(v) => std::env::set_var("HOME", v),
                     None => std::env::remove_var("HOME"),
                 }
-                match &saved_libfang {
-                    Some(v) => std::env::set_var("LIBREFANG_HOME", v),
-                    None => std::env::remove_var("LIBREFANG_HOME"),
+                match &saved_claude_code_home {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                    None => std::env::remove_var("CLAUDE_CODE_HOME"),
                 }
             }
             assert!(
