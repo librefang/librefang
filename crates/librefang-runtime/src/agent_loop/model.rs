@@ -180,7 +180,7 @@ pub(super) const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 /// rather than burning tokens (#3349). Operators with larger windows must
 /// set `agent.toml: model.context_window` (or the equivalent provider
 /// catalog entry) explicitly.
-pub(super) const UNKNOWN_MODEL_CONTEXT_WINDOW: usize = 8192;
+pub const UNKNOWN_MODEL_CONTEXT_WINDOW: usize = 8192;
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
 pub(super) fn stable_prefix_mode_enabled(manifest: &AgentManifest) -> bool {

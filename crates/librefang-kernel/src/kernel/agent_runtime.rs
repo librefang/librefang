@@ -468,18 +468,37 @@ impl LibreFangKernel {
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins
         let tools = self.available_tools(agent_id);
-        // Use 200K default or the model's known context window
-        let context_window = if session.context_window_tokens > 0 {
-            session.context_window_tokens
-        } else {
-            200_000
-        };
+
+        // Resolve context window with the same precedence chain the agent loop uses:
+        // 1. agent.toml `model.context_window` explicit override
+        // 2. ModelCatalog lookup (provider-aware, filters out 0)
+        // 3. Persisted session value (authoritative only when catalog has no entry)
+        // 4. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
+        let context_window: usize = entry
+            .manifest
+            .model
+            .context_window
+            .filter(|v| *v > 0)
+            .map(|v| v as usize)
+            .or_else(|| {
+                self.llm
+                    .model_catalog
+                    .load()
+                    .find_model(&entry.manifest.model.model)
+                    .map(|m| m.context_window as usize)
+                    .filter(|w| *w > 0)
+            })
+            .or_else(|| {
+                let v = session.context_window_tokens as usize;
+                if v > 0 { Some(v) } else { None }
+            })
+            .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
 
         Ok(generate_context_report(
             &session.messages,
             Some(system_prompt),
             Some(&tools),
-            context_window as usize,
+            context_window,
         ))
     }
 

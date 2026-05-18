@@ -1872,11 +1872,11 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
-  // Textarea only locked while the agent is actively streaming text. Once the
-  // model emits `typing:stop` the user can start composing the next message
-  // even while background post-processing (memory save) is still running —
-  // the send button stays gated on `effectiveDisabled` until the `response`
-  // event arrives with final tokens/cost.
+  // Both the textarea and the send button unlock on `typing:stop` (`disabled`
+  // and `inputDisabled` both track `isStreaming`). The `response` frame still
+  // arrives later and attaches `memories_saved` to the correct message via its
+  // keyed `updateAgentMessages` call — the send-button gate does not need to
+  // wait for it.
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
@@ -3333,7 +3333,7 @@ export function ChatPage() {
               onSend={sendMessage}
               onStop={stopMessage}
               isStreaming={isStreaming}
-              disabled={isLoading}
+              disabled={isStreaming}
               inputDisabled={isStreaming}
               placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
