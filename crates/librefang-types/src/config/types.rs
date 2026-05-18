@@ -7,6 +7,18 @@ use std::path::PathBuf;
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
+/// Hard ceiling on messages persisted per session, enforced by
+/// `librefang_memory::session::SessionStore::save_session` before the
+/// blob is written to SQLite (#5121 / #5138).
+///
+/// This is the single source of truth shared between the substrate (which
+/// enforces it) and config validation (which warns when an operator's
+/// `cron_session_max_messages` exceeds it, since the substrate will
+/// silently truncate beyond this point regardless of the cron cap). 2000
+/// keeps a worst-case session blob at roughly ~2 MB while leaving room
+/// for unusually long cron-driven sessions.
+pub const MAX_PERSISTED_SESSION_MESSAGES: usize = 2000;
+
 /// DM (direct message) policy for a channel.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -2910,6 +2922,15 @@ pub struct KernelConfig {
     /// each cron fire. Applied in addition to `cron_session_max_tokens`.
     ///
     /// `None` (default) disables message-count pruning.
+    ///
+    /// NOTE (#5138): the memory substrate independently enforces a hard
+    /// persistence ceiling of [`MAX_PERSISTED_SESSION_MESSAGES`] messages
+    /// per session, applied at `save_session` regardless of this value. A
+    /// `cron_session_max_messages` set *above* that ceiling cannot keep
+    /// more than [`MAX_PERSISTED_SESSION_MESSAGES`] across daemon restarts —
+    /// the tail beyond the ceiling is silently truncated on save. Config
+    /// validation emits a warning when this value exceeds the ceiling so
+    /// the discrepancy is not invisible.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
     /// Fraction of the effective token budget (post-prune) at which the

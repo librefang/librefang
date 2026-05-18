@@ -1925,6 +1925,11 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
 
+    // Subscribe to kernel shutdown so the detached poll task exits on
+    // daemon shutdown rather than pinning the whole `AppState` graph
+    // (via the moved `state`) until the client socket closes (#5144).
+    let mut shutdown_rx = state.kernel.supervisor_ref().subscribe();
+
     tokio::spawn(async move {
         let mut last_seq: u64 = {
             let entries = state.kernel.audit().recent(1);
@@ -1932,7 +1937,15 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         };
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        return; // Kernel shutting down — drop Arc<AppState>.
+                    }
+                    continue;
+                }
+            }
 
             let agents = state.kernel.agent_registry().list();
             let entries = state.kernel.audit().recent(50);

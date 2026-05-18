@@ -125,7 +125,7 @@ Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `
 
 ## Conventions
 
-- TypeScript strict. No `any` in new hooks; lean on types from `src/api.ts` or `openapi/generated.ts`.
+- TypeScript strict. No `any` in new hooks; lean on types from `src/api.ts` — the canonical, hand-maintained type source consumed by the SPA. `openapi/generated.ts` is a regenerable cross-reference only (not imported; refresh via `pnpm openapi:types`), do not import from it.
 - Hooks set sensible defaults in `queryOptions` (shared `staleTime` / `refetchInterval` so consumers without special needs inherit one policy). Accept an optional `options: { enabled?; staleTime?; refetchInterval? }` argument and pass it through to `useQuery` so call sites can override per-page needs — bell-icon polls fast but gated, bulk-management pages poll slowly, tabs gate by active-tab. See `useApprovals({ enabled: open })`, `useCommsEvents(50, { refetchInterval: 5_000 })`, `useModels({}, { enabled: isModelArg })`, `useAgentTemplates({ enabled })`, and `useApprovalCount({ refetchInterval: 5_000 })` for reference shapes. Every call-site override carries a short inline comment explaining why.
   ```ts
   type UseFooOptions = {
