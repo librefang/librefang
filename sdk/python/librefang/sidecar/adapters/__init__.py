@@ -9,7 +9,7 @@ Available adapters:
 * :mod:`librefang.sidecar.adapters.ntfy` — ntfy.sh (SSE in / HTTP out,
   stdlib-only; replaces the removed in-process ``librefang-channels::ntfy``)
 * :mod:`librefang.sidecar.adapters.telegram` — Telegram Bot API
-  (long-poll; requires ``requests``)
+  (long-poll, stdlib-only)
 * :mod:`librefang.sidecar.adapters.webhook` — generic inbound HTTP
   webhook receiver (stdlib-only)
 """
