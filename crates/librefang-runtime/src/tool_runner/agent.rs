@@ -91,9 +91,7 @@ pub(super) async fn tool_agent_send(
                         .await
                 }
                 (Some(parent), None) => kh.send_to_agent_as(agent_id, message, parent).await,
-                (None, Some(key)) => {
-                    kh.send_to_agent_with_key(agent_id, message, key).await
-                }
+                (None, Some(key)) => kh.send_to_agent_with_key(agent_id, message, key).await,
                 (None, None) => kh.send_to_agent(agent_id, message).await,
             }
         })
