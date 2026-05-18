@@ -44,6 +44,7 @@ pub use librefang_llm_drivers::drivers;
 pub mod embedding;
 pub mod file_read_tracker;
 pub mod graceful_shutdown;
+pub mod held_agent_locks;
 pub mod history_fold;
 pub mod hooks;
 pub use librefang_http as http_client;
