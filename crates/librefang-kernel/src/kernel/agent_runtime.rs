@@ -329,12 +329,44 @@ impl LibreFangKernel {
 
         // #4976: merge per-agent [compaction] overrides on top of the
         // global config before deciding thresholds / summary budget.
-        let config = CompactionConfig::from_toml_with_overrides(
+        let mut config = CompactionConfig::from_toml_with_overrides(
             &cfg.compaction,
             entry.manifest.compaction.as_ref(),
         );
 
-        let estimated_tokens = estimate_token_count(&session.messages, None, None);
+        // Strip provider prefix so the model name is valid for the upstream API.
+        let model = librefang_runtime::agent_loop::strip_provider_prefix(
+            &entry.manifest.model.model,
+            &entry.manifest.model.provider,
+        );
+
+        // Resolve the agent's actual context window from the model catalog
+        // BEFORE the gate so the gate's token-trigger comparison uses the
+        // real per-agent window (e.g. 128K GPT-4o, 1M Gemini) instead of
+        // the global 200K default that `CompactionConfig::from_toml_…`
+        // would otherwise hand us. Filter out 0 so image/audio entries
+        // (no context window) fall back to the 200K default instead of
+        // feeding 0 into compaction math.
+        let agent_ctx_window = self
+            .llm
+            .model_catalog
+            .load()
+            .find_model(&entry.manifest.model.model)
+            .map(|m| m.context_window as usize)
+            .filter(|w| *w > 0)
+            .unwrap_or(200_000);
+        config.context_window_tokens = agent_ctx_window;
+
+        // Match the pre-loop caller's estimator inputs in `messaging.rs`
+        // (`send_message_full` passes `Some(&manifest.model.system_prompt)`),
+        // otherwise this inner gate's estimate would skip the system prompt
+        // / tools budget and short-circuit even when the caller has already
+        // concluded compaction is warranted.
+        let estimated_tokens = estimate_token_count(
+            &session.messages,
+            Some(&entry.manifest.model.system_prompt),
+            None,
+        );
         if !needs_compaction(&session, &config)
             && !needs_compaction_by_tokens(estimated_tokens, &config)
         {
@@ -344,24 +376,6 @@ impl LibreFangKernel {
                 config.threshold
             ));
         }
-
-        // Strip provider prefix so the model name is valid for the upstream API.
-        let model = librefang_runtime::agent_loop::strip_provider_prefix(
-            &entry.manifest.model.model,
-            &entry.manifest.model.provider,
-        );
-
-        // Resolve the agent's actual context window from the model catalog.
-        // Filter out 0 so image/audio entries (no context window) fall back
-        // to the 200K default instead of feeding 0 into compaction math.
-        let agent_ctx_window = self
-            .llm
-            .model_catalog
-            .load()
-            .find_model(&entry.manifest.model.model)
-            .map(|m| m.context_window as usize)
-            .filter(|w| *w > 0)
-            .unwrap_or(200_000);
 
         // Compaction is a side task — route through the auxiliary chain when
         // configured (issue #3314) so users with `[llm.auxiliary] compression`
