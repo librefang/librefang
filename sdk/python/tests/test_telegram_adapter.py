@@ -225,6 +225,132 @@ def test_inbound_callback_query(monkeypatch):
     assert ("answerCallbackQuery", {"callback_query_id": "cq1"}) in answered
 
 
+def test_inbound_poll_answer_matches_rust_oracle():
+    # Oracle: crates/librefang-channels/src/telegram.rs:2129-2230 (the
+    # in-process `poll_answer` handler). Telegram only fires
+    # poll_answer for non-anonymous polls in private chats, so
+    # `user.id` doubles as the DM chat_id (see SENDER_USER_ID_KEY
+    # comment on line 2161). Field-by-field mirror.
+    a = _adapter()
+    ev = a._update_to_event({
+        "update_id": 42,
+        "poll_answer": {
+            "poll_id": "p-9001",
+            "user": {"id": 12345, "first_name": "Alice", "last_name": "B",
+                     "username": "al"},
+            "option_ids": [0, 2],
+        },
+    })
+    assert ev is not None, "poll_answer must produce an event"
+    p = ev["params"]
+    # sender.platform_id = user.id; display_name = "first last"
+    assert p["user_id"] == "12345"
+    assert p["user_name"] == "Alice B"
+    assert p["username"] == "al"
+    # content = PollAnswer { poll_id, option_ids }
+    assert p["content"] == {
+        "PollAnswer": {"poll_id": "p-9001", "option_ids": [0, 2]}
+    }
+    # platform_message_id = poll_id
+    assert p["message_id"] == "p-9001"
+    # DM-only — channel_id falls back to the user id (Rust comment)
+    assert p["channel_id"] == "12345"
+    # is_group = false, no thread_id
+    assert p.get("is_group", False) is False
+    assert "thread_id" not in p
+    # metadata mirrors the two keys the Rust path writes
+    assert p["metadata"] == {"user_id": "12345", "sender_user_id": "12345"}
+
+
+def test_inbound_poll_answer_user_only_first_name():
+    # Rust: `last_name` defaults to empty; display_name = first_name
+    # alone when last_name is empty.
+    a = _adapter()
+    ev = a._update_to_event({
+        "poll_answer": {
+            "poll_id": "p1",
+            "user": {"id": 7, "first_name": "Solo"},
+            "option_ids": [1],
+        },
+    })
+    assert ev["params"]["user_name"] == "Solo"
+
+
+def test_inbound_poll_answer_missing_first_name_defaults_unknown():
+    # Rust: `first_name` defaults to "Unknown" when absent.
+    a = _adapter()
+    ev = a._update_to_event({
+        "poll_answer": {
+            "poll_id": "p1",
+            "user": {"id": 8},
+            "option_ids": [],
+        },
+    })
+    assert ev["params"]["user_name"] == "Unknown"
+    # empty option_ids is valid (user retracted their vote)
+    assert ev["params"]["content"] == {
+        "PollAnswer": {"poll_id": "p1", "option_ids": []}
+    }
+
+
+def test_inbound_poll_answer_empty_poll_id_dropped():
+    # Rust: `if !poll_id.is_empty() && ...` — empty poll_id skipped.
+    a = _adapter()
+    assert a._update_to_event({
+        "poll_answer": {"poll_id": "", "user": {"id": 1}, "option_ids": []},
+    }) is None
+    # Same for missing poll_id entirely.
+    assert a._update_to_event({
+        "poll_answer": {"user": {"id": 1}, "option_ids": []},
+    }) is None
+
+
+def test_inbound_poll_answer_respects_allowed_users():
+    # Rust: `telegram_user_allowed(&allowed_users, user_id, username)`.
+    a = _adapter(ALLOWED_USERS="111,@alice")
+    # disallowed id+username
+    assert a._update_to_event({
+        "poll_answer": {"poll_id": "p", "user": {"id": 999},
+                        "option_ids": [0]},
+    }) is None
+    # allowed by id
+    assert a._update_to_event({
+        "poll_answer": {"poll_id": "p", "user": {"id": 111},
+                        "option_ids": [0]},
+    })["params"]["user_id"] == "111"
+    # allowed by username (case-insensitive, @ optional — see _allowed)
+    assert a._update_to_event({
+        "poll_answer": {"poll_id": "p",
+                        "user": {"id": 7, "username": "Alice"},
+                        "option_ids": [0]},
+    })["params"]["user_id"] == "7"
+
+
+def test_poll_answer_in_allowed_updates_subscription():
+    # The long-poll request must subscribe to `poll_answer` or
+    # Telegram simply never delivers it. Mirrors telegram.rs:2008.
+    captured = {}
+
+    def fake_get(url, params, timeout):
+        captured["params"] = params
+        return {"ok": True, "result": []}
+
+    import librefang.sidecar.adapters.telegram as tg_mod
+    a = _adapter()
+    orig = tg_mod._api_get
+    tg_mod._api_get = fake_get
+    try:
+        a._poll_once(lambda _ev: None, {"offset": 0})
+    finally:
+        tg_mod._api_get = orig
+    import json as _json
+    subs = _json.loads(captured["params"]["allowed_updates"])
+    assert "poll_answer" in subs
+    # don't accidentally drop existing subscriptions
+    for required in ("message", "edited_message", "callback_query"):
+        assert required in subs
+
+
 def test_inbound_edited_message_and_reply(monkeypatch):
     a = _adapter()
     monkeypatch.setattr(a, "_get_file_url", lambda fid: None)
