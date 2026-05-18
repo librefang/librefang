@@ -1,0 +1,8 @@
+{
+  "method": "reaction",
+  "params": {
+    "channel_id": "c1",
+    "message_id": "55",
+    "reaction": "👍"
+  }
+}

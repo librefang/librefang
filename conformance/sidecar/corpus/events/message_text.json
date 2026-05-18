@@ -1,0 +1,11 @@
+{
+  "method": "message",
+  "params": {
+    "user_id": "42",
+    "user_name": "Alice",
+    "content": { "Text": "hello" },
+    "text": "hello",
+    "channel_id": "-100123",
+    "platform": "telegram"
+  }
+}
