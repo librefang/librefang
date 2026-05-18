@@ -250,6 +250,23 @@ impl CredentialPool {
         }
     }
 
+    /// Report that a credential is permanently invalid (e.g. auth failure).
+    /// Unlike [`mark_exhausted`] which uses a TTL-based cooldown, this marks
+    /// the key as unavailable for the lifetime of the pool. The only way to
+    /// recover a permanently-exhausted key is via [`mark_success`] from a
+    /// concurrent code path or a hot-reload that rebuilds the pool.
+    ///
+    /// Implementation uses a far-future timestamp (100 years) so that
+    /// `is_available()` naturally returns `false` without a separate flag.
+    pub fn mark_permanent(&self, api_key: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        // ~100 years from now — well past any realistic daemon lifetime.
+        let far_future = Instant::now() + Duration::from_secs(365 * 100 * 86400);
+        if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
+            c.exhausted_until = Some(far_future);
+        }
+    }
+
     /// Report that a request with `api_key` succeeded.  Increments the
     /// credential's `request_count` and clears any leftover exhaustion marker
     /// (e.g. if a provider recovered before the TTL expired).
