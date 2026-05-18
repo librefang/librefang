@@ -738,6 +738,30 @@ const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
 const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
 const SESSION_RECOVERY_EXPIRE_MS = 30 * 60 * 1000; // 30 min
 
+
+// Unwrap nested message wrappers so contextInfo (quotedMessage, mentions,
+// forwards) is visible to handlers regardless of whether the inbound message
+// came from a normal chat, a disappearing-messages session (ephemeralMessage),
+// view-once media, an edited message, or a document with caption. Pre-fix the
+// gateway only handled the documentWithCaptionMessage shape inline; quotes
+// from ephemeral / view-once / edited replies came through with the
+// `[In risposta a: "..."]` prefix missing because the handler read fields
+// off the outer wrapper instead of the inner message. Mirror the standard
+// Baileys unwrap chain so every downstream field-extraction (contextInfo,
+// downloadable media, mention detection) sees the inner payload.
+function unwrapMessageWrappers(m) {
+  if (!m) return m;
+  return (
+    m.ephemeralMessage?.message
+    || m.viewOnceMessage?.message
+    || m.viewOnceMessageV2?.message
+    || m.viewOnceMessageV2Extension?.message
+    || m.editedMessage?.message
+    || m.documentWithCaptionMessage?.message
+    || m
+  );
+}
+
 function normalizeBaseJid(jid) {
   if (!jid) return '';
   // Strip device suffix "<id>:<device>@<server>" → "<id>@<server>"
@@ -1657,7 +1681,7 @@ async function startConnection() {
       }
 
       const sender = msg.key.remoteJid || '';
-      const innerMsg = msg.message || {};
+      const innerMsg = unwrapMessageWrappers(msg.message) || {};
 
       // Signal session recovery: inbound message with null payload ⇒ libsignal
       // rejected the ciphertext before stub 39 was emitted. Force a fresh
