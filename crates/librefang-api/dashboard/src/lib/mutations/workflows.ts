@@ -8,7 +8,7 @@ import {
   instantiateTemplate,
   saveWorkflowAsTemplate,
 } from "../http/client";
-import type { WorkflowItem } from "../../api";
+import type { WorkflowItem, WorkflowRunInput } from "../../api";
 import { workflowKeys } from "../queries/keys";
 
 function invalidateWorkflowLists(qc: ReturnType<typeof useQueryClient>) {
@@ -28,7 +28,7 @@ function invalidateWorkflowRecord(
 export function useRunWorkflow() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
+    mutationFn: ({ workflowId, input }: { workflowId: string; input: WorkflowRunInput }) =>
       runWorkflow(workflowId, input),
     onSuccess: (data, variables) => {
       const invalidations: Array<Promise<unknown>> = [
@@ -50,7 +50,7 @@ export function useRunWorkflow() {
 
 export function useDryRunWorkflow() {
   return useMutation({
-    mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
+    mutationFn: ({ workflowId, input }: { workflowId: string; input: WorkflowRunInput }) =>
       dryRunWorkflow(workflowId, input),
   });
 }

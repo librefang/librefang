@@ -5,7 +5,7 @@
 /// Resolve `[tool_results]` spill threshold + per-artifact cap from raw
 /// `ToolExecContext` fields, falling back to compiled defaults when the
 /// caller passed `0` (test call sites that don't populate the ctx).
-pub(super) fn resolve_spill_config(
+pub(crate) fn resolve_spill_config(
     spill_threshold_bytes: u64,
     max_artifact_bytes: u64,
 ) -> (u64, u64) {

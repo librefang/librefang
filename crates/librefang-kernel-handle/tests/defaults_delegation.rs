@@ -582,3 +582,40 @@ fn test_requires_approval_with_context_delegates_to_requires_approval() {
     assert!(handle.approval_checked.load(Ordering::SeqCst));
     assert!(result);
 }
+
+// ---------------------------------------------------------------------------
+// Test 4: send_to_agent_with_key default delegates to send_to_agent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_send_to_agent_with_key_delegates_to_send_to_agent() {
+    let handle = TrackingSendHandle {
+        send_called: AtomicBool::new(false),
+    };
+
+    let result = handle
+        .send_to_agent_with_key("agent1", "msg", "my-key")
+        .await;
+
+    assert!(handle.send_called.load(Ordering::SeqCst));
+    assert_eq!(result.unwrap(), "ok");
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: send_to_agent_as_with_key default delegates to send_to_agent_as,
+//         which itself falls through to send_to_agent on this stub
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_send_to_agent_as_with_key_delegates_to_send_to_agent_as() {
+    let handle = TrackingSendHandle {
+        send_called: AtomicBool::new(false),
+    };
+
+    let result = handle
+        .send_to_agent_as_with_key("agent1", "msg", "parent1", "my-key")
+        .await;
+
+    assert!(handle.send_called.load(Ordering::SeqCst));
+    assert_eq!(result.unwrap(), "ok");
+}

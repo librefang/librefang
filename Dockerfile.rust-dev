@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+#
+# Dockerfile for the `librefang-rust-dev` developer image.
+#
+# This image is the one the `cargo` wrapper script invokes when contributors
+# don't have a native Rust toolchain (e.g. on macOS hosts running cargo via
+# Docker). It is **separate** from the top-level `Dockerfile`, which builds
+# the slim runtime release image — that image deliberately strips out
+# anything not needed at runtime (no GUI libs, no source tree).
+#
+# Build:
+#   docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
+#
+# Usage (matches the wrapper at scripts/.local/bin/cargo or equivalent):
+#   LIBREFANG_MOUNT_BASE=/path/to/workspace-parent \
+#   LIBREFANG_RUST_IMAGE=librefang-rust-dev:latest \
+#       cargo check --workspace --lib
+#
+# Why this image needs GTK / WebKit dev libs:
+#   `cargo check --workspace --lib` descends into `librefang-desktop`, which
+#   depends on `tauri = "2"`. On Linux, Tauri 2 unconditionally pulls
+#   `wry -> webkit2gtk-sys` and `gdk-sys` / `gtk-sys` (the Linux webview
+#   is webkit2gtk). Their build scripts run `pkg-config gdk-3.0` /
+#   `webkit2gtk-4.1`, so the dev libs must be present at *check* time —
+#   not just at link time. Without them the workspace check fails on
+#   `gdk-sys` with "system library `gdk-3.0` was not found".
+#
+# The package list below mirrors what the GitHub Actions CI lanes install
+# for the Linux Tauri build (.github/workflows/ci.yml,
+# .github/workflows/release-desktop.yml). Keep them in sync — if CI's GTK
+# package list grows, so should this image.
+
+# Base image: Debian **trixie** (not bookworm). The runtime Dockerfile
+# at the repo root uses `rust:1.94-slim-bookworm` because it links a
+# specific toolchain at build time and never invokes rustup later. The
+# *dev* image is different: `rust-toolchain.toml` pins
+# `channel = "stable"`, so rustup downloads whatever the current stable
+# release is on first container start. rust-lang.org publishes the
+# aarch64-unknown-linux-gnu stable artefacts against glibc 2.39
+# (trixie); booting them inside a bookworm container (glibc 2.36)
+# crashes every build script with
+#   /lib/.../libc.so.6: version `GLIBC_2.39' not found
+# Tracking trixie keeps the dev image forward-compatible with stable
+# rustup channel rolls.
+FROM rust:1-trixie
+
+# System dependencies, in two groups:
+#   1. Core build deps (also present in the runtime Dockerfile):
+#      build-essential / pkg-config / libssl-dev / libdbus-1-dev — needed
+#      for the daemon binary itself (libdbus-1-dev is dragged in by
+#      `keyring`'s sync-secret-service feature, see top-level Dockerfile
+#      comment + #3180 / #3259).
+#   2. Tauri 2 Linux deps:
+#      libwebkit2gtk-4.1-dev — Tauri 2's wry webview backend
+#      libgtk-3-dev          — gdk-sys / gtk-sys
+#      libayatana-appindicator3-dev — system tray (gated behind the
+#                                     `linux-tray` Cargo feature, but the
+#                                     dev headers are cheap to ship and
+#                                     match CI exactly)
+#      librsvg2-dev          — SVG icon rasterisation in Tauri
+#      patchelf              — Tauri bundler post-processing step
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    libdbus-1-dev \
+    libsecret-1-dev \
+    perl \
+    ca-certificates \
+    libwebkit2gtk-4.1-dev \
+    libgtk-3-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+# The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
+# via named volumes, so we don't pre-create anything here. `rustup` /
+# `cargo` are already on PATH from the base image.

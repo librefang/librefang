@@ -237,7 +237,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // concrete path like the one above covers that case. No separate Authed
     // entry is needed.
     re("/api/channels", Expect::DashboardRead),
-    re("/api/cron/list", Expect::DashboardRead),
+    // SECURITY #5139: `/api/cron/*` was intentionally removed from
+    // PUBLIC_ROUTES_DASHBOARD_READS because cron-job reads serialise the
+    // user-authored prompt. The stale `/api/cron/list` row (a path that was
+    // never registered as a route) was left behind by the catalog cleanup;
+    // dropped here.
     re("/api/hands", Expect::DashboardRead),
     re("/api/hands/active", Expect::DashboardRead),
     re("/api/hands/my-hand", Expect::DashboardRead),

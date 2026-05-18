@@ -18,6 +18,60 @@
 
 use std::path::Path;
 
+/// Process-global serialization lock for **all** runtime `std::env::set_var`
+/// mutations (#5142).
+///
+/// `std::env::set_var` is declared undefined behaviour on Rust 1.74+ when any
+/// other thread reads the environment concurrently. The previous mitigation —
+/// wrapping each `set_var` in `tokio::task::spawn_blocking` — does NOT
+/// serialize: `spawn_blocking` dispatches onto the blocking thread pool, so
+/// two concurrent route handlers (e.g. a channel-bridge reload and a secret
+/// PATCH) each get their own blocking thread and `set_var` simultaneously,
+/// which is exactly the data race the docs forbid.
+///
+/// This `tokio::sync::Mutex<()>` is held across the actual `set_var` call so
+/// at most one runtime env mutation is in flight process-wide. It does not —
+/// and cannot — block synchronous readers elsewhere in the codebase; the
+/// residual risk of a concurrent reader is inherent to mutating `std::env` at
+/// runtime at all. Serializing the *writers* removes the writer/writer race
+/// and shrinks the writer/reader window to a single short critical section.
+/// Boot-time loading (`load_into_process_blocking`) runs before any other
+/// thread touches `std::env` and so does not take this lock.
+static ENV_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Serialized runtime mutation of a single process env var (#5142).
+///
+/// All async/runtime call sites that previously did
+/// `spawn_blocking(|| unsafe { std::env::set_var(..) })` must route through
+/// here instead so the writes are actually serialized against each other.
+/// The `unsafe` block is unavoidable (the std API is `unsafe` on 1.74+); the
+/// guard is what makes the *writer/writer* interleaving sound.
+pub async fn set_env_var_guarded(key: impl Into<String>, value: impl Into<String>) {
+    let key = key.into();
+    let value = value.into();
+    let _guard = ENV_WRITE_LOCK.lock().await;
+    // SAFETY: ENV_WRITE_LOCK serializes every runtime env writer in this
+    // process, so no other thread is concurrently *writing* std::env while
+    // this runs. See the `ENV_WRITE_LOCK` doc-comment for the residual
+    // writer/reader caveat.
+    unsafe { std::env::set_var(&key, &value) };
+}
+
+/// Serialized runtime removal of a single process env var (#5142).
+///
+/// `std::env::remove_var` carries the identical writer/reader UB contract as
+/// `set_var` on Rust 1.74+. It must take the SAME [`ENV_WRITE_LOCK`] as
+/// [`set_env_var_guarded`] — otherwise a `remove_var` could still race a
+/// concurrent guarded `set_var`, defeating the point of the lock.
+pub async fn remove_env_var_guarded(key: impl Into<String>) {
+    let key = key.into();
+    let _guard = ENV_WRITE_LOCK.lock().await;
+    // SAFETY: ENV_WRITE_LOCK serializes every runtime env writer in this
+    // process (both set and remove), so no other thread is concurrently
+    // *writing* std::env while this runs.
+    unsafe { std::env::remove_var(&key) };
+}
+
 /// Parse a `KEY=value` env file into ordered `(key, value)` pairs.
 ///
 /// Skips blank lines and `#` comments, trims surrounding whitespace, and
@@ -83,9 +137,12 @@ pub fn load_into_process_blocking(home: &Path) -> std::io::Result<usize> {
 }
 
 /// Async variant — re-load `<home>/secrets.env` from inside a running tokio
-/// runtime. The `set_var` calls run on a dedicated `spawn_blocking` thread so
-/// they do not race tokio workers. Returns the number of vars set; a missing
-/// file or read error logs and returns 0 (callers treat it as a no-op).
+/// runtime. The file read runs on a `spawn_blocking` thread; the env
+/// mutations are applied through [`set_env_var_guarded`] so they are
+/// serialized against every other runtime env writer process-wide (#5142 —
+/// `spawn_blocking` does NOT serialize, it fans out across the blocking
+/// pool). Returns the number of vars set; a missing file or read error logs
+/// and returns 0 (callers treat it as a no-op).
 ///
 /// Used by `channel_bridge::reload_channels_from_disk` so a dashboard edit
 /// that adds a fresh provider key is visible to the rebuilt channel adapters
@@ -95,26 +152,24 @@ pub async fn load_into_process_async(home: &Path) -> usize {
     if !path.exists() {
         return 0;
     }
-    match tokio::task::spawn_blocking(move || {
+    let entries = match tokio::task::spawn_blocking(move || {
         let content = std::fs::read_to_string(&path).ok()?;
-        let entries = parse_secrets_env(&content);
-        let n = entries.len();
-        for (k, v) in entries {
-            // SAFETY: spawn_blocking serialises the env mutation against
-            // tokio worker threads that might read std::env concurrently.
-            unsafe { std::env::set_var(k, v) };
-        }
-        Some(n)
+        Some(parse_secrets_env(&content))
     })
     .await
     {
-        Ok(Some(n)) => n,
-        Ok(None) => 0,
+        Ok(Some(entries)) => entries,
+        Ok(None) => return 0,
         Err(e) => {
             tracing::warn!("spawn_blocking for secrets.env reload failed: {e}");
-            0
+            return 0;
         }
+    };
+    let n = entries.len();
+    for (k, v) in entries {
+        set_env_var_guarded(k, v).await;
     }
+    n
 }
 
 #[cfg(test)]
@@ -194,6 +249,54 @@ no_equals_here
         unsafe {
             std::env::remove_var(&key_a);
             std::env::remove_var(&key_b);
+        }
+    }
+
+    /// #5142: `set_env_var_guarded` / `remove_env_var_guarded` must actually
+    /// mutate `std::env`, and (more importantly) serialize through the same
+    /// process-global lock so concurrent runtime writers can't race
+    /// `std::env::set_var` on separate blocking threads (the UB the audit
+    /// flagged). We can't directly observe UB, but we CAN assert the lock is
+    /// the single point of mutation: many concurrent guarded writers to
+    /// distinct keys all land, and a concurrent guarded remove of a key
+    /// observes a consistent final state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn guarded_env_mutation_serializes_and_applies_5142() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let key = format!("LIBREFANG_TEST_5142_{suffix}_{i}");
+            handles.push(tokio::spawn(async move {
+                set_env_var_guarded(key.clone(), format!("v{i}")).await;
+                key
+            }));
+        }
+        let mut keys = Vec::new();
+        for h in handles {
+            keys.push(h.await.unwrap());
+        }
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(
+                std::env::var(key).unwrap(),
+                format!("v{i}"),
+                "every concurrent guarded set_var must land"
+            );
+        }
+
+        // Concurrent guarded removes must also land consistently.
+        let mut rm = Vec::new();
+        for key in &keys {
+            let k = key.clone();
+            rm.push(tokio::spawn(async move { remove_env_var_guarded(k).await }));
+        }
+        for h in rm {
+            h.await.unwrap();
+        }
+        for key in &keys {
+            assert!(
+                std::env::var(key).is_err(),
+                "every concurrent guarded remove_var must land ({key})"
+            );
         }
     }
 }

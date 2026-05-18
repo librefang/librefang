@@ -113,7 +113,16 @@ pub fn jittered_backoff(
     // Dividing by 2^32 (not u32::MAX) maps that range to [0, 1).
     let r = (mixed >> 32) as f64 / (1u64 << 32) as f64;
 
-    let jitter = base_for_jitter.mul_f64((jitter_ratio * r).clamp(0.0, 1.0));
+    // `jitter_ratio` is caller-supplied. `f64::clamp` panics if the value
+    // being clamped is NaN, and `NaN * r` / `inf * r` is NaN — so a non-finite
+    // ratio would panic the retry hot path. Coerce any non-finite ratio to
+    // 0.0 (no jitter) before the clamp.
+    let safe_ratio = if jitter_ratio.is_finite() {
+        jitter_ratio
+    } else {
+        0.0
+    };
+    let jitter = base_for_jitter.mul_f64((safe_ratio * r).clamp(0.0, 1.0));
     base_for_jitter + jitter
 }
 
@@ -256,5 +265,29 @@ mod tests {
         let d = jittered_backoff(1, base, max, 0.5, floor);
         // floor is capped at 300s; jitter on top is at most 50% of 300s = 150s
         assert!(d <= Duration::from_secs(300) + Duration::from_secs(150));
+    }
+
+    // -- #5136: non-finite caller-supplied jitter_ratio must not panic -----
+
+    #[test]
+    fn nan_jitter_ratio_does_not_panic() {
+        // `jitter_ratio` is caller-supplied. `(NaN * r).clamp(0.0, 1.0)`
+        // panics inside f64::clamp (clamp panics when the value is NaN).
+        // A non-finite ratio must be coerced to 0.0 (no jitter), leaving
+        // the result equal to the deterministic exponential delay.
+        let base = Duration::from_secs(2);
+        let max = Duration::from_secs(60);
+        let d = jittered_backoff(2, base, max, f64::NAN, Duration::ZERO);
+        // attempt=2 → exp_delay = base * 2^1 = 4s, no jitter added.
+        assert_eq!(d, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn infinite_jitter_ratio_does_not_panic() {
+        let base = Duration::from_secs(2);
+        let max = Duration::from_secs(60);
+        let d = jittered_backoff(1, base, max, f64::INFINITY, Duration::ZERO);
+        // attempt=1 → exp_delay = base * 2^0 = 2s, no jitter added.
+        assert_eq!(d, Duration::from_secs(2));
     }
 }

@@ -243,6 +243,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={59} value={intervalMin}
+                aria-label={`${t("scheduler.every")} ${t("scheduler.minutes")}`}
                 onChange={e => setIntervalMin(Math.max(1, Math.min(59, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.minutes")}</span>
             </div>
@@ -251,6 +252,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={23} value={intervalHour}
+                aria-label={`${t("scheduler.every")} ${t("scheduler.hours")}`}
                 onChange={e => setIntervalHour(Math.max(1, Math.min(23, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.hours")}</span>
             </div>
@@ -281,6 +283,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every_month_on")}</span>
               <input type="number" min={1} max={28} value={monthDay}
+                aria-label={t("scheduler.every_month_on")}
                 onChange={e => setMonthDay(Math.max(1, Math.min(28, +e.target.value)))} className={num} />
               <span className="text-text-dim">{t("scheduler.day_suffix")}</span>
               {timeSelect}

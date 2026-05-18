@@ -256,6 +256,118 @@ fn apply_mirror(mirror: &str, url: &str) -> String {
     }
 }
 
+/// Extract the entries of a (already-decompressed) tar archive into
+/// `tmp_dir`, stripping the GitHub `librefang-registry-main/` prefix and
+/// enforcing the security invariants:
+///
+/// - Skip every entry that is not a regular file or directory
+///   (`SymbolicLink`, `HardLink`, device, fifo) — `tar::Entry::unpack`
+///   honours symlink/hardlink entries, which an attacker-influenced
+///   tarball (mirror substitution, see `apply_mirror`) could use to
+///   escape the cache or clobber arbitrary files (issue #5141).
+/// - Reject any entry whose path (after the plain-string prefix strip)
+///   still contains a `..` / root / drive-prefix component — the strip
+///   does not normalise, so `…-main/foo/../../../etc/cron.d/owned`
+///   survives it.
+/// - Belt-and-suspenders: re-verify the resolved destination's deepest
+///   existing ancestor canonicalises to inside `tmp_dir`.
+///
+/// Factored out of `download_and_extract` so the security logic is unit
+/// testable without performing a network download.
+pub(crate) fn extract_entries_into<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    tmp_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Canonicalise the extraction root once so the per-entry containment
+    // check below operates on a path with no symlink / `.` / `..` segments.
+    let tmp_canon = tmp_dir.canonicalize()?;
+
+    for entry in archive.entries()? {
+        let mut entry: tar::Entry<_> = entry?;
+        let path = entry.path()?;
+        let path_str = path.to_string_lossy().into_owned();
+
+        // SECURITY: skip symlink / hardlink / device / fifo entries
+        // entirely. `entry.unpack` honours `SymbolicLink`/`HardLink`
+        // entries, so a tarball containing
+        // `librefang-registry-main/x -> /etc/cron.d` followed by a file
+        // entry writing through `x/owned` would escape the cache dir
+        // (or, for a hardlink, clobber an arbitrary existing file).
+        // The registry only ever ships regular files and directories;
+        // anything else is malicious or corrupt input.
+        let etype = entry.header().entry_type();
+        if !etype.is_file() && !etype.is_dir() {
+            tracing::warn!("registry tarball: skipping non-regular entry {path_str:?} ({etype:?})");
+            continue;
+        }
+
+        // Strip the tarball prefix
+        let relative: String = match path_str.strip_prefix(TARBALL_PREFIX) {
+            Some(r) if !r.is_empty() => r.to_string(),
+            _ => continue,
+        };
+
+        // SECURITY: reject any entry whose name contains a `..` (or root /
+        // prefix) component. `strip_prefix(TARBALL_PREFIX)` is a plain
+        // string strip — it does NOT normalise, so a crafted entry like
+        // `librefang-registry-main/foo/../../../../etc/cron.d/owned`
+        // survives the strip with `relative` still holding the traversal.
+        // `tmp_dir.join(relative)` would then resolve outside the cache.
+        // Mirror-substitution (`apply_mirror`) makes the tarball source
+        // attacker-influenceable by operator config, so this is not purely
+        // theoretical.
+        let rel_path = Path::new(&relative);
+        if rel_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            tracing::warn!(
+                "registry tarball: rejecting entry with traversal/absolute \
+                 component: {path_str:?}"
+            );
+            continue;
+        }
+
+        let dest = tmp_dir.join(&relative);
+
+        // Create parent directories
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // SECURITY: belt-and-suspenders containment check on the resolved
+        // destination. The component scan above already rejects `..`, but
+        // re-verify after `join` against the canonical extraction root so a
+        // symlinked parent dir (created by a *prior* malicious entry that
+        // slipped a different bug) still can't redirect the write. Resolve
+        // the deepest existing ancestor (the leaf doesn't exist yet) and
+        // require it to stay under `tmp_canon`.
+        let containment_anchor = dest.ancestors().find(|a| a.exists()).unwrap_or(tmp_dir);
+        match containment_anchor.canonicalize() {
+            Ok(anchor_canon) if anchor_canon.starts_with(&tmp_canon) => {}
+            _ => {
+                tracing::warn!(
+                    "registry tarball: rejecting entry resolving outside \
+                     extraction root: {path_str:?}"
+                );
+                continue;
+            }
+        }
+
+        // Only extract files and directories
+        if etype.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if etype.is_file() {
+            entry.unpack(&dest)?;
+        }
+    }
+    Ok(())
+}
+
 /// Download the tarball via HTTP and extract it into `registry_cache`.
 fn download_and_extract(
     registry_cache: &Path,
@@ -286,32 +398,7 @@ fn download_and_extract(
     }
     std::fs::create_dir_all(&tmp_dir)?;
 
-    // Extract, stripping the `librefang-registry-main/` prefix
-    for entry in archive.entries()? {
-        let mut entry: tar::Entry<_> = entry?;
-        let path = entry.path()?;
-        let path_str = path.to_string_lossy();
-
-        // Strip the tarball prefix
-        let relative: String = match path_str.strip_prefix(TARBALL_PREFIX) {
-            Some(r) if !r.is_empty() => r.to_string(),
-            _ => continue,
-        };
-
-        let dest = tmp_dir.join(&relative);
-
-        // Create parent directories
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        // Only extract files and directories
-        if entry.header().entry_type().is_dir() {
-            std::fs::create_dir_all(&dest)?;
-        } else if entry.header().entry_type().is_file() {
-            entry.unpack(&dest)?;
-        }
-    }
+    extract_entries_into(&mut archive, &tmp_dir)?;
 
     // Swap: remove old cache, rename tmp to cache
     if registry_cache.exists() {
@@ -794,5 +881,170 @@ mod tests {
         assert!(!stale.exists(), "stale dir should be removed");
         assert!(valid.exists(), "valid dir should remain");
         assert!(both.exists(), "dir with both files should remain");
+    }
+
+    // ---- #5141: malicious-tarball extraction hardening ----------------
+
+    /// Build a raw (uncompressed) tar archive containing the given
+    /// `(name, contents)` regular-file entries and return its bytes.
+    fn build_tar_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut buf);
+            for (name, contents) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o644);
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_cksum();
+                b.append_data(&mut header, name, &contents[..]).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Append a regular-file entry whose stored name is written DIRECTLY
+    /// into the raw tar header `name[..]` bytes, bypassing the `tar`
+    /// writer's own `..`-rejecting guard. This is exactly the shape a
+    /// hand-crafted malicious tarball takes (the writer guard is a courtesy
+    /// to honest producers; a real attacker emits raw blocks).
+    fn append_raw_named_entry<W: std::io::Write>(
+        builder: &mut tar::Builder<W>,
+        raw_name: &str,
+        contents: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_entry_type(tar::EntryType::Regular);
+        {
+            let name_field = &mut header.as_old_mut().name;
+            name_field.fill(0);
+            let bytes = raw_name.as_bytes();
+            name_field[..bytes.len()].copy_from_slice(bytes);
+        }
+        header.set_cksum();
+        builder.append(&header, contents).unwrap();
+    }
+
+    #[test]
+    fn extract_rejects_dotdot_traversal_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extract_root = tmp.path().join(".registry_tmp");
+        std::fs::create_dir_all(&extract_root).unwrap();
+        // Sentinel target the attacker tries to clobber, OUTSIDE the root.
+        let outside = tmp.path().join("etc-cron-d-owned");
+
+        let mut buf = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut buf);
+            // Legitimate file — must extract fine.
+            append_raw_named_entry(
+                &mut b,
+                "librefang-registry-main/providers/ok.toml",
+                b"id=\"ok\"",
+            );
+            // ATTACK: traversal escaping the extraction root.
+            append_raw_named_entry(
+                &mut b,
+                "librefang-registry-main/x/../../../etc-cron-d-owned",
+                b"PWNED",
+            );
+            b.finish().unwrap();
+        }
+        let mut archive = tar::Archive::new(&buf[..]);
+        extract_entries_into(&mut archive, &extract_root).unwrap();
+
+        assert!(
+            !outside.exists(),
+            "traversal entry must NOT have written outside the root"
+        );
+        assert!(
+            extract_root.join("providers/ok.toml").exists(),
+            "legitimate entry must still extract"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_skips_symlink_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extract_root = tmp.path().join(".registry_tmp");
+        std::fs::create_dir_all(&extract_root).unwrap();
+        let outside = tmp.path().join("secret-target");
+        std::fs::write(&outside, b"original").unwrap();
+
+        // Build a tarball whose first entry is a symlink pointing outside,
+        // followed by a file written "through" the symlink name.
+        let mut buf = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut buf);
+            let mut link_hdr = tar::Header::new_gnu();
+            link_hdr.set_entry_type(tar::EntryType::Symlink);
+            link_hdr.set_size(0);
+            link_hdr.set_mode(0o777);
+            b.append_link(&mut link_hdr, "librefang-registry-main/evil", &outside)
+                .unwrap();
+
+            let payload = b"PWNED";
+            let mut f_hdr = tar::Header::new_gnu();
+            f_hdr.set_entry_type(tar::EntryType::Regular);
+            f_hdr.set_size(payload.len() as u64);
+            f_hdr.set_mode(0o644);
+            f_hdr.set_cksum();
+            b.append_data(
+                &mut f_hdr,
+                "librefang-registry-main/evil/owned",
+                &payload[..],
+            )
+            .unwrap();
+            b.finish().unwrap();
+        }
+        let mut archive = tar::Archive::new(&buf[..]);
+        extract_entries_into(&mut archive, &extract_root).unwrap();
+
+        // The symlink entry was skipped, so `evil` is NOT a symlink and the
+        // original outside file is untouched.
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"original",
+            "symlink entry must not redirect a write outside the root"
+        );
+        let evil = extract_root.join("evil");
+        if let Ok(meta) = std::fs::symlink_metadata(&evil) {
+            assert!(
+                !meta.file_type().is_symlink(),
+                "symlink entry must have been skipped, not materialised"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_accepts_legitimate_tarball() {
+        // POSITIVE: a normal registry tarball extracts cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let extract_root = tmp.path().join(".registry_tmp");
+        std::fs::create_dir_all(&extract_root).unwrap();
+
+        let bytes = build_tar_with_files(&[
+            (
+                "librefang-registry-main/providers/groq.toml",
+                b"id=\"groq\"\nversion=\"1.0.0\"",
+            ),
+            (
+                "librefang-registry-main/hands/clip/HAND.toml",
+                b"id=\"clip\"",
+            ),
+        ]);
+        let mut archive = tar::Archive::new(&bytes[..]);
+        extract_entries_into(&mut archive, &extract_root).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(extract_root.join("providers/groq.toml")).unwrap(),
+            "id=\"groq\"\nversion=\"1.0.0\"",
+        );
+        assert!(extract_root.join("hands/clip/HAND.toml").exists());
     }
 }

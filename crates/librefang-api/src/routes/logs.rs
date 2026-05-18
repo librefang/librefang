@@ -41,7 +41,16 @@ pub async fn logs_stream(
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
 
-    tokio::spawn(async move {
+    // Subscribe to the kernel shutdown signal so this detached task can
+    // exit promptly on daemon shutdown. Without this the only loop exit
+    // is `tx.send` returning `Err` (client disconnect), so the spawned
+    // task holds the `Arc<AppState>` (and therefore the whole kernel
+    // graph via `state.kernel`) until the OS tears the socket down —
+    // pinning the entire `AppState` for as long as any dashboard tab
+    // keeps an SSE channel open (#5144).
+    let mut shutdown_rx = state.kernel.supervisor_ref().subscribe();
+
+    let forwarder = tokio::spawn(async move {
         // Cursor-based polling: `last_seq == 0` triggers the bounded
         // backfill on the very first iteration, then every subsequent
         // poll asks for entries strictly newer than the last delivered
@@ -54,7 +63,15 @@ pub async fn logs_stream(
         let mut first_poll = true;
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        return; // Kernel shutting down — drop Arc<AppState>.
+                    }
+                    continue;
+                }
+            }
 
             let entries = if first_poll {
                 // First connect: cap the backfill so a long-running
@@ -105,6 +122,21 @@ pub async fn logs_stream(
                 last_seq = last.seq;
             }
             first_poll = false;
+        }
+    });
+
+    // Watchdog: the forwarder handle was previously dropped, so a panic in
+    // the poll loop left the EventSource hung with no server trace. Watch it
+    // and log on panic (#5137). The watchdog ends naturally when the
+    // forwarder returns (client disconnect) — no leak.
+    tokio::spawn(async move {
+        if let Err(e) = forwarder.await {
+            if e.is_panic() {
+                tracing::error!(
+                    error = %e,
+                    "SSE log forwarder task panicked; EventSource stalled"
+                );
+            }
         }
     });
 

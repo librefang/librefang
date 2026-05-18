@@ -835,7 +835,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(qq);
         ch!(discourse);
         ch!(gitter);
-        ch!(ntfy);
         ch!(gotify);
         ch!(webhook);
         ch!(linkedin);
@@ -2176,12 +2175,15 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         // ── Newly exposed collection-typed sections (#4678) ──
         {"key": "taint_rules", "struct_field": "taint_rules"},
         {"key": "fallback_providers", "struct_field": "fallback_providers"},
+        {"key": "credential_pools", "struct_field": "credential_pools"},
         {"key": "sidecar_channels", "struct_field": "sidecar_channels"},
         {"key": "provider_urls", "struct_field": "provider_urls"},
         {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
         {"key": "provider_regions", "struct_field": "provider_regions"},
         {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
-        {"key": "tool_timeouts", "struct_field": "tool_timeouts"}
+        {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
+        // Background autonomous-loop executor knobs (#5168).
+        {"key": "background", "struct_field": "background"}
     ])
 }
 

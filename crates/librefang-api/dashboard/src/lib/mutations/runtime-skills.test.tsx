@@ -19,7 +19,6 @@ import {
 } from "./skills";
 import {
   runtimeKeys,
-  overviewKeys,
   skillKeys,
   fanghubKeys,
   clawhubKeys,
@@ -73,7 +72,13 @@ function expectAllSurfacesInvalidated(spy: ReturnType<typeof vi.spyOn>) {
 }
 
 describe("useRestoreBackup", () => {
-  it("invalidates runtimeKeys.backups() and overviewKeys.snapshot()", async () => {
+  // A backup restore overwrites the entire ~/.librefang data directory
+  // — workflows/, the SQLite substrate under data/, custom_models.json,
+  // and config.toml (provider config). Enumerating each domain `.all`
+  // key drifted from what backup.rs actually archives (#5182 follow-up
+  // to #5140), so the mutation now performs a daemon-restart level
+  // cache reset via a single argument-less `invalidateQueries()` call.
+  it("performs a full cache reset after restore (#5140, #5182)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -84,12 +89,10 @@ describe("useRestoreBackup", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: runtimeKeys.backups(),
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: overviewKeys.snapshot(),
-    });
+    // Single, argument-less invalidate covers every cached domain — no
+    // query-key allowlist to drift against backup.rs.
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith();
   });
 });
 
