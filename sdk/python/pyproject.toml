@@ -46,8 +46,14 @@ exclude = ["examples*"]
 [tool.setuptools.package-data]
 librefang = ["py.typed"]
 
+# `python_files = ["*.py"]` made pytest import every example *script*
+# as a test module (they target the legacy flat `librefang_sdk`
+# layout, not the `librefang.*` package), so `pytest` errored at
+# collection on a clean checkout. Restrict to real test files — the
+# standard convention — so example scripts stay scripts.
 [tool.pytest.ini_options]
-testpaths = ["examples"]
-python_files = ["*.py"]
+testpaths = ["tests", "examples"]
+python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_mode = "auto"
