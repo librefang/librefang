@@ -76,7 +76,7 @@ LibreFang 从以下 TOML 文件读取配置：
 **核心行为：**
 
 - 配置中的每个结构体都使用了 `#[serde(default)]`，这意味着**所有字段都是可选的**。未填写的字段将使用文档中说明的默认值。
-- 通道配置节（`[channels.telegram]`、`[channels.discord]` 等）采用 `Option<T>` 类型——缺少该节时，对应的通道适配器将被**禁用**。即使只写了节头（内容为空），也会以默认值启用该适配器。
+- 通道配置节（`[channels.discord]`、`[channels.slack]` 等）采用 `Option<T>` 类型——缺少该节时，对应的通道适配器将被**禁用**。即使只写了节头（内容为空），也会以默认值启用该适配器。Telegram 现已改为 sidecar 模式，使用 `[[sidecar_channels]]` 而非 `[channels.telegram]`。
 - 密钥**绝不直接存储在 config.toml 中**。`api_key_env` 和 `bot_token_env` 等字段保存的是环境变量的**名称**，实际密钥从该环境变量中读取，以防止密钥被意外提交到版本控制系统。
 - 敏感字段（`api_key`、`shared_secret`）在调试输出和日志中会被自动脱敏。
 
@@ -318,11 +318,14 @@ slack = "U0123ABCDEF"
 # --- 通道适配器 ---
 # （所有 45 个适配器的详细说明见下方"通道配置"章节）
 
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = []
-# default_agent = "assistant"
-poll_interval_secs = 1
+# Telegram 使用 sidecar 适配器（内置通道已在 #5241 中移除）：
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
 
 [channels.discord]
 bot_token_env = "DISCORD_BOT_TOKEN"
@@ -804,27 +807,22 @@ timeout_secs = 10
 | `account_id` | string 或 null | `null` | 当前 Bot 实例的唯一标识符。用于通过 `[[bindings]]` 匹配规则进行多 Bot 路由。 |
 | `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
 
-#### `[channels.telegram]`
+#### Telegram
+
+Telegram 现已改为 sidecar 模式，`[channels.telegram]` 配置块不再被接受。请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = []
-# default_agent = "assistant"
-poll_interval_secs = 1
-# api_url = "https://api.telegram.org"  # 覆盖用于本地 Bot API 服务器
-# account_id = "my-telegram-bot"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "111,@alice"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | 存放 Telegram Bot API 令牌的环境变量。 |
-| `allowed_users` | list of i64 | `[]` | 允许交互的 Telegram 用户 ID 列表。空列表 = 允许所有人。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `poll_interval_secs` | u64 | `1` | 长轮询间隔（秒）。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `api_url` | string 或 null | `null` | 覆盖 Telegram Bot API 基础 URL。适用于本地 Bot API 服务器实例。默认为 `https://api.telegram.org`。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+Sidecar 适配器保留了所有原有运行语义。详见 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
 #### `[channels.discord]`
 
@@ -1753,15 +1751,15 @@ slack = "U0ABCDEFG"
 每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 model = "claude-haiku-4-5-20251001"
-system_prompt = "You are a concise Telegram assistant."
+system_prompt = "You are a concise Discord assistant."
 dm_policy = "respond"
 group_policy = "mention_only"
 rate_limit_per_minute = 0
 rate_limit_per_user = 10
 threading = true
-output_format = "telegram_html"
+output_format = "markdown"
 usage_footer = "tokens"
 typing_mode = "instant"
 disable_commands = false

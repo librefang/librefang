@@ -140,22 +140,10 @@ struct ChannelMeta {
 }
 
 const CHANNEL_REGISTRY: &[ChannelMeta] = &[
-    // ── Messaging (12) ──────────────────────────────────────────────
-    ChannelMeta {
-        name: "telegram", display_name: "Telegram", icon: "TG",
-        description: "Telegram Bot API — long-polling adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token from @BotFather",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("TELEGRAM_BOT_TOKEN"), required: true, placeholder: "123456:ABC-DEF...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "12345, 67890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "poll_interval_secs", label: "Poll Interval (sec)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "1", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open @BotFather on Telegram", "Send /newbot and follow the prompts", "Paste the token below"],
-        config_template: "[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"",
-    },
+    // ── Messaging (11) ──────────────────────────────────────────────
+    // telegram migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.telegram); no longer an in-process
+    // channel.
     ChannelMeta {
         name: "discord", display_name: "Discord", icon: "DC",
         description: "Discord Gateway bot adapter",
@@ -814,7 +802,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
-        "telegram" => config.telegram.is_some(),
         "discord" => config.discord.is_some(),
         "slack" => config.slack.is_some(),
         "whatsapp" => config.whatsapp.is_some(),
@@ -972,16 +959,86 @@ fn find_channel_meta(name: &str) -> Option<&'static ChannelMeta> {
     CHANNEL_REGISTRY.iter().find(|c| c.name == name)
 }
 
+/// Synthesize dashboard channel rows for configured `[[sidecar_channels]]`.
+///
+/// telegram / ntfy (and any other sidecar adapter) were removed from
+/// `CHANNEL_REGISTRY` when they migrated out-of-process (#5241 / #5224),
+/// which silently dropped them from the dashboard channels page. They
+/// are still channels — surface the configured ones here so the
+/// operator view stays consistent regardless of whether an adapter
+/// runs in-process or as a sidecar. These rows are config.toml-managed
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
+/// they carry no editable `fields`; the page renders them as
+/// configured/online cards (it conditionally hides empty
+/// `fields`/`setup_steps`).
+fn sidecar_channel_rows(
+    sidecar: &[librefang_types::config::SidecarChannelConfig],
+    msgs_24h: &std::collections::HashMap<String, u64>,
+    with_msgs: bool,
+) -> Vec<serde_json::Value> {
+    let registry: std::collections::HashSet<&str> =
+        CHANNEL_REGISTRY.iter().map(|c| c.name).collect();
+    let mut instance_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for sc in sidecar {
+        *instance_counts.entry(sc.name.as_str()).or_insert(0) += 1;
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for sc in sidecar {
+        let name = sc.name.as_str();
+        // One card per distinct sidecar name; never shadow an
+        // in-process registry entry that happens to share the name.
+        if registry.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let mut row = serde_json::json!({
+            "name": name,
+            "display_name": name,
+            "icon": "SC",
+            "description": format!(
+                "Out-of-process sidecar adapter ({} {})",
+                sc.command,
+                sc.args.join(" ")
+            ),
+            "category": "sidecar",
+            "difficulty": "",
+            "setup_time": "",
+            "quick_setup": "",
+            "setup_type": "sidecar",
+            "configured": true,
+            "instance_count": instance_counts.get(name).copied().unwrap_or(1),
+            "has_token": true,
+            "fields": Vec::<serde_json::Value>::new(),
+            "setup_steps": [
+                "Runs as an out-of-process sidecar adapter",
+                "Configured via [[sidecar_channels]] in config.toml \
+                 (Config \u{2192} Sidecar Channels)",
+            ],
+            "config_template": format!(
+                "[[sidecar_channels]]\nname = \"{name}\"\nchannel_type = \"{channel_type}\""
+            ),
+        });
+        if with_msgs {
+            let m = msgs_24h
+                .get(channel_type)
+                .or_else(|| msgs_24h.get(name))
+                .copied()
+                .unwrap_or(0);
+            row["msgs_24h"] = serde_json::json!(m);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "telegram" => config
-            .telegram
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "discord" => config
             .discord
             .as_ref()
@@ -1162,7 +1219,6 @@ fn channel_config_values(
 /// `instance_count`.
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
-        "telegram" => config.telegram.len(),
         "discord" => config.discord.len(),
         "slack" => config.slack.len(),
         "whatsapp" => config.whatsapp.len(),
@@ -1228,7 +1284,6 @@ fn channel_instances_serialized(
             .collect()
     }
     match name {
-        "telegram" => ser(&config.telegram),
         "discord" => ser(&config.discord),
         "slack" => ser(&config.slack),
         "whatsapp" => ser(&config.whatsapp),
@@ -1356,6 +1411,16 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    // Sidecar-backed channels (telegram / ntfy / …) are not in
+    // CHANNEL_REGISTRY but are still channels — surface the configured
+    // ones so the operator view stays consistent (#5241 / #5224).
+    {
+        let kcfg = state.kernel.config_ref();
+        let rows = sidecar_channel_rows(&kcfg.sidecar_channels, &msgs_24h, true);
+        configured_count += rows.len() as u32;
+        channels.extend(rows);
+    }
+
     let total = channels.len();
     // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
     // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
@@ -1414,6 +1479,17 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
         }
         channels.push(channel_json);
+    }
+
+    // Sidecar-backed channels — keep the snapshot consistent with
+    // /api/channels (#5241 / #5224).
+    {
+        let kcfg = state.kernel.config_ref();
+        channels.extend(sidecar_channel_rows(
+            &kcfg.sidecar_channels,
+            &std::collections::HashMap::new(),
+            false,
+        ));
     }
 
     channels
@@ -1716,7 +1792,7 @@ fn build_instance_fields_json(
         .collect();
 
     // For per-instance secret fields, override `has_value` to check the env
-    // var that THIS instance's `<key>` points at (e.g. `TELEGRAM_BOT_TOKEN_2`)
+    // var that THIS instance's `<key>` points at (e.g. `DISCORD_BOT_TOKEN_2`)
     // instead of the field schema's default env var. Without this, every
     // instance would report the same `has_value` derived from the default
     // env var, defeating the purpose of multiple instances.
@@ -1742,7 +1818,7 @@ fn build_instance_fields_json(
             if field_json.get("key").and_then(|v| v.as_str()) == Some(field_def.key) {
                 field_json["has_value"] = serde_json::Value::Bool(has_value);
                 // Surface the env-var name the instance is pointing at so
-                // the UI can show "TELEGRAM_BOT_TOKEN_2" next to the secret
+                // the UI can show "DISCORD_BOT_TOKEN_2" next to the secret
                 // field — otherwise the user can't tell instances apart.
                 field_json["env_var"] = serde_json::Value::String(pointed_env_name.to_string());
             }
@@ -1835,7 +1911,7 @@ fn resolve_secret_env_overrides(
 /// — `OneOrMany`'s deserialiser coerces TOML integers to JSON strings in
 /// some fields (see `librefang-types/src/config/serde_helpers.rs`), and
 /// the two views diverge. All sites that build the hash today route
-/// through `serde_json::to_value(&TelegramConfig)` (and friends) so this
+/// through `serde_json::to_value(&DiscordConfig)` (and friends) so this
 /// holds; the test `instance_signature_stable_across_key_order` pins it.
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
@@ -2597,21 +2673,6 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
                 return Err(format!("Discord API error: {body}"));
             }
         }
-        "telegram" => {
-            let token = std::env::var("TELEGRAM_BOT_TOKEN")
-                .map_err(|_| "TELEGRAM_BOT_TOKEN not set".to_string())?;
-            let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({ "chat_id": target_id, "text": test_msg }))
-                .send()
-                .await
-                .map_err(|e| format!("HTTP request failed: {e}"))?;
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Telegram API error: {body}"));
-            }
-        }
         "slack" => {
             let token = std::env::var("SLACK_BOT_TOKEN")
                 .map_err(|_| "SLACK_BOT_TOKEN not set".to_string())?;
@@ -3125,12 +3186,12 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Telegram requires TELEGRAM_BOT_TOKEN. With it unset we must surface
+        // Discord requires DISCORD_BOT_TOKEN. With it unset we must surface
         // a 412 — NOT a 200 with a "status: error" body, which silently passes
         // dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("TELEGRAM_BOT_TOKEN");
+        let _g = EnvGuard::unset("DISCORD_BOT_TOKEN");
 
-        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3146,9 +3207,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "test-token-not-real");
+        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "test-token-not-real");
 
-        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3157,25 +3218,25 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn downstream_send_failure_returns_502() {
         let _lock = ENV_LOCK.lock().await;
-        // Telegram bot token is set (so we get past the 412 gate) but the
+        // Discord bot token is set (so we get past the 412 gate) but the
         // value is bogus, so Bot API will reject the call. We pass a
         // `chat_id` to force the live-send branch. Result: handler must
         // surface a 502 Bad Gateway.
         //
-        // This exercises a real network round-trip to api.telegram.org —
+        // This exercises a real network round-trip to discord.com —
         // it'll be skipped in offline CI environments. We detect that by
         // looking at the response status: anything other than 502 in an
         // offline run means we couldn't reach the network at all, which
         // is fine for the purpose of *this* assertion (we already cover
         // the 200 / 412 / 404 paths deterministically above).
-        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "0:invalid-token-for-test");
+        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "0:invalid-token-for-test");
 
         let body = axum::body::Bytes::from_static(b"{\"chat_id\":\"1\"}");
-        let resp = test_channel(Path("telegram".to_string()), body)
+        let resp = test_channel(Path("discord".to_string()), body)
             .await
             .into_response();
 
-        // Either: we reached Telegram and got a 401-equivalent → handler
+        // Either: we reached Discord and got a 401-equivalent → handler
         // returns 502; or we have no network → reqwest errors out which
         // also gets mapped to 502. Both are acceptable. A 200 here would
         // be the bug from #3507.
@@ -3195,8 +3256,8 @@ mod instance_helper_tests {
     //! and have no business reaching production untested.
     use super::*;
 
-    fn telegram_meta() -> &'static ChannelMeta {
-        find_channel_meta("telegram").expect("telegram is in the registry")
+    fn discord_meta() -> &'static ChannelMeta {
+        find_channel_meta("discord").expect("discord is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
@@ -3207,11 +3268,11 @@ mod instance_helper_tests {
     /// env-var name (no suffix), matching the legacy single-instance flow.
     #[test]
     fn resolve_overrides_picks_default_for_first_instance() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN"),
+            Some("DISCORD_BOT_TOKEN"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -3222,15 +3283,15 @@ mod instance_helper_tests {
     /// at idx 1) — it must pick `_BOT_TOKEN_2`, the lowest unused suffix.
     #[test]
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
-            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN_2"),
+            Some("DISCORD_BOT_TOKEN_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -3241,15 +3302,15 @@ mod instance_helper_tests {
     /// bot token in place" actually rotate in place.
     #[test]
     fn resolve_overrides_preserves_existing_env_name_on_update() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
-            inst_with_env("MY_CUSTOM_TG_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
+            inst_with_env("MY_CUSTOM_DC_TOKEN"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_TG_TOKEN"),
+            Some("MY_CUSTOM_DC_TOKEN"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -3261,18 +3322,18 @@ mod instance_helper_tests {
     /// row should still be allowed to pick its own slot).
     #[test]
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+            inst_with_env("DISCORD_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN_2")
+            Some("DISCORD_BOT_TOKEN_2")
         );
     }
 

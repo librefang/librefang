@@ -23,17 +23,17 @@ librefang config set-key telegram             # .env 文件
 5. 添加到配置文件：
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "assistant"
-# 可选：限制为特定 Telegram 用户 ID
-# allowed_users = ["123456789"]
-
-[channels.telegram.overrides]
-# 可选：使用 Telegram 原生 HTML 格式
-# output_format = "telegram_html"
-# group_policy = "mention_only"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "123456789,@alice"
 ```
+
+`[channels.telegram]` 配置块已不再被接受（#5241 已移除内置适配器）。请改用以上 `[[sidecar_channels]]` 声明。
 
 6. 重启守护进程：
 
@@ -43,9 +43,9 @@ librefang start
 
 ### 工作原理
 
-Telegram 适配器使用 `getUpdates` API 进行长轮询，每隔几秒轮询一次，长轮询超时为 30 秒。API 调用失败时应用指数退避（从 1 秒开始，最长 60 秒）。通过 `watch::channel` 协调关闭。
+Telegram sidecar 适配器（`librefang.sidecar.adapters.telegram`，随 `librefang-sdk` 发布）使用 `getUpdates` API 进行长轮询，服务端超时 30 秒。API 调用失败时由 supervisor 应用指数退避，进程崩溃后自动重启。
 
-来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会使用共享的 `split_message()` 工具自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
+来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
 
 ### 文件附件
 
@@ -461,8 +461,8 @@ http://127.0.0.1:4545/
 如需 LibreFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
 
 ```toml
-[channels.telegram]
-split_long_messages = false   # 在 4096 处截断，不拆分
+[channels.discord]
+split_long_messages = false   # 截断而非拆分
 ```
 
-Telegram 和 Discord 的默认值为 `true`。
+Discord 和 Telegram sidecar 适配器的默认值均为 `true`。

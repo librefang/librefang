@@ -28,7 +28,7 @@ use walkdir::WalkDir;
 /// - Missing required fields on agent manifests
 ///
 /// **What this does NOT catch:**
-/// - Unknown fields **nested inside** sections (e.g. `[channels.telegram].foo`).
+/// - Unknown fields **nested inside** sections (e.g. `[channels.discord].foo`).
 ///   LibreFang's channel structs use `#[serde(default)]` without
 ///   `deny_unknown_fields`, so unknown nested fields are silently ignored at
 ///   deserialization time. Catching these would require per-struct field-list
@@ -592,10 +592,10 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.telegram]\n\
+             [channels.discord]\n\
              bot_token_env = \"TG_TOKEN\"\n\
              \n\
-             [channels.telegram.overrides]\n\
+             [channels.discord.overrides]\n\
              group_policy = \"respond\"\n",
         )
         .unwrap();
@@ -618,8 +618,8 @@ mod tests {
         );
     }
 
-    /// Since #5129 / #5130 the six locked-down structs (`TelegramConfig`,
-    /// `DiscordConfig`, `SlackConfig`, `WhatsAppConfig`, `MattermostConfig`,
+    /// Since #5129 / #5130 the five locked-down structs (`DiscordConfig`,
+    /// `SlackConfig`, `WhatsAppConfig`, `MattermostConfig`,
     /// `McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`, so an
     /// unknown field nested inside any of them now surfaces as a
     /// "does not cleanly deserialize" warning at migrate time. The remaining
@@ -635,7 +635,7 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.telegram]\n\
+             [channels.discord]\n\
              bot_token_env = \"TG_TOKEN\"\n\
              nickname = \"this-field-does-not-exist\"\n",
         )
@@ -649,7 +649,7 @@ mod tests {
         };
         let report = migrate(&options).unwrap();
 
-        // The deny_unknown_fields attribute on TelegramConfig surfaces the
+        // The deny_unknown_fields attribute on DiscordConfig surfaces the
         // unknown nested key as a deserialize-failure warning. The bad field
         // name must appear in the message so operators can locate the typo.
         assert!(

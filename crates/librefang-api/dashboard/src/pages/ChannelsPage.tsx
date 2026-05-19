@@ -142,15 +142,21 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
           {msgs > 0 ? t("common.running") : t("common.idle")}
         </span>
       </Badge>
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-        className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
-        aria-label={t("channels.config")}
-        title={t("channels.config")}
-      >
-        <Settings className="w-3.5 h-3.5" />
-      </button>
+      {/* Sidecar channels are config.toml-managed (no /api/channels
+          configure endpoint — it would 404), so suppress the inline
+          Configure affordance; the whole-card click still opens the
+          read-only details drawer. */}
+      {c.category !== "sidecar" && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+          className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
+          aria-label={t("channels.config")}
+          title={t("channels.config")}
+        >
+          <Settings className="w-3.5 h-3.5" />
+        </button>
+      )}
       {viewMode === "grid" && (
         <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
       )}
@@ -283,17 +289,31 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex gap-2 pt-2">
-            <Button variant="primary" className="flex-1" onClick={onConfigure} leftIcon={<Settings className="w-4 h-4" />}>
-              {channel.configured ? t("channels.update_config") : t("channels.setup_adapter")}
-            </Button>
-            {channel.configured && (
-              <Button variant="secondary" onClick={onTest} leftIcon={<CheckCircle2 className="w-4 h-4" />}>
-                {t("channels.test") || "Test"}
+          {/* Actions — sidecar channels run out-of-process and have no
+              /api/channels configure/test endpoint (those are
+              CHANNEL_REGISTRY-only and 404 for a sidecar name), so show
+              a read-only note pointing at where they ARE managed
+              instead of broken Configure/Test buttons. */}
+          {channel.category === "sidecar" ? (
+            <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
+              <p className="text-xs text-text-dim">
+                Runs as an out-of-process sidecar adapter. Manage it in
+                config.toml (<code className="font-mono">[[sidecar_channels]]</code>)
+                — Config → Sidecar Channels.
+              </p>
+            </div>
+          ) : (
+            <div className="flex gap-2 pt-2">
+              <Button variant="primary" className="flex-1" onClick={onConfigure} leftIcon={<Settings className="w-4 h-4" />}>
+                {channel.configured ? t("channels.update_config") : t("channels.setup_adapter")}
               </Button>
-            )}
-          </div>
+              {channel.configured && (
+                <Button variant="secondary" onClick={onTest} leftIcon={<CheckCircle2 className="w-4 h-4" />}>
+                  {t("channels.test") || "Test"}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}

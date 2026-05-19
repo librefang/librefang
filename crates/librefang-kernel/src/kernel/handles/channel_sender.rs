@@ -56,7 +56,6 @@ macro_rules! for_each_channel_field {
         $mac!(signal, "signal");
         $mac!(slack, "slack");
         $mac!(teams, "teams");
-        $mac!(telegram, "telegram");
         $mac!(threema, "threema");
         $mac!(twist, "twist");
         $mac!(twitch, "twitch");
@@ -491,7 +490,6 @@ mod tests {
             "signal",
             "slack",
             "teams",
-            "telegram",
             "threema",
             "twist",
             "twitch",
