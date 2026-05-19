@@ -401,28 +401,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for vb in self.channels.viber.iter() {
-            if std::env::var(&vb.auth_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Viber configured but {} is not set",
-                    vb.auth_token_env
-                ));
-            }
-        }
-        for ms in self.channels.messenger.iter() {
-            if std::env::var(&ms.page_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Messenger configured but {} is not set",
-                    ms.page_token_env
-                ));
-            }
-        }
         for rd in self.channels.reddit.iter() {
             if std::env::var(&rd.client_secret_env)
                 .unwrap_or_default()
@@ -503,17 +481,6 @@ impl KernelConfig {
                 warnings.push(format!(
                     "Threema configured but {} is not set",
                     tm.secret_env
-                ));
-            }
-        }
-        for ns in self.channels.nostr.iter() {
-            if std::env::var(&ns.private_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Nostr configured but {} is not set",
-                    ns.private_key_env
                 ));
             }
         }
@@ -603,17 +570,6 @@ impl KernelConfig {
                 }
             }
         }
-        for dc in self.channels.discourse.iter() {
-            if std::env::var(&dc.api_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Discourse configured but {} is not set",
-                    dc.api_key_env
-                ));
-            }
-        }
         for gt in self.channels.gitter.iter() {
             if std::env::var(&gt.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
@@ -640,17 +596,6 @@ impl KernelConfig {
                     )),
                     Some(_) => {}
                 }
-            }
-        }
-        for li in self.channels.linkedin.iter() {
-            if std::env::var(&li.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "LinkedIn configured but {} is not set",
-                    li.access_token_env
-                ));
             }
         }
 

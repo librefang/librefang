@@ -813,8 +813,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(zulip);
         ch!(xmpp);
         ch!(line);
-        ch!(viber);
-        ch!(messenger);
         ch!(reddit);
         ch!(bluesky);
         ch!(feishu);
@@ -823,7 +821,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(guilded);
         ch!(keybase);
         ch!(threema);
-        ch!(nostr);
         ch!(webex);
         ch!(pumble);
         ch!(flock);
@@ -831,10 +828,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(mumble);
         ch!(dingtalk);
         ch!(qq);
-        ch!(discourse);
         ch!(gitter);
         ch!(webhook);
-        ch!(linkedin);
         ch!(wecom);
         serde_json::Value::Object(map)
     };
