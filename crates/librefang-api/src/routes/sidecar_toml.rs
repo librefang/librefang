@@ -21,23 +21,41 @@ pub fn upsert_sidecar_block(
         .parse()
         .map_err(|e| format!("parse {path:?}: {e}"))?;
 
-    // Build the replacement table for this single block.
-    let mut block = Table::new();
-    block["name"] = value(name);
-    block["channel_type"] = value(channel_type);
-    block["command"] = value(command);
-    let mut args_arr = Array::new();
-    for a in args {
-        args_arr.push(*a);
+    // Helper: apply ONLY the schema-managed keys to `block`. When this
+    // helper updates an existing block, operator-tuned fields such as
+    // `restart`, `restart_max_retries`, `ready_timeout_secs`,
+    // `message_buffer`, `overflow`, … must survive — the dashboard
+    // configure form is not aware of them and the user does not expect
+    // saving a token to also reset their supervision tunables. Schema-
+    // managed = `name`, `channel_type`, `command`, `args`, plus the
+    // entire `env` table (`env` IS schema-managed: the configure form
+    // is the source of truth for non-secret env values for the catalog
+    // entry, so it must wholly replace whatever was previously there;
+    // a key removed from the form must disappear).
+    fn apply_schema_managed(
+        block: &mut Table,
+        name: &str,
+        channel_type: &str,
+        command: &str,
+        args: &[&str],
+        env: &BTreeMap<String, String>,
+    ) {
+        block["name"] = value(name);
+        block["channel_type"] = value(channel_type);
+        block["command"] = value(command);
+        let mut args_arr = Array::new();
+        for a in args {
+            args_arr.push(*a);
+        }
+        block["args"] = value(args_arr);
+        let mut env_table = Table::new();
+        for (k, v) in env {
+            env_table[k] = value(v.clone());
+        }
+        // Render as `[sidecar_channels.env]` (not dotted inline).
+        env_table.set_implicit(false);
+        block["env"] = Item::Table(env_table);
     }
-    block["args"] = value(args_arr);
-    let mut env_table = Table::new();
-    for (k, v) in env {
-        env_table[k] = value(v.clone());
-    }
-    // Render as `[sidecar_channels.env]` (not dotted inline).
-    env_table.set_implicit(false);
-    block["env"] = Item::Table(env_table);
 
     let aot_item = doc
         .entry("sidecar_channels")
@@ -55,12 +73,15 @@ pub fn upsert_sidecar_block(
             .and_then(|i| i.as_str())
             .unwrap_or("");
         if existing_name == name {
-            *aot.get_mut(i).expect("indexed") = block.clone();
+            let existing = aot.get_mut(i).expect("indexed");
+            apply_schema_managed(existing, name, channel_type, command, args, env);
             replaced = true;
             break;
         }
     }
     if !replaced {
+        let mut block = Table::new();
+        apply_schema_managed(&mut block, name, channel_type, command, args, env);
         aot.push(block);
     }
 

@@ -104,3 +104,53 @@ fn does_not_touch_other_sidecar_blocks() {
     );
     assert!(content.contains("ALLOWED_USERS = \"99\""));
 }
+
+#[test]
+fn preserves_operator_tuned_fields_on_replace() {
+    // Operator-tuned supervision fields (`restart`, retry/backoff
+    // limits, `ready_timeout_secs`, `message_buffer`, `overflow`) live
+    // on the same `[[sidecar_channels]]` table but are NOT part of the
+    // configure form's schema-managed key set. Replacing the whole
+    // block on every save would silently revert them to the serde
+    // defaults — a regression the codex review caught. Schema-managed
+    // env keys still replace wholesale (see existing
+    // `replaces_existing_block_with_same_name`).
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         command = \"python3\"\n\
+         args = [\"-m\",\"librefang.sidecar.adapters.telegram\"]\n\
+         restart = false\n\
+         restart_max_retries = 5\n\
+         ready_timeout_secs = 60\n\
+         message_buffer = 200\n\
+         \n\
+         [sidecar_channels.env]\n\
+         OBSOLETE = \"x\"\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[("ALLOWED_USERS", "1")]),
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(content.contains("restart = false"), "restart preserved");
+    assert!(content.contains("restart_max_retries = 5"));
+    assert!(content.contains("ready_timeout_secs = 60"));
+    assert!(content.contains("message_buffer = 200"));
+    assert!(
+        !content.contains("OBSOLETE"),
+        "schema-managed env wholly replaced"
+    );
+    assert!(content.contains("ALLOWED_USERS = \"1\""));
+}
