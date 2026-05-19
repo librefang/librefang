@@ -29,7 +29,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::config::{ChannelsConfig, DiscordConfig, OneOrMany};
+use librefang_types::config::{ChannelsConfig, DiscordConfig, OneOrMany, SidecarChannelConfig};
 use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -976,5 +976,94 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     assert!(
         body.get("status").is_none(),
         "legacy `status` field must be gone post-#3505: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar-backed channels stay visible on /api/channels (#5241 / #5224)
+// ---------------------------------------------------------------------------
+
+/// `SidecarChannelConfig` has no `Default` and many serde-defaulted
+/// fields — build it from JSON so the test stays robust to new fields.
+fn sidecar_telegram() -> SidecarChannelConfig {
+    serde_json::from_value(serde_json::json!({
+        "name": "telegram",
+        "command": "python3",
+        "args": ["-m", "librefang.sidecar.adapters.telegram"],
+        "channel_type": "telegram",
+    }))
+    .expect("valid SidecarChannelConfig")
+}
+
+async fn boot_with_sidecar(sidecar: Vec<SidecarChannelConfig>) -> Harness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.sidecar_channels = sidecar.clone();
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::channels::router())
+        .with_state(state.clone());
+    Harness {
+        app,
+        _state: state,
+        _test: test,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_list_includes_configured_sidecar_channels() {
+    // Regression: telegram / ntfy migrated out-of-process were removed
+    // from CHANNEL_REGISTRY and silently vanished from the dashboard
+    // channels page. A configured [[sidecar_channels]] entry must still
+    // surface as a channel row so the operator view stays consistent
+    // regardless of in-process vs sidecar (#5241 / #5224).
+    let h = boot_with_sidecar(vec![sidecar_telegram()]).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let arr = body["items"].as_array().expect("items");
+    let tg = arr
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("configured sidecar telegram must appear in /api/channels");
+    assert_eq!(
+        tg["configured"], true,
+        "a declared [[sidecar_channels]] is configured: {tg}"
+    );
+    assert_eq!(tg["category"], "sidecar");
+    assert_eq!(tg["setup_type"], "sidecar");
+    // config.toml-managed — no editable dashboard form fields (the page
+    // renders it as a configured/online card, not a broken setup form).
+    assert_eq!(
+        tg["fields"].as_array().map(|a| a.len()),
+        Some(0),
+        "sidecar row must carry no editable fields: {tg}"
+    );
+    // Counts toward the dashboard's "X configured" sub-line.
+    assert!(body["configured_count"].as_u64().unwrap_or(0) >= 1);
+    // Exactly one telegram row — the in-process ChannelMeta is gone, so
+    // the sidecar row must not be shadowed or duplicated.
+    assert_eq!(
+        arr.iter().filter(|r| r["name"] == "telegram").count(),
+        1,
+        "exactly one telegram row (the sidecar one)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_list_without_sidecar_has_no_sidecar_rows() {
+    // Negative control: with nothing configured, no synthetic sidecar
+    // rows leak in (only the in-process CHANNEL_REGISTRY).
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["items"].as_array().expect("items");
+    assert!(
+        !arr.iter().any(|r| r["category"] == "sidecar"),
+        "no sidecar rows when none are configured"
+    );
+    assert!(
+        !arr.iter().any(|r| r["name"] == "telegram"),
+        "telegram is not in CHANNEL_REGISTRY and none configured"
     );
 }
