@@ -2180,7 +2180,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     /// Auto-describe inbound channel image. Mirror of `transcribe_inbound_audio`.
     ///
-    /// Honors `[media] image_description` (default ON per upstream config)
+    /// Honors `[media] image_description` (default OFF — opt-in once a
+    /// vision provider has been configured explicitly)
     /// and dispatches to `MediaEngine::describe_image`, which routes to the
     /// configured `image_provider` (default `gemini-2.5-flash`). Returns the
     /// description text on success so the bridge can prepend it as a
