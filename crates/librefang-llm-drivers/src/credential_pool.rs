@@ -16,6 +16,26 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Build the redacted hint for an API key. Returns `"****"` plus the last
+/// four characters (Unicode-safe — we count by `char`, never by byte
+/// boundary, so an exotic key containing multi-byte chars cannot panic the
+/// diagnostic path with an `is_char_boundary` slice error). API keys are
+/// expected to be ASCII in practice; this is defense-in-depth so a bad
+/// pool config never takes down the snapshot endpoint.
+fn redact_key_hint(api_key: &str) -> String {
+    // Collect the last four chars in original order without slicing on
+    // arbitrary byte offsets. `chars().count()` is O(n) on UTF-8 but key
+    // strings are short (typically < 200 bytes) so the cost is negligible
+    // and is paid only at snapshot time (diagnostics), never per-request.
+    let total = api_key.chars().count();
+    if total >= 4 {
+        let tail: String = api_key.chars().skip(total - 4).collect();
+        format!("****{tail}")
+    } else {
+        "****".to_string()
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Default cooldown duration after a 429 rate-limit response.
@@ -63,11 +83,7 @@ pub struct PooledCredential {
 impl std::fmt::Debug for PooledCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact the API key so it is never printed in logs or panic messages.
-        let hint = if self.api_key.len() >= 4 {
-            format!("****{}", &self.api_key[self.api_key.len() - 4..])
-        } else {
-            "****".to_string()
-        };
+        let hint = redact_key_hint(&self.api_key);
         f.debug_struct("PooledCredential")
             .field("api_key", &hint)
             .field("priority", &self.priority)
@@ -119,11 +135,7 @@ pub struct CredentialSnapshot {
 
 impl CredentialSnapshot {
     fn from_credential(c: &PooledCredential) -> Self {
-        let hint = if c.api_key.len() >= 4 {
-            format!("****{}", &c.api_key[c.api_key.len() - 4..])
-        } else {
-            "****".to_string()
-        };
+        let hint = redact_key_hint(&c.api_key);
         let now = Instant::now();
         let (is_exhausted, cooldown) = match c.exhausted_until {
             None => (false, None),
@@ -688,5 +700,28 @@ mod tests {
             Some(u64::MAX),
             "mark_permanent should sentinel-encode as u64::MAX"
         );
+    }
+
+    // ── key_hint redaction (UTF-8 boundary safety) ────────────────────────────
+
+    /// Defense-in-depth: a key with a non-ASCII character at the suffix boundary
+    /// must NOT panic the redaction helper. API keys are expected to be ASCII
+    /// in practice, but the diagnostic snapshot path is invoked from HTTP/CLI/
+    /// dashboard rendering — a panic there would surface as a 500 to the caller.
+    #[test]
+    fn redact_key_hint_handles_multibyte_chars() {
+        // 8-char key ending in a 4-byte emoji — `&s[s.len() - 4..]` would
+        // panic with "byte index N is not a char boundary" on the old impl.
+        let key = "abcd🦀ef"; // 7 chars; last 4 are 'd', '🦀', 'e', 'f'.
+        let hint = super::redact_key_hint(key);
+        assert_eq!(hint, "****d🦀ef");
+        // Pure-ASCII fast path still works.
+        assert_eq!(super::redact_key_hint("sk-abcd1234"), "****1234");
+        // Short key (< 4 chars) falls back to a plain redaction marker.
+        assert_eq!(super::redact_key_hint("xyz"), "****");
+        assert_eq!(super::redact_key_hint(""), "****");
+        // 4-byte char that occupies multiple bytes still counts as one char.
+        let key2 = "🦀🦀🦀🦀"; // 4 chars / 16 bytes.
+        assert_eq!(super::redact_key_hint(key2), "****🦀🦀🦀🦀");
     }
 }

@@ -10068,10 +10068,12 @@ fn pool_config_path(config_override: Option<PathBuf>) -> PathBuf {
     config_override.unwrap_or_else(|| librefang_home().join("config.toml"))
 }
 
-/// Parse config.toml into a mutable `toml::Value` tree. Exits with a friendly
-/// message on missing-file / parse errors. Shared by all four mutating pool
-/// commands so the same diagnostic appears for each entry point.
-fn pool_load_toml_or_exit(path: &std::path::Path) -> toml::Value {
+/// Parse config.toml into a `toml_edit::DocumentMut` so comments, blank
+/// lines, key ordering, and unrelated sections are preserved through any
+/// mutation. Exits with a friendly message on missing-file / parse errors.
+/// Shared by all three mutating pool commands so the same diagnostic appears
+/// for each entry point.
+fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::DocumentMut {
     if !path.exists() {
         ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
         std::process::exit(1);
@@ -10083,7 +10085,10 @@ fn pool_load_toml_or_exit(path: &std::path::Path) -> toml::Value {
         ));
         std::process::exit(1);
     });
-    toml::from_str(&content).unwrap_or_else(|e| {
+    if content.trim().is_empty() {
+        return toml_edit::DocumentMut::new();
+    }
+    content.parse::<toml_edit::DocumentMut>().unwrap_or_else(|e| {
         ui::error_with_fix(
             &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
             &i18n::t("config-parse-fix-alt"),
@@ -10092,12 +10097,8 @@ fn pool_load_toml_or_exit(path: &std::path::Path) -> toml::Value {
     })
 }
 
-fn pool_write_toml_or_exit(path: &std::path::Path, value: &toml::Value) {
-    let rendered = toml::to_string_pretty(value).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to serialize config: {e}"));
-        std::process::exit(1);
-    });
-    std::fs::write(path, rendered).unwrap_or_else(|e| {
+fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
+    std::fs::write(path, doc.to_string()).unwrap_or_else(|e| {
         ui::error(&format!("Failed to write {}: {e}", path.display()));
         std::process::exit(1);
     });
@@ -10113,26 +10114,30 @@ fn pool_strategy_canon(input: &str) -> Option<&'static str> {
     }
 }
 
-/// Return the existing `[[credential_pools]]` array (creating it if needed),
-/// and the index of the entry whose `provider` matches `provider_name` (or
-/// `None` if absent).
-fn pool_lookup_mut<'t>(
-    root: &'t mut toml::Value,
+/// Locate the `[[credential_pools]]` entry whose `provider` matches
+/// `provider_name`, creating the surrounding `ArrayOfTables` if it does not
+/// exist yet. Returns `(array, Some(idx))` on hit and `(array, None)` on miss
+/// so the caller can decide whether to append or report an error.
+fn pool_lookup_doc_mut<'d>(
+    doc: &'d mut toml_edit::DocumentMut,
     provider_name: &str,
-) -> (&'t mut Vec<toml::Value>, Option<usize>) {
-    let root_table = root
-        .as_table_mut()
-        .expect("config.toml root must be a table");
-    let entry = root_table
-        .entry("credential_pools".to_string())
-        .or_insert_with(|| toml::Value::Array(Vec::new()));
-    if !entry.is_array() {
-        ui::error("config.toml `credential_pools` exists but is not an array");
-        std::process::exit(1);
-    }
-    let arr = entry.as_array_mut().unwrap();
-    let idx = arr.iter().position(|p| {
-        p.get("provider")
+) -> (&'d mut toml_edit::ArrayOfTables, Option<usize>) {
+    // Insert an empty `[[credential_pools]]` if missing. We use
+    // `or_insert(Item::ArrayOfTables(...))` so the rendered output retains
+    // the canonical TOML form even when the section was absent in the
+    // original file.
+    let item = doc
+        .entry("credential_pools")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let arr = match item.as_array_of_tables_mut() {
+        Some(a) => a,
+        None => {
+            ui::error("config.toml `credential_pools` exists but is not an array of tables");
+            std::process::exit(1);
+        }
+    };
+    let idx = arr.iter().position(|t| {
+        t.get("provider")
             .and_then(|v| v.as_str())
             .map(|n| n.eq_ignore_ascii_case(provider_name))
             .unwrap_or(false)
@@ -10308,6 +10313,22 @@ fn print_pool_summary_human(body: &serde_json::Value) {
     }
 }
 
+/// Best-effort env-var name sanity check used by `auth pool add`. POSIX
+/// env-var names are `[A-Z_][A-Z0-9_]*`; reject obvious nonsense (spaces,
+/// punctuation, leading digit) at config-time so the operator finds out
+/// here instead of seeing "pool has no resolvable keys" from the daemon
+/// on next boot.
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_uppercase() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 fn cmd_auth_pool_add(
     config: Option<PathBuf>,
     provider: &str,
@@ -10315,34 +10336,59 @@ fn cmd_auth_pool_add(
     label: &str,
     priority: u32,
 ) {
-    let path = pool_config_path(config);
-    let mut root = pool_load_toml_or_exit(&path);
+    if !is_valid_env_var_name(env_var) {
+        ui::error(&format!(
+            "`{env_var}` is not a valid env var name. Expected uppercase letters, digits, and underscores (e.g. OPENAI_API_KEY_2)."
+        ));
+        std::process::exit(1);
+    }
+    // Validate the env var is actually set at add time. Without this the
+    // operator can stage a typo into config.toml and only find out at the
+    // next daemon boot via a "Credential pool key env var not set — skipping"
+    // warning that may go unnoticed. Treat empty/whitespace as unset too —
+    // an env var set to "" cannot drive a real provider call.
+    match std::env::var(env_var) {
+        Ok(v) if !v.trim().is_empty() => {}
+        Ok(_) => {
+            ui::error_with_fix(
+                &format!("env var `{env_var}` is set but empty."),
+                &format!("Set it to your API key before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry."),
+            );
+            std::process::exit(1);
+        }
+        Err(_) => {
+            ui::error_with_fix(
+                &format!("env var `{env_var}` is not set in the current shell."),
+                &format!("Export it before adding the pool entry, e.g.\n  export {env_var}=sk-…\nThen retry. (The daemon will read it from its own environment at boot time — make sure it's exported there too.)"),
+            );
+            std::process::exit(1);
+        }
+    }
 
-    let mut new_key = toml::value::Table::new();
-    new_key.insert("api_key_env".to_string(), toml::Value::String(env_var.to_string()));
-    new_key.insert("label".to_string(), toml::Value::String(label.to_string()));
-    new_key.insert(
-        "priority".to_string(),
-        toml::Value::Integer(priority as i64),
-    );
-    let new_key_value = toml::Value::Table(new_key);
+    let path = pool_config_path(config);
+    let mut doc = pool_load_doc_or_exit(&path);
 
     {
-        let (arr, idx) = pool_lookup_mut(&mut root, provider);
+        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
 
         match idx {
             Some(i) => {
-                // Append to existing pool's keys array.
-                let entry = arr.get_mut(i).unwrap();
-                let pool_table = entry
-                    .as_table_mut()
-                    .expect("credential_pools entry must be a table");
-                let keys_entry = pool_table
-                    .entry("keys".to_string())
-                    .or_insert_with(|| toml::Value::Array(Vec::new()));
-                let keys_arr = keys_entry
-                    .as_array_mut()
-                    .expect("keys must be an array");
+                // Append to existing pool's keys array-of-tables.
+                let pool_tbl = arr.get_mut(i).expect("idx within bounds");
+                let keys_item = pool_tbl
+                    .entry("keys")
+                    .or_insert(toml_edit::Item::ArrayOfTables(
+                        toml_edit::ArrayOfTables::new(),
+                    ));
+                let keys_arr = match keys_item.as_array_of_tables_mut() {
+                    Some(a) => a,
+                    None => {
+                        ui::error(&format!(
+                            "Pool for `{provider}` has a `keys` field that is not an array of tables."
+                        ));
+                        std::process::exit(1);
+                    }
+                };
                 // Duplicate guard: same env_var on the same provider is an error.
                 let dup = keys_arr.iter().any(|k| {
                     k.get("api_key_env")
@@ -10356,29 +10402,33 @@ fn cmd_auth_pool_add(
                     ));
                     std::process::exit(1);
                 }
-                keys_arr.push(new_key_value);
+                let mut new_key_tbl = toml_edit::Table::new();
+                new_key_tbl["api_key_env"] = toml_edit::value(env_var);
+                new_key_tbl["label"] = toml_edit::value(label);
+                new_key_tbl["priority"] = toml_edit::value(priority as i64);
+                keys_arr.push(new_key_tbl);
             }
             None => {
                 // Create the pool with default strategy = fill_first.
-                let mut pool_table = toml::value::Table::new();
-                pool_table.insert(
-                    "provider".to_string(),
-                    toml::Value::String(provider.to_string()),
+                let mut pool_tbl = toml_edit::Table::new();
+                pool_tbl["provider"] = toml_edit::value(provider);
+                pool_tbl["strategy"] = toml_edit::value("fill_first");
+                let mut keys_arr = toml_edit::ArrayOfTables::new();
+                let mut new_key_tbl = toml_edit::Table::new();
+                new_key_tbl["api_key_env"] = toml_edit::value(env_var);
+                new_key_tbl["label"] = toml_edit::value(label);
+                new_key_tbl["priority"] = toml_edit::value(priority as i64);
+                keys_arr.push(new_key_tbl);
+                pool_tbl.insert(
+                    "keys",
+                    toml_edit::Item::ArrayOfTables(keys_arr),
                 );
-                pool_table.insert(
-                    "strategy".to_string(),
-                    toml::Value::String("fill_first".to_string()),
-                );
-                pool_table.insert(
-                    "keys".to_string(),
-                    toml::Value::Array(vec![new_key_value]),
-                );
-                arr.push(toml::Value::Table(pool_table));
+                arr.push(pool_tbl);
             }
         }
     }
 
-    pool_write_toml_or_exit(&path, &root);
+    pool_write_doc_or_exit(&path, &doc);
     ui::success(&format!(
         "Added key `{label}` (env={env_var}, priority={priority}) to pool for `{provider}`. Restart the daemon or hot-reload config to apply."
     ));
@@ -10386,44 +10436,54 @@ fn cmd_auth_pool_add(
 
 fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_var: &str) {
     let path = pool_config_path(config);
-    let mut root = pool_load_toml_or_exit(&path);
+    let mut doc = pool_load_doc_or_exit(&path);
 
     let mut empty_pool_removed = false;
     {
-        let (arr, idx) = pool_lookup_mut(&mut root, provider);
+        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
             ui::error(&format!("No credential pool configured for provider `{provider}`."));
             std::process::exit(1);
         };
 
-        let entry = arr.get_mut(i).unwrap();
-        let pool_table = entry
-            .as_table_mut()
-            .expect("credential_pools entry must be a table");
-        let Some(keys) = pool_table.get_mut("keys").and_then(|v| v.as_array_mut()) else {
+        let pool_tbl = arr.get_mut(i).expect("idx within bounds");
+        let Some(keys_item) = pool_tbl.get_mut("keys") else {
             ui::error(&format!("Pool for `{provider}` has no keys array."));
             std::process::exit(1);
         };
-        let before = keys.len();
-        keys.retain(|k| {
-            k.get("api_key_env")
+        let Some(keys_arr) = keys_item.as_array_of_tables_mut() else {
+            ui::error(&format!(
+                "Pool for `{provider}` has a `keys` field that is not an array of tables."
+            ));
+            std::process::exit(1);
+        };
+        let before = keys_arr.len();
+        // ArrayOfTables has no `retain` — walk indices backwards and remove
+        // matching entries one by one so index shifts don't skip neighbors.
+        for j in (0..keys_arr.len()).rev() {
+            let matches = keys_arr
+                .get(j)
+                .and_then(|t| t.get("api_key_env"))
                 .and_then(|v| v.as_str())
-                .map(|e| e != env_var)
-                .unwrap_or(true)
-        });
-        if keys.len() == before {
+                .map(|e| e == env_var)
+                .unwrap_or(false);
+            if matches {
+                keys_arr.remove(j);
+            }
+        }
+        if keys_arr.len() == before {
             ui::error(&format!(
                 "No key with env_var `{env_var}` found in pool for `{provider}`."
             ));
             std::process::exit(1);
         }
-        if keys.is_empty() {
+        if keys_arr.is_empty() {
             arr.remove(i);
             empty_pool_removed = true;
         }
     }
 
-    pool_write_toml_or_exit(&path, &root);
+    pool_write_doc_or_exit(&path, &doc);
     if empty_pool_removed {
         ui::success(&format!(
             "Removed key `{env_var}` from pool for `{provider}`. Pool is now empty and has been removed entirely. Restart the daemon or hot-reload config to apply."
@@ -10444,26 +10504,19 @@ fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &st
     };
 
     let path = pool_config_path(config);
-    let mut root = pool_load_toml_or_exit(&path);
+    let mut doc = pool_load_doc_or_exit(&path);
 
     {
-        let (arr, idx) = pool_lookup_mut(&mut root, provider);
+        let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
             ui::error(&format!("No credential pool configured for provider `{provider}`."));
             std::process::exit(1);
         };
-        let pool_table = arr
-            .get_mut(i)
-            .unwrap()
-            .as_table_mut()
-            .expect("credential_pools entry must be a table");
-        pool_table.insert(
-            "strategy".to_string(),
-            toml::Value::String(canon.to_string()),
-        );
+        let pool_tbl = arr.get_mut(i).expect("idx within bounds");
+        pool_tbl["strategy"] = toml_edit::value(canon);
     }
 
-    pool_write_toml_or_exit(&path, &root);
+    pool_write_doc_or_exit(&path, &doc);
     ui::success(&format!(
         "Set pool strategy for `{provider}` to `{canon}`. Restart the daemon or hot-reload config to apply."
     ));
@@ -13431,9 +13484,10 @@ mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
         daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
-        normalize_daemon_addr, normalize_release_tag, parse_toml_integer, parse_version_core,
-        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
-        Commands, DeviceAuthNextStep, GatewayCommands, MemoryCommands, ReleaseComparison,
+        is_valid_env_var_name, normalize_daemon_addr, normalize_release_tag, parse_toml_integer,
+        parse_version_core, pool_strategy_canon, resolve_device_auth_start, resolve_hand_instance,
+        AuthCommands, ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
+        MemoryCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -14441,5 +14495,119 @@ input_schema = { type = "object" }
         assert_eq!(set_agent, store_agent);
         assert_eq!(set_key, store_key);
         assert_eq!(set_val, store_val);
+    }
+
+    // ── Credential pool CLI helpers (#4965) ───────────────────────────────────
+
+    #[test]
+    fn is_valid_env_var_name_accepts_standard_shapes() {
+        assert!(is_valid_env_var_name("OPENAI_API_KEY"));
+        assert!(is_valid_env_var_name("OPENAI_API_KEY_2"));
+        assert!(is_valid_env_var_name("_PRIVATE"));
+        assert!(is_valid_env_var_name("A"));
+        assert!(is_valid_env_var_name("X1"));
+    }
+
+    #[test]
+    fn is_valid_env_var_name_rejects_garbage() {
+        // Leading digit, lowercase, spaces, punctuation, empty — all rejected.
+        assert!(!is_valid_env_var_name(""));
+        assert!(!is_valid_env_var_name("1FOO"));
+        assert!(!is_valid_env_var_name("foo"));
+        assert!(!is_valid_env_var_name("FOO BAR"));
+        assert!(!is_valid_env_var_name("FOO-BAR"));
+        assert!(!is_valid_env_var_name("FOO.BAR"));
+        assert!(!is_valid_env_var_name("FOO$"));
+        assert!(!is_valid_env_var_name(" FOO"));
+    }
+
+    #[test]
+    fn pool_strategy_canon_accepts_known_strategies() {
+        assert_eq!(pool_strategy_canon("fill_first"), Some("fill_first"));
+        assert_eq!(pool_strategy_canon("Fill-First"), Some("fill_first"));
+        assert_eq!(pool_strategy_canon("FILLFIRST"), Some("fill_first"));
+        assert_eq!(pool_strategy_canon("round_robin"), Some("round_robin"));
+        assert_eq!(pool_strategy_canon("RoundRobin"), Some("round_robin"));
+        assert_eq!(pool_strategy_canon("random"), Some("random"));
+        assert_eq!(pool_strategy_canon("least_used"), Some("least_used"));
+        assert_eq!(pool_strategy_canon("LEASTUSED"), Some("least_used"));
+    }
+
+    #[test]
+    fn pool_strategy_canon_rejects_unknown() {
+        assert_eq!(pool_strategy_canon(""), None);
+        assert_eq!(pool_strategy_canon("foo"), None);
+        assert_eq!(pool_strategy_canon("priority"), None);
+        assert_eq!(pool_strategy_canon("rand"), None);
+    }
+
+    /// Round-trip a config.toml fragment containing comments and an unrelated
+    /// section through `toml_edit::DocumentMut`. Proves the parser preserves
+    /// the bits the mutating pool commands rely on: comments survive,
+    /// unrelated tables stay intact, and a freshly inserted
+    /// `[[credential_pools]]` lands at the bottom without rewriting the
+    /// rest of the file. (The actual cmd_auth_pool_* functions are private
+    /// CLI orchestrators that exit the process on error and call `ui::*`
+    /// helpers, so we test the underlying mutation primitive directly.)
+    #[test]
+    fn toml_edit_roundtrip_preserves_comments_and_unrelated_sections() {
+        let original = r#"# top-of-file comment
+api_listen = "127.0.0.1:4545"
+
+[default_model]
+# inline comment in default_model
+provider = "anthropic"
+model = "claude-3-5-sonnet"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# trailing comment before our edit
+"#;
+        let mut doc: toml_edit::DocumentMut =
+            original.parse().expect("fragment must parse");
+        // Insert a credential_pools entry the same way the CLI's add-on-no-pool
+        // path does — building an ArrayOfTables and pushing one table into it.
+        let item = doc
+            .entry("credential_pools")
+            .or_insert(toml_edit::Item::ArrayOfTables(
+                toml_edit::ArrayOfTables::new(),
+            ));
+        let arr = item
+            .as_array_of_tables_mut()
+            .expect("just inserted as array of tables");
+        let mut pool_tbl = toml_edit::Table::new();
+        pool_tbl["provider"] = toml_edit::value("anthropic");
+        pool_tbl["strategy"] = toml_edit::value("fill_first");
+        let mut keys_arr = toml_edit::ArrayOfTables::new();
+        let mut key_tbl = toml_edit::Table::new();
+        key_tbl["api_key_env"] = toml_edit::value("ANTHROPIC_API_KEY_2");
+        key_tbl["label"] = toml_edit::value("Backup");
+        key_tbl["priority"] = toml_edit::value(5_i64);
+        keys_arr.push(key_tbl);
+        pool_tbl.insert("keys", toml_edit::Item::ArrayOfTables(keys_arr));
+        arr.push(pool_tbl);
+
+        let rendered = doc.to_string();
+        // All three comments survive verbatim.
+        assert!(
+            rendered.contains("# top-of-file comment"),
+            "top comment missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("# inline comment in default_model"),
+            "inline comment missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("# trailing comment before our edit"),
+            "trailing comment missing: {rendered}"
+        );
+        // Unrelated section intact.
+        assert!(rendered.contains("[default_model]"));
+        assert!(rendered.contains("provider = \"anthropic\""));
+        // New section present with the expected canonical shape.
+        assert!(rendered.contains("[[credential_pools]]"));
+        assert!(rendered.contains("[[credential_pools.keys]]"));
+        assert!(rendered.contains("api_key_env = \"ANTHROPIC_API_KEY_2\""));
+        assert!(rendered.contains("label = \"Backup\""));
+        assert!(rendered.contains("priority = 5"));
     }
 }

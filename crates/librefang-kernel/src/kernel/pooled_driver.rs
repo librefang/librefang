@@ -318,4 +318,42 @@ mod tests {
         assert!(!snap[0].is_exhausted, "timeout must not mark the key");
         assert_eq!(snap[0].cooldown_remaining_secs, None);
     }
+
+    /// Issue #4965 acceptance: when every key in the pool is in cooldown,
+    /// `acquire()` must surface a 503-shape error so the surrounding
+    /// `FallbackChain` can roll forward to the next `[[fallback_providers]]`
+    /// entry (status 503 maps to `FailoverReason::ModelUnavailable` per
+    /// `LlmError::failover_reason` for `code: None`).
+    #[test]
+    fn all_keys_exhausted_returns_503_for_fallback_chain() {
+        let p = make_pooled();
+        // Drain both keys via the 24h credit-exhausted path so no jitter
+        // window can let one of them flip back to available between marks.
+        p.pool.mark_credit_exhausted("key-a");
+        p.pool.mark_credit_exhausted("key-b");
+        assert_eq!(
+            p.pool.available_count(),
+            0,
+            "preconditions: both keys must be in cooldown"
+        );
+
+        let err = p.acquire().expect_err("acquire must fail when no keys remain");
+        match err {
+            LlmError::Api { status, ref message, code } => {
+                assert_eq!(status, 503, "must be 503 so FallbackChain rolls forward");
+                assert!(
+                    message.contains("exhausted"),
+                    "diagnostic must mention exhaustion, got: {message}"
+                );
+                assert!(code.is_none(), "no provider-typed code expected");
+            }
+            other => panic!("expected LlmError::Api {{ status: 503, .. }}, got {other:?}"),
+        }
+        // And the failover classification: 503 with code=None maps to
+        // ModelUnavailable → FallbackChain skips to the next provider entry.
+        assert!(matches!(
+            err.failover_reason(),
+            FailoverReason::ModelUnavailable
+        ));
+    }
 }
