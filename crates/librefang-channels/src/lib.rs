@@ -29,8 +29,6 @@ pub use message_truncator::{
 };
 
 // Individual channel adapters — feature-gated (alphabetical order)
-#[cfg(feature = "channel-bluesky")]
-pub mod bluesky;
 #[cfg(feature = "channel-dingtalk")]
 pub mod dingtalk;
 #[cfg(feature = "channel-discord")]
@@ -39,36 +37,20 @@ pub mod discord;
 pub mod email;
 #[cfg(feature = "channel-feishu")]
 pub mod feishu;
-#[cfg(feature = "channel-flock")]
-pub mod flock;
-#[cfg(feature = "channel-gitter")]
-pub mod gitter;
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
-#[cfg(feature = "channel-guilded")]
-pub mod guilded;
-#[cfg(feature = "channel-irc")]
-pub mod irc;
-#[cfg(feature = "channel-keybase")]
-pub mod keybase;
 #[cfg(feature = "channel-line")]
 pub mod line;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
-#[cfg(feature = "channel-mumble")]
-pub mod mumble;
 #[cfg(feature = "channel-nextcloud")]
 pub mod nextcloud;
-#[cfg(feature = "channel-pumble")]
-pub mod pumble;
 #[cfg(feature = "channel-qq")]
 pub mod qq;
 #[cfg(feature = "channel-reddit")]
 pub mod reddit;
-#[cfg(feature = "channel-revolt")]
-pub mod revolt;
 #[cfg(feature = "channel-rocketchat")]
 pub mod rocketchat;
 #[cfg(feature = "channel-signal")]
@@ -77,14 +59,8 @@ pub mod signal;
 pub mod slack;
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-threema")]
-pub mod threema;
-#[cfg(feature = "channel-twist")]
-pub mod twist;
 #[cfg(feature = "channel-twitch")]
 pub mod twitch;
-#[cfg(feature = "channel-voice")]
-pub mod voice;
 #[cfg(feature = "channel-webex")]
 pub mod webex;
 #[cfg(feature = "channel-webhook")]
@@ -95,7 +71,5 @@ pub mod wechat;
 pub mod wecom;
 #[cfg(feature = "channel-whatsapp")]
 pub mod whatsapp;
-#[cfg(feature = "channel-xmpp")]
-pub mod xmpp;
 #[cfg(feature = "channel-zulip")]
 pub mod zulip;
