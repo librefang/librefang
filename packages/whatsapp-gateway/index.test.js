@@ -47,6 +47,7 @@ const {
   SESSION_RECOVERY_MAX_ATTEMPTS,
   runDispatchSelfTest,
   channelTypeForChat,
+  detectAudioMimetype,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -1538,5 +1539,88 @@ describe('ownerIntentsRelay', () => {
     assert.equal(re.test('Sag mir was du denkst'), false);
     assert.equal(re.test('sag mir bitte'), false);
     assert.equal(re.test('sage uns die Wahrheit'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectAudioMimetype — magic-bytes audio container detection
+// (Regression guard: sendAudio used to hardcode `audio/ogg; codecs=opus`,
+//  rendering MP3/WAV/M4A payloads as "Unsupported content type" downstream.)
+// ---------------------------------------------------------------------------
+describe('detectAudioMimetype', () => {
+  // Build a buffer that starts with `head` and is padded to `minLen` with
+  // zeroes — keeps tests focused on the signature without invalid framing.
+  function makeBuf(head, minLen = 32) {
+    const out = Buffer.alloc(Math.max(minLen, head.length));
+    Buffer.from(head).copy(out, 0);
+    return out;
+  }
+
+  it('detects OGG/Opus (OggS signature)', () => {
+    const buf = makeBuf([0x4f, 0x67, 0x67, 0x53, 0x00, 0x02]);
+    assert.equal(detectAudioMimetype(buf), 'audio/ogg; codecs=opus');
+  });
+
+  it('detects MP3 with ID3v2 tag', () => {
+    const buf = makeBuf([0x49, 0x44, 0x33, 0x04, 0x00]);
+    assert.equal(detectAudioMimetype(buf), 'audio/mpeg');
+  });
+
+  it('detects MP3 with raw MPEG frame sync (0xFF Fx)', () => {
+    // MPEG-1 layer III: 0xFF 0xFB
+    assert.equal(detectAudioMimetype(makeBuf([0xff, 0xfb])), 'audio/mpeg');
+    // MPEG-2 layer III: 0xFF 0xF3
+    assert.equal(detectAudioMimetype(makeBuf([0xff, 0xf3])), 'audio/mpeg');
+    // MPEG-2.5 layer III: 0xFF 0xE2
+    assert.equal(detectAudioMimetype(makeBuf([0xff, 0xe2])), 'audio/mpeg');
+  });
+
+  it('detects WAV (RIFF + WAVE)', () => {
+    const buf = makeBuf([
+      0x52, 0x49, 0x46, 0x46,           // RIFF
+      0x24, 0x00, 0x00, 0x00,           // size (dummy)
+      0x57, 0x41, 0x56, 0x45,           // WAVE
+    ]);
+    assert.equal(detectAudioMimetype(buf), 'audio/wav');
+  });
+
+  it('detects MP4/M4A (ftyp at offset 4)', () => {
+    const buf = makeBuf([
+      0x00, 0x00, 0x00, 0x20,           // size
+      0x66, 0x74, 0x79, 0x70,           // ftyp
+      0x4d, 0x34, 0x41, 0x20,           // M4A
+    ]);
+    assert.equal(detectAudioMimetype(buf), 'audio/mp4');
+  });
+
+  it('detects FLAC (fLaC signature)', () => {
+    const buf = makeBuf([0x66, 0x4c, 0x61, 0x43]);
+    assert.equal(detectAudioMimetype(buf), 'audio/flac');
+  });
+
+  it('falls back to opus for unknown signatures (with warning)', () => {
+    // Suppress the warning emitted on the unknown path so it does
+    // not pollute test output. node:test surfaces stderr to the
+    // user even when the assertion passes.
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const buf = makeBuf([0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe]);
+      assert.equal(detectAudioMimetype(buf), 'audio/ogg; codecs=opus');
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it('falls back to opus for empty / too-short buffers', () => {
+    assert.equal(detectAudioMimetype(null), 'audio/ogg; codecs=opus');
+    assert.equal(detectAudioMimetype(undefined), 'audio/ogg; codecs=opus');
+    assert.equal(detectAudioMimetype(Buffer.alloc(0)), 'audio/ogg; codecs=opus');
+    assert.equal(detectAudioMimetype(Buffer.from([0x4f, 0x67, 0x67])), 'audio/ogg; codecs=opus');
+  });
+
+  it('does not mis-classify MP3 framing as OGG (regression guard)', () => {
+    // MP3 frame sync starts with 0xFF — must not collide with OggS.
+    assert.notEqual(detectAudioMimetype(makeBuf([0xff, 0xfb])), 'audio/ogg; codecs=opus');
   });
 });
