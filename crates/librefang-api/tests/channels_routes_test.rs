@@ -1191,15 +1191,17 @@ async fn channels_list_discovery_rows_carry_form_fields_when_schema_cached() {
             name: "telegram".into(),
             display_name: "Telegram".into(),
             description: "Telegram Bot API adapter".into(),
-            fields: vec![librefang_api::routes::sidecar_describe::SidecarSchemaField {
-                key: "TELEGRAM_BOT_TOKEN".into(),
-                label: "Bot Token".into(),
-                field_type: "secret".into(),
-                required: true,
-                placeholder: "123:ABC".into(),
-                advanced: false,
-                options: None,
-            }],
+            fields: vec![
+                librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                    key: "TELEGRAM_BOT_TOKEN".into(),
+                    label: "Bot Token".into(),
+                    field_type: "secret".into(),
+                    required: true,
+                    placeholder: "123:ABC".into(),
+                    advanced: false,
+                    options: None,
+                },
+            ],
         },
     )]);
 

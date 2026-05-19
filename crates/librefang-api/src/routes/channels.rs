@@ -51,12 +51,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
+use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::skills::{
     append_channel_instance, remove_channel_config, remove_channel_instance, remove_secret_env,
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
     CHANNEL_AOT_CONFLICT_PREFIX,
 };
-use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -839,8 +839,8 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "google_chat"
-        | "flock" | "pumble" | "threema" | "webhook" | "wecom" => Some("/webhook"),
+        "feishu" | "teams" | "dingtalk" | "line" | "google_chat" | "flock" | "pumble"
+        | "threema" | "webhook" | "wecom" => Some("/webhook"),
         "voice" => Some("/ws"),
         _ => None,
     }
@@ -1334,28 +1334,27 @@ pub async fn configure_sidecar_channel(
         //     those out by reading the on-disk `secrets.env` once: a
         //     key already in `secrets.env` means the env presence is
         //     our own boot-time write, not a shell shadow.
-        let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
-            &secrets_path,
-        )
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        return None;
-                    }
-                    let eq = line.find('=')?;
-                    let k = line[..eq].trim();
-                    if k.is_empty() {
-                        None
-                    } else {
-                        Some(k.to_string())
-                    }
+        let secrets_env_keys: std::collections::HashSet<String> =
+            std::fs::read_to_string(&secrets_path)
+                .ok()
+                .map(|s| {
+                    s.lines()
+                        .filter_map(|line| {
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') {
+                                return None;
+                            }
+                            let eq = line.find('=')?;
+                            let k = line[..eq].trim();
+                            if k.is_empty() {
+                                None
+                            } else {
+                                Some(k.to_string())
+                            }
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .unwrap_or_default();
         let mut shadowed: Vec<String> = schema
             .fields
             .iter()
@@ -1381,12 +1380,10 @@ pub async fn configure_sidecar_channel(
                 continue;
             }
             if f.field_type == "secret" {
-                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(
-                    |e| {
-                        ApiErrorResponse::internal(format!("failed to write secret: {e}"))
-                            .into_json_tuple()
-                    },
-                )?;
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
+                    ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                        .into_json_tuple()
+                })?;
             } else {
                 nonsecret_env.insert(f.key.clone(), trimmed.to_string());
             }

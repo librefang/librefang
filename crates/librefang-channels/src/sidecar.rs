@@ -431,10 +431,7 @@ fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
 /// `Command::env`, with both layers merged. The parent env is NOT
 /// returned here — the spawned child already inherits it via
 /// `Command::env_clear` not being called.
-fn build_spawn_env(
-    home_dir: &Path,
-    ctx_env: &HashMap<String, String>,
-) -> Vec<(String, String)> {
+fn build_spawn_env(home_dir: &Path, ctx_env: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut merged: HashMap<String, String> = HashMap::new();
     let secrets_path = home_dir.join("secrets.env");
     for (k, v) in parse_secrets_env(&secrets_path) {
@@ -888,10 +885,7 @@ impl SidecarAdapter {
     /// matches the path the API layer writes to. Recomputing from
     /// `LIBREFANG_HOME`/`~/.librefang` here would silently diverge when
     /// the operator overrides `KernelConfig.home_dir`.
-    pub fn new(
-        config: &librefang_types::config::SidecarChannelConfig,
-        home_dir: PathBuf,
-    ) -> Self {
+    pub fn new(config: &librefang_types::config::SidecarChannelConfig, home_dir: PathBuf) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let channel_type = config
             .channel_type
@@ -2244,7 +2238,8 @@ mod tests {
         let merged = build_spawn_env(tmp.path(), &ctx_env);
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
-            got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY").map(|s| s.as_str()),
+            got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY")
+                .map(|s| s.as_str()),
             Some("from_file"),
         );
     }

@@ -78,10 +78,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     // tests, or two HTTP handlers racing on the same secrets file).
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(
-        ".secrets.env.tmp.{}.{seq}",
-        std::process::id()
-    ));
+    let tmp = parent.join(format!(".secrets.env.tmp.{}.{seq}", std::process::id()));
     {
         let mut f = fs::OpenOptions::new()
             .write(true)

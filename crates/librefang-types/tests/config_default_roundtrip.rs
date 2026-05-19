@@ -35,12 +35,12 @@ use librefang_types::config::{
     BrowserConfig, BudgetConfig, CanvasConfig, ChannelsConfig, ChunkConfig, CompactionTomlConfig,
     ContextEngineTomlConfig, DockerSandboxConfig, ExtensionsConfig, ExternalAuthConfig,
     HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig, KernelConfig,
-    MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig,
-    ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig,
-    QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig,
-    SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
-    TelemetryConfig, TerminalConfig, ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig,
-    VoiceConfig, WebConfig, WebFetchConfig, WebhookTriggerConfig,
+    MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig, ParallelToolsConfig,
+    PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig, QueueConcurrencyConfig,
+    QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig, SanitizeConfig, SessionConfig,
+    SkillsConfig, TaskBoardConfig, TavilySearchConfig, TelemetryConfig, TerminalConfig,
+    ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig, VoiceConfig, WebConfig, WebFetchConfig,
+    WebhookTriggerConfig,
 };
 use serde::Serialize;
 
@@ -357,7 +357,6 @@ fn terminal_config_default_roundtrips_through_toml() {
 fn voice_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<VoiceConfig>("VoiceConfig");
 }
-
 
 // Issue #3462 — extend the round-trip property to nested config types
 // referenced from agent manifests and channel wiring. These three are the
