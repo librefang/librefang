@@ -3735,7 +3735,10 @@ pub async fn start_channel_bridge_with_config(
             command = %sidecar_config.command,
             "Registering sidecar channel adapter"
         );
-        let adapter = Arc::new(SidecarAdapter::new(sidecar_config));
+        let adapter = Arc::new(SidecarAdapter::new(
+            sidecar_config,
+            kernel.home_dir().to_path_buf(),
+        ));
         adapters.push((adapter, None, None));
     }
 
