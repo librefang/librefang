@@ -546,15 +546,6 @@ admin_role = "admin"
     }
 
     #[test]
-    fn test_irc_config_defaults() {
-        let irc = IrcConfig::default();
-        assert_eq!(irc.server, "irc.libera.chat");
-        assert_eq!(irc.port, 6667);
-        assert_eq!(irc.nick, "librefang");
-        assert!(!irc.use_tls);
-    }
-
-    #[test]
     fn test_google_chat_config_defaults() {
         let gc = GoogleChatConfig::default();
         assert_eq!(gc.service_account_env, "GOOGLE_CHAT_SERVICE_ACCOUNT");
@@ -583,25 +574,15 @@ admin_role = "admin"
     }
 
     #[test]
-    fn test_xmpp_config_defaults() {
-        let x = XmppConfig::default();
-        assert_eq!(x.password_env, "XMPP_PASSWORD");
-        assert_eq!(x.port, 5222);
-        assert!(x.rooms.is_empty());
-    }
-
-    #[test]
     fn test_all_new_channel_configs_serde() {
         let config = KernelConfig {
             channels: ChannelsConfig {
                 teams: OneOrMany(vec![TeamsConfig::default()]),
                 mattermost: OneOrMany(vec![MattermostConfig::default()]),
-                irc: OneOrMany(vec![IrcConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
                 twitch: OneOrMany(vec![TwitchConfig::default()]),
                 rocketchat: OneOrMany(vec![RocketChatConfig::default()]),
                 zulip: OneOrMany(vec![ZulipConfig::default()]),
-                xmpp: OneOrMany(vec![XmppConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
@@ -610,12 +591,10 @@ admin_role = "admin"
         let back: KernelConfig = toml::from_str(&toml_str).unwrap();
         assert!(back.channels.teams.is_some());
         assert!(back.channels.mattermost.is_some());
-        assert!(back.channels.irc.is_some());
         assert!(back.channels.google_chat.is_some());
         assert!(back.channels.twitch.is_some());
         assert!(back.channels.rocketchat.is_some());
         assert!(back.channels.zulip.is_some());
-        assert!(back.channels.xmpp.is_some());
     }
 
     #[test]

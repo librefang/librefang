@@ -10,7 +10,7 @@
 use librefang_llm_driver::exhaustion::{
     ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,
 };
-use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
+use librefang_memory::usage::{ModelUsage, UsageRecord, UsageSummary};
 use librefang_memory::UsageBackend;
 use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -122,6 +122,7 @@ impl MeteringEngine {
         Self {
             store,
             pending: Arc::new(CostReservationLedger::default()),
+            exhaustion: None,
         }
     }
 

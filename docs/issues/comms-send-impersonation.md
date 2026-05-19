@@ -11,7 +11,7 @@
 
 The handler trusts the literal value of `req.from_agent_id` — it only checks that the `AgentId` exists locally; it **does not verify that the caller owns it**.
 
-Unlike inbound Slack (`channels/slack.rs`), Viber (`channels/viber.rs:21` HMAC-SHA256), and Messenger (`channels/messenger.rs:21` HMAC-SHA1 `X-Hub-Signature`), which do signature validation, `comms_send` is an authenticated route, but the auth layer only proves "some user is logged in," not that the user **owns** `from_agent_id`.
+Unlike inbound Slack (`channels/slack.rs`), LINE (`channels/line.rs` HMAC-SHA256), and Threema (`channels/threema.rs` MAC), which do signature validation, `comms_send` is an authenticated route, but the auth layer only proves "some user is logged in," not that the user **owns** `from_agent_id`.
 
 Consequence: a low-privilege user can POST `from_agent_id = <some admin-owned agent>` and forge inter-agent messages from that agent.
 

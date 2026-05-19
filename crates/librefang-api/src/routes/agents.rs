@@ -5169,9 +5169,14 @@ pub async fn delete_hand_agent_runtime_config(
 // ---------------------------------------------------------------------------
 
 /// Request body for cloning an agent.
+//
+// `pub` (not `pub(crate)`): the `clone_agent` handler takes `Json<CloneAgentRequest>`
+// and is registered by `librefang-testing`'s router builder, so a `pub(crate)`
+// type would leak as a private type in that public signature across the crate
+// boundary.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CloneAgentRequest {
+pub struct CloneAgentRequest {
     pub new_name: String,
     /// Whether to copy skills from the source agent (default: true).
     #[serde(default = "default_clone_true")]

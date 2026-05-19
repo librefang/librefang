@@ -89,34 +89,6 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN"],
         description: "LINE Messaging API adapter",
     },
-    ChannelDef {
-        name: "viber",
-        display_name: "Viber",
-        category: "Messaging",
-        env_vars: &["VIBER_AUTH_TOKEN"],
-        description: "Viber Bot API adapter",
-    },
-    ChannelDef {
-        name: "messenger",
-        display_name: "Messenger",
-        category: "Messaging",
-        env_vars: &["MESSENGER_PAGE_TOKEN", "MESSENGER_VERIFY_TOKEN"],
-        description: "Facebook Messenger adapter",
-    },
-    ChannelDef {
-        name: "threema",
-        display_name: "Threema",
-        category: "Messaging",
-        env_vars: &["THREEMA_SECRET"],
-        description: "Threema Gateway adapter",
-    },
-    ChannelDef {
-        name: "keybase",
-        display_name: "Keybase",
-        category: "Messaging",
-        env_vars: &["KEYBASE_PAPERKEY"],
-        description: "Keybase chat adapter",
-    },
     // ── Social (5)
     ChannelDef {
         name: "reddit",
@@ -125,33 +97,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["REDDIT_CLIENT_SECRET", "REDDIT_PASSWORD"],
         description: "Reddit API bot adapter",
     },
-    ChannelDef {
-        name: "mastodon",
-        display_name: "Mastodon",
-        category: "Social",
-        env_vars: &["MASTODON_ACCESS_TOKEN"],
-        description: "Mastodon Streaming API adapter",
-    },
+    // mastodon migrated to a sidecar adapter
     ChannelDef {
         name: "bluesky",
         display_name: "Bluesky",
         category: "Social",
         env_vars: &["BLUESKY_APP_PASSWORD"],
         description: "Bluesky/AT Protocol adapter",
-    },
-    ChannelDef {
-        name: "linkedin",
-        display_name: "LinkedIn",
-        category: "Social",
-        env_vars: &["LINKEDIN_ACCESS_TOKEN"],
-        description: "LinkedIn Messaging API adapter",
-    },
-    ChannelDef {
-        name: "nostr",
-        display_name: "Nostr",
-        category: "Social",
-        env_vars: &["NOSTR_PRIVATE_KEY"],
-        description: "Nostr relay protocol adapter",
     },
     // ── Enterprise (10)
     ChannelDef {
@@ -202,76 +154,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         description: "DingTalk Robot API adapter (webhook or stream mode)",
     },
     ChannelDef {
-        name: "pumble",
-        display_name: "Pumble",
-        category: "Enterprise",
-        env_vars: &["PUMBLE_BOT_TOKEN"],
-        description: "Pumble bot adapter",
-    },
-    ChannelDef {
-        name: "flock",
-        display_name: "Flock",
-        category: "Enterprise",
-        env_vars: &["FLOCK_BOT_TOKEN"],
-        description: "Flock bot adapter",
-    },
-    ChannelDef {
-        name: "twist",
-        display_name: "Twist",
-        category: "Enterprise",
-        env_vars: &["TWIST_TOKEN"],
-        description: "Twist API v3 adapter",
-    },
-    ChannelDef {
         name: "zulip",
         display_name: "Zulip",
         category: "Enterprise",
         env_vars: &["ZULIP_API_KEY"],
         description: "Zulip event queue adapter",
     },
-    // ── Developer (9)
-    ChannelDef {
-        name: "irc",
-        display_name: "IRC",
-        category: "Developer",
-        env_vars: &[],
-        description: "IRC raw TCP adapter",
-    },
-    ChannelDef {
-        name: "xmpp",
-        display_name: "XMPP",
-        category: "Developer",
-        env_vars: &["XMPP_PASSWORD"],
-        description: "XMPP/Jabber adapter",
-    },
-    ChannelDef {
-        name: "gitter",
-        display_name: "Gitter",
-        category: "Developer",
-        env_vars: &["GITTER_TOKEN"],
-        description: "Gitter Streaming API adapter",
-    },
-    ChannelDef {
-        name: "discourse",
-        display_name: "Discourse",
-        category: "Developer",
-        env_vars: &["DISCOURSE_API_KEY"],
-        description: "Discourse forum API adapter",
-    },
-    ChannelDef {
-        name: "revolt",
-        display_name: "Revolt",
-        category: "Developer",
-        env_vars: &["REVOLT_BOT_TOKEN"],
-        description: "Revolt bot adapter",
-    },
-    ChannelDef {
-        name: "guilded",
-        display_name: "Guilded",
-        category: "Developer",
-        env_vars: &["GUILDED_BOT_TOKEN"],
-        description: "Guilded bot adapter",
-    },
+    // ── Developer
     ChannelDef {
         name: "nextcloud",
         display_name: "Nextcloud",
@@ -293,34 +182,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["TWITCH_OAUTH_TOKEN"],
         description: "Twitch IRC gateway adapter",
     },
-    // ── Notifications (3) — ntfy migrated to a sidecar adapter
-    ChannelDef {
-        name: "gotify",
-        display_name: "Gotify",
-        category: "Notifications",
-        env_vars: &["GOTIFY_APP_TOKEN", "GOTIFY_CLIENT_TOKEN"],
-        description: "Gotify WebSocket adapter",
-    },
+    // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",
         display_name: "Webhook",
         category: "Notifications",
         env_vars: &["WEBHOOK_SECRET"],
         description: "Generic webhook adapter",
-    },
-    ChannelDef {
-        name: "voice",
-        display_name: "Voice",
-        category: "Media",
-        env_vars: &["OPENAI_API_KEY"],
-        description: "Voice channel via WebSocket with STT/TTS",
-    },
-    ChannelDef {
-        name: "mumble",
-        display_name: "Mumble",
-        category: "Notifications",
-        env_vars: &["MUMBLE_PASSWORD"],
-        description: "Mumble text chat adapter",
     },
 ];
 

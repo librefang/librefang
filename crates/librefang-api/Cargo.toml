@@ -77,7 +77,14 @@ metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 [features]
-# Default = core-channels + telemetry + surreal-backend.
+# Default = a small "core-channels" set + telemetry + surreal-backend.
+# Heavy / unmaintained adapters (matrix, email/imap, google-chat,
+# bluesky, …) stay opt-in via `--features all-channels` so plain
+# `cargo build` and downstream library users don't pay the compile-time
+# cost. Release / packaging pipelines opt in to `all-channels`
+# explicitly. See #3655 / #3688.
+# BossFang fork: `surreal-backend` is on by default (SurrealDB-as-default
+# storage — zero-config live deployment path).
 default = ["core-channels", "telemetry", "surreal-backend"]
 
 # Storage backend feature gates (mirrors librefang-storage).
@@ -107,41 +114,22 @@ channel-discord = ["librefang-channels/channel-discord"]
 channel-slack = ["librefang-channels/channel-slack"]
 channel-matrix = ["librefang-channels/channel-matrix"]
 channel-email = ["librefang-channels/channel-email"]
-channel-voice = ["librefang-channels/channel-voice"]
 channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
 channel-signal = ["librefang-channels/channel-signal"]
 channel-teams = ["librefang-channels/channel-teams"]
 channel-mattermost = ["librefang-channels/channel-mattermost"]
-channel-irc = ["librefang-channels/channel-irc"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 channel-twitch = ["librefang-channels/channel-twitch"]
 channel-rocketchat = ["librefang-channels/channel-rocketchat"]
 channel-zulip = ["librefang-channels/channel-zulip"]
-channel-xmpp = ["librefang-channels/channel-xmpp"]
 channel-bluesky = ["librefang-channels/channel-bluesky"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-line = ["librefang-channels/channel-line"]
-channel-mastodon = ["librefang-channels/channel-mastodon"]
-channel-messenger = ["librefang-channels/channel-messenger"]
 channel-reddit = ["librefang-channels/channel-reddit"]
-channel-revolt = ["librefang-channels/channel-revolt"]
-channel-viber = ["librefang-channels/channel-viber"]
-channel-flock = ["librefang-channels/channel-flock"]
-channel-guilded = ["librefang-channels/channel-guilded"]
-channel-keybase = ["librefang-channels/channel-keybase"]
 channel-nextcloud = ["librefang-channels/channel-nextcloud"]
-channel-nostr = ["librefang-channels/channel-nostr"]
-channel-pumble = ["librefang-channels/channel-pumble"]
-channel-threema = ["librefang-channels/channel-threema"]
-channel-twist = ["librefang-channels/channel-twist"]
 channel-webex = ["librefang-channels/channel-webex"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
-channel-discourse = ["librefang-channels/channel-discourse"]
-channel-gitter = ["librefang-channels/channel-gitter"]
-channel-gotify = ["librefang-channels/channel-gotify"]
-channel-linkedin = ["librefang-channels/channel-linkedin"]
-channel-mumble = ["librefang-channels/channel-mumble"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
@@ -162,15 +150,13 @@ core-channels = [
 all-channels = [
     "channel-discord", "channel-slack", "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
-    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
-    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
-    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
-    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
-    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble",
-    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+    "channel-teams", "channel-mattermost", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip",
+    "channel-bluesky", "channel-feishu", "channel-line",
+    "channel-reddit",
+    "channel-nextcloud",
+    "channel-webex", "channel-dingtalk",
+    "channel-qq", "channel-wechat", "channel-wecom",
 ]
 
 # All channels except email — used for Android targets where rustls-connector's
@@ -178,22 +164,20 @@ all-channels = [
 all-channels-no-email = [
     "channel-discord", "channel-slack", "channel-matrix",
     "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
-    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
-    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
-    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
-    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
-    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble",
-    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+    "channel-teams", "channel-mattermost", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip",
+    "channel-bluesky", "channel-feishu", "channel-line",
+    "channel-reddit",
+    "channel-nextcloud",
+    "channel-webex", "channel-dingtalk",
+    "channel-qq", "channel-wechat", "channel-wecom",
 ]
 
-# Mini: 12 core channels
+# Mini: a small core set of channels
 mini = [
     "channel-discord", "channel-slack", "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-teams", "channel-mattermost", "channel-google-chat",
 ]
 
 [target.'cfg(unix)'.dependencies]
