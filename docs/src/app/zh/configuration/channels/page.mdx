@@ -668,21 +668,22 @@ token_env = "NTFY_TOKEN"
 | `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.gotify]`
+#### Gotify
+
+Gotify 由 Python sidecar 适配器 (`librefang.sidecar.adapters.gotify`) 提供。原 `[channels.gotify]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.gotify]
-server_url = "https://gotify.example.com"
-app_token_env = "GOTIFY_APP_TOKEN"
-client_token_env = "GOTIFY_CLIENT_TOKEN"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Gotify 服务器 URL。 |
-| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | 存放 Gotify 应用令牌（用于发送消息）的环境变量。 |
-| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | 存放 Gotify 客户端令牌（通过 WebSocket 接收消息）的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`GOTIFY_APP_TOKEN`（出站发布）和 `GOTIFY_CLIENT_TOKEN`（入站 WebSocket 订阅）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Gotify 表单时会自动写入。
 
 #### `[channels.webhook]`
 

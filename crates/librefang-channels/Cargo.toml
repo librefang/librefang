@@ -29,7 +29,6 @@ all-channels = [
     "channel-flock",
     "channel-gitter",
     "channel-google-chat",
-    "channel-gotify",
     "channel-guilded",
     "channel-irc",
     "channel-keybase",
@@ -102,7 +101,6 @@ channel-webex = []
 channel-dingtalk = []
 channel-discourse = []
 channel-gitter = []
-channel-gotify = []
 channel-linkedin = []
 channel-mumble = []
 channel-qq = []
