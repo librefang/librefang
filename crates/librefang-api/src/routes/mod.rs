@@ -37,6 +37,7 @@ pub mod plugins;
 pub mod prompts;
 pub mod providers;
 pub mod registry;
+pub mod secrets_env;
 pub mod sidecar_describe;
 pub mod skills;
 pub mod system;
