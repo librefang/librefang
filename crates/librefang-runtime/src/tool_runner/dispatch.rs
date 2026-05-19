@@ -1035,6 +1035,7 @@ pub async fn execute_tool_raw(
                 *kernel,
                 *workspace_root,
                 *sender_id,
+                *channel,
                 *caller_agent_id,
                 &extra_refs,
             )

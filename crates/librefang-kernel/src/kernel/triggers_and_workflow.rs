@@ -99,6 +99,8 @@ impl LibreFangKernel {
                 session_id: Some(session_id.0.to_string()),
                 step_id: None,
                 reasoning_echo_policy: echo_policy,
+                sender_user_id: None,
+                sender_channel: None,
             };
 
             let resp = match tokio::time::timeout(
@@ -185,6 +187,8 @@ impl LibreFangKernel {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: echo_policy,
+            sender_user_id: None,
+            sender_channel: None,
         };
 
         let result = match tokio::time::timeout(

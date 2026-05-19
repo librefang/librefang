@@ -453,6 +453,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: self.echo_policy(),
+            sender_user_id: None,
+            sender_channel: None,
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -612,6 +614,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: self.echo_policy(),
+            sender_user_id: None,
+            sender_channel: None,
         };
 
         match self.driver.complete(request).await {

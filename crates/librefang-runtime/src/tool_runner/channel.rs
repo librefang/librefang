@@ -135,6 +135,7 @@ pub(super) async fn tool_channel_send(
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    sender_channel: Option<&str>,
     caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
@@ -159,6 +160,43 @@ pub(super) async fn tool_channel_send(
 
     if recipient.is_empty() {
         return Err("Recipient cannot be empty".to_string());
+    }
+
+    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19).
+    //
+    // When the MCP bridge populated the turn's peer scope (sender_id +
+    // channel via the `X-LibreFang-Current-Peer-Jid` and
+    // `X-LibreFang-Current-Channel` headers the `claude-code` driver
+    // writes into the per-invocation mcp_config), refuse `channel_send`
+    // dispatches that target a different recipient on the **same**
+    // channel — the model is attempting to relay outside the turn's
+    // peer scope, typically because of sticky context from a prior
+    // stranger turn or an outright hallucinated JID.
+    //
+    // Different-channel dispatches (e.g. an email reply composed during
+    // a WhatsApp turn, or a Telegram heads-up while answering an SMS)
+    // stay allowed — only intra-channel re-targeting is the cross-chat
+    // leak pattern. Cross-chat *escalation* must go through
+    // `notify_owner`, which is kernel-mediated and not subject to this
+    // guard.
+    //
+    // The guard is opt-in by construction: out-of-band callers (no
+    // peer scope, e.g. external MCP clients, cron, automation
+    // triggers) populate `sender_id` / `sender_channel` with `None` and
+    // the guard is skipped.
+    if let (Some(expected_peer), Some(turn_channel)) = (sender_id, sender_channel) {
+        if !expected_peer.is_empty()
+            && !turn_channel.is_empty()
+            && turn_channel.eq_ignore_ascii_case(&channel)
+            && recipient != expected_peer
+        {
+            return Err(format!(
+                "channel_send recipient '{recipient}' does not match the current peer \
+                 '{expected_peer}' on channel '{channel}'. Cross-chat dispatch is forbidden — \
+                 to reach a different contact, use notify_owner (kernel-mediated) or wait for \
+                 that contact's inbound message."
+            ));
+        }
     }
 
     let thread_id = input["thread_id"].as_str().filter(|s| !s.is_empty());

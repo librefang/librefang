@@ -1287,6 +1287,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1329,6 +1331,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
@@ -1362,6 +1366,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");
@@ -1404,6 +1410,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");

@@ -108,6 +108,8 @@ impl LibreFangKernel {
             // for the empty-string id and the driver's fallback handles
             // the actual model the driver substitutes.
             reasoning_echo_policy: self.lookup_reasoning_echo_policy(""),
+            sender_user_id: None,
+            sender_channel: None,
         };
 
         let result = match tokio::time::timeout(

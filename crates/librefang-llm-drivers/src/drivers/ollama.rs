@@ -1056,6 +1056,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         }
     }
 

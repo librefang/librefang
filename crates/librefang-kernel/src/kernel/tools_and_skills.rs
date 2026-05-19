@@ -618,6 +618,8 @@ impl LibreFangKernel {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: echo_policy,
+            sender_user_id: None,
+            sender_channel: None,
         };
 
         let start = std::time::Instant::now();

@@ -86,6 +86,8 @@ pub fn simple_request(model: &str) -> CompletionRequest {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
     }
 }
 
@@ -118,6 +120,8 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
     }
 }
 
@@ -140,6 +144,8 @@ pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
     }
 }
 
@@ -162,6 +168,8 @@ pub fn o_series_request() -> CompletionRequest {
         session_id: None,
         step_id: None,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        sender_user_id: None,
+        sender_channel: None,
     }
 }
 

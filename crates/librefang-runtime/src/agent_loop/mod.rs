@@ -1033,6 +1033,8 @@ pub async fn run_agent_loop(
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
             reasoning_echo_policy,
+            sender_user_id: sender_user_id.clone(),
+            sender_channel: sender_channel.clone(),
         };
 
         // Notify phase: Thinking

@@ -2842,6 +2842,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -2895,6 +2897,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -2951,6 +2955,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            sender_user_id: None,
+            sender_channel: None,
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -3010,6 +3016,8 @@ mod tests {
                 step_id: None,
                 reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(
                 ),
+                sender_user_id: None,
+                sender_channel: None,
             };
             let oai = driver.build_request(&req).expect("build_request");
             let assistant_msg = oai
@@ -3073,6 +3081,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: policy,
+            sender_user_id: None,
+            sender_channel: None,
         }
     }
 
@@ -3172,6 +3182,8 @@ mod tests {
             session_id: None,
             step_id: None,
             reasoning_echo_policy: policy,
+            sender_user_id: None,
+            sender_channel: None,
         };
         let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
 

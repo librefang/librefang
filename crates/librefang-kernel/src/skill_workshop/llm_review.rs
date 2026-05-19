@@ -139,6 +139,8 @@ pub async fn review_candidate(
         session_id: attribution.session_id.map(str::to_string),
         step_id: attribution.candidate_id.map(str::to_string),
         reasoning_echo_policy,
+        sender_user_id: None,
+        sender_channel: None,
     };
 
     let response = match driver.complete(request).await {
