@@ -163,6 +163,23 @@ const getErrorMessage = (error: unknown): string =>
 
 const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
 
+// `WorkflowRunState` (Rust kernel) serializes terminal/unit variants as bare
+// snake_case strings (`"running"`, `"completed"`, …) and the struct variant
+// `Paused { resume_token_hash, reason, paused_at }` as an externally-tagged
+// object `{ paused: { … } }`. Anything checking "is this run paused?" from
+// the wire shape needs to accept BOTH the bare string (defensive for any
+// flattened/normalised callers) AND the tagged-object form — comparing
+// `state === "paused"` alone silently misses every real paused run, which is
+// exactly the case where the HITL `OperatorActionBar` must mount. Same
+// reasoning the kernel-handle layer hits in workflow_runner.rs:198.
+const isPausedRunState = (state: unknown): boolean => {
+  if (state === "paused") return true;
+  if (state !== null && typeof state === "object" && "paused" in (state as Record<string, unknown>)) {
+    return true;
+  }
+  return false;
+};
+
 // Image detection is `O(n²)` worst-case on malformed JSON-ish output (a
 // run of unmatched `{` triggers a fresh scan from each one). Memoize so
 // unrelated re-renders of the parent (poll ticks, prop bag churn) don't
@@ -1128,10 +1145,14 @@ export function WorkflowsPage() {
                                 </div>
                               )}
                               {/* HITL operator-step action bar (#4977).
-                                  Renders only when the run is paused at an
-                                  operator step; renders nothing otherwise
-                                  (404/409 from the inspect endpoint). */}
-                              {runId && runDetailQuery.data.state === "paused" && (
+                                  Mount whenever the run is paused (any
+                                  paused-shape); the bar's own inspect
+                                  query renders null on 404/409 if it's not
+                                  an operator-step pause. Must use
+                                  `isPausedRunState` not `state === "paused"`
+                                  — the Paused variant ships as
+                                  `{paused: {…}}` not a bare string. */}
+                              {runId && isPausedRunState(runDetailQuery.data.state) && (
                                 <OperatorActionBar runId={runId} />
                               )}
                               <StepAccordion

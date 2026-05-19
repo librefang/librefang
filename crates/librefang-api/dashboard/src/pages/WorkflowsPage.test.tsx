@@ -491,4 +491,62 @@ describe("WorkflowsPage", () => {
     expect(screen.getByText("review_draft")).toBeInTheDocument();
     expect(screen.getByText(/2 actions/i)).toBeInTheDocument();
   });
+
+  // Regression for #4977 review: the Rust `WorkflowRunState::Paused {…}`
+  // variant serialises to `{paused: {…}}` (externally-tagged struct
+  // variant) — not the bare string `"paused"`. The OperatorActionBar
+  // mount guard must accept the object form, or every real paused run
+  // silently fails to surface the resolution UI.
+  it("mounts the operator action bar when the run detail state is a tagged Paused object", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    // Run-list row labelled distinctly from the workflow row so the
+    // click target is unambiguous.
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-paused-1",
+          workflow_name: "paused-run-row",
+          state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:00:30Z" } },
+          steps_completed: 1,
+          started_at: "2026-05-01T12:00:00Z",
+        },
+      ]),
+    );
+    useWorkflowRunDetailMock.mockReturnValue(
+      makeQuery({
+        id: "run-paused-1",
+        workflow_id: "wf-1",
+        workflow_name: "paused-run-row",
+        input: "seed",
+        // Real wire shape from `serde_json::to_value(&run.state)` for the
+        // `WorkflowRunState::Paused` struct variant.
+        state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:00:30Z" } },
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [],
+      }),
+    );
+    // Stub the inspect query so the bar resolves to a renderable pause —
+    // confirms the *mount* happened and the data flowed through.
+    useWorkflowOperatorPauseMock.mockReturnValue(
+      makeQuery({
+        run_id: "run-paused-1",
+        workflow_id: "wf-1",
+        workflow_name: "paused-run-row",
+        step_name: "review_draft",
+        operator_step_index: 0,
+        artifact: "the draft",
+        actions: ["approve"],
+        started_at: "2026-05-01T12:00:00Z",
+        paused_at: "2026-05-01T12:00:30Z",
+      }),
+    );
+    renderPage();
+    // Select the paused run in the Run History list to reveal the
+    // OperatorActionBar inside the inline run detail panel.
+    fireEvent.click(screen.getByText("paused-run-row"));
+    // The bar's hallmark copy renders only when the mount guard passed
+    // AND the inspect query produced a pause.
+    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    expect(screen.getByText("the draft")).toBeInTheDocument();
+  });
 });
