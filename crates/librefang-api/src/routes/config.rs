@@ -2698,8 +2698,13 @@ fn is_writable_config_path(path: &str) -> bool {
         // fallback_providers, taint_rules) are intentionally NOT here:
         // their items have nested fields (e.g. SidecarChannel.env) that
         // SCRUB_SUFFIXES — which only inspects the dotted path string —
-        // cannot police inside a wholesale JSON payload. Those sections
-        // remain edit-on-disk for now (round-4 review of #4678).
+        // cannot police inside a wholesale JSON payload.
+        // `sidecar_channels` writes go through the dedicated
+        // `POST /api/channels/sidecar/{name}/configure` endpoint, which
+        // validates against the cached `--describe` schema and splits
+        // secrets vs non-secrets across `secrets.env` and `config.toml`.
+        // `fallback_providers` / `taint_rules` remain edit-on-disk for
+        // now (round-4 review of #4678).
         "provider_urls",
         "provider_regions",
         "provider_proxy_urls",
@@ -3453,6 +3458,9 @@ url = "https://search.example.com"
         // fallback_providers, taint_rules) reject whole-blob writes:
         // their items have nested fields (env maps, api_key_env) that
         // SCRUB can't police inside a wholesale JSON payload.
+        // `sidecar_channels` has its own typed write endpoint
+        // (`POST /api/channels/sidecar/{name}/configure`); the bare
+        // path stays closed here.
         assert!(super::is_writable_config_path("provider_urls"));
         assert!(super::is_writable_config_path("provider_regions"));
         assert!(super::is_writable_config_path(

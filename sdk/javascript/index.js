@@ -535,6 +535,10 @@ class ChannelsResource {
     return this._c._request("POST", "/api/channels/reload");
   }
 
+  async configureSidecarChannel(name, data) {
+    return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
+  }
+
   async wechatQrStart() {
     return this._c._request("POST", "/api/channels/wechat/qr/start");
   }

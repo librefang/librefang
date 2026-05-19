@@ -1013,6 +1013,13 @@ pub async fn build_router(
     let (bridge, initial_webhook_router) =
         channel_bridge::start_channel_bridge(kernel.clone()).await;
 
+    // Probe first-party sidecar adapters (`telegram`, `ntfy`) with
+    // `--describe` and cache their schemas so `GET /api/channels`
+    // can emit `fields[]` for unconfigured discovery rows. Runs once
+    // at boot — failures (SDK not installed, describe crashed) are
+    // logged at WARN and the dashboard falls back to an empty form.
+    routes::channels::populate_sidecar_schema_cache().await;
+
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
     // and the config has prometheus_enabled = true. The handle is parked in a
     // module-local `OnceLock` inside `crate::telemetry`; the `/api/metrics`
