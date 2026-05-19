@@ -111,14 +111,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["REDDIT_CLIENT_SECRET", "REDDIT_PASSWORD"],
         description: "Reddit API bot adapter",
     },
-    // mastodon migrated to a sidecar adapter
-    ChannelDef {
-        name: "bluesky",
-        display_name: "Bluesky",
-        category: "Social",
-        env_vars: &["BLUESKY_APP_PASSWORD"],
-        description: "Bluesky/AT Protocol adapter",
-    },
+    // mastodon and bluesky migrated to sidecar adapters
     // ── Enterprise (10)
     ChannelDef {
         name: "teams",

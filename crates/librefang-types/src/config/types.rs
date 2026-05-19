@@ -6395,8 +6395,6 @@ pub struct ChannelsConfig {
     pub line: OneOrMany<LineConfig>,
     /// Reddit API configuration(s).
     pub reddit: OneOrMany<RedditConfig>,
-    /// Bluesky/AT Protocol configuration(s).
-    pub bluesky: OneOrMany<BlueskyConfig>,
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     /// Revolt (Discord-like) configuration(s).
@@ -6503,7 +6501,6 @@ impl Default for ChannelsConfig {
             xmpp: OneOrMany::default(),
             line: OneOrMany::default(),
             reddit: OneOrMany::default(),
-            bluesky: OneOrMany::default(),
             feishu: OneOrMany::default(),
             revolt: OneOrMany::default(),
             nextcloud: OneOrMany::default(),
@@ -7349,39 +7346,6 @@ impl Default for RedditConfig {
             username: String::new(),
             password_env: "REDDIT_PASSWORD".to_string(),
             subreddits: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Bluesky/AT Protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct BlueskyConfig {
-    /// Bluesky identifier (handle or DID).
-    pub identifier: String,
-    /// Env var name holding the app password.
-    pub app_password_env: String,
-    /// PDS service URL.
-    pub service_url: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for BlueskyConfig {
-    fn default() -> Self {
-        Self {
-            identifier: String::new(),
-            app_password_env: "BLUESKY_APP_PASSWORD".to_string(),
-            service_url: "https://bsky.social".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

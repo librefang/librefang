@@ -301,24 +301,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
         config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
     },
-    // mastodon migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.mastodon in the SDK package); no
-    // longer an in-process channel.
-    ChannelMeta {
-        name: "bluesky", display_name: "Bluesky", icon: "BS",
-        description: "Bluesky/AT Protocol adapter",
-        category: "social", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Enter your handle and app password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "identifier", label: "Handle", field_type: FieldType::Text, env_var: None, required: true, placeholder: "user.bsky.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("BLUESKY_APP_PASSWORD"), required: true, placeholder: "xxxx-xxxx-xxxx-xxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "service_url", label: "PDS URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://bsky.social", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > App Passwords in Bluesky", "Create an app password", "Enter handle and password below"],
-        config_template: "[channels.bluesky]\nidentifier = \"\"\napp_password_env = \"BLUESKY_APP_PASSWORD\"",
-    },
+    // mastodon and bluesky migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{mastodon,bluesky} in the SDK package);
+    // no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
     ChannelMeta {
         name: "teams", display_name: "Microsoft Teams", icon: "MS",
@@ -710,7 +695,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "threema" => config.threema.is_some(),
         "keybase" => config.keybase.is_some(),
         "reddit" => config.reddit.is_some(),
-        "bluesky" => config.bluesky.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
@@ -980,6 +964,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Mastodon Streaming API (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.mastodon"],
+    },
+    SidecarCatalogEntry {
+        name: "bluesky",
+        display_name: "Bluesky",
+        description: "Bluesky / AT Protocol adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.bluesky"],
     },
 ];
 
@@ -1538,10 +1529,6 @@ fn channel_config_values(
             .reddit
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "bluesky" => config
-            .bluesky
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
             .as_ref()
@@ -1636,7 +1623,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "threema" => config.threema.len(),
         "keybase" => config.keybase.len(),
         "reddit" => config.reddit.len(),
-        "bluesky" => config.bluesky.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
@@ -1694,7 +1680,6 @@ fn channel_instances_serialized(
         "threema" => ser(&config.threema),
         "keybase" => ser(&config.keybase),
         "reddit" => ser(&config.reddit),
-        "bluesky" => ser(&config.bluesky),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),

@@ -29,8 +29,6 @@ pub use message_truncator::{
 };
 
 // Individual channel adapters — feature-gated (alphabetical order)
-#[cfg(feature = "channel-bluesky")]
-pub mod bluesky;
 #[cfg(feature = "channel-dingtalk")]
 pub mod dingtalk;
 #[cfg(feature = "channel-discord")]

@@ -12,8 +12,8 @@ Adapters are gated behind cargo features (`channel-xxx`).
 
 `default = []`. Every workspace consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets `default-features = false` and forwards an explicit subset.
 
-- `all-channels` — every adapter (matrix, IMAP, Bluesky, …). Used by release CI.
-- Per-adapter: `channel-discord`, `channel-slack`, `channel-webhook`, etc. (ntfy and telegram migrated to sidecars — see `librefang.sidecar.adapters.ntfy` / `librefang.sidecar.adapters.telegram` in the SDK.)
+- `all-channels` — every adapter (matrix, IMAP, google-chat, …). Used by release CI.
+- Per-adapter: `channel-discord`, `channel-slack`, `channel-webhook`, etc. (ntfy, telegram, gotify, mastodon, and bluesky migrated to sidecars — see `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky}` in the SDK.)
 
 See `Cargo.toml` for the full feature matrix.
 

@@ -20,7 +20,6 @@ default = []
 # a matching entry here. CI / release / packaging pipelines opt in to
 # this; everyday `cargo build` paths don't.
 all-channels = [
-    "channel-bluesky",
     "channel-dingtalk",
     "channel-discord",
     "channel-email",
@@ -73,7 +72,6 @@ channel-twitch = []
 channel-rocketchat = []
 channel-zulip = []
 channel-xmpp = []
-channel-bluesky = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []
 channel-reddit = []

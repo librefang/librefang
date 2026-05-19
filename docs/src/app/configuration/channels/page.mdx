@@ -390,21 +390,23 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 `MASTODON_ACCESS_TOKEN` (OAuth bearer) goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Mastodon form. The sidecar inherits SSE-with-polling-fallback semantics from the removed in-process adapter.
 
-#### `[channels.bluesky]`
+#### Bluesky
+
+Bluesky is provided by the Python sidecar adapter (`librefang.sidecar.adapters.bluesky`). The in-process `[channels.bluesky]` config block was removed in the sidecar migration. Declare Bluesky as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.bluesky]
-identifier = "mybot.bsky.social"
-app_password_env = "BLUESKY_APP_PASSWORD"
-service_url = "https://bsky.social"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "mybot.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # custom PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `identifier` | string | `""` | Bluesky handle or DID. |
-| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | Env var holding the Bluesky app password. |
-| `service_url` | string | `"https://bsky.social"` | PDS (Personal Data Server) URL. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`BLUESKY_APP_PASSWORD` goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Bluesky form. The sidecar polls `app.bsky.notification.listNotifications` every 5 s and threads outbound replies back to the originating notification via an in-memory LRU cache (capacity 200).
 
 #### `[channels.feishu]`
 

@@ -94,34 +94,31 @@ The Mastodon sidecar connects to the instance's user streaming API via Server-Se
 - A Bluesky account (see [Bluesky API docs](https://docs.bsky.app))
 - An app password (generated in Bluesky **Settings > App Passwords**)
 
+Bluesky runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.bluesky`, ships in `librefang-sdk`).
+
 ### Setup
 
 1. In Bluesky, go to **Settings > App Passwords** and create a new app password.
-2. Set environment variables:
-
-```bash
-export BLUESKY_IDENTIFIER=your-handle.bsky.social  # Environment variable
-export BLUESKY_APP_PASSWORD=your-app-password
-librefang vault set BLUESKY_IDENTIFIER        # Encrypted vault (recommended)
-librefang vault set BLUESKY_APP_PASSWORD
-librefang config set-key bluesky              # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-3. Add to config:
+2. Add a `[[sidecar_channels]]` entry:
 
 ```toml
-[channels.bluesky]
-identifier_env = "BLUESKY_IDENTIFIER"
-app_password_env = "BLUESKY_APP_PASSWORD"
-default_agent = "social-media"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "your-handle.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # custom PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
+3. Set the app password via the dashboard's Channels page (writes `BLUESKY_APP_PASSWORD` to `~/.librefang/secrets.env`), or place it directly in your vault / `.env`.
 4. Restart the daemon.
 
 ### How It Works
 
-The Bluesky adapter authenticates using the AT Protocol and monitors notifications (mentions) via REST polling. Responses are posted as reply posts through the AT Protocol's `com.atproto.repo.createRecord` endpoint.
+The sidecar authenticates with `com.atproto.server.createSession` and refreshes the session JWT before expiry. It polls `app.bsky.notification.listNotifications` every 5 s (filtering `mention` + `reply` reasons) and posts replies via `com.atproto.repo.createRecord` using the `app.bsky.feed.post` lexicon. An in-memory LRU cache (capacity 200) maps inbound notification URIs to their `{root, parent}` reply refs so outbound responses thread back to the originating post; on a chunked reply every chunk reuses the same reply ref to keep the thread tight.
 
 ---
 

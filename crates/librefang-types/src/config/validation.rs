@@ -412,17 +412,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for bs in self.channels.bluesky.iter() {
-            if std::env::var(&bs.app_password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Bluesky configured but {} is not set",
-                    bs.app_password_env
-                ));
-            }
-        }
         for fs in self.channels.feishu.iter() {
             if std::env::var(&fs.app_secret_env)
                 .unwrap_or_default()
