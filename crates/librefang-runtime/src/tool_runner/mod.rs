@@ -51,9 +51,9 @@ use self::canvas::tool_canvas_present;
 use self::channel::tool_channel_send;
 use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_list};
 pub use self::definitions::{builtin_tool_definitions, select_native_tools, ALWAYS_NATIVE_TOOLS};
+pub use self::dispatch::{current_agent_depth, execute_tool, execute_tool_raw, ToolExecContext};
 #[allow(unused_imports)] // Re-exported for incremental migration of submodules (#3576).
 pub(super) use self::error::{ToolError, ToolResult as TypedToolResult};
-pub use self::dispatch::{current_agent_depth, execute_tool, execute_tool_raw, ToolExecContext};
 use self::event::tool_event_publish;
 use self::fs::{
     check_absolute_path_inside_workspace, maybe_dedup_file_read, maybe_snapshot, named_ws_prefixes,

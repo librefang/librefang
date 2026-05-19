@@ -38,15 +38,19 @@ pub enum ToolError {
     /// `name` is the schema field; `reason` is a free-form human-readable
     /// explanation suitable for relaying back to the LLM.
     #[error("Invalid parameter '{name}': {reason}")]
-    InvalidParameter {
-        name: &'static str,
-        reason: String,
-    },
+    InvalidParameter { name: &'static str, reason: String },
 
-    /// A runtime capability the tool needs isn't wired in this call context
-    /// (kernel handle missing, caller agent id missing, web/browser context
-    /// missing, …). Mirrors [`LibreFangError::Unavailable`]'s "this build /
-    /// configuration doesn't include the subsystem" semantics.
+    /// A runtime subsystem the tool needs isn't wired in this build /
+    /// configuration (kernel handle missing, web/browser context missing,
+    /// docker exec disabled, …). Mirrors [`LibreFangError::Unavailable`] and
+    /// maps to HTTP 503.
+    ///
+    /// NOT used for internal call-context attribution gaps (caller agent id,
+    /// session id) — those are dispatcher invariants the LLM cannot recover
+    /// from and belong under `Internal`, not 503. Lying about a subsystem
+    /// being unavailable when the real failure is a missing attribution
+    /// would mislead both the upstream caller's retry logic and the
+    /// operator's status dashboards.
     #[error("{0} unavailable")]
     Unavailable(&'static str),
 
@@ -78,8 +82,16 @@ pub enum ToolError {
     /// on a successful upstream result) failed. Distinct from `Upstream` so
     /// the agent loop can distinguish "the tool ran but I couldn't hand you
     /// the answer" from "the tool itself failed".
-    #[error("Serialization error: {0}")]
-    Serialization(String),
+    ///
+    /// `source` carries the original `serde_json::Error` (or other typed
+    /// serializer error) so callers walking the chain can downcast — same
+    /// shape as [`LibreFangError::Serialization`].
+    #[error("Serialization error: {message}")]
+    Serialization {
+        message: String,
+        #[source]
+        source: Option<BoxedSource>,
+    },
 
     /// Internal invariant violation. Use sparingly — prefer one of the more
     /// specific variants above.
@@ -113,38 +125,94 @@ impl ToolError {
             source: None,
         }
     }
+
+    /// Build [`Self::Serialization`] from a typed serializer error (typically
+    /// `serde_json::Error`), preserving it on the `source()` chain. Mirrors
+    /// [`LibreFangError::serialization`] so the chain survives the bridge into
+    /// the application enum.
+    pub fn serialization<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Serialization {
+            message: source.to_string(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Build [`Self::Serialization`] from a free-form message (no underlying
+    /// typed error — invariant / framing check).
+    pub fn serialization_msg(message: impl Into<String>) -> Self {
+        Self::Serialization {
+            message: message.into(),
+            source: None,
+        }
+    }
+}
+
+/// Auto-conversion so call sites can `?`-bubble `serde_json` failures
+/// without a `.map_err`. Preserves the underlying `serde_json::Error` on the
+/// `source()` chain (matches the `From<serde_json::Error> for LibreFangError`
+/// impl in `librefang-types`).
+impl From<serde_json::Error> for ToolError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::serialization(e)
+    }
 }
 
 /// Lift [`ToolError`] into [`LibreFangError`] so callers further up the
 /// stack can `?`-bubble it without explicit `.map_err`. Maps each kind to
 /// the closest existing semantic in the application enum:
 ///
-/// - `MissingParameter` / `InvalidParameter` → `InvalidInput` (caller bug).
-/// - `Unavailable` → `Unavailable` (missing subsystem).
-/// - `NotFound` → `Internal` (no `NotFound { kind }` in the app enum yet;
-///   keeping the `Display` content preserves the rendered message).
-/// - `PermissionDenied` → `CapabilityDenied`.
-/// - `Upstream` → `ToolExecution` (closest match; the typed source still
-///   rides on `BoxedSource`).
-/// - `Serialization` → `serialization_msg`.
+/// - `MissingParameter` / `InvalidParameter` → `InvalidInput` (caller bug,
+///   400-class on the HTTP boundary).
+/// - `Unavailable` → `Unavailable` (missing subsystem, 503-class).
+/// - `NotFound` → `InvalidInput` (no generic `NotFound { kind }` in the app
+///   enum yet — `AgentNotFound` / `SessionNotFound` are the only typed
+///   not-found variants. `InvalidInput` keeps the rendered `Display` and
+///   maps to 400, which is friendlier than the 500 `Internal` would give if
+///   a future caller bubbles a `ToolError::NotFound` through to an HTTP
+///   handler).
+/// - `PermissionDenied` → `CapabilityDenied` (403-class).
+/// - `Upstream` → `ToolExecution` for the `Display`; the typed source is
+///   re-attached to `Memory` / `Network` / `LlmDriver` / `Serialization`
+///   when we can identify it, otherwise stays on `ToolExecution.reason`
+///   as a stringified message. (The `tool_id` field is set to `"unknown"`
+///   because the dispatch boundary — not the submodule fn — knows the tool
+///   name; slice 5 of #3576 will lift dispatch to return `ToolError` and
+///   thread the tool id at that boundary.)
+/// - `Serialization` → `LibreFangError::Serialization` preserving the
+///   `source()` chain.
 /// - `Internal` → `Internal`.
 impl From<ToolError> for LibreFangError {
     fn from(e: ToolError) -> Self {
         match e {
-            ToolError::MissingParameter(_) | ToolError::InvalidParameter { .. } => {
-                LibreFangError::InvalidInput(e.to_string())
-            }
+            ToolError::MissingParameter(_)
+            | ToolError::InvalidParameter { .. }
+            | ToolError::NotFound { .. } => LibreFangError::InvalidInput(e.to_string()),
             ToolError::Unavailable(cap) => LibreFangError::unavailable(cap),
-            ToolError::NotFound { .. } => LibreFangError::Internal(e.to_string()),
             ToolError::PermissionDenied(_) => LibreFangError::CapabilityDenied(e.to_string()),
-            ToolError::Upstream { message, source } => LibreFangError::ToolExecution {
-                tool_id: "unknown".to_string(),
-                reason: source
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or(message),
+            ToolError::Upstream { message, source } => match source {
+                // The upstream is itself a `LibreFangError` (kernel handle
+                // round-trip): unwrap it so the typed kind survives — keeping
+                // `LibreFangError::Memory{source}` etc. intact, with its own
+                // `BoxedSource` chain — instead of flattening to
+                // `ToolExecution{reason: <stringified>}`.
+                Some(boxed) => match boxed.downcast::<LibreFangError>() {
+                    Ok(inner) => *inner,
+                    Err(other) => LibreFangError::ToolExecution {
+                        tool_id: "unknown".to_string(),
+                        reason: other.to_string(),
+                    },
+                },
+                None => LibreFangError::ToolExecution {
+                    tool_id: "unknown".to_string(),
+                    reason: message,
+                },
             },
-            ToolError::Serialization(msg) => LibreFangError::serialization_msg(msg),
+            ToolError::Serialization { message, source } => {
+                LibreFangError::Serialization { message, source }
+            }
             ToolError::Internal(msg) => LibreFangError::Internal(msg),
         }
     }
@@ -222,18 +290,39 @@ mod tests {
         let e: LibreFangError = ToolError::PermissionDenied("nope".into()).into();
         assert!(matches!(e, LibreFangError::CapabilityDenied(_)));
 
-        let e: LibreFangError = ToolError::Serialization("bad utf8".into()).into();
+        let e: LibreFangError = ToolError::serialization_msg("bad utf8").into();
         assert!(matches!(e, LibreFangError::Serialization { .. }));
 
         let e: LibreFangError = ToolError::Internal("invariant".into()).into();
         assert!(matches!(e, LibreFangError::Internal(_)));
     }
 
-    /// `Upstream` lifts to `ToolExecution`. The reason field must prefer the
-    /// underlying typed source's `Display` when available so the rendered
-    /// message contains the actual cause, not the wrapper's repeating prefix.
+    /// `NotFound` lifts to `InvalidInput` (400), not `Internal` (500). The app
+    /// enum does not yet carry a generic `NotFound{kind}` variant — only
+    /// `AgentNotFound` / `SessionNotFound` — and falling through to `Internal`
+    /// would surface as HTTP 500 on the api boundary, which is wrong for a
+    /// "you asked for a thing that does not exist or is not yours" failure.
+    /// The rendered `Display` is preserved either way.
     #[test]
-    fn upstream_into_librefang_error_carries_source_display() {
+    fn not_found_lifts_to_invalid_input_with_display_preserved() {
+        let e: LibreFangError = ToolError::NotFound {
+            kind: "Cron job",
+            id: "abc-123".to_string(),
+        }
+        .into();
+        match e {
+            LibreFangError::InvalidInput(msg) => {
+                assert_eq!(msg, "Cron job 'abc-123' not found");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// `Upstream` carrying a foreign typed error (`std::io::Error` — not a
+    /// `LibreFangError`) lifts to `ToolExecution` and the reason field
+    /// surfaces the underlying source's `Display`.
+    #[test]
+    fn upstream_foreign_source_lifts_to_tool_execution() {
         let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out");
         let e: LibreFangError = ToolError::upstream(inner).into();
         match e {
@@ -243,5 +332,79 @@ mod tests {
             }
             other => panic!("expected ToolExecution, got {other:?}"),
         }
+    }
+
+    /// `Upstream` carrying a typed `LibreFangError` (the common kernel-handle
+    /// case — `KernelOpError == LibreFangError`) MUST unwrap, not flatten to
+    /// `ToolExecution`. Flattening would lose the variant kind and erase the
+    /// `Memory{source} / Network{source}` chain that #3745 went out of its
+    /// way to preserve; retry logic walking `source()` would see the boxed
+    /// `LibreFangError` instead of being able to downcast to the storage /
+    /// transport error directly.
+    #[test]
+    fn upstream_carrying_librefang_error_round_trips_variant() {
+        let inner = LibreFangError::AgentNotFound("agent-x".into());
+        let lifted: LibreFangError = ToolError::upstream(inner).into();
+        match lifted {
+            LibreFangError::AgentNotFound(id) => assert_eq!(id, "agent-x"),
+            other => panic!("expected AgentNotFound to round-trip, got {other:?}"),
+        }
+    }
+
+    /// `Upstream` carrying a typed `LibreFangError::Memory{source}` must
+    /// preserve BOTH the outer `Memory` variant AND the inner `BoxedSource`
+    /// chain — otherwise the bridge silently undoes #3745.
+    #[test]
+    fn upstream_carrying_memory_error_preserves_inner_source_chain() {
+        let storage = std::io::Error::other("disk full");
+        let mem = LibreFangError::memory(storage);
+        let lifted: LibreFangError = ToolError::upstream(mem).into();
+        match &lifted {
+            LibreFangError::Memory {
+                message,
+                source: Some(s),
+            } => {
+                assert_eq!(message, "disk full");
+                assert!(
+                    s.downcast_ref::<std::io::Error>().is_some(),
+                    "inner source must still downcast to io::Error"
+                );
+            }
+            other => panic!("expected Memory{{source: Some(_)}}, got {other:?}"),
+        }
+    }
+
+    /// `Serialization` lifts to `LibreFangError::Serialization` AND keeps the
+    /// underlying serde_json::Error on the `source()` chain. The earlier
+    /// `Serialization(String)` shape silently dropped it.
+    #[test]
+    fn serialization_into_librefang_preserves_source_chain() {
+        let json_err = serde_json::from_str::<u32>("not a number").unwrap_err();
+        let e: LibreFangError = ToolError::serialization(json_err).into();
+        match &e {
+            LibreFangError::Serialization {
+                source: Some(s), ..
+            } => {
+                assert!(
+                    s.downcast_ref::<serde_json::Error>().is_some(),
+                    "inner source must downcast to serde_json::Error"
+                );
+            }
+            other => panic!("expected Serialization{{source: Some(_)}}, got {other:?}"),
+        }
+    }
+
+    /// `From<serde_json::Error> for ToolError` mirrors the
+    /// `From<serde_json::Error> for LibreFangError` shape so `?` works the
+    /// same on both sides of the boundary.
+    #[test]
+    fn from_serde_json_error_preserves_source() {
+        let json_err = serde_json::from_str::<u32>("nope").unwrap_err();
+        let e: ToolError = json_err.into();
+        let src = e.source().expect("Serialization should carry a source");
+        assert!(
+            src.downcast_ref::<serde_json::Error>().is_some(),
+            "source must downcast to serde_json::Error"
+        );
     }
 }

@@ -66,14 +66,17 @@ The replacement type:
 pub enum ToolError {
     /// A required input parameter is missing or wrong-typed.
     /// Maps to "the LLM called the tool wrong — re-prompt with the schema".
-    #[error("Missing parameter '{0}'")]
+    #[error("Missing required parameter '{0}'")]
     MissingParameter(&'static str),
 
     #[error("Invalid parameter '{name}': {reason}")]
     InvalidParameter { name: &'static str, reason: String },
 
     /// Tool requires a runtime capability that isn't wired (kernel handle,
-    /// caller agent id, web context, …). Mirrors `LibreFangError::Unavailable`.
+    /// web context, …). Mirrors `LibreFangError::Unavailable`. NOT used for
+    /// caller-agent-id or other internal call-context attribution gaps —
+    /// those map to `Internal` because the LLM cannot recover from them and
+    /// surfacing them as 503 would lie about the subsystem state.
     #[error("{0} unavailable")]
     Unavailable(&'static str),
 
@@ -89,7 +92,11 @@ pub enum ToolError {
     /// A downstream subsystem (kernel handle, skill loader, MCP server) failed.
     /// Carries the upstream error on the `source()` chain so callers walking
     /// it can downcast back to `LibreFangError` / `KernelError` etc.
-    #[error("Upstream error: {message}")]
+    ///
+    /// `Display` renders only `{message}` (no "Upstream error:" prefix) so the
+    /// wire string the LLM sees doesn't double up — the upstream `Display`
+    /// already carries its own kind prefix.
+    #[error("{message}")]
     Upstream {
         message: String,
         #[source]
@@ -98,11 +105,20 @@ pub enum ToolError {
 
     /// Serialization of the tool's response (json) failed. Distinct from
     /// `Upstream` so the agent loop can surface "the tool ran but I couldn't
-    /// hand you the answer" rather than "the tool failed".
-    #[error("Serialization error: {0}")]
-    Serialization(String),
+    /// hand you the answer" rather than "the tool failed". `source` carries
+    /// the original `serde_json::Error` (or other typed serializer error) so
+    /// the chain survives the `From<ToolError> for LibreFangError` bridge.
+    #[error("Serialization error: {message}")]
+    Serialization {
+        message: String,
+        #[source]
+        source: Option<BoxedSource>,
+    },
 
-    /// Internal invariant violation. Use sparingly — prefer one of the above.
+    /// Internal invariant violation (dispatcher wiring gap, broken assumption).
+    /// Use sparingly — prefer one of the above. Maps to 500 on the HTTP
+    /// boundary intentionally; if the LLM might recover by re-prompting, use
+    /// `InvalidParameter` / `MissingParameter` instead.
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -111,31 +127,54 @@ pub type ToolResult<T = String> = Result<T, ToolError>;
 ```
 
 `From<ToolError> for LibreFangError` provides the bridge for callers that want
-to bubble through the kernel boundary:
+to bubble through the kernel boundary. Source-chain preservation is the
+explicit contract — the bridge must NOT silently undo #3745.
 
 ```rust
 impl From<ToolError> for LibreFangError {
     fn from(e: ToolError) -> Self {
         match e {
-            ToolError::MissingParameter(_) | ToolError::InvalidParameter { .. } => {
-                LibreFangError::InvalidInput(e.to_string())
-            }
+            // 400-class: caller bug; the LLM can re-prompt against the schema.
+            ToolError::MissingParameter(_)
+            | ToolError::InvalidParameter { .. }
+            | ToolError::NotFound { .. } => LibreFangError::InvalidInput(e.to_string()),
+            // 503: missing subsystem.
             ToolError::Unavailable(cap) => LibreFangError::unavailable(cap),
-            ToolError::NotFound { .. } => LibreFangError::Internal(e.to_string()),
+            // 403: authz.
             ToolError::PermissionDenied(_) => LibreFangError::CapabilityDenied(e.to_string()),
-            ToolError::Upstream { message, source } => LibreFangError::ToolExecution {
-                tool_id: "unknown".to_string(),
-                reason: source
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or(message),
+            // Kernel-handle round-trip: `KernelOpError == LibreFangError`, so a
+            // typed `LibreFangError` rides on `Upstream.source`. Unwrap so the
+            // variant kind survives — flattening to `ToolExecution{reason}`
+            // would erase `Memory{source}` / `Network{source}` / `LlmDriver{source}`.
+            ToolError::Upstream { message, source } => match source {
+                Some(boxed) => match boxed.downcast::<LibreFangError>() {
+                    Ok(inner) => *inner,
+                    Err(other) => LibreFangError::ToolExecution {
+                        tool_id: "unknown".to_string(),
+                        reason: other.to_string(),
+                    },
+                },
+                None => LibreFangError::ToolExecution {
+                    tool_id: "unknown".to_string(),
+                    reason: message,
+                },
             },
-            ToolError::Serialization(msg) => LibreFangError::serialization_msg(msg),
+            // Preserve the source chain end-to-end.
+            ToolError::Serialization { message, source } => {
+                LibreFangError::Serialization { message, source }
+            }
             ToolError::Internal(msg) => LibreFangError::Internal(msg),
         }
     }
 }
 ```
+
+`tool_id: "unknown"` on the `ToolExecution` arm is intentional placeholder
+debt — the dispatch boundary (not the submodule fn) knows the tool name, and
+slice 5 of the migration order will lift dispatch to return `ToolError` so the
+tool id can be threaded at that boundary. Until then, every typed-upstream
+`LibreFangError` case unwraps to its real variant, so the `unknown` only
+appears for the (currently empty) "foreign typed source" case.
 
 **Naming convention recap.** Domain errors live next to the trait they serve
 (`HandError` next to the hands API, `SandboxError` in the sandbox crate). The
@@ -200,10 +239,13 @@ Smallest-blast-radius first. Each module is independently reviewable.
    the `From<LibreFangError>` impl exercised.
 4. **`tool_runner/{shell,knowledge,image,meta,canvas,wiki,web_legacy,hand}.rs`** —
    the long tail. Each PR migrates one file + adds tests.
-5. **`tool_runner/{a2a,fs,dispatch}.rs` and the rest** — last, because
-   `dispatch.rs` is the boundary that finally upgrades from
+5. **`tool_runner/{fs,dispatch}.rs`** — last, because `dispatch.rs` is the
+   boundary that finally upgrades from
    `match result { Ok(s) => …, Err(s) => … }` to
-   `match result { Ok(s) => …, Err(e) => match e.kind() … }`.
+   `match result { Ok(s) => …, Err(e) => match e.kind() … }`, and lifts
+   `require_kernel` (stringly) into the typed `require_kernel_typed` everywhere.
+   (`a2a.rs` is migrated in slice 3 above; the earlier listing here was a
+   duplicate.)
 6. **`librefang-channels::bridge`** — 24 sites. After tool_runner is done so the
    shared `ToolError` shape is settled.
 7. **`librefang-api::channel_bridge`** — 16 sites. Same reason.
@@ -228,15 +270,34 @@ Estimated runway: ~10–14 PRs after this one. Tracked under the umbrella issue
    `cron_*` arms call `.map_err(|e: ToolError| e.to_string())` at the
    dispatch-side boundary so the change does not cascade across the other
    ~180 sites in this PR. (That cascade is the work of follow-up PRs.)
-5. Unit tests on `cron.rs` covering each new `ToolError` variant returned
-   by the three cron fns. Note that the rendered error *strings* the LLM
-   sees change with this migration (e.g. `"Missing 'job_id' parameter"`
-   becomes `"Missing required parameter 'job_id'"`) — that is the whole
-   point of the structured shape and is desirable, but it means downstream
-   code that substring-matched the legacy phrasing must be re-pointed at
-   the structured variant. The cron arm has only one caller (`dispatch.rs`),
-   which renders the error via `format!("Error: {err}")` without parsing it,
-   so no string-matching consumer exists.
+5. Tests:
+   - Pure unit tests in `cron.rs` for the three "kernel missing →
+     `Unavailable`" wiring guards plus the `caller_agent_id_missing` helper
+     (which maps to `Internal`, NOT `Unavailable`, so the 503 surface stays
+     honest about subsystem state).
+   - End-to-end integration tests in
+     `tests/tool_runner_forwarding_task_cron.rs` for each error path the
+     functions can actually hit on a `Some(kernel)` call:
+     `cron_list` happy, `cron_cancel` happy, `cron_cancel` on an unowned
+     job-id (must surface as `NotFound`, must NOT reach the kernel),
+     `cron_cancel` without a `job_id` (must surface as `MissingParameter`).
+     These run through the stringifying dispatch boundary so the wire
+     string the LLM sees is a pinned contract.
+   - `error.rs` unit tests for the `From<ToolError> for LibreFangError`
+     bridge: variant kind mapping, `Upstream` unwrapping a typed
+     `LibreFangError` (must round-trip the variant, NOT flatten to
+     `ToolExecution`), `Upstream` preserving an inner `Memory{source}`
+     chain (regression-test against silently undoing #3745),
+     `Serialization` preserving its `serde_json::Error` source.
+
+   Note that the rendered error *strings* the LLM sees change with this
+   migration (e.g. `"Missing 'job_id' parameter"` becomes
+   `"Missing required parameter 'job_id'"`) — that is the whole point of
+   the structured shape and is desirable, but it means downstream code
+   that substring-matched the legacy phrasing must be re-pointed at the
+   structured variant. The cron arm has only one caller (`dispatch.rs`),
+   which renders the error via `format!("Error: {err}")` without parsing
+   it, so no string-matching consumer exists.
 
 ## What this PR explicitly does NOT ship
 
