@@ -3367,45 +3367,28 @@ async function sendImage(to, imageUrl, caption) {
 // onto an MP3/WAV/M4A buffer, downstream renderers (web.whatsapp.com,
 // Beeper) reject the payload as "Unsupported content type". TTS providers
 // (ElevenLabs default, OpenAI default) ship MP3, not OGG.
+const OPUS_DEFAULT = 'audio/ogg; codecs=opus';
 function detectAudioMimetype(buffer) {
-  if (!buffer || buffer.length < 12) {
-    return 'audio/ogg; codecs=opus';
+  if (!buffer || buffer.length < 12) return OPUS_DEFAULT;
+  const startsWith = (offset, ...bytes) =>
+    bytes.every((b, i) => buffer[offset + i] === b);
+  // Plain prefix signatures: (offset, [bytes], mimetype).
+  if (startsWith(0, 0x4f, 0x67, 0x67, 0x53)) return OPUS_DEFAULT;            // OggS
+  if (startsWith(0, 0x49, 0x44, 0x33)) return 'audio/mpeg';                  // ID3v2
+  if (startsWith(0, 0x66, 0x4c, 0x61, 0x43)) return 'audio/flac';            // fLaC
+  if (startsWith(4, 0x66, 0x74, 0x79, 0x70)) return 'audio/mp4';             // ftyp (M4A/AAC)
+  if (startsWith(0, 0x52, 0x49, 0x46, 0x46) && startsWith(8, 0x57, 0x41, 0x56, 0x45)) {
+    return 'audio/wav';                                                       // RIFF…WAVE
   }
-  // OGG (Vorbis/Opus): 'OggS' at offset 0
-  if (buffer[0] === 0x4f && buffer[1] === 0x67 && buffer[2] === 0x67 && buffer[3] === 0x53) {
-    return 'audio/ogg; codecs=opus';
-  }
-  // MP3 with ID3v2 tag: 'ID3' at offset 0
-  if (buffer[0] === 0x49 && buffer[1] === 0x44 && buffer[2] === 0x33) {
-    return 'audio/mpeg';
-  }
-  // MP3 raw MPEG frame sync: 0xFF Ex (MPEG-1/2/2.5 layer III, any bitrate)
-  if (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) {
-    return 'audio/mpeg';
-  }
-  // WAV: 'RIFF' at 0, 'WAVE' at 8
-  if (
-    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
-    buffer[8] === 0x57 && buffer[9] === 0x41 && buffer[10] === 0x56 && buffer[11] === 0x45
-  ) {
-    return 'audio/wav';
-  }
-  // MP4/M4A/AAC-in-MP4: 'ftyp' at offset 4
-  if (buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70) {
-    return 'audio/mp4';
-  }
-  // FLAC: 'fLaC' at offset 0 — Baileys accepts it under audio/flac
-  if (buffer[0] === 0x66 && buffer[1] === 0x4c && buffer[2] === 0x61 && buffer[3] === 0x43) {
-    return 'audio/flac';
-  }
-  // Unknown — fall back to the legacy default and warn so the
-  // mismatch is visible in production logs.
+  // MP3 raw MPEG frame sync: 0xFF Ex (MPEG-1/2/2.5 layer III, any bitrate).
+  if (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) return 'audio/mpeg';
+  // Unknown — fall back and warn so the mismatch is visible in prod logs.
   console.warn(JSON.stringify({
     event: 'audio_mimetype_unknown',
     size: buffer.length,
     head: buffer.slice(0, 12).toString('hex'),
   }));
-  return 'audio/ogg; codecs=opus';
+  return OPUS_DEFAULT;
 }
 
 async function sendAudio(to, audioUrl, ptt = true) {
@@ -3442,12 +3425,9 @@ async function sendAudio(to, audioUrl, ptt = true) {
 
   // ptt: true sends as a voice note (push-to-talk bubble); false sends as audio file
   const mimetype = detectAudioMimetype(buffer);
-  if (mimetype !== 'audio/ogg; codecs=opus') {
+  if (mimetype !== OPUS_DEFAULT) {
     console.log(JSON.stringify({
-      event: 'audio_mimetype_detected',
-      mimetype,
-      size: buffer.length,
-      ptt,
+      event: 'audio_mimetype_detected', mimetype, size: buffer.length, ptt,
     }));
   }
   const audioMsg = { audio: buffer, mimetype, ptt };

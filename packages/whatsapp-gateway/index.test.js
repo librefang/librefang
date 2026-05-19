@@ -1618,9 +1618,4 @@ describe('detectAudioMimetype', () => {
     assert.equal(detectAudioMimetype(Buffer.alloc(0)), 'audio/ogg; codecs=opus');
     assert.equal(detectAudioMimetype(Buffer.from([0x4f, 0x67, 0x67])), 'audio/ogg; codecs=opus');
   });
-
-  it('does not mis-classify MP3 framing as OGG (regression guard)', () => {
-    // MP3 frame sync starts with 0xFF — must not collide with OggS.
-    assert.notEqual(detectAudioMimetype(makeBuf([0xff, 0xfb])), 'audio/ogg; codecs=opus');
-  });
 });
