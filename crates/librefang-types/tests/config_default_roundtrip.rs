@@ -39,7 +39,7 @@ use librefang_types::config::{
     PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig, QueueConcurrencyConfig,
     QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig, SanitizeConfig, SessionConfig,
     SkillsConfig, TaskBoardConfig, TavilySearchConfig, TelemetryConfig, TerminalConfig,
-    ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig, VoiceConfig, WebConfig, WebFetchConfig,
+    ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig, WebConfig, WebFetchConfig,
     WebhookTriggerConfig,
 };
 use serde::Serialize;
@@ -351,11 +351,6 @@ fn parallel_tools_config_default_roundtrips_through_toml() {
 #[test]
 fn terminal_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<TerminalConfig>("TerminalConfig");
-}
-
-#[test]
-fn voice_config_default_roundtrips_through_toml() {
-    assert_default_roundtrip::<VoiceConfig>("VoiceConfig");
 }
 
 // Issue #3462 — extend the round-trip property to nested config types

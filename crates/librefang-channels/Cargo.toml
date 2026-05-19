@@ -24,35 +24,23 @@ all-channels = [
     "channel-discord",
     "channel-email",
     "channel-feishu",
-    "channel-flock",
-    "channel-gitter",
     "channel-google-chat",
-    "channel-guilded",
-    "channel-irc",
-    "channel-keybase",
     "channel-line",
     "channel-matrix",
     "channel-mattermost",
-    "channel-mumble",
     "channel-nextcloud",
-    "channel-pumble",
     "channel-qq",
     "channel-reddit",
-    "channel-revolt",
     "channel-rocketchat",
     "channel-signal",
     "channel-slack",
     "channel-teams",
-    "channel-threema",
-    "channel-twist",
     "channel-twitch",
-    "channel-voice",
     "channel-webex",
     "channel-webhook",
     "channel-wechat",
     "channel-wecom",
     "channel-whatsapp",
-    "channel-xmpp",
     "channel-zulip",
 ]
 
@@ -66,28 +54,16 @@ channel-whatsapp = []
 channel-signal = []
 channel-teams = []
 channel-mattermost = []
-channel-irc = []
 channel-google-chat = ["dep:rsa"]
 channel-twitch = []
 channel-rocketchat = []
 channel-zulip = []
-channel-xmpp = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []
 channel-reddit = []
-channel-revolt = []
-channel-voice = []
-channel-flock = []
-channel-guilded = []
-channel-keybase = []
 channel-nextcloud = []
-channel-pumble = []
-channel-threema = []
-channel-twist = []
 channel-webex = []
 channel-dingtalk = []
-channel-gitter = []
-channel-mumble = []
 channel-qq = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]
