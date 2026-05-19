@@ -61,12 +61,49 @@ Configure via ``[[sidecar_channels]]``:
     [sidecar_channels.env]
     REDDIT_CLIENT_ID = "abc123"
     REDDIT_USERNAME = "librefang-bot"
-    REDDIT_SUBREDDITS = "rust,programming"      # comma-separated
-    # REDDIT_ACCOUNT_ID = "prod"                # optional, multi-bot routing
-    # REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"  # override default UA
+    REDDIT_SUBREDDITS = "rust,programming"           # comma-separated
+    REDDIT_USER_AGENT = "myorg/1.0 (by /u/me)"       # REQUIRED — see below
+    # REDDIT_ACCOUNT_ID = "prod"                      # optional, multi-bot routing
+    # REDDIT_POLL_INTERVAL_SECS = "30"                # optional, default 30, floor 5
 
 Secrets via ``~/.librefang/secrets.env``:
 ``REDDIT_CLIENT_SECRET`` and ``REDDIT_PASSWORD``.
+
+Ban-avoidance defaults
+======================
+
+Reddit is strict about bot behaviour and the adapter ships with the
+guardrails that the operator most often forgets:
+
+* **REDDIT_USER_AGENT is required and validated.** Reddit's API rules
+  require the UA to identify the maintainer (``by /u/<your-handle>``)
+  and treat fake / impersonating UAs as grounds for IP+account ban.
+  The literal default UA contains ``/u/librefang-bot`` (NOT a real
+  account); the adapter rejects it at startup so an operator can't
+  ship-by-accident. Use your own maintainer Reddit handle.
+* **30-second default polling interval.** The Rust adapter polled
+  every 5 s; with N subreddits that's the fastest path to burning
+  the 60 req/min/account budget and getting a short-ban. The default
+  here is 30 s (operator-tunable via ``REDDIT_POLL_INTERVAL_SECS``,
+  floored at 5 s).
+* **``X-Ratelimit-*`` aware throttling.** Every response is inspected:
+  when ``X-Ratelimit-Remaining`` falls below 10, the poller sleeps
+  until the reset window (capped at 60 s) before issuing the next
+  sub-fetch. This converts "burn budget then get 429'd" into a
+  smooth pre-emptive slow-down, which is what Reddit's anti-abuse
+  side actually wants to see.
+* **429 handling.** A 429 on polling honours ``Retry-After`` and
+  raises, letting the producer loop back off. A 429 on
+  ``/api/comment`` honours ``Retry-After`` and retries once before
+  surfacing the error.
+
+What this adapter does **not** enforce (operator responsibility):
+
+* Account age and karma minimums (Reddit shadowbans young accounts).
+* Per-subreddit posting permission — get mod approval first.
+* Trigger gating — by default every new comment is emitted; bound it
+  with ``group_trigger_patterns`` in the agent's config to only
+  respond to ``/cmd`` or named-mention so the bot isn't spammy.
 """
 from __future__ import annotations
 
@@ -89,7 +126,13 @@ DEFAULT_API_BASE = "https://oauth.reddit.com"
 # chunks with a separator because Reddit only accepts one reply per
 # parent (matches the Rust adapter).
 MAX_MESSAGE_LEN = 10000
-POLL_INTERVAL_SECS = 5
+# Default polling interval. 30 s is the safer default for ban-avoidance:
+# the Rust adapter used 5 s, but 5 s × N subreddits is the quickest way
+# to burn Reddit's 60 req/min/account budget and trigger an anti-abuse
+# short-ban. Operators with a high-churn sub can override via
+# REDDIT_POLL_INTERVAL_SECS (floored at MIN_POLL_INTERVAL_SECS).
+DEFAULT_POLL_INTERVAL_SECS = 30
+MIN_POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
 MAX_BACKOFF_SECS = 60.0
 # Refresh OAuth tokens 5 minutes before expiry.
@@ -105,8 +148,28 @@ CHUNK_JOIN = "\n\n---\n\n"
 # comment cap. Visible to the operator in the posted comment so an
 # overlong agent response is obvious rather than silently mangled.
 TRUNCATION_MARKER = "\n\n[…truncated]"
-# Reddit requires a unique, descriptive UA per its API guidelines.
+# Reddit requires a unique, descriptive UA per its API guidelines. The
+# default deliberately contains '/u/librefang-bot' which is NOT a real
+# account; __init__ rejects it so the operator must configure
+# REDDIT_USER_AGENT with their own maintainer handle before the sidecar
+# will start. Reddit treats fake or impersonating UAs as grounds for
+# IP+account ban — this is the single biggest source of bot bans, and
+# it has to be impossible to ship-by-accident.
 DEFAULT_USER_AGENT = "librefang:sidecar (by /u/librefang-bot)"
+# Substrings in the UA that mean "operator forgot to set a real one".
+# Case-insensitive match.
+PLACEHOLDER_UA_FRAGMENTS = ("librefang-bot", "/u/your", "/u/example")
+# Rate-limit response-header handling. Reddit returns:
+#   X-Ratelimit-Used:      fractional req count used in current window
+#   X-Ratelimit-Remaining: float remaining in current window
+#   X-Ratelimit-Reset:     seconds until the window resets
+# When `remaining` drops below the floor we pre-emptively sleep until
+# reset so we don't burn through the budget and trip a 429. Capped at
+# MAX_BACKOFF_SECS so we never block the poller for more than a minute.
+RATELIMIT_REMAINING_FLOOR = 10.0
+# Default Retry-After when Reddit 429s without the header (rare but
+# documented). 60 s matches Reddit's API guideline minimum back-off.
+RETRY_AFTER_DEFAULT_SECS = 60.0
 
 
 def _normalise_subreddit(value: str) -> str:
@@ -228,8 +291,17 @@ class RedditAdapter(SidecarAdapter):
                   "Account ID (multi-bot routing)", "text",
                   placeholder="prod", advanced=True),
             Field("REDDIT_USER_AGENT",
-                  "Custom User-Agent (Reddit requires unique UA)",
-                  "text", placeholder=DEFAULT_USER_AGENT,
+                  "User-Agent (REQUIRED — must contain your real "
+                  "/u/<username>; the placeholder default is rejected "
+                  "at startup to prevent IP/account bans)",
+                  "text",
+                  placeholder="myorg/1.0 (by /u/myactual-reddit-name)",
+                  required=True),
+            Field("REDDIT_POLL_INTERVAL_SECS",
+                  f"Poll interval seconds (default {DEFAULT_POLL_INTERVAL_SECS}, "
+                  f"floor {MIN_POLL_INTERVAL_SECS}). Higher = safer for ban-avoidance.",
+                  "text",
+                  placeholder=str(DEFAULT_POLL_INTERVAL_SECS),
                   advanced=True),
         ],
     )
@@ -249,6 +321,27 @@ class RedditAdapter(SidecarAdapter):
         ua = os.environ.get("REDDIT_USER_AGENT", "").strip()
         self.user_agent = ua or DEFAULT_USER_AGENT
 
+        # Poll interval — default 30 s (safer for ban-avoidance), floor 5 s.
+        # Operator-tunable via REDDIT_POLL_INTERVAL_SECS env var.
+        interval_raw = os.environ.get("REDDIT_POLL_INTERVAL_SECS", "").strip()
+        try:
+            interval = (
+                int(interval_raw) if interval_raw else DEFAULT_POLL_INTERVAL_SECS
+            )
+        except (TypeError, ValueError):
+            log.error(
+                "REDDIT_POLL_INTERVAL_SECS invalid (must be integer)",
+                value=interval_raw,
+            )
+            raise SystemExit(2) from None
+        if interval < MIN_POLL_INTERVAL_SECS:
+            log.warn(
+                "REDDIT_POLL_INTERVAL_SECS below floor; clamping",
+                requested=interval, floor=MIN_POLL_INTERVAL_SECS,
+            )
+            interval = MIN_POLL_INTERVAL_SECS
+        self.poll_interval = interval
+
         # Optional URL overrides for test injection (no env handle —
         # tests reach in via attributes after construction).
         self.token_url = DEFAULT_TOKEN_URL
@@ -267,6 +360,24 @@ class RedditAdapter(SidecarAdapter):
             missing.append("REDDIT_SUBREDDITS")
         if missing:
             log.error("reddit required env vars missing", missing=missing)
+            raise SystemExit(2)
+
+        # Reject the placeholder UA. Reddit's API rules require a real
+        # `by /u/<maintainer>` handle and treat fake/impersonating UAs
+        # as ban-worthy. The default ships with `/u/librefang-bot`
+        # which is NOT a real account, so refusing to start forces the
+        # operator to configure REDDIT_USER_AGENT — the single biggest
+        # ban-avoidance lever and one we can enforce at boot time.
+        ua_lc = self.user_agent.lower()
+        if any(frag in ua_lc for frag in PLACEHOLDER_UA_FRAGMENTS):
+            log.error(
+                "REDDIT_USER_AGENT contains a placeholder username; "
+                "Reddit's API guidelines require a real /u/<maintainer> "
+                "in the UA, otherwise the bot risks an IP+account ban. "
+                "Set REDDIT_USER_AGENT to e.g. "
+                "'myorg/1.0 (by /u/myactual-reddit-username)' before starting.",
+                user_agent=self.user_agent,
+            )
             raise SystemExit(2)
 
         # OAuth2 token cache: (access_token, monotonic_expiry_seconds).
@@ -298,32 +409,82 @@ class RedditAdapter(SidecarAdapter):
         body: bytes | None = None,
         headers: dict | None = None,
         timeout: float = SEND_TIMEOUT_SECS,
-    ) -> tuple[int, dict | None, bytes]:
-        """Issue an HTTP request and return (status, parsed_json_or_None, raw_body).
-        Raises ``urllib.error.URLError`` on transport failure;
-        ``HTTPError`` is captured and surfaced via the status code so
-        callers can branch on 401 / 4xx / 5xx without try/except."""
+    ) -> tuple[int, dict | None, bytes, dict]:
+        """Issue an HTTP request and return
+        ``(status, parsed_json_or_None, raw_body, response_headers)``.
+        Response header keys are normalised to lowercase so callers
+        can do case-insensitive lookups. Raises ``urllib.error.URLError``
+        on transport failure; ``HTTPError`` is captured and surfaced via
+        the status code so callers can branch on 401 / 4xx / 5xx
+        without try/except (response headers are still returned on
+        HTTPError, which is what makes ``Retry-After`` / Reddit's
+        ``X-Ratelimit-*`` headers reachable after a 429)."""
         req = urllib.request.Request(
             url, data=body, headers=headers or {}, method=method,
         )
+        resp_headers: dict = {}
         try:
             with urllib.request.urlopen(  # noqa: S310 — configured URL
                 req, timeout=timeout,
             ) as resp:
                 status = getattr(resp, "status", 200)
                 raw = resp.read()
+                if resp.headers is not None:
+                    resp_headers = {
+                        k.lower(): v for k, v in resp.headers.items()
+                    }
         except urllib.error.HTTPError as e:
             status = e.code
             try:
                 raw = e.read()
             except Exception:  # noqa: BLE001
                 raw = b""
+            if e.headers is not None:
+                resp_headers = {k.lower(): v for k, v in e.headers.items()}
         if not raw:
-            return status, None, b""
+            return status, None, b"", resp_headers
         try:
-            return status, json.loads(raw.decode("utf-8")), raw
+            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
         except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw
+            return status, None, raw, resp_headers
+
+    # ---- Reddit API rate-limit handling ------------------------------
+
+    @staticmethod
+    def _ratelimit_pause(resp_headers: dict) -> float:
+        """Return seconds to sleep based on Reddit's ratelimit headers.
+        Returns ``0.0`` when budget is healthy or headers are missing.
+        Capped at ``MAX_BACKOFF_SECS`` so a misreported reset can't
+        block the poller for more than a minute."""
+        remaining_raw = resp_headers.get("x-ratelimit-remaining")
+        if not remaining_raw:
+            return 0.0
+        try:
+            remaining = float(remaining_raw)
+        except (TypeError, ValueError):
+            return 0.0
+        if remaining >= RATELIMIT_REMAINING_FLOOR:
+            return 0.0
+        reset_raw = resp_headers.get("x-ratelimit-reset")
+        try:
+            reset = float(reset_raw) if reset_raw else MAX_BACKOFF_SECS
+        except (TypeError, ValueError):
+            reset = MAX_BACKOFF_SECS
+        return min(max(reset, 1.0), MAX_BACKOFF_SECS)
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable; capped at
+        ``MAX_BACKOFF_SECS``. We don't support the HTTP-date form —
+        Reddit always sends seconds for rate-limit replies."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
 
     # ---- OAuth2 token management -------------------------------------
 
@@ -344,7 +505,7 @@ class RedditAdapter(SidecarAdapter):
             "Authorization": self._basic_auth_header(),
             "Content-Type": "application/x-www-form-urlencoded",
         })
-        status, resp, raw = self._http(
+        status, resp, raw, _hdrs = self._http(
             self.token_url, method="POST", body=body, headers=headers,
         )
         if status != 200 or not isinstance(resp, dict):
@@ -379,7 +540,7 @@ class RedditAdapter(SidecarAdapter):
         username for logging."""
         token = self._get_token()
         url = f"{self.api_base}/api/v1/me"
-        status, resp, raw = self._http(url, headers=self._headers(bearer=token))
+        status, resp, raw, _hdrs = self._http(url, headers=self._headers(bearer=token))
         if status != 200 or not isinstance(resp, dict):
             snippet = raw[:200].decode("utf-8", "replace")
             raise RuntimeError(
@@ -411,12 +572,21 @@ class RedditAdapter(SidecarAdapter):
         """Poll every configured subreddit once. Errors per-subreddit
         are logged and skipped — one bad subreddit doesn't take the
         whole adapter down. Raises only on auth / token errors which
-        the caller handles with backoff."""
+        the caller handles with backoff.
+
+        After every request we check Reddit's ``X-Ratelimit-Remaining``
+        header and, when the remaining budget falls below
+        ``RATELIMIT_REMAINING_FLOOR``, sleep until ``X-Ratelimit-Reset``
+        (capped at ``MAX_BACKOFF_SECS``) before issuing the next
+        sub-fetch. A 429 with ``Retry-After`` is honoured the same way.
+        This converts "burn budget then get 429" into a smooth
+        slow-down, which is what Reddit's anti-abuse logic actually
+        wants to see from a well-behaved bot."""
         token = self._get_token()
         for sub in self.subreddits:
             url = f"{self.api_base}/r/{sub}/comments?limit=25&sort=new"
             try:
-                status, body, raw = self._http(
+                status, body, raw, resp_hdrs = self._http(
                     url, headers=self._headers(bearer=token),
                 )
             except urllib.error.URLError as e:
@@ -427,10 +597,34 @@ class RedditAdapter(SidecarAdapter):
                 # Clear the cached token; caller backs off and retries.
                 self._cached_token = None
                 raise RuntimeError("reddit 401 — token expired")
+            if status == 429:
+                # Rate-limited mid-poll. Honour Retry-After (or our
+                # default) and bail; the producer loop's backoff will
+                # retry the whole poll pass.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "reddit 429 rate-limited; will back off and retry",
+                    subreddit=sub, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("reddit 429 — rate-limited")
             if status != 200 or not isinstance(body, dict):
                 log.warn("reddit comment fetch failed",
                          subreddit=sub, status=status)
                 continue
+            # Pre-emptive throttle when Reddit reports we're close to
+            # the per-account budget; sleeping here delays the next
+            # sub-fetch in this same poll pass and any subsequent
+            # POSTs from on_send.
+            pause = self._ratelimit_pause(resp_hdrs)
+            if pause > 0:
+                log.info(
+                    "reddit ratelimit near floor; pausing",
+                    subreddit=sub,
+                    remaining=resp_hdrs.get("x-ratelimit-remaining"),
+                    sleep_secs=pause,
+                )
+                time.sleep(pause)
             children = body.get("data", {}).get("children") if isinstance(
                 body.get("data"), dict
             ) else None
@@ -489,7 +683,7 @@ class RedditAdapter(SidecarAdapter):
                          error=str(e), delay=backoff)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF_SECS)
-            time.sleep(POLL_INTERVAL_SECS)
+            time.sleep(self.poll_interval)
 
     async def produce(self, emit) -> None:
         loop = asyncio.get_event_loop()
@@ -525,7 +719,7 @@ class RedditAdapter(SidecarAdapter):
         headers = self._headers(bearer=token, extra={
             "Content-Type": "application/x-www-form-urlencoded",
         })
-        status, resp, raw = self._http(
+        status, resp, raw, resp_hdrs = self._http(
             url, method="POST", body=body, headers=headers,
         )
         if status == 401:
@@ -533,7 +727,21 @@ class RedditAdapter(SidecarAdapter):
             self._cached_token = None
             token = self._get_token()
             headers["Authorization"] = f"Bearer {token}"
-            status, resp, raw = self._http(
+            status, resp, raw, resp_hdrs = self._http(
+                url, method="POST", body=body, headers=headers,
+            )
+        if status == 429:
+            # Reddit-side rate-limited. Honour Retry-After (or our
+            # default) and retry once. A second 429 falls through to
+            # the >=300 branch and surfaces the error so the supervisor
+            # can decide whether to back off the whole send loop.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "reddit 429 on /api/comment; sleeping then retrying once",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            status, resp, raw, resp_hdrs = self._http(
                 url, method="POST", body=body, headers=headers,
             )
         if status >= 300:

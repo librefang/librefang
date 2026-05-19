@@ -23,6 +23,10 @@ import urllib.parse
 
 import pytest
 
+# A non-placeholder UA — every adapter constructed by these tests must
+# carry one or `__init__` will reject the boot for ban-avoidance reasons.
+TEST_UA = "librefang-tests/1.0 (by /u/test-maintainer)"
+
 # Required env must be present at import time because the adapter
 # raises SystemExit(2) if unset on construction.
 os.environ.setdefault("REDDIT_CLIENT_ID", "test-client-id")
@@ -30,6 +34,7 @@ os.environ.setdefault("REDDIT_CLIENT_SECRET", "test-client-secret")
 os.environ.setdefault("REDDIT_USERNAME", "test-user")
 os.environ.setdefault("REDDIT_PASSWORD", "test-pass")
 os.environ.setdefault("REDDIT_SUBREDDITS", "rust")
+os.environ.setdefault("REDDIT_USER_AGENT", TEST_UA)
 from librefang.sidecar.adapters import reddit as ra  # noqa: E402
 
 
@@ -41,7 +46,8 @@ def _adapter(**env):
         "REDDIT_PASSWORD": "test-pass",
         "REDDIT_SUBREDDITS": "rust",
         "REDDIT_ACCOUNT_ID": "",
-        "REDDIT_USER_AGENT": "",
+        "REDDIT_USER_AGENT": TEST_UA,
+        "REDDIT_POLL_INTERVAL_SECS": "",
     }
     for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
@@ -62,12 +68,60 @@ def test_default_urls_and_user_agent():
     a = _adapter()
     assert a.token_url == "https://www.reddit.com/api/v1/access_token"
     assert a.api_base == "https://oauth.reddit.com"
-    assert a.user_agent.startswith("librefang:")
+    # Test scaffold supplies a real-looking UA; the literal default UA
+    # (containing `/u/librefang-bot`) is now rejected at startup —
+    # see test_placeholder_user_agent_rejected.
+    assert a.user_agent == TEST_UA
 
 
 def test_custom_user_agent():
     a = _adapter(REDDIT_USER_AGENT="my-bot/1.0 (by /u/me)")
     assert a.user_agent == "my-bot/1.0 (by /u/me)"
+
+
+def test_placeholder_user_agent_rejected():
+    """Reddit's API guidelines treat fake / impersonating UAs as
+    grounds for IP+account ban. Reject the default UA (which contains
+    `/u/librefang-bot`, a non-existent account) at construction so the
+    operator can't ship-by-accident without configuring a real
+    maintainer handle. This is the single highest-leverage
+    ban-avoidance check we can enforce automatically."""
+    for placeholder in (
+        ra.DEFAULT_USER_AGENT,
+        "myorg/1.0 (by /u/librefang-bot)",
+        "scrape/0.1 (by /u/your-username)",
+        "MyBot/2 (by /u/example)",
+    ):
+        with pytest.raises(SystemExit) as exc:
+            _adapter(REDDIT_USER_AGENT=placeholder)
+        assert exc.value.code == 2, placeholder
+
+
+def test_poll_interval_default_is_safer_than_rust():
+    """The Rust adapter polled every 5 s by default. 5 s × N subs
+    burns the 60 req/min budget fast and is a leading source of
+    short-bans. The sidecar default is 30 s — operator can still
+    override via REDDIT_POLL_INTERVAL_SECS for fast-moving subs."""
+    a = _adapter()
+    assert a.poll_interval == ra.DEFAULT_POLL_INTERVAL_SECS
+    assert ra.DEFAULT_POLL_INTERVAL_SECS >= 30
+
+
+def test_poll_interval_env_override():
+    a = _adapter(REDDIT_POLL_INTERVAL_SECS="60")
+    assert a.poll_interval == 60
+
+
+def test_poll_interval_below_floor_clamped():
+    """A misconfigured `0` / `1` shouldn't let the bot hammer Reddit."""
+    a = _adapter(REDDIT_POLL_INTERVAL_SECS="1")
+    assert a.poll_interval == ra.MIN_POLL_INTERVAL_SECS
+
+
+def test_poll_interval_invalid_exits():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(REDDIT_POLL_INTERVAL_SECS="not-a-number")
+    assert exc.value.code == 2
 
 
 def test_missing_required_env_exits():
@@ -225,9 +279,23 @@ def test_parse_returns_none_on_malformed():
 # ---- _FakeUrlopen scaffolding --------------------------------------
 
 
+class _HdrShim:
+    """Mimic the parts of ``email.message.Message`` that ``_http``
+    touches — only ``.items()``. urllib's real response headers are a
+    Message; tests want a dict shape, so wrap it."""
+
+    def __init__(self, hdrs: dict):
+        self._hdrs = hdrs or {}
+
+    def items(self):
+        return list(self._hdrs.items())
+
+
 class _FakeUrlopen:
     """Capture urllib.request.urlopen calls and return scripted
-    responses. Each call pops the next response from `script`."""
+    responses. Each script entry is ``(status, body)`` or
+    ``(status, body, response_headers)``; the 2-tuple form keeps
+    older tests unchanged."""
 
     def __init__(self, script):
         self.script = list(script)
@@ -249,10 +317,15 @@ class _FakeUrlopen:
             raise AssertionError(
                 f"unexpected extra urlopen call to {req.full_url}"
             )
-        status, body = self.script.pop(0)
+        entry = self.script.pop(0)
+        if len(entry) == 3:
+            status, body, resp_hdrs = entry
+        else:
+            status, body = entry
+            resp_hdrs = {}
         if status >= 400:
             raise urllib.error.HTTPError(
-                req.full_url, status, "Error", {},
+                req.full_url, status, "Error", _HdrShim(resp_hdrs),
                 io.BytesIO(json.dumps(body or {}).encode("utf-8")),
             )
         if body is None:
@@ -261,13 +334,14 @@ class _FakeUrlopen:
             payload = json.dumps(body).encode("utf-8")
         else:
             payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload)
+        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 class _FakeResp:
-    def __init__(self, status, body=b""):
+    def __init__(self, status, body=b"", headers=None):
         self.status = status
         self._body = body
+        self.headers = headers if headers is not None else _HdrShim({})
 
     def read(self):
         return self._body
@@ -590,6 +664,112 @@ def test_poll_once_skips_subreddit_on_transport_error(monkeypatch):
     assert emitted[0]["params"]["metadata"]["subreddit"] == "rust"  # parsed from response
     assert any("/r/rust/comments" in c for c in calls_seen)
     assert any("/r/programming/comments" in c for c in calls_seen)
+
+
+# ---- Reddit rate-limit handling (X-Ratelimit-* / 429) -------------
+
+
+def test_ratelimit_pause_idle_when_budget_healthy():
+    """Plenty of budget left → no sleep. Defensive against absent
+    headers (the most common case for non-Reddit upstreams)."""
+    assert ra.RedditAdapter._ratelimit_pause({}) == 0.0
+    assert ra.RedditAdapter._ratelimit_pause({
+        "x-ratelimit-remaining": "59.0",
+        "x-ratelimit-reset": "30",
+    }) == 0.0
+
+
+def test_ratelimit_pause_floor_triggers_sleep_until_reset():
+    """When remaining drops below the floor, the sleep is the reset
+    timer (capped at MAX_BACKOFF_SECS to avoid blocking the poller
+    for minutes if Reddit reports a bogus reset)."""
+    pause = ra.RedditAdapter._ratelimit_pause({
+        "x-ratelimit-remaining": "3.0",
+        "x-ratelimit-reset": "20",
+    })
+    assert pause == 20.0
+    # Cap at MAX_BACKOFF_SECS
+    pause = ra.RedditAdapter._ratelimit_pause({
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": "999",
+    })
+    assert pause == ra.MAX_BACKOFF_SECS
+
+
+def test_retry_after_secs_default_when_missing():
+    assert ra.RedditAdapter._retry_after_secs({}) == ra.RETRY_AFTER_DEFAULT_SECS
+    assert ra.RedditAdapter._retry_after_secs({
+        "retry-after": "not-a-number",
+    }) == ra.RETRY_AFTER_DEFAULT_SECS
+
+
+def test_retry_after_secs_honours_header_capped():
+    assert ra.RedditAdapter._retry_after_secs({"retry-after": "12"}) == 12.0
+    # Capped at MAX_BACKOFF_SECS
+    assert ra.RedditAdapter._retry_after_secs(
+        {"retry-after": "9999"},
+    ) == ra.MAX_BACKOFF_SECS
+
+
+def test_poll_once_429_raises_and_sleeps(monkeypatch):
+    """429 mid-poll: honour Retry-After, then raise so the producer
+    loop's backoff retries the whole pass."""
+    a = _adapter()
+    a.own_username = "test-user"
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (429, {"message": "Too Many Requests"}, {"Retry-After": "7"}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None)
+    assert sleeps == [7.0], "must honour Retry-After exactly before raising"
+
+
+def test_poll_once_low_remaining_pauses(monkeypatch):
+    """A 200 response carrying `X-Ratelimit-Remaining` below the floor
+    causes the poller to pre-emptively sleep before the next subreddit
+    fetch (or before returning, if it was the only sub). This is the
+    'slow down before getting 429'd' path."""
+    a = _adapter(REDDIT_SUBREDDITS="rust,programming")
+    a.own_username = "test-user"
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (200, _children(_comment(cid="c1")),
+         {"X-Ratelimit-Remaining": "3.0", "X-Ratelimit-Reset": "15"}),
+        (200, _children(_comment(cid="c2"))),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    emitted: list = []
+    a._poll_once(emitted.append)
+    assert sleeps == [15.0], (
+        "low remaining must sleep until reset before fetching next sub"
+    )
+    assert len(emitted) == 2, (
+        "throttling must not drop messages; both subs' comments emitted"
+    )
+
+
+def test_post_comment_429_retries_after_retry_after(monkeypatch):
+    """429 on /api/comment: honour Retry-After, then retry once. A
+    second 429 falls through to the >=300 surface so the supervisor
+    can back off the whole send loop."""
+    a = _adapter()
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (429, {"message": "Too Many Requests"}, {"Retry-After": "4"}),
+        (200, {"json": {"errors": [], "data": {}}}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    a._post_comment("t1_abc", "retry me")
+    assert sleeps == [4.0], "must sleep exactly Retry-After between attempts"
+    assert len(fake.calls) == 2, "must retry exactly once after 429"
 
 
 # ---- seen_comments eviction ---------------------------------------

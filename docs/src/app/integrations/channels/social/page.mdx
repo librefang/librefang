@@ -28,9 +28,24 @@ default_agent = "assistant"
 REDDIT_CLIENT_ID = "abc123"
 REDDIT_USERNAME = "librefang-bot"
 REDDIT_SUBREDDITS = "mysubreddit,rust"
-# REDDIT_ACCOUNT_ID = "prod"              # optional, multi-bot routing key
-# REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"   # override default UA
+REDDIT_USER_AGENT = "myorg/1.0 (by /u/myactual-reddit-name)"   # REQUIRED, see below
+# REDDIT_ACCOUNT_ID = "prod"               # optional, multi-bot routing key
+# REDDIT_POLL_INTERVAL_SECS = "30"         # optional, default 30, floor 5
 ```
+
+### Ban-avoidance — read before going live
+
+Reddit is strict about bot behaviour. The adapter enforces what it can:
+
+- **`REDDIT_USER_AGENT` is required.** Reddit's API rules require the UA to identify a real maintainer (`by /u/<your-reddit-handle>`). The literal default placeholder is rejected at startup to prevent IP+account bans. Use your own Reddit username.
+- **Default 30 s polling.** Lower than 5 s burns the 60 req/min/account budget fast. The floor is 5 s; raise `REDDIT_POLL_INTERVAL_SECS` for less-active subs.
+- **Automatic throttling.** When Reddit reports `X-Ratelimit-Remaining < 10`, the poller pre-emptively sleeps until the reset window. A 429 on polling backs off; a 429 on `/api/comment` honours `Retry-After` and retries once.
+
+What the adapter cannot enforce — your responsibility:
+
+- Bot account should be at least 30 days old with >100 comment karma; new accounts get shadowbanned quickly.
+- Get mod approval before joining any subreddit. Reply-bots in unfamiliar subs are a common report-and-ban trigger.
+- Gate triggers via `group_trigger_patterns` in your agent's config so the bot only replies to `/cmd` or named-mention — replying to every new comment is the fastest way to a sitewide ban.
 
 3. Put the two secrets in `~/.librefang/secrets.env`:
 

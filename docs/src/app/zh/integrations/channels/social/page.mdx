@@ -24,9 +24,24 @@ default_agent = "assistant"
 REDDIT_CLIENT_ID = "abc123"
 REDDIT_USERNAME = "librefang-bot"
 REDDIT_SUBREDDITS = "mysubreddit,rust"
-# REDDIT_ACCOUNT_ID = "prod"              # 可选，多 Bot 路由
-# REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"   # 覆盖默认 User-Agent
+REDDIT_USER_AGENT = "myorg/1.0 (by /u/myactual-reddit-name)"   # 必填，见下方
+# REDDIT_ACCOUNT_ID = "prod"               # 可选，多 Bot 路由
+# REDDIT_POLL_INTERVAL_SECS = "30"         # 可选，默认 30，下限 5
 ```
+
+### 防封号 —— 上线前必读
+
+Reddit 对 bot 行为有严格审查。adapter 自动做了能做的：
+
+- **`REDDIT_USER_AGENT` 必填。** Reddit API 规则要求 UA 标明真实维护者（`by /u/<你的 Reddit 用户名>`）。占位默认值会在启动时被拒绝以避免 IP + 账号双封。请使用你自己的 Reddit 用户名。
+- **默认 30 秒轮询间隔。** 低于 5 秒会快速烧掉每账号 60 req/min 的预算。下限是 5 秒，活跃度低的 sub 可以把 `REDDIT_POLL_INTERVAL_SECS` 调更高。
+- **自动节流。** 当 Reddit 返回 `X-Ratelimit-Remaining < 10` 时，poller 会提前睡到 reset 窗口。Polling 收到 429 会退避；`/api/comment` 收到 429 会读取 `Retry-After` 重试一次。
+
+adapter 无法强制、需要你自己保证的：
+
+- Bot 账号至少 30 天 + 评论 karma > 100，否则容易被 shadowban。
+- 进入任何 subreddit 前先跟 mod 报备。在陌生 sub 自动回复是常见的封号触发点。
+- 通过 agent 配置里的 `group_trigger_patterns` 限制触发条件，让 bot 只回应 `/cmd` 或具名 @mention —— 对每条新评论都回复是最快的全站封号路径。
 
 3. 把两个密钥写入 `~/.librefang/secrets.env`：
 
