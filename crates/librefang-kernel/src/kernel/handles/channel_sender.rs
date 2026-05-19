@@ -26,40 +26,27 @@ macro_rules! for_each_channel_field {
         // processes or compilations would silently change which agent wins
         // when multiple channel instances share a `default_agent`. See
         // CLAUDE.md "Deterministic prompt ordering".
-        $mac!(bluesky, "bluesky");
         $mac!(dingtalk, "dingtalk");
         $mac!(discord, "discord");
         $mac!(email, "email");
         $mac!(feishu, "feishu");
-        $mac!(flock, "flock");
-        $mac!(gitter, "gitter");
         $mac!(google_chat, "google_chat");
-        $mac!(guilded, "guilded");
-        $mac!(irc, "irc");
-        $mac!(keybase, "keybase");
         $mac!(line, "line");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
-        $mac!(mumble, "mumble");
         $mac!(nextcloud, "nextcloud");
-        $mac!(pumble, "pumble");
         $mac!(qq, "qq");
         $mac!(reddit, "reddit");
-        $mac!(revolt, "revolt");
         $mac!(rocketchat, "rocketchat");
         $mac!(signal, "signal");
         $mac!(slack, "slack");
         $mac!(teams, "teams");
-        $mac!(threema, "threema");
-        $mac!(twist, "twist");
         $mac!(twitch, "twitch");
-        $mac!(voice, "voice");
         $mac!(webex, "webex");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
         $mac!(wecom, "wecom");
         $mac!(whatsapp, "whatsapp");
-        $mac!(xmpp, "xmpp");
         $mac!(zulip, "zulip");
     };
 }
@@ -453,40 +440,27 @@ mod tests {
 
         // Hardcoded sorted reference — must match the macro body exactly.
         const EXPECTED: &[&str] = &[
-            "bluesky",
             "dingtalk",
             "discord",
             "email",
             "feishu",
-            "flock",
-            "gitter",
             "google_chat",
-            "guilded",
-            "irc",
-            "keybase",
             "line",
             "matrix",
             "mattermost",
-            "mumble",
             "nextcloud",
-            "pumble",
             "qq",
             "reddit",
-            "revolt",
             "rocketchat",
             "signal",
             "slack",
             "teams",
-            "threema",
-            "twist",
             "twitch",
-            "voice",
             "webex",
             "webhook",
             "wechat",
             "wecom",
             "whatsapp",
-            "xmpp",
             "zulip",
         ];
 

@@ -51,12 +51,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
+use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::skills::{
     append_channel_instance, remove_channel_config, remove_channel_instance, remove_secret_env,
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
     CHANNEL_AOT_CONFLICT_PREFIX,
 };
-use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -253,36 +253,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
         config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
     },
-    ChannelMeta {
-        name: "threema", display_name: "Threema", icon: "3M",
-        description: "Threema Gateway adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your Gateway ID and API secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "secret_env", label: "API Secret", field_type: FieldType::Secret, env_var: Some("THREEMA_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "threema_id", label: "Gateway ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "*MYID01", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8454", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Register at gateway.threema.ch", "Copy your ID and API secret", "Paste them below"],
-        config_template: "[channels.threema]\nthreema_id = \"\"\nsecret_env = \"THREEMA_SECRET\"",
-    },
-    ChannelMeta {
-        name: "keybase", display_name: "Keybase", icon: "KB",
-        description: "Keybase chat bot adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your username and paper key",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "username", label: "Username", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang_bot", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "paperkey_env", label: "Paper Key", field_type: FieldType::Secret, env_var: Some("KEYBASE_PAPERKEY"), required: true, placeholder: "word1 word2 word3...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_teams", label: "Allowed Teams", field_type: FieldType::List, env_var: None, required: false, placeholder: "team1, team2", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Keybase bot account", "Generate a paper key", "Enter username and paper key below"],
-        config_template: "[channels.keybase]\nusername = \"\"\npaperkey_env = \"KEYBASE_PAPERKEY\"",
-    },
     // ── Social (5) ──────────────────────────────────────────────────
     ChannelMeta {
         name: "reddit", display_name: "Reddit", icon: "RD",
@@ -301,24 +271,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
         config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
     },
-    // mastodon migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.mastodon in the SDK package); no
-    // longer an in-process channel.
-    ChannelMeta {
-        name: "bluesky", display_name: "Bluesky", icon: "BS",
-        description: "Bluesky/AT Protocol adapter",
-        category: "social", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Enter your handle and app password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "identifier", label: "Handle", field_type: FieldType::Text, env_var: None, required: true, placeholder: "user.bsky.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("BLUESKY_APP_PASSWORD"), required: true, placeholder: "xxxx-xxxx-xxxx-xxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "service_url", label: "PDS URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://bsky.social", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > App Passwords in Bluesky", "Create an app password", "Enter handle and password below"],
-        config_template: "[channels.bluesky]\nidentifier = \"\"\napp_password_env = \"BLUESKY_APP_PASSWORD\"",
-    },
+    // mastodon and bluesky migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{mastodon,bluesky} in the SDK package);
+    // no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
     ChannelMeta {
         name: "teams", display_name: "Microsoft Teams", icon: "MS",
@@ -413,49 +368,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
     },
     ChannelMeta {
-        name: "pumble", display_name: "Pumble", icon: "PB",
-        description: "Pumble bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("PUMBLE_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8455", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Pumble Integrations", "Copy the token", "Paste it below"],
-        config_template: "[channels.pumble]\nbot_token_env = \"PUMBLE_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "flock", display_name: "Flock", icon: "FL",
-        description: "Flock bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("FLOCK_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Build an app in Flock App Store", "Copy the bot token", "Paste it below"],
-        config_template: "[channels.flock]\nbot_token_env = \"FLOCK_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "twist", display_name: "Twist", icon: "TW",
-        description: "Twist API v3 adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API token and workspace ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "token_env", label: "API Token", field_type: FieldType::Secret, env_var: Some("TWIST_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "workspace_id", label: "Workspace ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "12345", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Channel IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123, 456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an integration in Twist Settings", "Copy the API token", "Enter token and workspace ID below"],
-        config_template: "[channels.twist]\ntoken_env = \"TWIST_TOKEN\"\nworkspace_id = \"\"",
-    },
-    ChannelMeta {
         name: "zulip", display_name: "Zulip", icon: "ZL",
         description: "Zulip event queue adapter",
         category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
@@ -471,83 +383,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot in Zulip Settings > Your Bots", "Copy the API key", "Enter server URL, bot email, and key below"],
         config_template: "[channels.zulip]\nserver_url = \"\"\nbot_email = \"\"\napi_key_env = \"ZULIP_API_KEY\"",
     },
-    // ── Developer (9) ───────────────────────────────────────────────
-    ChannelMeta {
-        name: "irc", display_name: "IRC", icon: "IR",
-        description: "IRC raw TCP adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter server and nickname",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server", label: "Server", field_type: FieldType::Text, env_var: None, required: true, placeholder: "irc.libera.chat", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "nick", label: "Nickname", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channels", label: "Channels", field_type: FieldType::List, env_var: None, required: false, placeholder: "#librefang, #general", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "6667", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "use_tls", label: "Use TLS", field_type: FieldType::Text, env_var: None, required: false, placeholder: "false", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Choose an IRC server", "Enter server, nick, and channels below"],
-        config_template: "[channels.irc]\nserver = \"irc.libera.chat\"\nnick = \"librefang\"",
-    },
-    ChannelMeta {
-        name: "xmpp", display_name: "XMPP/Jabber", icon: "XM",
-        description: "XMPP/Jabber protocol adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your JID and password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "jid", label: "JID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@jabber.org", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Password", field_type: FieldType::Secret, env_var: Some("XMPP_PASSWORD"), required: true, placeholder: "password", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server", label: "Server", field_type: FieldType::Text, env_var: None, required: false, placeholder: "jabber.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "5222", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "rooms", label: "MUC Rooms", field_type: FieldType::List, env_var: None, required: false, placeholder: "room@conference.jabber.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot account on your XMPP server", "Enter JID and password below"],
-        config_template: "[channels.xmpp]\njid = \"\"\npassword_env = \"XMPP_PASSWORD\"",
-    },
-    ChannelMeta {
-        name: "gitter", display_name: "Gitter", icon: "GT",
-        description: "Gitter Streaming API adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your auth token and room ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("GITTER_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "room_id", label: "Room ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "abc123def456", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Get a token from developer.gitter.im", "Find your room ID", "Paste both below"],
-        config_template: "[channels.gitter]\ntoken_env = \"GITTER_TOKEN\"\nroom_id = \"\"",
-    },
-    ChannelMeta {
-        name: "revolt", display_name: "Revolt", icon: "RV",
-        description: "Revolt bot adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("REVOLT_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_url", label: "API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.revolt.chat", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > My Bots in Revolt", "Create a bot and copy the token", "Paste it below"],
-        config_template: "[channels.revolt]\nbot_token_env = \"REVOLT_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "guilded", display_name: "Guilded", icon: "GD",
-        description: "Guilded bot adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("GUILDED_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server_ids", label: "Server IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Server Settings > Bots in Guilded", "Create a bot and copy the token", "Paste it below"],
-        config_template: "[channels.guilded]\nbot_token_env = \"GUILDED_BOT_TOKEN\"",
-    },
+    // ── Developer ───────────────────────────────────────────────────
     ChannelMeta {
         name: "nextcloud", display_name: "Nextcloud Talk", icon: "NC",
         description: "Nextcloud Talk REST adapter",
@@ -614,41 +450,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
     },
     ChannelMeta {
-        name: "voice", display_name: "Voice", icon: "VC",
-        description: "Voice channel via WebSocket with STT/TTS",
-        category: "media", difficulty: "Medium", setup_time: "~3 min",
-        quick_setup: "Set an OpenAI API key for Whisper STT and TTS",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "api_key_env", label: "API Key (STT/TTS)", field_type: FieldType::Secret, env_var: Some("OPENAI_API_KEY"), required: true, placeholder: "sk-...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "listen_port", label: "WebSocket Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "4546", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "stt_url", label: "STT API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "tts_url", label: "TTS API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "tts_voice", label: "TTS Voice", field_type: FieldType::Text, env_var: None, required: false, placeholder: "alloy", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "buffer_threshold", label: "Audio Buffer (bytes)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "32768", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Set OPENAI_API_KEY environment variable", "Optionally configure STT/TTS endpoints", "Connect via WebSocket at ws://host:4546/voice"],
-        config_template: "[channels.voice]\napi_key_env = \"OPENAI_API_KEY\"\nlisten_port = 4546",
-    },
-    ChannelMeta {
-        name: "mumble", display_name: "Mumble", icon: "MB",
-        description: "Mumble text chat adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter server host and username",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "host", label: "Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "mumble.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "username", label: "Username", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Server Password", field_type: FieldType::Secret, env_var: Some("MUMBLE_PASSWORD"), required: false, placeholder: "password", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "64738", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channel", label: "Channel", field_type: FieldType::Text, env_var: None, required: false, placeholder: "Root", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enter host and username below", "Optionally add a password"],
-        config_template: "[channels.mumble]\nhost = \"\"\nusername = \"librefang\"",
-    },
-    ChannelMeta {
         name: "wechat", display_name: "WeChat", icon: "WX",
         description: "WeChat personal account via iLink protocol",
         category: "messaging", difficulty: "Easy", setup_time: "~1 min",
@@ -707,31 +508,18 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "line" => config.line.is_some(),
-        "threema" => config.threema.is_some(),
-        "keybase" => config.keybase.is_some(),
         "reddit" => config.reddit.is_some(),
-        "bluesky" => config.bluesky.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "webex" => config.webex.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
-        "pumble" => config.pumble.is_some(),
-        "flock" => config.flock.is_some(),
-        "twist" => config.twist.is_some(),
         "zulip" => config.zulip.is_some(),
-        "irc" => config.irc.is_some(),
-        "xmpp" => config.xmpp.is_some(),
-        "gitter" => config.gitter.is_some(),
-        "revolt" => config.revolt.is_some(),
-        "guilded" => config.guilded.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
         "twitch" => config.twitch.is_some(),
         "webhook" => config.webhook.is_some(),
-        "voice" => config.voice.is_some(),
-        "mumble" => config.mumble.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
         "qq" => config.qq.is_some(),
@@ -832,9 +620,9 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "google_chat"
-        | "flock" | "pumble" | "threema" | "webhook" | "wecom" => Some("/webhook"),
-        "voice" => Some("/ws"),
+        "feishu" | "teams" | "dingtalk" | "line" | "google_chat" | "webhook" | "wecom" => {
+            Some("/webhook")
+        }
         _ => None,
     }
 }
@@ -980,6 +768,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Mastodon Streaming API (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.mastodon"],
+    },
+    SidecarCatalogEntry {
+        name: "bluesky",
+        display_name: "Bluesky",
+        description: "Bluesky / AT Protocol adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.bluesky"],
     },
 ];
 
@@ -1338,28 +1133,27 @@ pub async fn configure_sidecar_channel(
         // helper directly so quote/whitespace handling stays consistent
         // with how the sidecar actually inherits env vars at spawn time
         // (codex review fix #9).
-        let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
-            &secrets_path,
-        )
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        return None;
-                    }
-                    let eq = line.find('=')?;
-                    let k = line[..eq].trim();
-                    if k.is_empty() {
-                        None
-                    } else {
-                        Some(k.to_string())
-                    }
+        let secrets_env_keys: std::collections::HashSet<String> =
+            std::fs::read_to_string(&secrets_path)
+                .ok()
+                .map(|s| {
+                    s.lines()
+                        .filter_map(|line| {
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') {
+                                return None;
+                            }
+                            let eq = line.find('=')?;
+                            let k = line[..eq].trim();
+                            if k.is_empty() {
+                                None
+                            } else {
+                                Some(k.to_string())
+                            }
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .unwrap_or_default();
         let mut shadowed: Vec<String> = schema
             .fields
             .iter()
@@ -1385,12 +1179,10 @@ pub async fn configure_sidecar_channel(
                 continue;
             }
             if f.field_type == "secret" {
-                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(
-                    |e| {
-                        ApiErrorResponse::internal(format!("failed to write secret: {e}"))
-                            .into_json_tuple()
-                    },
-                )?;
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
+                    ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                        .into_json_tuple()
+                })?;
             } else {
                 nonsecret_env.insert(f.key.clone(), trimmed.to_string());
             }
@@ -1509,10 +1301,6 @@ fn channel_config_values(
             .mattermost
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "irc" => config
-            .irc
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
             .as_ref()
@@ -1529,10 +1317,6 @@ fn channel_config_values(
             .zulip
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "xmpp" => config
-            .xmpp
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "line" => config
             .line
             .as_ref()
@@ -1541,68 +1325,24 @@ fn channel_config_values(
             .reddit
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "bluesky" => config
-            .bluesky
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "revolt" => config
-            .revolt
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "nextcloud" => config
             .nextcloud
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "guilded" => config
-            .guilded
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "keybase" => config
-            .keybase
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "threema" => config
-            .threema
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "pumble" => config
-            .pumble
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "flock" => config
-            .flock
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "twist" => config
-            .twist
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "mumble" => config
-            .mumble
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "gitter" => config
-            .gitter
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "voice" => config
-            .voice
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "wechat" => config
@@ -1636,31 +1376,18 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "line" => config.line.len(),
-        "threema" => config.threema.len(),
-        "keybase" => config.keybase.len(),
         "reddit" => config.reddit.len(),
-        "bluesky" => config.bluesky.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
         "webex" => config.webex.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
-        "pumble" => config.pumble.len(),
-        "flock" => config.flock.len(),
-        "twist" => config.twist.len(),
         "zulip" => config.zulip.len(),
-        "irc" => config.irc.len(),
-        "xmpp" => config.xmpp.len(),
-        "gitter" => config.gitter.len(),
-        "revolt" => config.revolt.len(),
-        "guilded" => config.guilded.len(),
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
         "twitch" => config.twitch.len(),
         "webhook" => config.webhook.len(),
-        "voice" => config.voice.len(),
-        "mumble" => config.mumble.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
         "qq" => config.qq.len(),
@@ -1694,31 +1421,18 @@ fn channel_instances_serialized(
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "line" => ser(&config.line),
-        "threema" => ser(&config.threema),
-        "keybase" => ser(&config.keybase),
         "reddit" => ser(&config.reddit),
-        "bluesky" => ser(&config.bluesky),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
         "webex" => ser(&config.webex),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
-        "pumble" => ser(&config.pumble),
-        "flock" => ser(&config.flock),
-        "twist" => ser(&config.twist),
         "zulip" => ser(&config.zulip),
-        "irc" => ser(&config.irc),
-        "xmpp" => ser(&config.xmpp),
-        "gitter" => ser(&config.gitter),
-        "revolt" => ser(&config.revolt),
-        "guilded" => ser(&config.guilded),
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
         "twitch" => ser(&config.twitch),
         "webhook" => ser(&config.webhook),
-        "voice" => ser(&config.voice),
-        "mumble" => ser(&config.mumble),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),
         "qq" => ser(&config.qq),
