@@ -4138,6 +4138,16 @@
               }
             }
           },
+          "409": {
+            "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Schema not cached — SDK module may be missing",
             "content": {
