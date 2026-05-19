@@ -158,6 +158,8 @@
     "on": "ON",
     "expand": "Expand",
     "collapse": "Collapse",
+    "show_advanced": "Show advanced",
+    "hide_advanced": "Hide advanced",
     "add": "Add",
     "remove": "Remove",
     "discard": "Discard",
@@ -873,7 +875,10 @@
     "empty_title": "No channels yet",
     "empty_body": "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
     "connect_first": "Connect a channel",
-    "picker_title": "Add channel"
+    "picker_title": "Add channel",
+    "saved": "Saved",
+    "saved_restart_required": "Saved — restart daemon to apply",
+    "shadowed_secrets_warning": "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}"
   },
   "skills": {
     "title": "Skills",

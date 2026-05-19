@@ -353,7 +353,7 @@ function SidecarForm({
 }: {
   channel: Channel;
   onClose: () => void;
-  t: (key: string, opts?: { defaultValue?: string }) => string;
+  t: (key: string, opts?: { defaultValue?: string; keys?: string }) => string;
 }) {
   const addToast = useUIStore((s) => s.addToast);
   const saveMut = useSaveSidecarConfig();
@@ -395,7 +395,9 @@ function SidecarForm({
           if (res.shadowed_secrets && res.shadowed_secrets.length > 0) {
             addToast(
               t("channels.shadowed_secrets_warning", {
-                defaultValue: `Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: ${res.shadowed_secrets.join(", ")}`,
+                defaultValue:
+                  "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",
+                keys: res.shadowed_secrets.join(", "),
               }),
               "error",
             );

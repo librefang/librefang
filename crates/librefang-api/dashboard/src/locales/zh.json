@@ -158,6 +158,8 @@
     "on": "开启",
     "expand": "展开",
     "collapse": "收起",
+    "show_advanced": "显示高级选项",
+    "hide_advanced": "隐藏高级选项",
     "add": "添加",
     "remove": "移除",
     "discard": "放弃更改",
@@ -873,7 +875,10 @@
     "empty_title": "尚未配置 channel",
     "empty_body": "接入 Slack、Discord、邮件、短信或其他自带桥接，让 agent 可以收发消息。",
     "connect_first": "添加一个 channel",
-    "picker_title": "添加 channel"
+    "picker_title": "添加 channel",
+    "saved": "已保存",
+    "saved_restart_required": "已保存 — 需要重启 daemon 才能生效",
+    "shadowed_secrets_warning": "警告：以下 token 被 shell 环境变量遮蔽，需要先 unset 并重启才会生效：{{keys}}"
   },
   "skills": {
     "title": "技能",
