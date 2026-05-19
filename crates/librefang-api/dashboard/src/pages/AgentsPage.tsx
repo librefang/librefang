@@ -39,6 +39,7 @@ import { useAgentTriggers } from "../lib/queries/schedules";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
+import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
@@ -599,6 +600,28 @@ export function AgentsPage() {
           }))
         : undefined,
     [toolsListQuery.data],
+  );
+  // Configured MCP servers catalog for the create-dialog finder (#5246).
+  // The MCP servers field previously rendered as a free-text TagInput,
+  // forcing users to remember server names exactly. Gate-fetch the
+  // catalog only while the form-mode create dialog is open so we don't
+  // hold an open `/api/mcp/servers` poll when the page first loads.
+  // `refetchInterval: false` overrides the 30s default poll baked into
+  // `useMcpServers` — the catalog only needs to be fresh on dialog open,
+  // and reopening the dialog triggers a fresh fetch via the `enabled`
+  // toggle anyway.
+  const mcpServersQuery = useMcpServers({
+    enabled: showCreate && createMode === "form",
+    refetchInterval: false,
+  });
+  const mcpCatalogForForm = useMemo<
+    { name: string; description?: string }[] | undefined
+  >(
+    () =>
+      mcpServersQuery.data
+        ? mcpServersQuery.data.configured.map((s) => ({ name: s.name }))
+        : undefined,
+    [mcpServersQuery.data],
   );
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
@@ -2342,6 +2365,7 @@ export function AgentsPage() {
                 extras={formExtras}
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
+                mcpCatalog={mcpCatalogForForm}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
