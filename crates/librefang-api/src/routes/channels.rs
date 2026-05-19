@@ -959,6 +959,80 @@ fn find_channel_meta(name: &str) -> Option<&'static ChannelMeta> {
     CHANNEL_REGISTRY.iter().find(|c| c.name == name)
 }
 
+/// Synthesize dashboard channel rows for configured `[[sidecar_channels]]`.
+///
+/// telegram / ntfy (and any other sidecar adapter) were removed from
+/// `CHANNEL_REGISTRY` when they migrated out-of-process (#5241 / #5224),
+/// which silently dropped them from the dashboard channels page. They
+/// are still channels — surface the configured ones here so the
+/// operator view stays consistent regardless of whether an adapter
+/// runs in-process or as a sidecar. These rows are config.toml-managed
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
+/// they carry no editable `fields`; the page renders them as
+/// configured/online cards (it conditionally hides empty
+/// `fields`/`setup_steps`).
+fn sidecar_channel_rows(
+    sidecar: &[librefang_types::config::SidecarChannelConfig],
+    msgs_24h: &std::collections::HashMap<String, u64>,
+    with_msgs: bool,
+) -> Vec<serde_json::Value> {
+    let registry: std::collections::HashSet<&str> =
+        CHANNEL_REGISTRY.iter().map(|c| c.name).collect();
+    let mut instance_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for sc in sidecar {
+        *instance_counts.entry(sc.name.as_str()).or_insert(0) += 1;
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for sc in sidecar {
+        let name = sc.name.as_str();
+        // One card per distinct sidecar name; never shadow an
+        // in-process registry entry that happens to share the name.
+        if registry.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let mut row = serde_json::json!({
+            "name": name,
+            "display_name": name,
+            "icon": "SC",
+            "description": format!(
+                "Out-of-process sidecar adapter ({} {})",
+                sc.command,
+                sc.args.join(" ")
+            ),
+            "category": "sidecar",
+            "difficulty": "",
+            "setup_time": "",
+            "quick_setup": "",
+            "setup_type": "sidecar",
+            "configured": true,
+            "instance_count": instance_counts.get(name).copied().unwrap_or(1),
+            "has_token": true,
+            "fields": Vec::<serde_json::Value>::new(),
+            "setup_steps": [
+                "Runs as an out-of-process sidecar adapter",
+                "Configured via [[sidecar_channels]] in config.toml \
+                 (Config \u{2192} Sidecar Channels)",
+            ],
+            "config_template": format!(
+                "[[sidecar_channels]]\nname = \"{name}\"\nchannel_type = \"{channel_type}\""
+            ),
+        });
+        if with_msgs {
+            let m = msgs_24h
+                .get(channel_type)
+                .or_else(|| msgs_24h.get(name))
+                .copied()
+                .unwrap_or(0);
+            row["msgs_24h"] = serde_json::json!(m);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
@@ -1337,6 +1411,16 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    // Sidecar-backed channels (telegram / ntfy / …) are not in
+    // CHANNEL_REGISTRY but are still channels — surface the configured
+    // ones so the operator view stays consistent (#5241 / #5224).
+    {
+        let kcfg = state.kernel.config_ref();
+        let rows = sidecar_channel_rows(&kcfg.sidecar_channels, &msgs_24h, true);
+        configured_count += rows.len() as u32;
+        channels.extend(rows);
+    }
+
     let total = channels.len();
     // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
     // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
@@ -1395,6 +1479,17 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
         }
         channels.push(channel_json);
+    }
+
+    // Sidecar-backed channels — keep the snapshot consistent with
+    // /api/channels (#5241 / #5224).
+    {
+        let kcfg = state.kernel.config_ref();
+        channels.extend(sidecar_channel_rows(
+            &kcfg.sidecar_channels,
+            &std::collections::HashMap::new(),
+            false,
+        ));
     }
 
     channels
