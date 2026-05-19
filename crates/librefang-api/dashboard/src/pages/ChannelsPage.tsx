@@ -30,6 +30,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
@@ -431,14 +432,25 @@ function SidecarForm({
                 </span>
               )}
             </label>
-            <Input
-              type={f.type === "secret" ? "password" : "text"}
-              value={values[f.key] ?? ""}
-              placeholder={f.placeholder ?? undefined}
-              onChange={(e) =>
-                setValues((v) => ({ ...v, [f.key]: e.target.value }))
-              }
-            />
+            {f.type === "select" && f.options && f.options.length > 0 ? (
+              <Select
+                options={f.options.map((o) => ({ value: o, label: o }))}
+                value={values[f.key] ?? ""}
+                placeholder={f.placeholder ?? undefined}
+                onChange={(e) =>
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
+                }
+              />
+            ) : (
+              <Input
+                type={f.type === "secret" ? "password" : "text"}
+                value={values[f.key] ?? ""}
+                placeholder={f.placeholder ?? undefined}
+                onChange={(e) =>
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
+                }
+              />
+            )}
           </div>
         ))}
         {advanced.length > 0 && (
