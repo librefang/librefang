@@ -125,13 +125,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["REDDIT_CLIENT_SECRET", "REDDIT_PASSWORD"],
         description: "Reddit API bot adapter",
     },
-    ChannelDef {
-        name: "mastodon",
-        display_name: "Mastodon",
-        category: "Social",
-        env_vars: &["MASTODON_ACCESS_TOKEN"],
-        description: "Mastodon Streaming API adapter",
-    },
+    // mastodon migrated to a sidecar adapter
     ChannelDef {
         name: "bluesky",
         display_name: "Bluesky",
@@ -293,14 +287,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["TWITCH_OAUTH_TOKEN"],
         description: "Twitch IRC gateway adapter",
     },
-    // ── Notifications (3) — ntfy migrated to a sidecar adapter
-    ChannelDef {
-        name: "gotify",
-        display_name: "Gotify",
-        category: "Notifications",
-        env_vars: &["GOTIFY_APP_TOKEN", "GOTIFY_CLIENT_TOKEN"],
-        description: "Gotify WebSocket adapter",
-    },
+    // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",
         display_name: "Webhook",

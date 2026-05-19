@@ -111,7 +111,6 @@ channel-xmpp = ["librefang-channels/channel-xmpp"]
 channel-bluesky = ["librefang-channels/channel-bluesky"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-line = ["librefang-channels/channel-line"]
-channel-mastodon = ["librefang-channels/channel-mastodon"]
 channel-messenger = ["librefang-channels/channel-messenger"]
 channel-reddit = ["librefang-channels/channel-reddit"]
 channel-revolt = ["librefang-channels/channel-revolt"]
@@ -128,7 +127,6 @@ channel-webex = ["librefang-channels/channel-webex"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
 channel-discourse = ["librefang-channels/channel-discourse"]
 channel-gitter = ["librefang-channels/channel-gitter"]
-channel-gotify = ["librefang-channels/channel-gotify"]
 channel-linkedin = ["librefang-channels/channel-linkedin"]
 channel-mumble = ["librefang-channels/channel-mumble"]
 channel-qq = ["librefang-channels/channel-qq"]
@@ -153,12 +151,12 @@ all-channels = [
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-bluesky", "channel-feishu", "channel-line",
     "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble",
+    "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
@@ -169,12 +167,12 @@ all-channels-no-email = [
     "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-bluesky", "channel-feishu", "channel-line",
     "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble",
+    "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 

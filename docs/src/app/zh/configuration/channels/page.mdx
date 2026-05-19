@@ -376,19 +376,24 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon 由 Python sidecar 适配器 (`librefang.sidecar.adapters.mastodon`) 提供。原 `[channels.mastodon]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
+# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `instance_url` | string | `""` | Mastodon 实例 URL（例如 `"https://mastodon.social"`）。 |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | 存放 Mastodon 访问令牌的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`MASTODON_ACCESS_TOKEN`（OAuth bearer）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Mastodon 表单时会自动写入。sidecar 继承了原适配器的 SSE 主路径 + REST 轮询回退语义。
 
 #### `[channels.bluesky]`
 
@@ -668,21 +673,22 @@ token_env = "NTFY_TOKEN"
 | `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.gotify]`
+#### Gotify
+
+Gotify 由 Python sidecar 适配器 (`librefang.sidecar.adapters.gotify`) 提供。原 `[channels.gotify]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.gotify]
-server_url = "https://gotify.example.com"
-app_token_env = "GOTIFY_APP_TOKEN"
-client_token_env = "GOTIFY_CLIENT_TOKEN"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Gotify 服务器 URL。 |
-| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | 存放 Gotify 应用令牌（用于发送消息）的环境变量。 |
-| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | 存放 Gotify 客户端令牌（通过 WebSocket 接收消息）的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`GOTIFY_APP_TOKEN`（出站发布）和 `GOTIFY_CLIENT_TOKEN`（入站 WebSocket 订阅）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Gotify 表单时会自动写入。
 
 #### `[channels.webhook]`
 

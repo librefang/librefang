@@ -6399,8 +6399,6 @@ pub struct ChannelsConfig {
     pub messenger: OneOrMany<MessengerConfig>,
     /// Reddit API configuration(s).
     pub reddit: OneOrMany<RedditConfig>,
-    /// Mastodon Streaming API configuration(s).
-    pub mastodon: OneOrMany<MastodonConfig>,
     /// Bluesky/AT Protocol configuration(s).
     pub bluesky: OneOrMany<BlueskyConfig>,
     /// Feishu/Lark Open Platform configuration(s).
@@ -6437,8 +6435,6 @@ pub struct ChannelsConfig {
     pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
-    /// Gotify notification configuration(s).
-    pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
     /// Voice channel (WebSocket + STT/TTS) configuration(s).
@@ -6519,7 +6515,6 @@ impl Default for ChannelsConfig {
             viber: OneOrMany::default(),
             messenger: OneOrMany::default(),
             reddit: OneOrMany::default(),
-            mastodon: OneOrMany::default(),
             bluesky: OneOrMany::default(),
             feishu: OneOrMany::default(),
             revolt: OneOrMany::default(),
@@ -6537,7 +6532,6 @@ impl Default for ChannelsConfig {
             qq: OneOrMany::default(),
             discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
-            gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
             linkedin: OneOrMany::default(),
@@ -7450,36 +7444,6 @@ impl Default for RedditConfig {
     }
 }
 
-/// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MastodonConfig {
-    /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
-    pub instance_url: String,
-    /// Env var name holding the access token.
-    pub access_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MastodonConfig {
-    fn default() -> Self {
-        Self {
-            instance_url: String::new(),
-            access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Bluesky/AT Protocol channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -8200,39 +8164,6 @@ impl Default for GitterConfig {
         Self {
             token_env: "GITTER_TOKEN".to_string(),
             room_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Gotify WebSocket channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GotifyConfig {
-    /// Gotify server URL.
-    pub server_url: String,
-    /// Env var name holding the app token (for sending).
-    pub app_token_env: String,
-    /// Env var name holding the client token (for receiving).
-    pub client_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GotifyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            app_token_env: "GOTIFY_APP_TOKEN".to_string(),
-            client_token_env: "GOTIFY_CLIENT_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

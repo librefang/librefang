@@ -47,8 +47,6 @@ pub mod flock;
 pub mod gitter;
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
-#[cfg(feature = "channel-gotify")]
-pub mod gotify;
 #[cfg(feature = "channel-guilded")]
 pub mod guilded;
 #[cfg(feature = "channel-irc")]
@@ -59,8 +57,6 @@ pub mod keybase;
 pub mod line;
 #[cfg(feature = "channel-linkedin")]
 pub mod linkedin;
-#[cfg(feature = "channel-mastodon")]
-pub mod mastodon;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]

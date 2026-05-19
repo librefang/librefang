@@ -406,19 +406,24 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | Subreddit names to monitor. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon is provided by the Python sidecar adapter (`librefang.sidecar.adapters.mastodon`). The in-process `[channels.mastodon]` config block was removed in the sidecar migration. Declare Mastodon as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # raise for higher-limit instances
+# MASTODON_ACCOUNT_ID = "prod"              # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `instance_url` | string | `""` | Mastodon instance URL (e.g., `"https://mastodon.social"`). |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | Env var holding the Mastodon access token. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`MASTODON_ACCESS_TOKEN` (OAuth bearer) goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Mastodon form. The sidecar inherits SSE-with-polling-fallback semantics from the removed in-process adapter.
 
 #### `[channels.bluesky]`
 
@@ -698,21 +703,22 @@ token_env = "NTFY_TOKEN"
 | `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.gotify]`
+#### Gotify
+
+Gotify is provided by the Python sidecar adapter (`librefang.sidecar.adapters.gotify`). The in-process `[channels.gotify]` config block was removed in the sidecar migration. Declare Gotify as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.gotify]
-server_url = "https://gotify.example.com"
-app_token_env = "GOTIFY_APP_TOKEN"
-client_token_env = "GOTIFY_CLIENT_TOKEN"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Gotify server URL. |
-| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | Env var holding the Gotify app token (for sending messages). |
-| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | Env var holding the Gotify client token (for receiving messages via WebSocket). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`GOTIFY_APP_TOKEN` (used for outbound publish) and `GOTIFY_CLIENT_TOKEN` (used for inbound WebSocket subscribe) go into `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
 #### `[channels.webhook]`
 

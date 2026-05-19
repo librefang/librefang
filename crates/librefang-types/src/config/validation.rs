@@ -434,17 +434,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for md in self.channels.mastodon.iter() {
-            if std::env::var(&md.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Mastodon configured but {} is not set",
-                    md.access_token_env
-                ));
-            }
-        }
         for bs in self.channels.bluesky.iter() {
             if std::env::var(&bs.app_password_env)
                 .unwrap_or_default()
@@ -628,17 +617,6 @@ impl KernelConfig {
         for gt in self.channels.gitter.iter() {
             if std::env::var(&gt.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
-            }
-        }
-        for gf in self.channels.gotify.iter() {
-            if std::env::var(&gf.app_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Gotify configured but {} is not set",
-                    gf.app_token_env
-                ));
             }
         }
         for wh in self.channels.webhook.iter() {

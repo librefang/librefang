@@ -29,13 +29,11 @@ feishu
 flock
 gitter
 google_chat
-gotify
 guilded
 irc
 keybase
 line
 linkedin
-mastodon
 matrix
 mattermost
 messenger

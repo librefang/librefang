@@ -35,13 +35,11 @@ macro_rules! for_each_channel_field {
         $mac!(flock, "flock");
         $mac!(gitter, "gitter");
         $mac!(google_chat, "google_chat");
-        $mac!(gotify, "gotify");
         $mac!(guilded, "guilded");
         $mac!(irc, "irc");
         $mac!(keybase, "keybase");
         $mac!(line, "line");
         $mac!(linkedin, "linkedin");
-        $mac!(mastodon, "mastodon");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
         $mac!(messenger, "messenger");
@@ -469,13 +467,11 @@ mod tests {
             "flock",
             "gitter",
             "google_chat",
-            "gotify",
             "guilded",
             "irc",
             "keybase",
             "line",
             "linkedin",
-            "mastodon",
             "matrix",
             "mattermost",
             "messenger",
