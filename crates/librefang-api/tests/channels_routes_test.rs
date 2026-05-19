@@ -1349,6 +1349,44 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
         "expected ReloadChannels in hot_actions_applied: {resp}"
     );
 
+    // T4.2: prove the bridge actually re-spawned, not just that the kernel's
+    // in-memory config was reloaded. `reload_config()` clears
+    // `mesh.channel_adapters` (see `config_reload_ops.rs::246-256`), and only
+    // the handler-side follow-up `channel_bridge::reload_channels_from_disk`
+    // re-populates it by re-entering `start_channel_bridge_with_config`. So
+    // the presence of a telegram entry in `channel_adapters_ref()` after the
+    // save returns is a direct regression test for the broken-chain bug:
+    // without (A) the map stays empty and this assertion fires.
+    //
+    // (Asserting `configured: true` via GET /api/channels would not catch
+    // this: that flag reads `kernel.config_ref().sidecar_channels`, which
+    // `reload_config()` updates on its own — independent of bridge spawn.)
+    let adapters = h._state.kernel.channel_adapters_ref();
+    assert!(
+        adapters.contains_key("telegram"),
+        "telegram adapter must be registered in channel_adapters after sidecar configure; \
+         saw keys: {:?}",
+        adapters.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
+    );
+
+    // Cross-check the operator-facing view: GET /api/channels must also
+    // surface the row as configured (this passes once `reload_config()`
+    // ran, regardless of bridge spawn — included as a defence-in-depth
+    // check that the kernel's in-memory config matches what's on disk).
+    let (list_status, list_body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(list_status, StatusCode::OK, "list response: {list_body}");
+    let items = list_body["items"]
+        .as_array()
+        .expect("items must be an array");
+    let telegram = items
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("telegram row must appear after configure");
+    assert_eq!(
+        telegram["configured"], true,
+        "telegram must be configured=true after sidecar save: {telegram}"
+    );
+
     // Clear cache so sibling tests are not polluted by this seed.
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }

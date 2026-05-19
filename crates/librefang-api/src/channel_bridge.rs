@@ -3715,6 +3715,19 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Sidecar channel adapters ───────────────────────────────
+    // Re-init path: this loop runs on every channel-bridge cycle, not just
+    // daemon boot. After config changes that produce `HotAction::ReloadChannels`
+    // (see `librefang_kernel::config_reload`), the dispatch in
+    // `kernel/config_reload_ops.rs::246-256` clears `mesh.channel_adapters`;
+    // the owning handler (`routes/channels.rs::configure_channel`,
+    // `configure_sidecar_channel`, `reload_channels`, … or the 30s disk
+    // watcher in `server.rs`) follows up with
+    // `channel_bridge::reload_channels_from_disk(&state)` which re-enters
+    // `start_channel_bridge_with_config` and so re-executes this loop —
+    // picking up any newly-added [[sidecar_channels]] entry. Saves without
+    // that handler-side follow-up will silently fail to spawn the sidecar
+    // (the supervisor map stays empty); audit any new save endpoint that
+    // touches `sidecar_channels` for this pattern.
     let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(

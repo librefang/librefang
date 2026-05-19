@@ -1341,6 +1341,29 @@ pub async fn configure_sidecar_channel(
         ApiErrorResponse::internal(format!("config reload failed: {e}")).into_json_tuple()
     })?;
 
+    // 7. When the plan emits `ReloadChannels`, the kernel has already
+    //    cleared `mesh.channel_adapters` — but the supervisor map is
+    //    only re-populated by re-entering `start_channel_bridge_with_config`
+    //    via `channel_bridge::reload_channels_from_disk`. Without this
+    //    follow-up the [[sidecar_channels]] entry we just wrote stays
+    //    on disk only and no sidecar process is spawned until daemon
+    //    restart — silently breaking the operator's expectation that
+    //    `hot_actions_applied: [ReloadChannels]` means a new sidecar
+    //    is live. Mirrors `routes/config.rs::config_reload` and
+    //    `routes/channels.rs::configure_channel`.
+    if plan
+        .hot_actions
+        .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+    {
+        if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
+            tracing::error!("sidecar configure: bridge restart failed: {e}");
+            return Err(ApiErrorResponse::internal(format!(
+                "saved config.toml but bridge restart failed: {e}"
+            ))
+            .into_json_tuple());
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "status": "saved",
         "hot_actions_applied": plan
