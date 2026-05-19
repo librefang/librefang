@@ -35,7 +35,6 @@ macro_rules! for_each_channel_field {
         $mac!(flock, "flock");
         $mac!(gitter, "gitter");
         $mac!(google_chat, "google_chat");
-        $mac!(gotify, "gotify");
         $mac!(guilded, "guilded");
         $mac!(irc, "irc");
         $mac!(keybase, "keybase");
@@ -469,7 +468,6 @@ mod tests {
             "flock",
             "gitter",
             "google_chat",
-            "gotify",
             "guilded",
             "irc",
             "keybase",
