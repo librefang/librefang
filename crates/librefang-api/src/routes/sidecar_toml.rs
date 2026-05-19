@@ -88,7 +88,7 @@ pub fn upsert_sidecar_block(
                     env_table[*key] = value(v.clone());
                 }
                 _ => {
-                    env_table.remove(*key);
+                    env_table.remove(key);
                 }
             }
         }
