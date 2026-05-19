@@ -146,17 +146,25 @@ impl From<ToolError> for LibreFangError {
             // typed `LibreFangError` rides on `Upstream.source`. Unwrap so the
             // variant kind survives — flattening to `ToolExecution{reason}`
             // would erase `Memory{source}` / `Network{source}` / `LlmDriver{source}`.
+            // For foreign typed sources (anything that isn't itself a
+            // `LibreFangError` — `std::io::Error`, `reqwest::Error`, …),
+            // preserve the box on `ToolExecution.source` so callers walking
+            // `Error::source()` can still downcast to the concrete underlying
+            // type. Dropping it would silently undo #3745 for every tool that
+            // lifts a non-`LibreFangError` source through this bridge.
             ToolError::Upstream { message, source } => match source {
                 Some(boxed) => match boxed.downcast::<LibreFangError>() {
                     Ok(inner) => *inner,
                     Err(other) => LibreFangError::ToolExecution {
                         tool_id: "unknown".to_string(),
                         reason: other.to_string(),
+                        source: Some(other),
                     },
                 },
                 None => LibreFangError::ToolExecution {
                     tool_id: "unknown".to_string(),
                     reason: message,
+                    source: None,
                 },
             },
             // Preserve the source chain end-to-end.
@@ -174,7 +182,11 @@ debt — the dispatch boundary (not the submodule fn) knows the tool name, and
 slice 5 of the migration order will lift dispatch to return `ToolError` so the
 tool id can be threaded at that boundary. Until then, every typed-upstream
 `LibreFangError` case unwraps to its real variant, so the `unknown` only
-appears for the (currently empty) "foreign typed source" case.
+appears for the "foreign typed source" case (`std::io::Error`,
+`reqwest::Error`, etc.). When that case fires, the typed source is preserved
+on `ToolExecution.source` (the `BoxedSource` field added in this slice — see
+`LibreFangError::tool_execution`) so callers walking `Error::source()` can
+still downcast back to the concrete underlying type.
 
 **Naming convention recap.** Domain errors live next to the trait they serve
 (`HandError` next to the hands API, `SandboxError` in the sandbox crate). The

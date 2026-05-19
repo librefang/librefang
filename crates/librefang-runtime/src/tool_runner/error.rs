@@ -174,13 +174,16 @@ impl From<serde_json::Error> for ToolError {
 ///   a future caller bubbles a `ToolError::NotFound` through to an HTTP
 ///   handler).
 /// - `PermissionDenied` → `CapabilityDenied` (403-class).
-/// - `Upstream` → `ToolExecution` for the `Display`; the typed source is
-///   re-attached to `Memory` / `Network` / `LlmDriver` / `Serialization`
-///   when we can identify it, otherwise stays on `ToolExecution.reason`
-///   as a stringified message. (The `tool_id` field is set to `"unknown"`
-///   because the dispatch boundary — not the submodule fn — knows the tool
-///   name; slice 5 of #3576 will lift dispatch to return `ToolError` and
-///   thread the tool id at that boundary.)
+/// - `Upstream` → if the boxed source IS itself a `LibreFangError`
+///   (the kernel-handle round-trip case where `KernelOpError == LibreFangError`),
+///   unwrap it so the variant kind and its own typed source chain survive.
+///   Otherwise lift to `ToolExecution { tool_id: "unknown", reason, source }`,
+///   keeping the foreign typed source (`std::io::Error`, `reqwest::Error`, …)
+///   walkable via `Error::source()` — this is the contract #3745 established
+///   and slice-2+ of #3576 depends on for retry / circuit-break logic. The
+///   `tool_id` field is set to `"unknown"` because the dispatch boundary — not
+///   the submodule fn — knows the tool name; slice 5 of #3576 will lift
+///   dispatch to return `ToolError` and thread the tool id at that boundary.
 /// - `Serialization` → `LibreFangError::Serialization` preserving the
 ///   `source()` chain.
 /// - `Internal` → `Internal`.
@@ -198,16 +201,27 @@ impl From<ToolError> for LibreFangError {
                 // `LibreFangError::Memory{source}` etc. intact, with its own
                 // `BoxedSource` chain — instead of flattening to
                 // `ToolExecution{reason: <stringified>}`.
+                //
+                // For foreign typed sources (anything that ISN'T a
+                // `LibreFangError` — `std::io::Error`, `reqwest::Error`, …),
+                // preserve the box on `ToolExecution.source` so callers walking
+                // `Error::source()` can still downcast to the concrete
+                // underlying type. Dropping it would silently undo #3745 for
+                // every tool that lifts a non-`LibreFangError` source through
+                // this bridge (filesystem tools, web tools, channel adapters,
+                // …) — see Codex P2 on #5258.
                 Some(boxed) => match boxed.downcast::<LibreFangError>() {
                     Ok(inner) => *inner,
                     Err(other) => LibreFangError::ToolExecution {
                         tool_id: "unknown".to_string(),
                         reason: other.to_string(),
+                        source: Some(other),
                     },
                 },
                 None => LibreFangError::ToolExecution {
                     tool_id: "unknown".to_string(),
                     reason: message,
+                    source: None,
                 },
             },
             ToolError::Serialization { message, source } => {
@@ -319,19 +333,67 @@ mod tests {
     }
 
     /// `Upstream` carrying a foreign typed error (`std::io::Error` — not a
-    /// `LibreFangError`) lifts to `ToolExecution` and the reason field
-    /// surfaces the underlying source's `Display`.
+    /// `LibreFangError`) lifts to `ToolExecution` and BOTH the `reason` field
+    /// surfaces the underlying source's `Display` AND the typed source is
+    /// preserved on the `source()` chain so callers walking it can downcast
+    /// to the concrete underlying type. Dropping the source here would
+    /// silently undo #3745's retry / circuit-break contract for the foreign
+    /// typed sources slice-2+ of #3576 will route through this bridge
+    /// (`std::io::Error` from filesystem tools, `reqwest::Error` from web
+    /// tools, …). See Codex P2 on #5258.
     #[test]
-    fn upstream_foreign_source_lifts_to_tool_execution() {
+    fn upstream_foreign_source_lifts_to_tool_execution_preserving_chain() {
         let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out");
         let e: LibreFangError = ToolError::upstream(inner).into();
-        match e {
-            LibreFangError::ToolExecution { tool_id, reason } => {
+        match &e {
+            LibreFangError::ToolExecution {
+                tool_id,
+                reason,
+                source: Some(s),
+            } => {
                 assert_eq!(tool_id, "unknown");
                 assert_eq!(reason, "read timed out");
+                let downcast = s
+                    .downcast_ref::<std::io::Error>()
+                    .expect("source must downcast to io::Error");
+                assert_eq!(downcast.kind(), std::io::ErrorKind::TimedOut);
             }
-            other => panic!("expected ToolExecution, got {other:?}"),
+            other => panic!("expected ToolExecution{{source: Some(_)}}, got {other:?}"),
         }
+        // Also walkable via the public `Error::source()` API — the contract
+        // retry / circuit-break logic relies on (independent of the field
+        // shape).
+        let walked = e.source().expect("Error::source() must yield the inner");
+        assert!(
+            walked.downcast_ref::<std::io::Error>().is_some(),
+            "Error::source() must downcast to io::Error"
+        );
+    }
+
+    /// End-to-end regression for Codex P2 on #5258: a tool fn lifts a foreign
+    /// typed error via `ToolError::upstream` and bubbles it through `?` to a
+    /// `LibreFangError`-returning caller. The original `io::Error` must
+    /// remain downcastable on the resulting chain — this is the scenario the
+    /// stated retry / circuit-break contract is for. Earlier shape dropped
+    /// the source at the bridge.
+    #[test]
+    fn question_mark_bubble_preserves_foreign_source_end_to_end() {
+        fn tool_call() -> Result<(), ToolError> {
+            let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no perms");
+            Err(ToolError::upstream(io_err))
+        }
+        fn caller() -> Result<(), LibreFangError> {
+            tool_call()?;
+            Ok(())
+        }
+        let err = caller().unwrap_err();
+        let src = err
+            .source()
+            .expect("LibreFangError must carry the upstream source through `?`");
+        let downcast = src
+            .downcast_ref::<std::io::Error>()
+            .expect("source must downcast back to the original io::Error");
+        assert_eq!(downcast.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     /// `Upstream` carrying a typed `LibreFangError` (the common kernel-handle
