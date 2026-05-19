@@ -44,9 +44,24 @@ import { truncateId } from "../lib/string";
 const INPUT_CLASS =
   "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
+// Trigger pattern presets must match the wire shape of `TriggerPattern`
+// in `librefang_kernel::triggers`:
+//   - unit variants (`Lifecycle`, `AgentTerminated`, `All`) deserialize from
+//     the bare string form (e.g. `"lifecycle"`)
+//   - struct variants (`AgentSpawned { name_pattern }`) require the object
+//     form `{ "agent_spawned": { "name_pattern": "..." } }`
+// Sending `"agent_spawned"` as a bare string lands on serde's
+// AgentSpawned arm without the required `name_pattern` field and the
+// backend rejects with "Invalid trigger pattern" (issue surfaced by the
+// Codex P2 review on PR #5256). Default `name_pattern: "*"` matches all
+// spawn events — users can edit the JSON via the `custom` preset if they
+// need a narrower glob.
 const TRIGGER_PATTERN_PRESETS = [
   { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
-  { label: "agent_spawned", value: '"agent_spawned"' },
+  {
+    label: "agent_spawned (any)",
+    value: '{"agent_spawned":{"name_pattern":"*"}}',
+  },
   { label: "agent_terminated", value: '"agent_terminated"' },
   { label: "all events", value: '"all"' },
   { label: "custom JSON…", value: "custom" },
@@ -97,23 +112,45 @@ function readActionMessage(action: unknown): string {
   return "";
 }
 
-/** Parse `"continuous · 120s"` (the human-readable summary the backend
- * puts on `AgentDetail.schedule`) into its component parts. */
-function parseScheduleMode(schedule: string | undefined): {
-  isContinuous: boolean;
-  isReactive: boolean;
-  continuousInterval: number;
-} {
+/** Parse the human-readable schedule summary the backend puts on
+ * `AgentDetail.schedule` (rendered by `format_schedule_mode` in
+ * `routes/agents.rs`) into a discriminated mode tag.
+ *
+ * Backend serialisation:
+ *   Reactive            → "manual"
+ *   Periodic { cron }   → the raw cron expression string
+ *   Proactive { … }     → "proactive"
+ *   Continuous { secs } → "continuous · <secs>s"
+ *
+ * Returning a tagged union avoids the earlier two-flag shape that
+ * collapsed periodic/proactive into "not continuous, not reactive →
+ * render as Manual" — that misled users into thinking the toggle would
+ * leave their cron / proactive schedule alone (Codex P2 review on
+ * PR #5256). */
+type ParsedScheduleMode =
+  | { kind: "reactive" }
+  | { kind: "continuous"; intervalSecs: number }
+  | { kind: "periodic"; cron: string }
+  | { kind: "proactive" };
+
+function parseScheduleMode(schedule: string | undefined): ParsedScheduleMode {
   if (!schedule || schedule === "manual" || schedule === "reactive") {
-    return { isContinuous: false, isReactive: true, continuousInterval: DEFAULT_CONTINUOUS_INTERVAL };
+    return { kind: "reactive" };
   }
-  const isContinuous = schedule.startsWith("continuous");
-  const match = schedule.match(/(\d+)\s*s/);
-  return {
-    isContinuous,
-    isReactive: false,
-    continuousInterval: match ? Number(match[1]) : DEFAULT_CONTINUOUS_INTERVAL,
-  };
+  if (schedule === "proactive") {
+    return { kind: "proactive" };
+  }
+  if (schedule.startsWith("continuous")) {
+    const match = schedule.match(/(\d+)\s*s/);
+    return {
+      kind: "continuous",
+      intervalSecs: match ? Number(match[1]) : DEFAULT_CONTINUOUS_INTERVAL,
+    };
+  }
+  // Fallthrough: backend rendered a raw cron expression (periodic mode).
+  // We treat anything else as periodic-with-this-string rather than
+  // silently downgrading to manual.
+  return { kind: "periodic", cron: schedule };
 }
 
 interface AgentSchedulePanelProps {
@@ -152,10 +189,11 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const updateTrigger = useUpdateTrigger();
   const deleteTrigger = useDeleteTrigger();
 
-  const { isContinuous, isReactive, continuousInterval } = useMemo(
-    () => parseScheduleMode(agent.schedule),
-    [agent.schedule],
-  );
+  const parsedMode = useMemo(() => parseScheduleMode(agent.schedule), [agent.schedule]);
+  const isContinuous = parsedMode.kind === "continuous";
+  const isReactive = parsedMode.kind === "reactive";
+  const continuousInterval =
+    parsedMode.kind === "continuous" ? parsedMode.intervalSecs : DEFAULT_CONTINUOUS_INTERVAL;
 
   // ----- continuous interval editor (inline) -------------------------------
   const [editingInterval, setEditingInterval] = useState(false);
@@ -496,21 +534,35 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
         </div>
         <div className="flex-1 min-w-0">
           <div className="font-mono text-[13px] text-text-main">
-            {isContinuous
-              ? `${t("agents.detail.schedule_continuous", { defaultValue: "Continuous" })} (${continuousInterval}s)`
-              : t("agents.detail.schedule_manual", { defaultValue: "Manual" })}
+            {parsedMode.kind === "continuous"
+              ? `${t("agents.detail.schedule_continuous", { defaultValue: "Continuous" })} (${parsedMode.intervalSecs}s)`
+              : parsedMode.kind === "periodic"
+                ? `${t("agents.detail.schedule_periodic", { defaultValue: "Periodic" })} (${parsedMode.cron})`
+                : parsedMode.kind === "proactive"
+                  ? t("agents.detail.schedule_proactive", { defaultValue: "Proactive" })
+                  : t("agents.detail.schedule_manual", { defaultValue: "Manual" })}
           </div>
           <div className="text-[11px] text-text-dim/80 mt-0.5">
-            {isContinuous
+            {parsedMode.kind === "continuous"
               ? t("agents.detail.schedule_continuous_desc", {
                   defaultValue: "agent checks for work on a fixed interval",
                 })
-              : t("agents.detail.schedule_manual_desc", {
-                  defaultValue: "wakes on incoming messages and events only",
-                })}
+              : parsedMode.kind === "periodic"
+                ? t("agents.detail.schedule_periodic_desc", {
+                    defaultValue:
+                      "agent fires on the cron expression set in the manifest — edit via agent.toml",
+                  })
+                : parsedMode.kind === "proactive"
+                  ? t("agents.detail.schedule_proactive_desc", {
+                      defaultValue:
+                        "agent monitors conditions set in the manifest — edit via agent.toml",
+                    })
+                  : t("agents.detail.schedule_manual_desc", {
+                      defaultValue: "wakes on incoming messages and events only",
+                    })}
           </div>
         </div>
-        {isContinuous ? (
+        {parsedMode.kind === "continuous" ? (
           <div className="flex items-center gap-2 shrink-0">
             <Button
               variant="ghost"
@@ -538,7 +590,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
               {t("agents.detail.switch_to_manual", { defaultValue: "Switch to manual" })}
             </Button>
           </div>
-        ) : (
+        ) : parsedMode.kind === "reactive" ? (
           <Button
             variant="ghost"
             size="sm"
@@ -552,6 +604,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           >
             {t("agents.detail.switch_to_continuous", { defaultValue: "Switch to continuous" })}
           </Button>
+        ) : (
+          // Periodic / proactive: editing those requires manifest changes
+          // we don't yet surface here. Hide the toggle rather than offering
+          // a button that silently overwrites the user's `periodic` / `proactive`
+          // schedule with continuous.
+          <span className="text-[10px] uppercase tracking-[0.06em] text-text-dim/70 shrink-0 px-2">
+            {t("agents.detail.schedule_manifest_only", { defaultValue: "manifest-controlled" })}
+          </span>
         )}
       </div>
       {isContinuous && editingInterval && (

@@ -189,6 +189,88 @@ describe("AgentSchedulePanel — mode toggles", () => {
   });
 });
 
+// Regression — Codex P2 review on PR #5256.
+//
+// `format_schedule_mode` in `routes/agents.rs` returns:
+//   ScheduleMode::Reactive             → "manual"
+//   ScheduleMode::Periodic { cron }    → the cron string itself
+//   ScheduleMode::Proactive { .. }     → "proactive"
+//   ScheduleMode::Continuous { .. }    → "continuous · Ns"
+//
+// Pre-fix the panel collapsed periodic/proactive into the "manual" branch,
+// which then offered a "Switch to continuous" button that would silently
+// clobber the manifest-driven schedule. We now render the actual mode and
+// hide the toggle to keep the manifest the source of truth for those modes.
+describe("AgentSchedulePanel — non-continuous schedule modes", () => {
+  beforeEach(() => {
+    vi.mocked(http.listCronJobs).mockResolvedValue([]);
+    vi.mocked(http.listTriggers).mockResolvedValue([]);
+  });
+
+  it("renders a periodic schedule with the cron expression, no switch-to-continuous offered", async () => {
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "0 9 * * *" }} />,
+    );
+    expect(await screen.findByText("Periodic (0 9 * * *)")).toBeInTheDocument();
+    // The "manifest-controlled" marker replaces the toggle so users can't
+    // accidentally overwrite a periodic schedule with a continuous one.
+    expect(await screen.findByText("manifest-controlled")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Switch to continuous" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders a proactive schedule with no switch-to-continuous offered", async () => {
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
+    );
+    expect(await screen.findByText("Proactive")).toBeInTheDocument();
+    expect(await screen.findByText("manifest-controlled")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Switch to continuous" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// Regression — Codex P2 review on PR #5256.
+//
+// `TriggerPattern::AgentSpawned { name_pattern }` is a struct variant: serde
+// rejects the bare string `"agent_spawned"` because the required
+// `name_pattern` field is missing. The preset must therefore serialise the
+// object shape `{"agent_spawned":{"name_pattern":"*"}}` so the backend
+// `create_trigger` route accepts it.
+//
+// The preset list lives inside `AgentSchedulePanel.tsx` as a module-private
+// const and the drawer that renders it is hoisted into a global slot
+// (see the long comment at the end of this file), so we can't reach the
+// `<option>` through the rendered DOM here. We pin the contract via the
+// component source file instead: a fixture-style read of the file with a
+// targeted regex catches both regressions on this preset.
+//
+// This is a static contract: if a future refactor swaps the preset value
+// back to `'"agent_spawned"'` the JSON.parse below will produce the bare
+// string and fail the deep-equal check below.
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+describe("AgentSchedulePanel — trigger pattern preset wire shape", () => {
+  it("encodes the agent_spawned preset as the struct-variant object shape, not a bare string", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, "AgentSchedulePanel.tsx"), "utf8");
+    const presetMatch = src.match(
+      /label:\s*"agent_spawned[^"]*",\s*\n?\s*value:\s*([^,\n]+)/,
+    );
+    expect(presetMatch, "agent_spawned preset not found").toBeTruthy();
+    const valueLiteral = presetMatch![1].trim();
+    // The value is a single-quoted JS string literal wrapping a JSON
+    // payload; strip the outer JS quotes before parsing.
+    const jsonStr = valueLiteral.replace(/^['"]/, "").replace(/['"]$/, "");
+    const parsed = JSON.parse(jsonStr);
+    expect(parsed).toEqual({ agent_spawned: { name_pattern: "*" } });
+  });
+});
+
 // Drawer-form CRUD (cron / trigger create + edit) is not exercised here.
 // `DrawerPanel` pushes its body into a global drawer slot owned by
 // `<PushDrawer>` rather than rendering into the local subtree, so the
