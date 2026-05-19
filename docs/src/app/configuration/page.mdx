@@ -1172,19 +1172,24 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | Subreddit names to monitor. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon is now sidecar-only. The `[channels.mastodon]` config block is no longer accepted. Declare Mastodon as a `[[sidecar_channels]]` entry:
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # raise for higher-limit instances
+# MASTODON_ACCOUNT_ID = "prod"              # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `instance_url` | string | `""` | Mastodon instance URL (e.g., `"https://mastodon.social"`). |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | Env var holding the Mastodon access token. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`MASTODON_ACCESS_TOKEN` (OAuth bearer) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Mastodon form.
 
 #### `[channels.bluesky]`
 

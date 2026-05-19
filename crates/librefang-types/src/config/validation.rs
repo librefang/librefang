@@ -434,17 +434,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for md in self.channels.mastodon.iter() {
-            if std::env::var(&md.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Mastodon configured but {} is not set",
-                    md.access_token_env
-                ));
-            }
-        }
         for bs in self.channels.bluesky.iter() {
             if std::env::var(&bs.app_password_env)
                 .unwrap_or_default()

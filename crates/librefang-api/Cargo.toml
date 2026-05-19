@@ -111,7 +111,6 @@ channel-xmpp = ["librefang-channels/channel-xmpp"]
 channel-bluesky = ["librefang-channels/channel-bluesky"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-line = ["librefang-channels/channel-line"]
-channel-mastodon = ["librefang-channels/channel-mastodon"]
 channel-messenger = ["librefang-channels/channel-messenger"]
 channel-reddit = ["librefang-channels/channel-reddit"]
 channel-revolt = ["librefang-channels/channel-revolt"]
@@ -152,7 +151,7 @@ all-channels = [
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-bluesky", "channel-feishu", "channel-line",
     "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
@@ -168,7 +167,7 @@ all-channels-no-email = [
     "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
-    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-bluesky", "channel-feishu", "channel-line",
     "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",

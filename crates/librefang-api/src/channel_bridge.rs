@@ -273,8 +273,6 @@ use librefang_channels::bluesky::BlueskyAdapter;
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
-#[cfg(feature = "channel-mastodon")]
-use librefang_channels::mastodon::MastodonAdapter;
 #[cfg(feature = "channel-messenger")]
 use librefang_channels::messenger::MessengerAdapter;
 #[cfg(feature = "channel-reddit")]
@@ -1951,7 +1949,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "viber" => find_channel_info!(viber),
             "messenger" => find_channel_info!(messenger),
             "reddit" => find_channel_info!(reddit),
-            "mastodon" => find_channel_info!(mastodon),
             "bluesky" => find_channel_info!(bluesky),
             "feishu" => find_channel_info!(feishu),
             "revolt" => find_channel_info!(revolt),
@@ -2636,7 +2633,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(viber, "channel-viber", "Viber");
     check_channel!(messenger, "channel-messenger", "Messenger");
     check_channel!(reddit, "channel-reddit", "Reddit");
-    check_channel!(mastodon, "channel-mastodon", "Mastodon");
     check_channel!(bluesky, "channel-bluesky", "Bluesky");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(revolt, "channel-revolt", "Revolt");
@@ -3172,22 +3168,6 @@ pub async fn start_channel_bridge_with_config(
                     rd_config.account_id.clone(),
                 ));
             }
-        }
-    }
-
-    // Mastodon
-    #[cfg(feature = "channel-mastodon")]
-    for md_config in config.mastodon.iter() {
-        if let Some(token) = read_token(&md_config.access_token_env, "Mastodon") {
-            let adapter = Arc::new(
-                MastodonAdapter::new(md_config.instance_url.clone(), token)
-                    .with_account_id(md_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                md_config.default_agent.clone(),
-                md_config.account_id.clone(),
-            ));
         }
     }
 
@@ -4660,7 +4640,6 @@ mod tests {
         assert!(config.channels.viber.is_none());
         assert!(config.channels.messenger.is_none());
         assert!(config.channels.reddit.is_none());
-        assert!(config.channels.mastodon.is_none());
         assert!(config.channels.bluesky.is_none());
         assert!(config.channels.feishu.is_none());
         assert!(config.channels.revolt.is_none());
