@@ -57,36 +57,33 @@ The Reddit adapter authenticates via OAuth2 using script-type credentials and po
 - A Mastodon account on any instance
 - An application access token (from the instance's **Preferences > Development** page, see [Mastodon API docs](https://docs.joinmastodon.org/api/))
 
+Mastodon runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.mastodon`, ships in `librefang-sdk`).
+
 ### Setup
 
 1. On your Mastodon instance, go to **Preferences > Development > New Application**.
 2. Grant the scopes `read` and `write`.
-3. Copy the access token.
-4. Set environment variables:
-
-```bash
-export MASTODON_INSTANCE_URL=https://mastodon.social  # Environment variable
-export MASTODON_ACCESS_TOKEN=your-access-token
-librefang vault set MASTODON_INSTANCE_URL     # Encrypted vault (recommended)
-librefang vault set MASTODON_ACCESS_TOKEN
-librefang config set-key mastodon             # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-5. Add to config:
+3. Copy the access token (this becomes `MASTODON_ACCESS_TOKEN`).
+4. Open the dashboard Channels page, pick Mastodon, and fill the instance URL and access token — the dashboard writes `MASTODON_ACCESS_TOKEN` to `~/.librefang/secrets.env` and `MASTODON_INSTANCE_URL` to the `[sidecar_channels.env]` table in `~/.librefang/config.toml`. Equivalent manual config:
 
 ```toml
-[channels.mastodon]
-instance_env = "MASTODON_INSTANCE_URL"
-token_env = "MASTODON_ACCESS_TOKEN"
-default_agent = "social-media"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # raise for higher-limit instances
+# MASTODON_ACCOUNT_ID = "prod"              # optional, multi-bot routing
 ```
 
-6. Restart the daemon.
+5. The daemon supervises the sidecar — no manual restart is needed; the kernel's hot-reload spawns or replaces the subprocess on config change.
 
 ### How It Works
 
-The Mastodon adapter connects to the instance's streaming API via Server-Sent Events (SSE) to receive notifications in real time (mentions, direct messages). Responses are posted as toots or direct messages through the Mastodon REST API.
+The Mastodon sidecar connects to the instance's user streaming API via Server-Sent Events (SSE) to receive mention notifications in real time. On SSE failure it falls back to REST polling of `/api/v1/notifications`. Outbound replies are posted as toots via `POST /api/v1/statuses` with `in_reply_to_id` chaining so a chunked reply stays as one thread.
 
 ---
 

@@ -6399,8 +6399,6 @@ pub struct ChannelsConfig {
     pub messenger: OneOrMany<MessengerConfig>,
     /// Reddit API configuration(s).
     pub reddit: OneOrMany<RedditConfig>,
-    /// Mastodon Streaming API configuration(s).
-    pub mastodon: OneOrMany<MastodonConfig>,
     /// Bluesky/AT Protocol configuration(s).
     pub bluesky: OneOrMany<BlueskyConfig>,
     /// Feishu/Lark Open Platform configuration(s).
@@ -6517,7 +6515,6 @@ impl Default for ChannelsConfig {
             viber: OneOrMany::default(),
             messenger: OneOrMany::default(),
             reddit: OneOrMany::default(),
-            mastodon: OneOrMany::default(),
             bluesky: OneOrMany::default(),
             feishu: OneOrMany::default(),
             revolt: OneOrMany::default(),
@@ -7440,36 +7437,6 @@ impl Default for RedditConfig {
             username: String::new(),
             password_env: "REDDIT_PASSWORD".to_string(),
             subreddits: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MastodonConfig {
-    /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
-    pub instance_url: String,
-    /// Env var name holding the access token.
-    pub access_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MastodonConfig {
-    fn default() -> Self {
-        Self {
-            instance_url: String::new(),
-            access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

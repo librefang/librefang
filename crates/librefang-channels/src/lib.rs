@@ -57,8 +57,6 @@ pub mod keybase;
 pub mod line;
 #[cfg(feature = "channel-linkedin")]
 pub mod linkedin;
-#[cfg(feature = "channel-mastodon")]
-pub mod mastodon;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]

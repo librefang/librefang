@@ -816,7 +816,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(viber);
         ch!(messenger);
         ch!(reddit);
-        ch!(mastodon);
         ch!(bluesky);
         ch!(feishu);
         ch!(revolt);
