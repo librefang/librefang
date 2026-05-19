@@ -1340,6 +1340,15 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
         "secrets must NOT leak into config.toml: {toml}"
     );
 
+    // T4.1: sidecar_channels diff must emit ReloadChannels so the bridge
+    // re-inits without a daemon restart.
+    assert!(
+        resp["hot_actions_applied"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == "ReloadChannels")),
+        "expected ReloadChannels in hot_actions_applied: {resp}"
+    );
+
     // Clear cache so sibling tests are not polluted by this seed.
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }
