@@ -16,6 +16,7 @@ const sidecarSaved: SidecarSaveResult = {
   status: "saved",
   restart_required: false,
   hot_actions_applied: ["ReloadChannels"],
+  shadowed_secrets: [],
 };
 
 describe("useSaveSidecarConfig", () => {

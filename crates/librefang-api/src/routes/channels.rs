@@ -1243,7 +1243,12 @@ pub struct ConfigureSidecarBody {
         ("name" = String, Path, description = "Sidecar catalog name (e.g. telegram, ntfy)")
     ),
     responses(
-        (status = 200, description = "Saved; reload plan returned", body = crate::types::JsonObject),
+        (status = 200, description = "Saved; reload plan returned. Body fields: \
+            `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), \
+            `shadowed_secrets` ([String]) — secret field keys whose value is already \
+            present in the daemon's process environment (e.g. exported by the launching \
+            shell). Those values will out-rank the freshly-written secrets.env entry \
+            until the operator unsets them and restarts the daemon.", body = crate::types::JsonObject),
         (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
         (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
         (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
@@ -1293,6 +1298,61 @@ pub async fn configure_sidecar_channel(
         }
     }
 
+    // 3b. Detect shell-environment shadowing of `secret` fields. The
+    //     dotenv loader's priority is: system env > vault > .env >
+    //     secrets.env (see `librefang_extensions::dotenv`). If the
+    //     operator exported `TELEGRAM_BOT_TOKEN` before launching the
+    //     daemon, `std::env::var` returns that exported value, and the
+    //     sidecar child inherits the exported value — not whatever we
+    //     are about to write to `secrets.env`. The save still succeeds
+    //     mechanically, but the new value never takes effect. Warn
+    //     before the operator chases this for an hour.
+    //
+    //     `std::env::var` also returns true for keys that *we* loaded
+    //     from `secrets.env` into the process env at boot, so we need
+    //     to subtract those out: if the key is in `secrets.env` already,
+    //     the env presence is our own write — not a shell shadow. Read
+    //     the on-disk file once and check membership before the write.
+    let home = librefang_home();
+    let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
+    let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
+        &secrets_path,
+    )
+    .ok()
+    .map(|s| {
+        s.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    return None;
+                }
+                let eq = line.find('=')?;
+                let k = line[..eq].trim();
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_string())
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    let mut shadowed_secrets: Vec<String> = schema
+        .fields
+        .iter()
+        .filter(|f| f.field_type == "secret")
+        .filter(|f| {
+            body.values
+                .get(&f.key)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
+        .map(|f| f.key.clone())
+        .collect();
+    shadowed_secrets.sort();
+
     // 4. Split payload: secrets go to secrets.env, everything else
     //    accumulates into the [sidecar_channels.env] table.
     //
@@ -1305,9 +1365,6 @@ pub async fn configure_sidecar_channel(
     //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
     //    The guard is dropped before `reload_config().await` so the
     //    hot-reload step does not gate other config-writing handlers.
-    let home = librefang_home();
-    let secrets_path = home.join("secrets.env");
-    let config_path = home.join("config.toml");
     let mut nonsecret_env: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     {
@@ -1388,6 +1445,7 @@ pub async fn configure_sidecar_channel(
             .map(|a| format!("{a:?}"))
             .collect::<Vec<_>>(),
         "restart_required": plan.restart_required,
+        "shadowed_secrets": shadowed_secrets,
     })))
 }
 

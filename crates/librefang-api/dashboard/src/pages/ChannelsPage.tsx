@@ -386,6 +386,20 @@ function SidecarForm({
               : t("channels.saved", { defaultValue: "Saved" }),
             "success",
           );
+          // Plan Risk #5: surface shell-environment shadowing of secret
+          // fields. `addToast` has no "warning" variant (success | error
+          // | info), so fall back to "error" with an explicit prefix —
+          // visually distinct from the "Saved" success toast above, and
+          // tells the operator the save *did* happen but the new value
+          // is being shadowed until they unset the shell export.
+          if (res.shadowed_secrets && res.shadowed_secrets.length > 0) {
+            addToast(
+              t("channels.shadowed_secrets_warning", {
+                defaultValue: `Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: ${res.shadowed_secrets.join(", ")}`,
+              }),
+              "error",
+            );
+          }
           onClose();
         },
         onError: (err) =>

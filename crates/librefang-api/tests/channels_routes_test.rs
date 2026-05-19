@@ -1369,6 +1369,18 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
         "expected ReloadChannels in hot_actions_applied: {resp}"
     );
 
+    // Plan Risk #5: with no shell-env shadow set, `shadowed_secrets`
+    // must be present and empty. (The field is always emitted, even on
+    // the happy path — the dashboard relies on that to short-circuit
+    // its warning toast.)
+    let shadowed = resp["shadowed_secrets"]
+        .as_array()
+        .expect("shadowed_secrets must be an array: {resp}");
+    assert!(
+        shadowed.is_empty(),
+        "no shell-env shadow expected here, but got: {resp}"
+    );
+
     // T4.2: prove the bridge actually re-spawned, not just that the kernel's
     // in-memory config was reloaded. `reload_config()` clears
     // `mesh.channel_adapters` (see `config_reload_ops.rs::246-256`), and only
@@ -1408,6 +1420,58 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
     );
 
     // Clear cache so sibling tests are not polluted by this seed.
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+// Plan Risk #5 regression. If the operator already exported the secret
+// key in their shell before launching the daemon, the dotenv loader's
+// priority order (system env > vault > .env > secrets.env) means the
+// shell value out-ranks whatever we write to `~/.librefang/secrets.env`.
+// The save mechanically succeeds, but the new value never reaches the
+// sidecar child. We surface this condition via `shadowed_secrets` so the
+// dashboard can warn the operator before they spend an hour chasing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_warns_on_shell_env_shadow() {
+    // Hold the channels-process lock so no other test mutates `LIBREFANG_HOME`
+    // or the process env while we toggle TELEGRAM_BOT_TOKEN.
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller —
+    // no other test reads or mutates env vars concurrently.
+    unsafe { std::env::set_var("TELEGRAM_BOT_TOKEN", "shell-set-val") };
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({
+        "values": {
+            "TELEGRAM_BOT_TOKEN": "form-val",
+            "ALLOWED_USERS": "1",
+        }
+    });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    // The save itself must still succeed — shadowing is advisory.
+    assert_eq!(status, StatusCode::OK, "response: {resp}");
+    assert_eq!(resp["status"], "saved");
+
+    let shadowed = resp["shadowed_secrets"]
+        .as_array()
+        .expect("shadowed_secrets must be an array");
+    assert!(
+        shadowed.iter().any(|v| v == "TELEGRAM_BOT_TOKEN"),
+        "shadowed_secrets must include TELEGRAM_BOT_TOKEN: {resp}"
+    );
+
+    // SAFETY: same lock guarantees as the set above.
+    unsafe { std::env::remove_var("TELEGRAM_BOT_TOKEN") };
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }
 

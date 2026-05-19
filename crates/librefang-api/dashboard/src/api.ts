@@ -1732,6 +1732,13 @@ export interface SidecarSaveResult {
   status: "saved";
   restart_required: boolean;
   hot_actions_applied: string[];
+  // Secret-typed field keys whose value is already present in the
+  // daemon's process environment (e.g. exported by the launching shell).
+  // The dotenv loader's priority puts process env above secrets.env, so
+  // those shell-exported values will out-rank the freshly-written
+  // secrets.env entry until the operator unsets them and restarts the
+  // daemon. Always emitted; empty when no shadow detected.
+  shadowed_secrets: string[];
 }
 
 // Sidecar channel save (Phase 5, sidecar-channel-configure). Splits values

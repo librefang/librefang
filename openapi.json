@@ -4109,7 +4109,7 @@
         },
         "responses": {
           "200": {
-            "description": "Saved; reload plan returned",
+            "description": "Saved; reload plan returned. Body fields: `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), `shadowed_secrets` ([String]) — secret field keys whose value is already present in the daemon's process environment (e.g. exported by the launching shell). Those values will out-rank the freshly-written secrets.env entry until the operator unsets them and restarts the daemon.",
             "content": {
               "application/json": {
                 "schema": {
