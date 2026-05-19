@@ -29,7 +29,6 @@ macro_rules! for_each_channel_field {
         $mac!(bluesky, "bluesky");
         $mac!(dingtalk, "dingtalk");
         $mac!(discord, "discord");
-        $mac!(discourse, "discourse");
         $mac!(email, "email");
         $mac!(feishu, "feishu");
         $mac!(flock, "flock");
@@ -39,14 +38,10 @@ macro_rules! for_each_channel_field {
         $mac!(irc, "irc");
         $mac!(keybase, "keybase");
         $mac!(line, "line");
-        $mac!(linkedin, "linkedin");
-        $mac!(mastodon, "mastodon");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
-        $mac!(messenger, "messenger");
         $mac!(mumble, "mumble");
         $mac!(nextcloud, "nextcloud");
-        $mac!(nostr, "nostr");
         $mac!(pumble, "pumble");
         $mac!(qq, "qq");
         $mac!(reddit, "reddit");
@@ -58,7 +53,6 @@ macro_rules! for_each_channel_field {
         $mac!(threema, "threema");
         $mac!(twist, "twist");
         $mac!(twitch, "twitch");
-        $mac!(viber, "viber");
         $mac!(voice, "voice");
         $mac!(webex, "webex");
         $mac!(webhook, "webhook");
@@ -462,7 +456,6 @@ mod tests {
             "bluesky",
             "dingtalk",
             "discord",
-            "discourse",
             "email",
             "feishu",
             "flock",
@@ -472,14 +465,10 @@ mod tests {
             "irc",
             "keybase",
             "line",
-            "linkedin",
-            "mastodon",
             "matrix",
             "mattermost",
-            "messenger",
             "mumble",
             "nextcloud",
-            "nostr",
             "pumble",
             "qq",
             "reddit",
@@ -491,7 +480,6 @@ mod tests {
             "threema",
             "twist",
             "twitch",
-            "viber",
             "voice",
             "webex",
             "webhook",

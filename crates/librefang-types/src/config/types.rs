@@ -6393,14 +6393,8 @@ pub struct ChannelsConfig {
     // Wave 3 — High-value channels
     /// LINE Messaging API configuration(s).
     pub line: OneOrMany<LineConfig>,
-    /// Viber Bot API configuration(s).
-    pub viber: OneOrMany<ViberConfig>,
-    /// Facebook Messenger configuration(s).
-    pub messenger: OneOrMany<MessengerConfig>,
     /// Reddit API configuration(s).
     pub reddit: OneOrMany<RedditConfig>,
-    /// Mastodon Streaming API configuration(s).
-    pub mastodon: OneOrMany<MastodonConfig>,
     /// Bluesky/AT Protocol configuration(s).
     pub bluesky: OneOrMany<BlueskyConfig>,
     /// Feishu/Lark Open Platform configuration(s).
@@ -6416,8 +6410,6 @@ pub struct ChannelsConfig {
     pub keybase: OneOrMany<KeybaseConfig>,
     /// Threema Gateway configuration(s).
     pub threema: OneOrMany<ThreemaConfig>,
-    /// Nostr relay configuration(s).
-    pub nostr: OneOrMany<NostrConfig>,
     /// Webex bot configuration(s).
     pub webex: OneOrMany<WebexConfig>,
     /// Pumble bot configuration(s).
@@ -6433,16 +6425,12 @@ pub struct ChannelsConfig {
     pub dingtalk: OneOrMany<DingTalkConfig>,
     /// QQ Bot API v2 configuration(s).
     pub qq: OneOrMany<QqConfig>,
-    /// Discourse forum configuration(s).
-    pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
     /// Voice channel (WebSocket + STT/TTS) configuration(s).
     pub voice: OneOrMany<VoiceConfig>,
-    /// LinkedIn messaging configuration(s).
-    pub linkedin: OneOrMany<LinkedInConfig>,
     /// WeChat personal account (iLink) configuration(s).
     pub wechat: OneOrMany<WeChatConfig>,
     /// WeCom/WeChat Work configuration(s).
@@ -6514,10 +6502,7 @@ impl Default for ChannelsConfig {
             zulip: OneOrMany::default(),
             xmpp: OneOrMany::default(),
             line: OneOrMany::default(),
-            viber: OneOrMany::default(),
-            messenger: OneOrMany::default(),
             reddit: OneOrMany::default(),
-            mastodon: OneOrMany::default(),
             bluesky: OneOrMany::default(),
             feishu: OneOrMany::default(),
             revolt: OneOrMany::default(),
@@ -6525,7 +6510,6 @@ impl Default for ChannelsConfig {
             guilded: OneOrMany::default(),
             keybase: OneOrMany::default(),
             threema: OneOrMany::default(),
-            nostr: OneOrMany::default(),
             webex: OneOrMany::default(),
             pumble: OneOrMany::default(),
             flock: OneOrMany::default(),
@@ -6533,11 +6517,9 @@ impl Default for ChannelsConfig {
             mumble: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
-            discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
-            linkedin: OneOrMany::default(),
             wechat: OneOrMany::default(),
             wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
@@ -7334,79 +7316,6 @@ impl Default for LineConfig {
     }
 }
 
-/// Viber Bot API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ViberConfig {
-    /// Env var name holding the auth token.
-    pub auth_token_env: String,
-    /// Webhook URL for receiving messages.
-    pub webhook_url: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for ViberConfig {
-    fn default() -> Self {
-        Self {
-            auth_token_env: "VIBER_AUTH_TOKEN".to_string(),
-            webhook_url: String::new(),
-            webhook_port: 8451,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Facebook Messenger Platform channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MessengerConfig {
-    /// Env var name holding the page access token.
-    pub page_token_env: String,
-    /// Env var name holding the webhook verify token.
-    pub verify_token_env: String,
-    /// Env var name holding the Facebook App Secret.
-    /// Used for HMAC-SHA1 verification of incoming webhook POST requests
-    /// via `X-Hub-Signature`. If absent or empty, verification is skipped
-    /// with a warning (backwards compatibility).
-    #[serde(default)]
-    pub app_secret_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MessengerConfig {
-    fn default() -> Self {
-        Self {
-            page_token_env: "MESSENGER_PAGE_TOKEN".to_string(),
-            verify_token_env: "MESSENGER_VERIFY_TOKEN".to_string(),
-            app_secret_env: "MESSENGER_APP_SECRET".to_string(),
-            webhook_port: 8452,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Reddit API channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -7440,36 +7349,6 @@ impl Default for RedditConfig {
             username: String::new(),
             password_env: "REDDIT_PASSWORD".to_string(),
             subreddits: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MastodonConfig {
-    /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
-    pub instance_url: String,
-    /// Env var name holding the access token.
-    pub access_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MastodonConfig {
-    fn default() -> Self {
-        Self {
-            instance_url: String::new(),
-            access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -7838,37 +7717,6 @@ impl Default for ThreemaConfig {
     }
 }
 
-/// Nostr relay channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NostrConfig {
-    /// Env var name holding the private key (nsec or hex).
-    pub private_key_env: String,
-    /// Relay URLs to connect to.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub relays: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NostrConfig {
-    fn default() -> Self {
-        Self {
-            private_key_env: "NOSTR_PRIVATE_KEY".to_string(),
-            relays: vec!["wss://relay.damus.io".to_string()],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Webex bot channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -8137,43 +7985,6 @@ impl Default for QqConfig {
     }
 }
 
-/// Discourse forum channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct DiscourseConfig {
-    /// Discourse base URL.
-    pub base_url: String,
-    /// Env var name holding the API key.
-    pub api_key_env: String,
-    /// API username.
-    pub api_username: String,
-    /// Category slugs to monitor.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub categories: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for DiscourseConfig {
-    fn default() -> Self {
-        Self {
-            base_url: String::new(),
-            api_key_env: "DISCOURSE_API_KEY".to_string(),
-            api_username: "system".to_string(),
-            categories: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Gitter Streaming API channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -8295,36 +8106,6 @@ impl Default for VoiceConfig {
             tts_url: "https://api.openai.com".to_string(),
             tts_voice: "alloy".to_string(),
             buffer_threshold: 32768,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// LinkedIn Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct LinkedInConfig {
-    /// Env var name holding the OAuth2 access token.
-    pub access_token_env: String,
-    /// Organization ID for messaging.
-    pub organization_id: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for LinkedInConfig {
-    fn default() -> Self {
-        Self {
-            access_token_env: "LINKEDIN_ACCESS_TOKEN".to_string(),
-            organization_id: String::new(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
