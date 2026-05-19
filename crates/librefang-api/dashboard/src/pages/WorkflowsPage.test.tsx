@@ -492,6 +492,103 @@ describe("WorkflowsPage", () => {
     expect(screen.getByText(/2 actions/i)).toBeInTheDocument();
   });
 
+  // #5257 round-2 (Codex P2): clicking a banner row for a paused run that
+  // lives OUTSIDE the first 10 entries of the run history must still
+  // mount the OperatorActionBar — the previous slice(0, 10) map silently
+  // dropped the resolution UI for any workflow with > 10 runs. Construct
+  // 11 runs, place the paused one last, then fire the banner click and
+  // assert the bar's hallmark copy renders.
+  it("mounts the operator action bar for a banner-selected run that lives outside the first 10", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    // Eleven runs: the first ten are completed, the last (index 10) is
+    // the paused one the banner will select. The dashboard slice was
+    // hard-coded at 10 — without the fix, the paused row never enters
+    // the render path even though the operator clicked it.
+    const completedRuns = Array.from({ length: 10 }).map((_, i) => ({
+      id: `run-completed-${i}`,
+      workflow_name: "alpha-flow",
+      state: "completed",
+      steps_completed: 3,
+      started_at: `2026-05-01T11:${String(i).padStart(2, "0")}:00Z`,
+    }));
+    const pausedRunId = "run-paused-deep-11";
+    const deepPausedRun = {
+      id: pausedRunId,
+      workflow_name: "alpha-flow",
+      state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:30:00Z" } },
+      steps_completed: 1,
+      started_at: "2026-05-01T12:00:00Z",
+    };
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([...completedRuns, deepPausedRun]),
+    );
+    useWorkflowRunDetailMock.mockReturnValue(
+      makeQuery({
+        id: pausedRunId,
+        workflow_id: "wf-1",
+        workflow_name: "alpha-flow",
+        input: "seed",
+        state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:30:00Z" } },
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [],
+      }),
+    );
+    useWorkflowOperatorPauseMock.mockReturnValue(
+      makeQuery({
+        run_id: pausedRunId,
+        workflow_id: "wf-1",
+        workflow_name: "alpha-flow",
+        step_name: "deep_review",
+        operator_step_index: 0,
+        artifact: "deep artifact",
+        actions: ["approve"],
+        started_at: "2026-05-01T12:00:00Z",
+        paused_at: "2026-05-01T12:30:00Z",
+      }),
+    );
+    // Banner row surfaces the paused run so the click handler maps to
+    // (runId, workflowId) → setSelectedRunId + setSelectedWorkflowId.
+    usePendingOperatorRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          run_id: pausedRunId,
+          workflow_id: "wf-1",
+          workflow_name: "alpha-flow",
+          step_name: "deep_review",
+          operator_step_index: 0,
+          artifact: "deep artifact",
+          actions: ["approve"],
+          started_at: "2026-05-01T12:00:00Z",
+          paused_at: "2026-05-01T12:30:00Z",
+        },
+      ]),
+    );
+    renderPage();
+
+    // The banner header confirms the worklist surfaced the row.
+    expect(
+      screen.getByText(/1 workflow run awaiting operator review/i),
+    ).toBeInTheDocument();
+    // Click the banner's row. The banner row label uses the step name —
+    // unique on the page, so it's an unambiguous click target.
+    fireEvent.click(screen.getByText("deep_review"));
+
+    // The OperatorActionBar's hallmark copy renders only when the bar
+    // actually mounted. Before the round-2 fix this assertion failed —
+    // the row was outside `slice(0, 10)` so the inline mount path was
+    // unreachable from the banner click.
+    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    // The "Approve" action button is unique to the action bar (the
+    // banner row only renders an "N actions" count badge, not the
+    // buttons themselves), so finding it proves the bar actually
+    // rendered its action list, not just the wrapper.
+    expect(screen.getByRole("button", { name: /Approve/i })).toBeInTheDocument();
+    // The artifact text appears in BOTH the banner row preview and the
+    // bar's artifact panel — assert both render so the inline mount
+    // path is exercised end-to-end.
+    expect(screen.getAllByText("deep artifact").length).toBeGreaterThanOrEqual(2);
+  });
+
   // Regression for #4977 review: the Rust `WorkflowRunState::Paused {…}`
   // variant serialises to `{paused: {…}}` (externally-tagged struct
   // variant) — not the bare string `"paused"`. The OperatorActionBar

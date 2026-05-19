@@ -3343,21 +3343,31 @@ impl WorkflowEngine {
     /// included so the caller can render `workflow_name`, `started_at`,
     /// and the `WorkflowRunState::Paused { paused_at, .. }` timestamp
     /// without a follow-up fetch per row. Runs are returned in
-    /// `started_at` ascending order (oldest first) so the dashboard
-    /// surfaces the longest-waiting operator review at the top of the
-    /// worklist.
+    /// `paused_at` ascending order (oldest *pause* first) so the
+    /// dashboard surfaces the longest-waiting operator review at the
+    /// top of the worklist — `started_at` is the wrong key because a
+    /// long-running workflow can reach its operator step AFTER a
+    /// shorter, newer workflow has already been paused waiting for the
+    /// human (#5257 round-2: Codex P2). Runs whose state has flipped
+    /// out of `Paused` between the dashmap scan and the inspect call
+    /// are dropped silently — the dashboard polls every 15s and will
+    /// observe the new state on the next tick.
     pub async fn list_pending_operator_runs(&self) -> Vec<(WorkflowRun, OperatorPause)> {
         // Snapshot paused-run IDs under the dashmap iterator, then drop
         // the iterator before awaiting `inspect_operator_pause` (which
-        // takes its own dashmap reads + awaits `get_workflow`).
+        // takes its own dashmap reads + awaits `get_workflow`). Capture
+        // `paused_at` from the state itself — that's the operator-wait
+        // clock; `started_at` only tells us when the *workflow* started.
         let mut paused_ids: Vec<(WorkflowRunId, DateTime<Utc>)> = self
             .runs
             .iter()
-            .filter(|r| r.state.is_paused())
-            .map(|r| (r.id, r.started_at))
+            .filter_map(|r| match &r.state {
+                WorkflowRunState::Paused { paused_at, .. } => Some((r.id, *paused_at)),
+                _ => None,
+            })
             .collect();
-        // Oldest first — longest-waiting review surfaces at the top.
-        paused_ids.sort_by_key(|(_, started)| *started);
+        // Oldest pause first — longest-waiting review surfaces at the top.
+        paused_ids.sort_by_key(|(_, paused_at)| *paused_at);
 
         let mut out: Vec<(WorkflowRun, OperatorPause)> = Vec::with_capacity(paused_ids.len());
         for (run_id, _) in paused_ids {
@@ -11980,5 +11990,118 @@ name = "topic"
             !pending.iter().any(|(r, _)| r.id == run_nonop),
             "manually-paused (non-operator) run must not surface in the operator worklist"
         );
+    }
+
+    /// #5257 round-2 (Codex P2) — `list_pending_operator_runs` MUST sort by
+    /// each run's `WorkflowRunState::Paused { paused_at, .. }`, not by
+    /// `WorkflowRun.started_at`. A long-running workflow can be started
+    /// hours before reaching its operator step, while a faster, newer
+    /// workflow run can hit its operator step first; the worklist is
+    /// surfaced to operators as "oldest pause first" so the truly
+    /// longest-waiting review must be top of list. Constructed so the
+    /// two orderings genuinely diverge — sorting by `started_at` would
+    /// put A ahead of B, sorting by `paused_at` puts B ahead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_pending_operator_runs_sorts_by_paused_at_not_started_at() {
+        let engine = WorkflowEngine::new();
+        engine.set_operator_hooks(
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(NoopResumeDriver),
+        );
+
+        let mut wf_a = workflow_with_operator_step();
+        wf_a.name = "wf-A".to_string();
+        wf_a.steps[0].name = "review-A".to_string();
+        let wf_a_id = engine.register(wf_a).await;
+
+        let mut wf_b = workflow_with_operator_step();
+        wf_b.name = "wf-B".to_string();
+        wf_b.steps[0].name = "review-B".to_string();
+        let wf_b_id = engine.register(wf_b).await;
+
+        // Create + execute A first (older `started_at`), then B (newer
+        // `started_at`). Both pause immediately at their sole operator
+        // step, so both `paused_at` timestamps are also A < B initially.
+        let run_a = engine
+            .create_run(wf_a_id, "artifact-A".to_string())
+            .await
+            .expect("create_run A");
+        engine
+            .execute_run(run_a, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("A pauses at operator");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let run_b = engine
+            .create_run(wf_b_id, "artifact-B".to_string())
+            .await
+            .expect("create_run B");
+        engine
+            .execute_run(run_b, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("B pauses at operator");
+
+        // Capture the natural `started_at` ordering for the contradiction
+        // assertion further down — A really did start before B.
+        let started_a = engine
+            .runs
+            .get(&run_a)
+            .map(|r| r.started_at)
+            .expect("A retained");
+        let started_b = engine
+            .runs
+            .get(&run_b)
+            .map(|r| r.started_at)
+            .expect("B retained");
+        assert!(started_a < started_b, "test setup: A must start before B");
+
+        // Now mutate the *pause* timestamps so the operator-wait clock
+        // contradicts `started_at`: A (older start) is mutated to a
+        // future `paused_at`, B (newer start) is mutated to a past one.
+        // This is the real-world shape where the kernel paused A long
+        // after B — a sort by `started_at` would still put A first,
+        // which is wrong; a sort by `paused_at` correctly puts B first.
+        {
+            let mut entry_a = engine
+                .runs
+                .get_mut(&run_a)
+                .expect("A still in dashmap before rewrite");
+            if let WorkflowRunState::Paused {
+                ref mut paused_at, ..
+            } = entry_a.state
+            {
+                *paused_at = Utc::now() + chrono::Duration::seconds(60);
+            } else {
+                panic!("A must be Paused after execute_run");
+            }
+        }
+        {
+            let mut entry_b = engine
+                .runs
+                .get_mut(&run_b)
+                .expect("B still in dashmap before rewrite");
+            if let WorkflowRunState::Paused {
+                ref mut paused_at, ..
+            } = entry_b.state
+            {
+                *paused_at = Utc::now() - chrono::Duration::seconds(60);
+            } else {
+                panic!("B must be Paused after execute_run");
+            }
+        }
+
+        let pending = engine.list_pending_operator_runs().await;
+        assert_eq!(pending.len(), 2, "two paused operator runs expected");
+        assert_eq!(
+            pending[0].0.id, run_b,
+            "B's pause is older — it must come first when sorting by `paused_at`. \
+             A sort by `started_at` would put A first; that's the bug this test guards."
+        );
+        assert_eq!(pending[1].0.id, run_a, "A's pause is newer — it must come second");
     }
 }

@@ -8,7 +8,6 @@ import {
   type ScheduleItem,
   type TemplateParameter,
   type WorkflowItem,
-  type WorkflowRunItem,
   type WorkflowRunInput,
   type WorkflowStep,
   type WorkflowStepResult,
@@ -161,8 +160,6 @@ const getRunStepResults = (data: ApiActionResponse | undefined): WorkflowStepRes
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
-
 // `WorkflowRunState` (Rust kernel) serializes terminal/unit variants as bare
 // snake_case strings (`"running"`, `"completed"`, …) and the struct variant
 // `Paused { resume_token_hash, reason, paused_at }` as an externally-tagged
@@ -178,6 +175,21 @@ const isPausedRunState = (state: unknown): boolean => {
     return true;
   }
   return false;
+};
+
+// Normalize either wire shape — bare string OR externally-tagged object
+// (currently only `{paused: {…}}`) — to a single discriminator string the
+// run-history row pill / dot can switch on. Without this helper, paused
+// runs in the list fall through `isRunState` as `undefined` and render
+// with the neutral grey "unknown" badge instead of the warning hue, even
+// though the page already knows how to colour them (#5257 round-2).
+const runStateKind = (state: unknown): string | undefined => {
+  if (typeof state === "string") return state;
+  if (state !== null && typeof state === "object") {
+    const keys = Object.keys(state as Record<string, unknown>);
+    if (keys.length === 1) return keys[0];
+  }
+  return undefined;
 };
 
 // Image detection is `O(n²)` worst-case on malformed JSON-ish output (a
@@ -345,6 +357,35 @@ export function WorkflowsPage() {
   const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
   const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "");
+
+  // Run history is paginated to the most recent 10 in the UI, but the
+  // pending-operator-reviews banner can select a paused run from anywhere
+  // in the full history. Without this, clicking such a row never mounts
+  // the `OperatorActionBar` (it lives inside the sliced map) and the
+  // dashboard provides no path to resolve that review (#5257 round-2,
+  // Codex P2). Always include the selected run in the rendered list when
+  // it lives outside the first-page slice. We append (rather than re-sort)
+  // so the rest of the recent-history view stays unchanged.
+  const FIRST_PAGE_SIZE = 10;
+  const displayedRuns = useMemo(() => {
+    const all = runsQuery.data ?? [];
+    const firstPage = all.slice(0, FIRST_PAGE_SIZE);
+    if (!selectedRunId) return firstPage;
+    if (firstPage.some((r) => r.id === selectedRunId)) return firstPage;
+    const selected = all.find((r) => r.id === selectedRunId);
+    return selected ? [...firstPage, selected] : firstPage;
+  }, [runsQuery.data, selectedRunId]);
+  // When the selected run was pulled in from outside the first page,
+  // the matching row is rendered with a "from review banner" pill so the
+  // operator can see why the truncated list now has an 11th entry.
+  const bannerSelectedRunOutsideFirstPage = useMemo(() => {
+    if (!selectedRunId) return null;
+    const all = runsQuery.data ?? [];
+    const firstPage = all.slice(0, FIRST_PAGE_SIZE);
+    if (firstPage.some((r) => r.id === selectedRunId)) return null;
+    return all.some((r) => r.id === selectedRunId) ? selectedRunId : null;
+  }, [runsQuery.data, selectedRunId]);
+
   const runMutation = useRunWorkflow();
   const dryRunMutation = useDryRunWorkflow();
   const deleteMutation = useDeleteWorkflow();
@@ -1100,15 +1141,47 @@ export function WorkflowsPage() {
                 )}
               </Card>
 
+              {/* Banner-selected paused run that hasn't surfaced in the
+                  visible Run History yet — either because the runs list
+                  is still loading after the banner click, or because the
+                  run lives outside the first 10 and `displayedRuns` is
+                  still being computed. Mount the `OperatorActionBar`
+                  here as a safety net so the operator can always resolve
+                  the review they jumped to (#5257 round-2 Codex P2). The
+                  inline mount inside the Run History card stays in
+                  place — once both are visible, this block is hidden by
+                  the `!displayedRuns.some(...)` guard so we don't render
+                  the bar twice. */}
+              {selectedRunId
+                && runDetailQuery.data
+                && isPausedRunState(runDetailQuery.data.state)
+                && !displayedRuns.some((r) => r.id === selectedRunId) && (
+                <Card padding="lg" className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">
+                    {t("workflows.selected_review", { defaultValue: "Selected review" })}
+                  </h3>
+                  <OperatorActionBar runId={selectedRunId} />
+                </Card>
+              )}
+
               {/* Run History */}
               {runsQuery.data && runsQuery.data.length > 0 && (
                 <Card padding="lg" className="space-y-3">
                   <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_history", { defaultValue: "Run History" })}</h3>
                   <div className="space-y-1.5">
-                    {runsQuery.data.slice(0, 10).map((run) => {
+                    {displayedRuns.map((run) => {
                       const runId = run.id;
-                      const state = isRunState(run.state) ? run.state : undefined;
+                      // Use `runStateKind` (handles both bare strings AND
+                      // the tagged `{paused: {…}}` form) so paused runs
+                      // pick up the warning-hue branch added below — not
+                      // the neutral "unknown" fallback the bare
+                      // `isRunState` produces (#5257 round-2).
+                      const state = runStateKind(run.state);
                       const isSelected = selectedRunId === runId;
+                      const isBannerPulledIn =
+                        selectedRunId === runId &&
+                        bannerSelectedRunOutsideFirstPage &&
+                        runId === bannerSelectedRunOutsideFirstPage;
                       return (
                         <div key={runId}>
                           <button
@@ -1123,17 +1196,29 @@ export function WorkflowsPage() {
                             <div className={`w-2 h-2 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success" :
                               state === "failed" ? "bg-error" :
-                              state === "running" ? "bg-brand animate-pulse" : "bg-text-dim/30"
+                              state === "running" ? "bg-brand animate-pulse" :
+                              state === "paused" ? "bg-warning" : "bg-text-dim/30"
                             }`} />
                             <div className="flex-1 min-w-0">
                               <p className="text-[10px] font-bold truncate">{run.workflow_name}</p>
                               <p className="text-[9px] text-text-dim/50">{formatDate(run.started_at)}</p>
                             </div>
+                            {/* "Selected from banner" pill — surfaces that
+                                this row was appended to the first-10 slice
+                                so the operator can resolve a paused run
+                                that lives deep in the history (#5257
+                                round-2 Codex P2). */}
+                            {isBannerPulledIn && (
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-warning/10 text-warning">
+                                {t("workflows.from_review_banner", { defaultValue: "from review banner" })}
+                              </span>
+                            )}
                             <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success/10 text-success" :
                               state === "failed" ? "bg-error/10 text-error" :
+                              state === "paused" ? "bg-warning/10 text-warning" :
                               "bg-main text-text-dim"
-                            }`}>{state}</span>
+                            }`}>{state ?? "unknown"}</span>
                           </button>
                           {/* Inline run detail */}
                           {isSelected && runDetailQuery.data && (
