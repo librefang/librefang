@@ -930,8 +930,8 @@ mod tests {
     // ----- send() path tests (issue #3820) -----
     //
     // Uses `wiremock` to stand up a local HTTP server and points `DiscordAdapter`
-    // at it via `with_api_base()`. This mirrors the pattern used for the gotify
-    // slice (PR #4447) and the slack slice (PR #4545), and exercises the
+    // at it via `with_api_base()`. This mirrors the wiremock pattern (PR #4447
+    // / #4545) shared across in-process adapters, and exercises the
     // `POST /channels/{id}/messages` call made by `ChannelAdapter::send`.
 
     use wiremock::matchers::{body_json, header, method, path_regex};
