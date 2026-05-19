@@ -240,8 +240,6 @@ use librefang_channels::discord::DiscordAdapter;
 use librefang_channels::email::EmailAdapter;
 #[cfg(feature = "channel-google-chat")]
 use librefang_channels::google_chat::GoogleChatAdapter;
-#[cfg(feature = "channel-irc")]
-use librefang_channels::irc::IrcAdapter;
 #[cfg(feature = "channel-matrix")]
 use librefang_channels::matrix::MatrixAdapter;
 #[cfg(feature = "channel-mattermost")]
@@ -256,14 +254,10 @@ use librefang_channels::slack::SlackAdapter;
 use librefang_channels::teams::TeamsAdapter;
 #[cfg(feature = "channel-twitch")]
 use librefang_channels::twitch::TwitchAdapter;
-#[cfg(feature = "channel-voice")]
-use librefang_channels::voice::VoiceAdapter;
 #[cfg(feature = "channel-webhook")]
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
 use librefang_channels::whatsapp::WhatsAppAdapter;
-#[cfg(feature = "channel-xmpp")]
-use librefang_channels::xmpp::XmppAdapter;
 #[cfg(feature = "channel-zulip")]
 use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
@@ -275,32 +269,14 @@ use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion}
 use librefang_channels::line::LineAdapter;
 #[cfg(feature = "channel-reddit")]
 use librefang_channels::reddit::RedditAdapter;
-#[cfg(feature = "channel-revolt")]
-use librefang_channels::revolt::RevoltAdapter;
 // Wave 4
-#[cfg(feature = "channel-flock")]
-use librefang_channels::flock::FlockAdapter;
-#[cfg(feature = "channel-guilded")]
-use librefang_channels::guilded::GuildedAdapter;
-#[cfg(feature = "channel-keybase")]
-use librefang_channels::keybase::KeybaseAdapter;
 #[cfg(feature = "channel-nextcloud")]
 use librefang_channels::nextcloud::NextcloudAdapter;
-#[cfg(feature = "channel-pumble")]
-use librefang_channels::pumble::PumbleAdapter;
-#[cfg(feature = "channel-threema")]
-use librefang_channels::threema::ThreemaAdapter;
-#[cfg(feature = "channel-twist")]
-use librefang_channels::twist::TwistAdapter;
 #[cfg(feature = "channel-webex")]
 use librefang_channels::webex::WebexAdapter;
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
-#[cfg(feature = "channel-gitter")]
-use librefang_channels::gitter::GitterAdapter;
-#[cfg(feature = "channel-mumble")]
-use librefang_channels::mumble::MumbleAdapter;
 #[cfg(feature = "channel-qq")]
 use librefang_channels::qq::QqAdapter;
 #[cfg(feature = "channel-wechat")]
@@ -1928,33 +1904,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
             "mattermost" => find_channel_info!(mattermost),
-            "irc" => find_channel_info!(irc),
             "google_chat" => find_channel_info!(google_chat),
             "twitch" => find_channel_info!(twitch),
             "rocketchat" => find_channel_info!(rocketchat),
             "zulip" => find_channel_info!(zulip),
-            "xmpp" => find_channel_info!(xmpp),
             // Wave 3
             "line" => find_channel_info!(line),
             "reddit" => find_channel_info!(reddit),
             "bluesky" => find_channel_info!(bluesky),
             "feishu" => find_channel_info!(feishu),
-            "revolt" => find_channel_info!(revolt),
             // Wave 4
             "nextcloud" => find_channel_info!(nextcloud),
-            "guilded" => find_channel_info!(guilded),
-            "keybase" => find_channel_info!(keybase),
-            "threema" => find_channel_info!(threema),
             "webex" => find_channel_info!(webex),
-            "pumble" => find_channel_info!(pumble),
-            "flock" => find_channel_info!(flock),
-            "twist" => find_channel_info!(twist),
             // Wave 5
-            "mumble" => find_channel_info!(mumble),
             "dingtalk" => find_channel_info!(dingtalk),
-            "gitter" => find_channel_info!(gitter),
             "webhook" => find_channel_info!(webhook),
-            "voice" => find_channel_info!(voice),
             "wechat" => find_channel_info!(wechat),
             "wecom" => find_channel_info!(wecom),
             _ => (None, None),
@@ -2608,33 +2572,21 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(mattermost, "channel-mattermost", "Mattermost");
-    check_channel!(irc, "channel-irc", "IRC");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
     check_channel!(twitch, "channel-twitch", "Twitch");
     check_channel!(rocketchat, "channel-rocketchat", "Rocket.Chat");
     check_channel!(zulip, "channel-zulip", "Zulip");
-    check_channel!(xmpp, "channel-xmpp", "XMPP");
     check_channel!(line, "channel-line", "LINE");
     check_channel!(reddit, "channel-reddit", "Reddit");
     check_channel!(bluesky, "channel-bluesky", "Bluesky");
     check_channel!(feishu, "channel-feishu", "Feishu");
-    check_channel!(revolt, "channel-revolt", "Revolt");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
     check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
-    check_channel!(guilded, "channel-guilded", "Guilded");
-    check_channel!(keybase, "channel-keybase", "Keybase");
-    check_channel!(threema, "channel-threema", "Threema");
     check_channel!(webex, "channel-webex", "Webex");
-    check_channel!(pumble, "channel-pumble", "Pumble");
-    check_channel!(flock, "channel-flock", "Flock");
-    check_channel!(twist, "channel-twist", "Twist");
-    check_channel!(mumble, "channel-mumble", "Mumble");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
-    check_channel!(gitter, "channel-gitter", "Gitter");
     check_channel!(webhook, "channel-webhook", "Webhook");
-    check_channel!(voice, "channel-voice", "Voice");
 
     // Sidecar channels (always available, not feature-gated)
     if !kernel.config_ref().sidecar_channels.is_empty() {
@@ -2930,36 +2882,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // IRC
-    #[cfg(feature = "channel-irc")]
-    for irc_config in config.irc.iter() {
-        if !irc_config.server.is_empty() {
-            let password = irc_config
-                .password_env
-                .as_ref()
-                .and_then(|env| read_token(env, "IRC"));
-            let adapter = Arc::new(
-                IrcAdapter::new(
-                    irc_config.server.clone(),
-                    irc_config.port,
-                    irc_config.nick.clone(),
-                    password,
-                    irc_config.channels.clone(),
-                    irc_config.use_tls,
-                )
-                .with_account_id(irc_config.account_id.clone())
-                .with_backoff(irc_config.initial_backoff_secs, irc_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                irc_config.default_agent.clone(),
-                irc_config.account_id.clone(),
-            ));
-        } else {
-            warn!("IRC configured but server is empty, skipping");
-        }
-    }
-
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
     for gc_config in config.google_chat.iter() {
@@ -3045,28 +2967,6 @@ pub async fn start_channel_bridge_with_config(
                 adapter,
                 z_config.default_agent.clone(),
                 z_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // XMPP
-    #[cfg(feature = "channel-xmpp")]
-    for x_config in config.xmpp.iter() {
-        if let Some(password) = read_token(&x_config.password_env, "XMPP") {
-            let adapter = Arc::new(
-                XmppAdapter::new(
-                    x_config.jid.clone(),
-                    password,
-                    x_config.server.clone(),
-                    x_config.port,
-                    x_config.rooms.clone(),
-                )
-                .with_account_id(x_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                x_config.default_agent.clone(),
-                x_config.account_id.clone(),
             ));
         }
     }
@@ -3166,27 +3066,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Revolt
-    #[cfg(feature = "channel-revolt")]
-    for rv_config in config.revolt.iter() {
-        if let Some(token) = read_token(&rv_config.bot_token_env, "Revolt") {
-            let mut adapter = RevoltAdapter::with_urls(
-                token,
-                rv_config.api_url.clone(),
-                rv_config.ws_url.clone(),
-            )
-            .with_account_id(rv_config.account_id.clone());
-            if !rv_config.allowed_channels.is_empty() {
-                adapter.set_allowed_channels(rv_config.allowed_channels.clone());
-            }
-            adapters.push((
-                Arc::new(adapter),
-                rv_config.default_agent.clone(),
-                rv_config.account_id.clone(),
-            ));
-        }
-    }
-
     // WeChat (personal account via iLink)
     // Only start when a bot token is available — without a token the adapter
     // would block on QR login which stalls the entire server startup.
@@ -3272,58 +3151,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Guilded
-    #[cfg(feature = "channel-guilded")]
-    for gd_config in config.guilded.iter() {
-        if let Some(token) = read_token(&gd_config.bot_token_env, "Guilded") {
-            let adapter = Arc::new(
-                GuildedAdapter::new(token, gd_config.server_ids.clone())
-                    .with_account_id(gd_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                gd_config.default_agent.clone(),
-                gd_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Keybase
-    #[cfg(feature = "channel-keybase")]
-    for kb_config in config.keybase.iter() {
-        if let Some(paperkey) = read_token(&kb_config.paperkey_env, "Keybase") {
-            let adapter = Arc::new(
-                KeybaseAdapter::new(
-                    kb_config.username.clone(),
-                    paperkey,
-                    kb_config.allowed_teams.clone(),
-                )
-                .with_account_id(kb_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                kb_config.default_agent.clone(),
-                kb_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Threema
-    #[cfg(feature = "channel-threema")]
-    for tm_config in config.threema.iter() {
-        if let Some(secret) = read_token(&tm_config.secret_env, "Threema") {
-            let adapter = Arc::new(
-                ThreemaAdapter::new(tm_config.threema_id.clone(), secret, tm_config.webhook_port)
-                    .with_account_id(tm_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tm_config.default_agent.clone(),
-                tm_config.account_id.clone(),
-            ));
-        }
-    }
-
     // Webex
     #[cfg(feature = "channel-webex")]
     for wx_config in config.webex.iter() {
@@ -3340,81 +3167,7 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Pumble
-    #[cfg(feature = "channel-pumble")]
-    for pb_config in config.pumble.iter() {
-        if let Some(token) = read_token(&pb_config.bot_token_env, "Pumble") {
-            let adapter = Arc::new(
-                PumbleAdapter::new(token, pb_config.webhook_port)
-                    .with_account_id(pb_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                pb_config.default_agent.clone(),
-                pb_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Flock
-    #[cfg(feature = "channel-flock")]
-    for fl_config in config.flock.iter() {
-        if let Some(token) = read_token(&fl_config.bot_token_env, "Flock") {
-            let adapter = Arc::new(
-                FlockAdapter::new(token, fl_config.webhook_port)
-                    .with_account_id(fl_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                fl_config.default_agent.clone(),
-                fl_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Twist
-    #[cfg(feature = "channel-twist")]
-    for tw_config in config.twist.iter() {
-        if let Some(token) = read_token(&tw_config.token_env, "Twist") {
-            let adapter = Arc::new(
-                TwistAdapter::new(
-                    token,
-                    tw_config.workspace_id.clone(),
-                    tw_config.allowed_channels.clone(),
-                )
-                .with_account_id(tw_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tw_config.default_agent.clone(),
-                tw_config.account_id.clone(),
-            ));
-        }
-    }
-
     // ── Wave 5 ──────────────────────────────────────────────────
-
-    // Mumble
-    #[cfg(feature = "channel-mumble")]
-    for mb_config in config.mumble.iter() {
-        if let Some(password) = read_token(&mb_config.password_env, "Mumble") {
-            let adapter = Arc::new(
-                MumbleAdapter::new(
-                    mb_config.host.clone(),
-                    mb_config.port,
-                    password,
-                    mb_config.username.clone(),
-                    mb_config.channel.clone(),
-                )
-                .with_account_id(mb_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                mb_config.default_agent.clone(),
-                mb_config.account_id.clone(),
-            ));
-        }
-    }
 
     // DingTalk
     #[cfg(feature = "channel-dingtalk")]
@@ -3497,22 +3250,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Gitter
-    #[cfg(feature = "channel-gitter")]
-    for gt_config in config.gitter.iter() {
-        if let Some(token) = read_token(&gt_config.token_env, "Gitter") {
-            let adapter = Arc::new(
-                GitterAdapter::new(token, gt_config.room_id.clone())
-                    .with_account_id(gt_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                gt_config.default_agent.clone(),
-                gt_config.account_id.clone(),
-            ));
-        }
-    }
-
     // Webhook
     #[cfg(feature = "channel-webhook")]
     for wh_config in config.webhook.iter() {
@@ -3537,29 +3274,6 @@ pub async fn start_channel_bridge_with_config(
                     tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
                 }
             }
-        }
-    }
-
-    // Voice (WebSocket + STT/TTS)
-    #[cfg(feature = "channel-voice")]
-    for voice_config in config.voice.iter() {
-        if let Some(api_key) = read_token(&voice_config.api_key_env, "Voice") {
-            let adapter = Arc::new(
-                VoiceAdapter::new(
-                    voice_config.listen_port,
-                    api_key,
-                    voice_config.stt_url.clone(),
-                    voice_config.tts_url.clone(),
-                    voice_config.tts_voice.clone(),
-                    voice_config.buffer_threshold,
-                )
-                .with_account_id(voice_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                voice_config.default_agent.clone(),
-                voice_config.account_id.clone(),
-            ));
         }
     }
 
@@ -4520,31 +4234,20 @@ mod tests {
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());
         assert!(config.channels.mattermost.is_none());
-        assert!(config.channels.irc.is_none());
         assert!(config.channels.google_chat.is_none());
         assert!(config.channels.twitch.is_none());
         assert!(config.channels.rocketchat.is_none());
         assert!(config.channels.zulip.is_none());
-        assert!(config.channels.xmpp.is_none());
         // Wave 3
         assert!(config.channels.line.is_none());
         assert!(config.channels.reddit.is_none());
         assert!(config.channels.bluesky.is_none());
         assert!(config.channels.feishu.is_none());
-        assert!(config.channels.revolt.is_none());
         // Wave 4
         assert!(config.channels.nextcloud.is_none());
-        assert!(config.channels.guilded.is_none());
-        assert!(config.channels.keybase.is_none());
-        assert!(config.channels.threema.is_none());
         assert!(config.channels.webex.is_none());
-        assert!(config.channels.pumble.is_none());
-        assert!(config.channels.flock.is_none());
-        assert!(config.channels.twist.is_none());
         // Wave 5
-        assert!(config.channels.mumble.is_none());
         assert!(config.channels.dingtalk.is_none());
-        assert!(config.channels.gitter.is_none());
         assert!(config.channels.webhook.is_none());
     }
 
