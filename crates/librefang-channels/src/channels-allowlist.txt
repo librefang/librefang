@@ -29,7 +29,6 @@ feishu
 flock
 gitter
 google_chat
-gotify
 guilded
 irc
 keybase

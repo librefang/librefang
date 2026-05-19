@@ -1113,9 +1113,9 @@ mod tests {
     // ----- send() path tests (issue #3820) -----
     //
     // Uses `wiremock` to stand up a local HTTP server and points `SlackAdapter`
-    // at it via `with_api_base()`. This mirrors the pattern used for the gotify
-    // slice (PR #4447) and exercises the `chat.postMessage` call made by
-    // `ChannelAdapter::send`.
+    // at it via `with_api_base()`. This mirrors the wiremock pattern (PR #4447)
+    // shared across in-process adapters, and exercises the `chat.postMessage`
+    // call made by `ChannelAdapter::send`.
 
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
