@@ -601,20 +601,33 @@ impl LibreFangKernel {
         agent_id: AgentId,
         purge_identity: bool,
     ) -> KernelResult<()> {
-        // Abort every in-flight LLM loop for this agent BEFORE the registry
-        // entry is removed (#5142). Without this the killed agent's streaming
-        // request keeps burning provider tokens until the provider returns,
-        // and the orphaned `running_tasks` entry would only be reaped by the
-        // periodic GC sweep — which (pre-#5142) dropped the `AbortHandle`
-        // instead of firing it. `suspend_agent` already does this fan-out;
-        // `kill_agent` must too. Fans out across all `(agent, session)`
-        // loops; a no-op `Ok(false)` when the agent had nothing running.
-        let _ = self.stop_agent_run(agent_id);
+        // Drop the registry entry FIRST so the kill/dispatch race window
+        // closes deterministically (#5142, race-fix follow-up). The
+        // messaging.rs running-task insert path has two guards keyed on
+        // `registry.get(agent_id).is_none()` — a pre-insert check and a
+        // post-insert recheck — both of which only fire once the registry
+        // entry is gone. If `stop_agent_run` ran first, a dispatcher that
+        // snapshotted the entry, then raced its own insert against the
+        // killer's `iter().collect()` snapshot, would observe `Some` on
+        // its post-insert recheck and skip self-eviction — leaving an
+        // orphan `RunningTask` that survives until the next GC sweep.
+        // Removing the registry entry up front guarantees both guards see
+        // the same truth.
         let entry = self
             .agents
             .registry
             .remove(agent_id)
             .map_err(KernelError::LibreFang)?;
+        // Abort every in-flight LLM loop for this agent. Best-effort fan-out
+        // across all `(agent, session)` loops captured before the registry
+        // remove above; any dispatcher whose insert lands after this point
+        // self-evicts via messaging.rs's post-insert registry recheck.
+        // Without this the killed agent's streaming request keeps burning
+        // provider tokens until the provider returns, and the orphaned
+        // `running_tasks` entry would only be reaped by the periodic GC
+        // sweep — which (pre-#5142) dropped the `AbortHandle` instead of
+        // firing it. `suspend_agent` does the same fan-out via this path.
+        let _ = self.stop_agent_run(agent_id);
         self.workflows.background.stop_agent(agent_id);
         // Abort any per-agent fire-and-forget tasks (skill reviews, …) so
         // they release semaphore permits and stop spending tokens on

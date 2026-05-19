@@ -148,6 +148,11 @@ export interface ChannelItem {
   setup_type?: string;
   setup_steps?: string[];
   fields?: ChannelField[];
+  /** TOML snippet shown for read-only sidecar discovery rows so operators
+   *  can copy it into config.toml. Backend always emits this; the UI only
+   *  renders it for `category === "sidecar"` to avoid noise on regular
+   *  CHANNEL_REGISTRY rows that already have a setup form. */
+  config_template?: string;
   /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
   webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
