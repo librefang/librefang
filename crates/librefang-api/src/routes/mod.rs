@@ -39,6 +39,7 @@ pub mod providers;
 pub mod registry;
 pub mod secrets_env;
 pub mod sidecar_describe;
+pub mod sidecar_toml;
 pub mod skills;
 pub mod system;
 pub mod task_queue;
