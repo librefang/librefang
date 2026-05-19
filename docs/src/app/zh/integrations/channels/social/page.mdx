@@ -90,34 +90,31 @@ Mastodon sidecar 通过 Server-Sent Events (SSE) 连接到实例的用户流式 
 - Bluesky 账户（参见 [Bluesky API 文档](https://docs.bsky.app)）
 - 应用密码（在 Bluesky **Settings > App Passwords** 中生成）
 
+Bluesky 以 Python sidecar (`librefang.sidecar.adapters.bluesky`, 随 `librefang-sdk` 发布) 形式运行。
+
 ### 设置步骤
 
 1. 在 Bluesky 中，前往 **Settings > App Passwords**，创建新的应用密码。
-2. 设置环境变量：
-
-```bash
-export BLUESKY_IDENTIFIER=your-handle.bsky.social  # 环境变量
-export BLUESKY_APP_PASSWORD=your-app-password
-librefang vault set BLUESKY_IDENTIFIER        # 加密金库（推荐）
-librefang vault set BLUESKY_APP_PASSWORD
-librefang config set-key bluesky              # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-3. 添加到配置文件：
+2. 添加 `[[sidecar_channels]]` 配置块：
 
 ```toml
-[channels.bluesky]
-identifier_env = "BLUESKY_IDENTIFIER"
-app_password_env = "BLUESKY_APP_PASSWORD"
-default_agent = "social-media"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "your-handle.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # 自定义 PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # 可选，多 bot 路由键
 ```
 
+3. 通过仪表盘 Channels 页设置应用密码（自动写入 `~/.librefang/secrets.env` 的 `BLUESKY_APP_PASSWORD`），或直接放入 vault / `.env`。
 4. 重启守护进程。
 
 ### 工作原理
 
-Bluesky 适配器使用 AT Protocol 认证，并通过 REST 轮询监控通知（提及）。响应通过 AT Protocol 的 `com.atproto.repo.createRecord` 端点作为回复帖子发布。
+sidecar 使用 `com.atproto.server.createSession` 认证，并在 JWT 过期前自动刷新。每 5 秒轮询 `app.bsky.notification.listNotifications`（仅过滤 `mention` + `reply` 通知），并通过 `com.atproto.repo.createRecord` 用 `app.bsky.feed.post` lexicon 发布回复。内存 LRU 缓存（容量 200）将入站通知 URI 映射到 `{root, parent}` 回复引用，从而把外发响应线程化关联到原帖子；分片回复时每个分片复用相同 reply ref，保证线程紧凑。
 
 ---
 

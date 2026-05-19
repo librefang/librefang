@@ -1112,21 +1112,23 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 `MASTODON_ACCESS_TOKEN`（OAuth bearer）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Mastodon 表单时会自动写入。
 
-#### `[channels.bluesky]`
+#### Bluesky
+
+Bluesky 由 Python sidecar 适配器 (`librefang.sidecar.adapters.bluesky`) 提供。原 `[channels.bluesky]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.bluesky]
-identifier = "mybot.bsky.social"
-app_password_env = "BLUESKY_APP_PASSWORD"
-service_url = "https://bsky.social"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "mybot.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # 自定义 PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `identifier` | string | `""` | Bluesky 用户名或 DID。 |
-| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | 存放 Bluesky 应用密码的环境变量。 |
-| `service_url` | string | `"https://bsky.social"` | PDS（个人数据服务器）URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`BLUESKY_APP_PASSWORD`（Bluesky 应用密码）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Bluesky 表单时会自动写入。
 
 #### `[channels.feishu]`
 

@@ -812,7 +812,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(zulip);
         ch!(line);
         ch!(reddit);
-        ch!(bluesky);
         ch!(feishu);
         ch!(nextcloud);
         ch!(webex);

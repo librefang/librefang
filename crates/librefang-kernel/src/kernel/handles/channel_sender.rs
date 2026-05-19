@@ -26,7 +26,6 @@ macro_rules! for_each_channel_field {
         // processes or compilations would silently change which agent wins
         // when multiple channel instances share a `default_agent`. See
         // CLAUDE.md "Deterministic prompt ordering".
-        $mac!(bluesky, "bluesky");
         $mac!(dingtalk, "dingtalk");
         $mac!(discord, "discord");
         $mac!(email, "email");
@@ -441,7 +440,6 @@ mod tests {
 
         // Hardcoded sorted reference — must match the macro body exactly.
         const EXPECTED: &[&str] = &[
-            "bluesky",
             "dingtalk",
             "discord",
             "email",

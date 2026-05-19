@@ -261,8 +261,6 @@ use librefang_channels::whatsapp::WhatsAppAdapter;
 #[cfg(feature = "channel-zulip")]
 use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
-#[cfg(feature = "channel-bluesky")]
-use librefang_channels::bluesky::BlueskyAdapter;
 #[cfg(feature = "channel-feishu")]
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
@@ -1911,7 +1909,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // Wave 3
             "line" => find_channel_info!(line),
             "reddit" => find_channel_info!(reddit),
-            "bluesky" => find_channel_info!(bluesky),
             "feishu" => find_channel_info!(feishu),
             // Wave 4
             "nextcloud" => find_channel_info!(nextcloud),
@@ -2578,7 +2575,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(zulip, "channel-zulip", "Zulip");
     check_channel!(line, "channel-line", "LINE");
     check_channel!(reddit, "channel-reddit", "Reddit");
-    check_channel!(bluesky, "channel-bluesky", "Bluesky");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
@@ -3012,22 +3008,6 @@ pub async fn start_channel_bridge_with_config(
                     rd_config.account_id.clone(),
                 ));
             }
-        }
-    }
-
-    // Bluesky
-    #[cfg(feature = "channel-bluesky")]
-    for bs_config in config.bluesky.iter() {
-        if let Some(password) = read_token(&bs_config.app_password_env, "Bluesky") {
-            let adapter = Arc::new(
-                BlueskyAdapter::new(bs_config.identifier.clone(), password)
-                    .with_account_id(bs_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                bs_config.default_agent.clone(),
-                bs_config.account_id.clone(),
-            ));
         }
     }
 
@@ -4241,7 +4221,6 @@ mod tests {
         // Wave 3
         assert!(config.channels.line.is_none());
         assert!(config.channels.reddit.is_none());
-        assert!(config.channels.bluesky.is_none());
         assert!(config.channels.feishu.is_none());
         // Wave 4
         assert!(config.channels.nextcloud.is_none());
