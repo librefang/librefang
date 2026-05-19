@@ -1229,6 +1229,61 @@ pub struct ConfigureSidecarBody {
     pub values: HashMap<String, String>,
 }
 
+/// Detect `[[sidecar_channels]]` entries in files referenced from the root
+/// config's `include = [...]` directive.
+///
+/// Background: librefang merges every file in `include` into the runtime
+/// config (`librefang_kernel::config::load_config`). The merge concatenates
+/// arrays-of-tables — so if an included file declares `[[sidecar_channels]]`
+/// and we write a fresh root-level `[[sidecar_channels]]` here, the live
+/// config will contain BOTH entries. The freshly-written root entry will
+/// silently shadow the included one on dashboard / configure paths
+/// (the kernel reads them in include-first order, but the dashboard
+/// configure flow expects to be editing the canonical entry).
+///
+/// Cheap heuristic: substring-match `[[sidecar_channels]]` in each included
+/// file. False positives on a comment containing that exact string are
+/// acceptable — the operator can either remove the comment or edit the
+/// included file directly as the 409 message recommends. Returns the list
+/// of include paths that contain at least one `[[sidecar_channels]]`
+/// header. Empty list = safe to write to root.
+fn included_files_with_sidecars(config_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let doc: toml_edit::DocumentMut = match content.parse() {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    // `include` may be a string array at the document root.
+    let include_arr = match doc.get("include").and_then(|i| i.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let parent = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut hits = Vec::new();
+    for entry in include_arr.iter() {
+        let raw = match entry.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let path = if std::path::Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            parent.join(raw)
+        };
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if body.contains("[[sidecar_channels]]") {
+                hits.push(path);
+            }
+        }
+    }
+    hits
+}
+
 /// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
 /// sidecar form values, splitting the payload across `secrets.env` and
 /// `config.toml`, then trigger a hot-reload so the kernel picks up the
@@ -1251,6 +1306,7 @@ pub struct ConfigureSidecarBody {
             until the operator unsets them and restarts the daemon.", body = crate::types::JsonObject),
         (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
         (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
+        (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
         (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
     )
 )]
@@ -1322,6 +1378,26 @@ pub async fn configure_sidecar_channel(
     let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
+
+    // 3c. Refuse to save when an `include`d file already owns the
+    //     `[[sidecar_channels]]` array. Writing a root-level entry on
+    //     top of that would silently shadow the included one after the
+    //     kernel merges them — the operator's intent (edit *that*
+    //     entry) and our behaviour (append a fresh root entry) would
+    //     diverge without warning. The dashboard / docs steer the
+    //     operator to the file that owns the existing block.
+    let shadowing = included_files_with_sidecars(&config_path);
+    if !shadowing.is_empty() {
+        let files = shadowing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiErrorResponse::conflict(format!(
+            "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
+        ))
+        .into_json_tuple());
+    }
     let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
         &secrets_path,
     )

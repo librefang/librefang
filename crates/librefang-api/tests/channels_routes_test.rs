@@ -1526,3 +1526,60 @@ async fn configure_sidecar_unknown_name_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// When a deployment keeps `[[sidecar_channels]]` in a file referenced
+/// from `include = [...]`, this endpoint must NOT write a fresh
+/// root-level array that would silently shadow the included one after
+/// the kernel merges them. The save is refused with 409 and an error
+/// message pointing the operator at the file that owns the existing
+/// block.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_refuses_when_include_owns_sidecars() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let home = h.home_dir();
+    std::fs::write(home.join("config.toml"), "include = [\"sidecars.toml\"]\n").unwrap();
+    std::fs::write(
+        home.join("sidecars.toml"),
+        "[[sidecar_channels]]\nname=\"ntfy\"\ncommand=\"python3\"\nargs=[\"-m\",\"librefang.sidecar.adapters.ntfy\"]\n",
+    )
+    .unwrap();
+    let body = serde_json::json!({ "values": { "TELEGRAM_BOT_TOKEN": "x" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "response: {resp}");
+    let body = resp.to_string();
+    assert!(
+        body.contains("include"),
+        "error must mention the include shadow: {body}"
+    );
+    assert!(
+        body.contains("sidecars.toml"),
+        "error must name the included file owning the existing array: {body}"
+    );
+
+    // No side effects: the configure handler must NOT have written a root-level
+    // `[[sidecar_channels]]` block onto the include-only config.toml.
+    let after = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(
+        !after.contains("[[sidecar_channels]]"),
+        "config.toml must remain include-only on 409: {after}"
+    );
+    // secrets.env must NOT have been written either — we refuse the entire op.
+    assert!(
+        !home.join("secrets.env").exists(),
+        "secrets.env must not be created when the save is refused with 409"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
