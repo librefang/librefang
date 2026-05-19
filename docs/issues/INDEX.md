@@ -1,6 +1,6 @@
 # LibreFang Audit — Issue Index
 
-**120 tracking items after two rounds of thematic consolidation.** Two independent audits against `/Volumes/Lexar/Workspace/oss/librefang/librefang` @ `087a0481`, each running 10 parallel review agents on 2026-05-18.
+**119 tracking items after two rounds of thematic consolidation.** Two independent audits against `/Volumes/Lexar/Workspace/oss/librefang/librefang` @ `087a0481`, each running 10 parallel review agents on 2026-05-18.
 
 Pipeline:
 - **Pass 1**: 136 findings produced by per-domain agents.
@@ -93,9 +93,6 @@ Filename convention: `{slug}.md`. Severity is captured in each file's `**Severit
 ### DoS (Pass 2)
 - [upload-route-bypasses-body-limit](upload-route-bypasses-body-limit.md) — Upload route mounted before `RequestBodyLimitLayer`, buffers full body to RAM
 - [trigger-engine-no-per-agent-cap](trigger-engine-no-per-agent-cap.md) — `TriggerEngine::register` lacks per-agent cap
-
-### Supply chain (Pass 2)
-- [rumqttc-rustls-webpki-cves](rumqttc-rustls-webpki-cves.md) — `rumqttc 0.25.1` drags in 4 active `rustls-webpki 0.102.8` CVEs
 
 ### Input validation (Pass 2)
 - [comms-send-impersonation](comms-send-impersonation.md) — `/api/comms/send` trusts caller-supplied `from_agent_id` (impersonation)
@@ -204,7 +201,7 @@ Filename convention: `{slug}.md`. Severity is captured in each file's `**Severit
 
 ### Concurrency
 - [agent-concurrency-get-then-insert](agent-concurrency-get-then-insert.md) — `agent_concurrency_for` get-then-insert
-- [mqtt-task-not-tracked](mqtt-task-not-tracked.md) — MQTT eventloop task untracked
+- [mqtt-task-not-tracked](mqtt-task-not-tracked.md) — process-manager readers detached + `held_locks` `RefCell` (MQTT half resolved by removing the adapter)
 
 ### Performance
 - [jwks-cache-no-reload-evict](jwks-cache-no-reload-evict.md) — JWKS cache no eviction on config reload
@@ -274,5 +271,4 @@ Filename convention: `{slug}.md`. Severity is captured in each file's `**Severit
 12. **channel-bridge-bypasses-lane-semaphore** — channel bridge bypass of `Lane::Trigger` (DoS amplifier)
 13. **upload-route-bypasses-body-limit** — upload route body-limit bypass (trivial RAM exhaustion for any authed user)
 14. **trigger-engine-no-per-agent-cap** — trigger registration cap missing (DoS at manifest layer)
-15. **rumqttc-rustls-webpki-cves** — `rumqttc` / `rustls-webpki` CVEs (gate `channel-mqtt` off by default)
 

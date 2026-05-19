@@ -23,7 +23,6 @@ all-channels = [
     "channel-bluesky",
     "channel-dingtalk",
     "channel-discord",
-    "channel-discourse",
     "channel-email",
     "channel-feishu",
     "channel-flock",
@@ -33,14 +32,10 @@ all-channels = [
     "channel-irc",
     "channel-keybase",
     "channel-line",
-    "channel-linkedin",
     "channel-matrix",
     "channel-mattermost",
-    "channel-messenger",
-    "channel-mqtt",
     "channel-mumble",
     "channel-nextcloud",
-    "channel-nostr",
     "channel-pumble",
     "channel-qq",
     "channel-reddit",
@@ -52,7 +47,6 @@ all-channels = [
     "channel-threema",
     "channel-twist",
     "channel-twitch",
-    "channel-viber",
     "channel-voice",
     "channel-webex",
     "channel-webhook",
@@ -82,29 +76,23 @@ channel-xmpp = []
 channel-bluesky = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []
-channel-messenger = []
 channel-reddit = []
 channel-revolt = []
-channel-viber = []
 channel-voice = []
 channel-flock = []
 channel-guilded = []
 channel-keybase = []
 channel-nextcloud = []
-channel-nostr = ["dep:k256"]
 channel-pumble = []
 channel-threema = []
 channel-twist = []
 channel-webex = []
 channel-dingtalk = []
-channel-discourse = []
 channel-gitter = []
-channel-linkedin = []
 channel-mumble = []
 channel-qq = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]
-channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
@@ -149,9 +137,7 @@ rsa = { workspace = true, optional = true }
 aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true }
 rustls = { workspace = true, features = ["ring"] }
-k256 = { workspace = true, optional = true }
 
-rumqttc = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
 rustls-connector = { workspace = true, optional = true }

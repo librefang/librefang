@@ -22,12 +22,12 @@ Channels that receive inbound traffic over HTTP enforce a uniform contract:
 
 | Outcome | Status |
 |---|---|
-| Required header missing or malformed (`X-Hub-Signature`, `X-Line-Signature`, `X-Viber-Content-Signature`, `Authorization: HMAC …`, DingTalk `timestamp`/`sign`) | **400 Bad Request** |
+| Required header missing or malformed (`X-Line-Signature`, `Authorization: HMAC …`, DingTalk `timestamp`/`sign`) | **400 Bad Request** |
 | Header present but signature mismatched, replayed, or expired | **401 Unauthorized** |
 
 HMAC verification covers the **raw wire bytes** (not bytes round-tripped through `serde_json::Value`), so the signing key set in the platform portal must match the env var configured below. Comparison runs in constant time.
 
-Channels with a per-secret env var (Messenger `app_secret_env`, Teams `security_token_env`) fall back to "skip verification + log a startup warning" when the env var is unset — this preserves backwards compatibility but should never be left unset in production.
+Channels with a per-secret env var (Teams `security_token_env`) fall back to "skip verification + log a startup warning" when the env var is unset — this preserves backwards compatibility but should never be left unset in production.
 
 Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through an SSRF guard at adapter construction: any private (`10/8`, `172.16/12`, `192.168/16`), CGN (`100.64/10`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), multicast, or cloud-metadata (`169.254.169.254`, `metadata.google.internal`, `metadata.azure.com`) target — including IPv6-bracket forms like `[::]`, `[::ffff:127.0.0.1]`, NAT64 `[64:ff9b::7f00:1]`, and trailing-dot FQDNs — is rejected with a startup error.
 
@@ -35,10 +35,9 @@ Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through a
 
 If you are upgrading from a release before this contract was introduced:
 
-1. **Operating Messenger?** Copy your **App Secret** from the Facebook app dashboard and export it as `MESSENGER_APP_SECRET` (or whatever name you set `app_secret_env` to). Without it, inbound webhooks still work but are unauthenticated — a warning is logged once at startup.
-2. **Operating Teams?** Copy the outgoing-webhook **security token** (base64) from the Teams portal and export it as `TEAMS_SECURITY_TOKEN` (or whatever you set `security_token_env` to). Same fallback semantics — warning once, no verification.
-3. **Operating LINE / Viber / DingTalk?** No new env var to set, but probes/health-checks that hit the webhook path without the platform's signature header now return `400`/`401`. Real platform traffic always carries a signature, so genuine inbound is unaffected; only direct probes break.
-4. **Using `[channels.webhook]` with `callback_url` pointing at a private address?** The most common case is a local dev setup with `callback_url = "http://127.0.0.1/..."`. The adapter now refuses to start with that. Switch to a public tunnel (e.g. ngrok, cloudflared) or omit `callback_url` entirely if you don't need outbound delivery.
+1. **Operating Teams?** Copy the outgoing-webhook **security token** (base64) from the Teams portal and export it as `TEAMS_SECURITY_TOKEN` (or whatever you set `security_token_env` to). Without it, inbound webhooks still work but are unauthenticated — a warning is logged once at startup.
+2. **Operating LINE / DingTalk?** No new env var to set, but probes/health-checks that hit the webhook path without the platform's signature header now return `400`/`401`. Real platform traffic always carries a signature, so genuine inbound is unaffected; only direct probes break.
+3. **Using `[channels.webhook]` with `callback_url` pointing at a private address?** The most common case is a local dev setup with `callback_url = "http://127.0.0.1/..."`. The adapter now refuses to start with that. Switch to a public tunnel (e.g. ngrok, cloudflared) or omit `callback_url` entirely if you don't need outbound delivery.
 
 If you operate **none** of the channels above, no action is required — your existing config keeps working unchanged.
 
@@ -352,40 +351,6 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-# webhook_port = 8451  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. **Required** — also used as the HMAC-SHA256 key to verify every inbound `X-Viber-Content-Signature`; missing → 400, mismatched → 401. |
-| `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
-| `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-app_secret_env = "MESSENGER_APP_SECRET"
-# webhook_port = 8452  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
-| `app_secret_env` | string | `"MESSENGER_APP_SECRET"` | Env var holding the **Facebook App Secret**. Used for HMAC-SHA1 verification of every inbound `X-Hub-Signature` header. If unset, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
-| `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.reddit]`
 
 ```toml
@@ -533,20 +498,6 @@ secret_env = "THREEMA_SECRET"
 | `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | Env var holding the Nostr private key (nsec or hex format). |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | Nostr relay WebSocket URLs to connect to. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.webex]`
 
 ```toml
@@ -655,24 +606,6 @@ secret_env = "DINGTALK_SECRET"
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `base_url` | string | `""` | Discourse forum base URL. |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | Env var holding the Discourse API key. |
-| `api_username` | string | `"system"` | Discourse API username. |
-| `categories` | list of strings | `[]` | Category slugs to monitor. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.gitter]`
 
 ```toml
@@ -758,20 +691,6 @@ tts_voice = "alloy"
 | `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
 | `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
 | `default_agent` | string or null | `null` | Agent name to route voice messages to. |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | Env var holding the LinkedIn OAuth2 access token. |
-| `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.qq]`
 

@@ -1118,40 +1118,6 @@ webhook_port = 8450
 | `webhook_port` | u16 | `8450` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-webhook_port = 8451
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. **Required** — also used as the HMAC-SHA256 key to verify every inbound `X-Viber-Content-Signature`; missing → 400, mismatched → 401. |
-| `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
-| `webhook_port` | u16 | `8451` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-app_secret_env = "MESSENGER_APP_SECRET"
-webhook_port = 8452
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
-| `app_secret_env` | string | `"MESSENGER_APP_SECRET"` | Env var holding the **Facebook App Secret**. Used for HMAC-SHA1 verification of every inbound `X-Hub-Signature` header. If unset, signature verification is skipped and a warning is logged once at startup — production should always set this. |
-| `webhook_port` | u16 | `8452` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.reddit]`
 
 ```toml
@@ -1299,20 +1265,6 @@ webhook_port = 8454
 | `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | Env var holding the Nostr private key (nsec or hex format). |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | Nostr relay WebSocket URLs to connect to. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.webex]`
 
 ```toml
@@ -1421,23 +1373,6 @@ webhook_port = 8457
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `base_url` | string | `""` | Discourse forum base URL. |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | Env var holding the Discourse API key. |
-| `api_username` | string | `"system"` | Discourse API username. |
-| `categories` | list of strings | `[]` | Category slugs to monitor. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.gitter]`
 
@@ -1500,20 +1435,6 @@ listen_port = 8460
 | `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
 | `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
 | `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | Env var holding the LinkedIn OAuth2 access token. |
-| `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.qq]`
@@ -2890,9 +2811,6 @@ Complete table of all environment variables referenced by the configuration. Non
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
 | `LINE_CHANNEL_SECRET` | LINE | LINE channel secret. |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE channel access token. |
-| `VIBER_AUTH_TOKEN` | Viber | Viber Bot auth token. |
-| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook page access token. |
-| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook verification token. |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit app client secret. |
 | `REDDIT_PASSWORD` | Reddit | Reddit bot account password. |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon access token. |
@@ -2903,7 +2821,6 @@ Complete table of all environment variables referenced by the configuration. Non
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
 | `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
-| `NOSTR_PRIVATE_KEY` | Nostr | Nostr private key (nsec or hex). |
 | `WEBEX_BOT_TOKEN` | Webex | Webex bot token. |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble bot token. |
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
@@ -2913,13 +2830,11 @@ Complete table of all environment variables referenced by the configuration. Non
 | `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (stream mode). |
 | `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token (webhook mode). |
 | `DINGTALK_SECRET` | DingTalk | DingTalk signing secret (webhook mode). |
-| `DISCOURSE_API_KEY` | Discourse | Discourse API key. |
 | `GITTER_TOKEN` | Gitter | Gitter auth token. |
 | `NTFY_TOKEN` | ntfy | ntfy auth token (optional for public topics). |
 | `GOTIFY_APP_TOKEN` | Gotify | Gotify app token (sending). |
 | `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify client token (receiving). |
 | `WEBHOOK_SECRET` | Webhook | HMAC signing secret for webhook verification. |
-| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 access token. |
 
 ---
 
@@ -2947,8 +2862,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | LINE | `access_token_env` |
-| Viber | `auth_token_env` |
-| Messenger | `page_token_env` |
 | Reddit | `client_secret_env` |
 | Mastodon | `access_token_env` |
 | Bluesky | `app_password_env` |
@@ -2958,18 +2871,15 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Guilded | `bot_token_env` |
 | Keybase | `paperkey_env` |
 | Threema | `secret_env` |
-| Nostr | `private_key_env` |
 | Webex | `bot_token_env` |
 | Pumble | `bot_token_env` |
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
 | DingTalk | `app_key_env` (stream) or `access_token_env` (webhook) |
-| Discourse | `api_key_env` |
 | Gitter | `token_env` |
 | ntfy | `token_env` (only if `token_env` is non-empty; public topics are OK without auth) |
 | Webhook | `secret_env` |
-| LinkedIn | `access_token_env` |
 
 For **web search providers**, the validator checks:
 
