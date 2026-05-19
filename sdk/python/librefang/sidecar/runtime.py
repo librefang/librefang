@@ -151,6 +151,25 @@ async def with_backoff(
             delay = min(delay * factor, maximum)
 
 
+def describe_main(adapter):
+    """Print the adapter's SCHEMA as JSON to stdout and return 0.
+
+    Returns 2 (no schema declared) — same exit code as the missing-token
+    case in telegram.py so the daemon's describe-cache logic can treat
+    "no schema" identically to "describe failed" and fall back.
+    """
+    import json as _json
+    schema = getattr(adapter, "SCHEMA", None)
+    if schema is None:
+        # Log via stderr (stdout is reserved for the JSON payload).
+        log.error("adapter has no SCHEMA attribute; --describe failed",
+                  adapter=type(adapter).__name__)
+        return 2
+    sys.stdout.write(_json.dumps(schema.to_dict()))
+    sys.stdout.flush()
+    return 0
+
+
 async def run(
     adapter: SidecarAdapter,
     *,
@@ -268,9 +287,15 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
     on a daemon thread (portable, unlike async stdin). See :func:`run`
     for ``ready_max_attempts``.
 
+    With ``--describe`` in ``sys.argv``, emit the adapter's SCHEMA JSON to
+    stdout and exit (via :func:`describe_main`) before starting the
+    stdio JSON-RPC loop.
+
     A :class:`ProducerCrashed` from ``run`` becomes ``SystemExit(1)`` so
     the daemon supervisor (and any non-supervised runner) sees a nonzero
     exit code, distinguishable from a clean ``shutdown``/EOF."""
+    if "--describe" in sys.argv[1:]:
+        raise SystemExit(describe_main(adapter))
     try:
         asyncio.run(_run_stdio(adapter, ready_interval=ready_interval,
                                ready_max_attempts=ready_max_attempts))
