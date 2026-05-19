@@ -225,6 +225,7 @@ fn test_push_filtered_user_message_applies_prefix_after_pii() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let privacy = librefang_types::config::PrivacyConfig {
         mode: librefang_types::config::PrivacyMode::Redact,
@@ -272,6 +273,7 @@ fn test_push_filtered_user_message_no_prefix_non_group() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let privacy = librefang_types::config::PrivacyConfig::default();
     let filter = crate::pii_filter::PiiFilter::new(&privacy.redact_patterns);
@@ -349,6 +351,7 @@ fn test_finalize_tool_use_results_skips_empty_message() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages = Vec::new();
     let mut tool_result_blocks = Vec::new();
@@ -385,6 +388,7 @@ fn test_handle_mid_turn_signal_injects_without_tool_results() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages = Vec::new();
     let mut staged = StagedToolUseTurn {
@@ -448,6 +452,7 @@ fn test_handle_mid_turn_signal_mixed_flush_resets_consecutive_all_failed() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages = Vec::new();
     let mut staged = StagedToolUseTurn {
@@ -593,6 +598,7 @@ fn test_handle_mid_turn_signal_approval_resolved_updates_waiting_result_and_rese
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages = session.messages.clone();
     let mut staged = StagedToolUseTurn {
@@ -804,6 +810,7 @@ fn injection_resolution_does_not_pollute_other_sessions() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages_b: Vec<Message> = Vec::new();
     let mut staged_b = StagedToolUseTurn {
@@ -915,6 +922,7 @@ fn injection_resolution_still_applies_when_session_owns_pending_approval() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages_a = session_a.messages.clone();
     let mut staged_a = StagedToolUseTurn {
@@ -1117,6 +1125,7 @@ fn test_prepare_llm_messages_new_messages_start_keeps_full_turn_after_trim() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
 
     for i in 0..13 {
@@ -1191,6 +1200,7 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
 
     for i in 0..13 {
@@ -1318,6 +1328,7 @@ fn test_prepare_llm_messages_cold_load_triggers_repair() {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         })
         .unwrap();
 
@@ -1357,6 +1368,7 @@ fn test_prepare_llm_messages_generation_skip_equivalence() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
 
     let first = prepare_llm_messages(
@@ -1475,6 +1487,7 @@ async fn test_mid_turn_signal_preserves_partial_hard_failure_results_for_classif
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let mut messages = Vec::new();
     let mut staged = StagedToolUseTurn {

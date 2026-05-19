@@ -473,6 +473,7 @@ async fn test_empty_response_after_tool_use_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -537,6 +538,7 @@ async fn test_empty_response_max_tokens_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -601,6 +603,7 @@ async fn test_normal_response_not_replaced_by_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -656,6 +659,7 @@ async fn test_success_response_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -716,6 +720,7 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -1023,6 +1028,7 @@ async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles(
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
 
@@ -1153,6 +1159,7 @@ async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // 10 turns of (assistant, tool_result) — under fold_after=2 every
     // tool_result older than the last two assistant turns is stale.
@@ -1331,6 +1338,7 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -1535,6 +1543,7 @@ fn cascade_leak_fixture() -> (
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // Re-use DirectiveDriver: two structural markers (envelope + turn
     // frame) reproduce the real-incident leak shape exactly.
@@ -1648,6 +1657,7 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     // A driver that emits two structural markers (triggering the cascade-leak
     // guard) and then signals ToolUse as the stop reason. Without the
@@ -1740,6 +1750,7 @@ async fn test_streaming_max_continuations_with_directives_preserves_reply_direct
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -1804,6 +1815,7 @@ async fn test_streaming_empty_response_after_tool_use_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -1941,6 +1953,7 @@ async fn test_empty_first_response_retries_and_recovers() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -1999,6 +2012,7 @@ async fn test_empty_first_response_fallback_when_retry_also_empty() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -2063,6 +2077,7 @@ async fn test_streaming_empty_response_max_tokens_returns_fallback() {
 
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);

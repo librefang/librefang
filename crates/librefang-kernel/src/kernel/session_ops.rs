@@ -471,6 +471,7 @@ impl LibreFangKernel {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         self.inject_reset_prompt(&mut new_session, agent_id);
         // `inject_reset_prompt` only persists when it actually pushed messages
@@ -855,6 +856,7 @@ impl LibreFangKernel {
 
             messages_generation: 0,
             last_repaired_generation: None,
+            peer_id: None,
         };
         // Sync save_session: caller `import_session` is a sync fn, no `.await` allowed.
         self.memory

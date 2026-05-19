@@ -551,6 +551,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .substrate_ref()
@@ -733,6 +734,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .substrate_ref()

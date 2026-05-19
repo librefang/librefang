@@ -368,6 +368,21 @@ impl LibreFangKernel {
             }
         };
 
+        // Derive `peer_id` for the freshly-materialised session row from the
+        // same `SenderContext.chat_id` that fed `SessionId::for_sender_scope`
+        // above. Mirrors the channel-branch population in `send_message_full`
+        // — see the comment there for the migration-v16 backstory. Canonical
+        // / explicit-override paths keep `None`.
+        let peer_id_for_new_session: Option<String> = match sender_context {
+            Some(ctx)
+                if !ctx.channel.is_empty()
+                    && !ctx.use_canonical_session
+                    && session_id_override.is_none() =>
+            {
+                ctx.chat_id.clone()
+            }
+            _ => None,
+        };
         let mut session = self
             .memory
             .substrate
@@ -382,7 +397,13 @@ impl LibreFangKernel {
                 model_override: None,
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: peer_id_for_new_session.clone(),
             });
+        // Existing pre-v16-writer rows: backfill on first touch when the
+        // current turn supplies a peer; never trample an already-set value.
+        if session.peer_id.is_none() && peer_id_for_new_session.is_some() {
+            session.peer_id = peer_id_for_new_session;
+        }
         // Evaluate the global session reset policy against this agent's
         // last_active timestamp.  The `force_session_wipe` flag on the entry
         // acts as an operator-forced hard-wipe signal that always wins

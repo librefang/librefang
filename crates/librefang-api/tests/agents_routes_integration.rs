@@ -1335,6 +1335,7 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     h.state
         .kernel

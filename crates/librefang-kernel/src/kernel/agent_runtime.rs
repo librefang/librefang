@@ -336,6 +336,7 @@ impl LibreFangKernel {
 
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             });
 
         // #4976: merge per-agent [compaction] overrides on top of the
@@ -497,6 +498,7 @@ impl LibreFangKernel {
 
                 messages_generation: 0,
                 last_repaired_generation: None,
+                peer_id: None,
             });
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins

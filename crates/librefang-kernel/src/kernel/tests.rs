@@ -9428,6 +9428,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel1
         .memory
@@ -9453,6 +9454,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel1
         .memory
@@ -9566,6 +9568,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,
+        peer_id: None,
     };
     kernel
         .memory
