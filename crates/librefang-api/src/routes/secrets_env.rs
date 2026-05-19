@@ -12,9 +12,33 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> {
+    // The dotenv reader (`librefang_extensions::dotenv`) silently strips
+    // a matched outer pair of `"..."` / `'...'` and processes escape
+    // sequences `\n` / `\\` / `\"` inside double quotes. If we accepted
+    // values that started with a quote, or that contained CR/LF/NUL, the
+    // round-trip from write to read would corrupt the value: an operator
+    // who typed `"abc"` would see `abc` come back. Leading/trailing
+    // whitespace would likewise be lost by trim semantics common in
+    // dotenv parsers. Reject those shapes loudly so the dashboard can
+    // surface a useful message instead of producing silent corruption.
     if value.contains('\n') || value.contains('\r') {
         return Err(format!(
-            "secret value for `{key}` must not contain a newline"
+            "secret value for `{key}` must not contain a newline or carriage return"
+        ));
+    }
+    if value.contains('\0') {
+        return Err(format!(
+            "secret value for `{key}` must not contain a NUL byte"
+        ));
+    }
+    if value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace) {
+        return Err(format!(
+            "secret value for `{key}` must not have leading or trailing whitespace"
+        ));
+    }
+    if value.starts_with('"') || value.starts_with('\'') {
+        return Err(format!(
+            "secret value for `{key}` must not start with a quote character (dotenv reader would strip it)"
         ));
     }
     if key.contains('=') || key.trim() != key || key.is_empty() {

@@ -56,8 +56,36 @@ fn upsert_appends_when_key_absent() {
 }
 
 #[test]
-fn upsert_rejects_value_with_newline() {
+fn upsert_rejects_invalid_value_chars() {
     let tmp = NamedTempFile::new().unwrap();
+
+    // Newline — preserves the historical "newline" substring assertion.
     let err = upsert_secret(tmp.path(), "K", "line1\nline2").unwrap_err();
-    assert!(err.to_string().contains("newline"));
+    assert!(
+        err.contains("newline") && err.contains("`K`"),
+        "newline error must mention 'newline' and the key: {err}"
+    );
+
+    // NUL byte.
+    let err = upsert_secret(tmp.path(), "K", "abc\0def").unwrap_err();
+    assert!(
+        err.contains("NUL") && err.contains("`K`"),
+        "NUL error must mention 'NUL' and the key: {err}"
+    );
+
+    // Leading whitespace — would be lost by dotenv parsers.
+    let err = upsert_secret(tmp.path(), "K", " abc").unwrap_err();
+    assert!(
+        err.contains("whitespace") && err.contains("`K`"),
+        "leading-whitespace error must mention 'whitespace' and the key: {err}"
+    );
+
+    // Starts with a double quote — dotenv reader would strip the quotes
+    // and process escape sequences inside, so we'd round-trip the wrong
+    // value back to the caller.
+    let err = upsert_secret(tmp.path(), "K", "\"x\"").unwrap_err();
+    assert!(
+        err.contains("quote") && err.contains("`K`"),
+        "quoted-value error must mention 'quote' and the key: {err}"
+    );
 }

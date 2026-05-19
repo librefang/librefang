@@ -1295,43 +1295,59 @@ pub async fn configure_sidecar_channel(
 
     // 4. Split payload: secrets go to secrets.env, everything else
     //    accumulates into the [sidecar_channels.env] table.
+    //
+    //    Both the secrets.env upserts and the config.toml upsert below
+    //    run inside `state.config_write_lock`. That mutex also gates
+    //    `POST /api/config/set` and the legacy `configure_channel`
+    //    handler (issue #3183), so two concurrent
+    //    `POST /api/channels/sidecar/{a,b}/configure` calls — or one of
+    //    those interleaved with `config_set` — cannot lost-update on
+    //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
+    //    The guard is dropped before `reload_config().await` so the
+    //    hot-reload step does not gate other config-writing handlers.
     let home = librefang_home();
     let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
     let mut nonsecret_env: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    for f in &schema.fields {
-        let Some(raw) = body.values.get(&f.key) else {
-            continue;
-        };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+        for f in &schema.fields {
+            let Some(raw) = body.values.get(&f.key) else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if f.field_type == "secret" {
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(
+                    |e| {
+                        ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                            .into_json_tuple()
+                    },
+                )?;
+            } else {
+                nonsecret_env.insert(f.key.clone(), trimmed.to_string());
+            }
         }
-        if f.field_type == "secret" {
-            super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
-                ApiErrorResponse::internal(format!("failed to write secret: {e}"))
-                    .into_json_tuple()
-            })?;
-        } else {
-            nonsecret_env.insert(f.key.clone(), trimmed.to_string());
-        }
-    }
 
-    // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
-    //    Idempotent: a second POST with the same name replaces the
-    //    block in-place, preserving formatting of every other section.
-    let config_path = home.join("config.toml");
-    super::sidecar_toml::upsert_sidecar_block(
-        &config_path,
-        entry.name,
-        entry.name, // channel_type defaults to the catalog name
-        entry.command,
-        entry.args,
-        &nonsecret_env,
-    )
-    .map_err(|e| {
-        ApiErrorResponse::internal(format!("failed to write config.toml: {e}")).into_json_tuple()
-    })?;
+        // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
+        //    Idempotent: a second POST with the same name replaces the
+        //    block in-place, preserving formatting of every other section.
+        super::sidecar_toml::upsert_sidecar_block(
+            &config_path,
+            entry.name,
+            entry.name, // channel_type defaults to the catalog name
+            entry.command,
+            entry.args,
+            &nonsecret_env,
+        )
+        .map_err(|e| {
+            ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
+                .into_json_tuple()
+        })?;
+    }
 
     // 6. Trigger hot-reload. The kernel diffs the on-disk config
     //    against the live snapshot and returns the resulting plan;
