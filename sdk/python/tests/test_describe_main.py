@@ -37,3 +37,25 @@ def test_describe_main_missing_schema_exits_two():
     assert rc == 2
     # Empty stdout on failure — daemon parses stdout, must not feed it junk
     assert buf.getvalue() == ""
+
+
+def test_run_stdio_main_describes_class_without_instantiation():
+    """run_stdio_main accepts a class and runs --describe without ever
+    calling __init__ — so adapters whose __init__ requires env vars
+    can still be described."""
+    import subprocess, sys, json
+    # NoSchema__init__-raises is a class whose __init__ would crash, so if
+    # run_stdio_main correctly avoids instantiation it must still describe
+    # successfully when SCHEMA is class-level.
+    script = (
+        "from librefang.sidecar import Schema, Field, run_stdio_main\n"
+        "class Crashy:\n"
+        "    SCHEMA = Schema('crashy','C','test',[Field('K','K','text')])\n"
+        "    def __init__(self):\n"
+        "        raise SystemExit(99)\n"
+        "import sys; sys.argv = ['x', '--describe']\n"
+        "run_stdio_main(Crashy)\n"
+    )
+    out = subprocess.check_output([sys.executable, "-c", script])
+    payload = json.loads(out)
+    assert payload["name"] == "crashy"

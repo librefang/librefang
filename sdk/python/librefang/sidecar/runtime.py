@@ -289,7 +289,12 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
 
     With ``--describe`` in ``sys.argv``, emit the adapter's SCHEMA JSON to
     stdout and exit (via :func:`describe_main`) before starting the
-    stdio JSON-RPC loop.
+    stdio JSON-RPC loop. Note: this branch is only reachable if the
+    caller already managed to *construct* the adapter — adapters that
+    require env vars in ``__init__`` cannot be described via this path.
+    Use :func:`run_stdio_main` (which takes the class, not an instance)
+    from your ``__main__`` block instead; this fallback exists only to
+    defend direct ``run_stdio(instance)`` callers.
 
     A :class:`ProducerCrashed` from ``run`` becomes ``SystemExit(1)`` so
     the daemon supervisor (and any non-supervised runner) sees a nonzero
@@ -301,6 +306,23 @@ def run_stdio(adapter: SidecarAdapter, *, ready_interval: float = 2.0,
                                ready_max_attempts=ready_max_attempts))
     except ProducerCrashed:
         raise SystemExit(1)
+
+
+def run_stdio_main(adapter_class):
+    """Entry point for ``if __name__ == "__main__"`` blocks.
+
+    Dispatches ``--describe`` from ``sys.argv`` against the adapter CLASS
+    (using its class-level ``SCHEMA``) without instantiating it — so
+    adapters whose ``__init__`` requires env vars (TELEGRAM_BOT_TOKEN,
+    NTFY_TOPIC, etc.) still describe correctly when the daemon spawns
+    them with no env to enumerate the form fields.
+
+    For the normal serve path, instantiates the class and hands off
+    to :func:`run_stdio`.
+    """
+    if "--describe" in sys.argv[1:]:
+        raise SystemExit(describe_main(adapter_class))
+    run_stdio(adapter_class())
 
 
 async def _run_stdio(adapter: SidecarAdapter, *,

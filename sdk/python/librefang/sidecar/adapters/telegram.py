@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from librefang.sidecar import Field, Schema, SidecarAdapter, protocol, run_stdio
+from librefang.sidecar import Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 
 LONGPOLL_SERVER_SECS = 30
@@ -1561,10 +1561,4 @@ class TelegramAdapter(SidecarAdapter):
 
 
 if __name__ == "__main__":
-    import sys as _sys
-    if "--describe" in _sys.argv[1:]:
-        # Describe-only path: don't instantiate (avoids env-required side
-        # effects like the TELEGRAM_BOT_TOKEN check in __init__).
-        from librefang.sidecar import describe_main
-        raise SystemExit(describe_main(TelegramAdapter))
-    run_stdio(TelegramAdapter())
+    run_stdio_main(TelegramAdapter)

@@ -50,6 +50,7 @@ from .runtime import (
     describe_main,
     run,
     run_stdio,
+    run_stdio_main,
     with_backoff,
 )
 
@@ -59,6 +60,7 @@ __all__ = [
     "describe_main",
     "run",
     "run_stdio",
+    "run_stdio_main",
     "with_backoff",
     "Content",
     "Field",

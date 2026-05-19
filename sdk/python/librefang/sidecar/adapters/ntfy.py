@@ -36,7 +36,7 @@ import time
 import urllib.error
 import urllib.request
 
-from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio
+from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 
 MAX_MESSAGE_LEN = 4096
@@ -216,10 +216,4 @@ class NtfyAdapter(SidecarAdapter):
 
 
 if __name__ == "__main__":
-    import sys as _sys
-    if "--describe" in _sys.argv[1:]:
-        # Describe-only path: don't instantiate (avoids env-required side
-        # effects like the NTFY_TOPIC check in __init__).
-        from librefang.sidecar import describe_main
-        raise SystemExit(describe_main(NtfyAdapter))
-    run_stdio(NtfyAdapter())
+    run_stdio_main(NtfyAdapter)
