@@ -630,17 +630,6 @@ impl KernelConfig {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
             }
         }
-        for gf in self.channels.gotify.iter() {
-            if std::env::var(&gf.app_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Gotify configured but {} is not set",
-                    gf.app_token_env
-                ));
-            }
-        }
         for wh in self.channels.webhook.iter() {
             if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
