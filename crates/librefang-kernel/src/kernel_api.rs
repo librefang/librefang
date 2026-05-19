@@ -552,6 +552,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -1343,6 +1344,7 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -1354,6 +1356,7 @@ impl KernelApi for LibreFangKernel {
             agent_id,
             message,
             kernel_handle,
+            sender_context.as_ref(),
             session_id_override,
             incognito,
         )

@@ -2831,6 +2831,15 @@ pub async fn send_message_stream(
         },
     };
 
+    // Build sender context from the request body BEFORE handing off to the
+    // kernel. The session resolver uses this to derive
+    // `SessionId::for_sender_scope(agent, channel, chat_id)` so per-chat
+    // isolation holds — without it, every inbound (DM, group, stranger)
+    // collapses onto the agent's global `Persistent` session pointer and
+    // contexts cross-pollinate. The non-streaming sibling `send_message`
+    // has always built this; the streaming variant historically did not,
+    // which is the bug fixed here.
+    let sender_context = request_sender_context(&req);
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     let (rx, handle) = match state
         .kernel
@@ -2839,6 +2848,7 @@ pub async fn send_message_stream(
             agent_id,
             &req.message,
             Some(kernel_handle),
+            sender_context,
             session_id_override,
             req.incognito,
         )
@@ -7061,6 +7071,95 @@ mod tests {
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants.len(), 2);
         assert_eq!(sender.group_participants[1].display_name, "Bob");
+    }
+
+    /// Regression for the 2026-05-19 cross-chat leak: the streaming
+    /// `/message/stream` handler historically called the kernel without
+    /// a `SenderContext`, so the resolver fell through to the per-agent
+    /// `Persistent` session pointer and collapsed every chat (DM, group,
+    /// stranger) onto one session. After the fix the handler must build
+    /// the same `SenderContext` the non-streaming sibling builds, and
+    /// the resolver derives a deterministic `SessionId::for_sender_scope`
+    /// per `(agent, channel:chat_id)` pair.
+    ///
+    /// This test exercises the boundary in two parts: (1) the request
+    /// shapes the gateway actually posts produce non-`None` sender
+    /// contexts whose `channel` field uniquely identifies the chat; (2)
+    /// passing those contexts through `SessionId::for_sender_scope` for
+    /// the same agent yields *different* session ids — which is the
+    /// invariant the streaming endpoint must preserve and the live
+    /// incident violated.
+    #[test]
+    fn test_streaming_handler_builds_sender_context_for_distinct_chats() {
+        use librefang_types::agent::SessionId;
+
+        // Two real channel_type shapes captured from the live incident
+        // log on 2026-05-19: the WhatsApp gateway posts the JID baked
+        // into the `channel_type` field (chat_id remains None on the
+        // SenderContext). The resolver's `for_sender_scope` therefore
+        // distinguishes scopes via `channel` alone.
+        let group_req = MessageRequest {
+            message: "ciao tutti".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("393285497365@s.whatsapp.net".to_string()),
+            sender_name: Some("Cate".to_string()),
+            channel_type: Some("whatsapp:393285497365-1412881543@g.us".to_string()),
+            is_group: true,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        };
+        let dm_req = MessageRequest {
+            message: "ora riproponimi i vocali per erika".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("+393760105565".to_string()),
+            sender_name: None,
+            channel_type: Some("whatsapp:191856289808491@lid".to_string()),
+            is_group: false,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        };
+
+        let group_ctx =
+            request_sender_context(&group_req).expect("group request must produce sender context");
+        let dm_ctx =
+            request_sender_context(&dm_req).expect("dm request must produce sender context");
+
+        // Sanity: the gateway-side channel values match the live
+        // incident exactly (no normalization between transport and
+        // kernel).
+        assert_eq!(group_ctx.channel, "whatsapp:393285497365-1412881543@g.us");
+        assert_eq!(dm_ctx.channel, "whatsapp:191856289808491@lid");
+
+        // The resolver invariant: same agent, two different chats →
+        // two different deterministic session ids. Before the fix, the
+        // streaming handler passed `None` for sender_context and BOTH
+        // requests landed on the agent's single `entry.session_id`.
+        let agent = AgentId::new();
+        let group_sid =
+            SessionId::for_sender_scope(agent, &group_ctx.channel, group_ctx.chat_id.as_deref());
+        let dm_sid = SessionId::for_sender_scope(agent, &dm_ctx.channel, dm_ctx.chat_id.as_deref());
+        assert_ne!(
+            group_sid, dm_sid,
+            "group and DM must resolve to distinct session ids — same id means cross-chat history bleed"
+        );
+
+        // And the derivation is stable: repeating the call must return
+        // the same id (otherwise the per-chat session would churn
+        // turn-by-turn).
+        assert_eq!(
+            group_sid,
+            SessionId::for_sender_scope(agent, &group_ctx.channel, group_ctx.chat_id.as_deref())
+        );
     }
 
     #[test]
