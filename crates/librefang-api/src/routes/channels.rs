@@ -1354,27 +1354,14 @@ pub async fn configure_sidecar_channel(
         }
     }
 
-    // 3b. Detect shell-environment shadowing of `secret` fields. The
-    //     dotenv loader's priority is: system env > vault > .env >
-    //     secrets.env (see `librefang_extensions::dotenv`). If the
-    //     operator exported `TELEGRAM_BOT_TOKEN` before launching the
-    //     daemon, `std::env::var` returns that exported value, and the
-    //     sidecar child inherits the exported value — not whatever we
-    //     are about to write to `secrets.env`. The save still succeeds
-    //     mechanically, but the new value never takes effect. Warn
-    //     before the operator chases this for an hour.
-    //
-    //     `std::env::var` also returns true for keys that *we* loaded
-    //     from `secrets.env` into the process env at boot, so we need
-    //     to subtract those out: if the key is in `secrets.env` already,
-    //     the env presence is our own write — not a shell shadow. Read
-    //     the on-disk file once and check membership before the write.
-    //
-    //     Use the kernel's configured `home_dir` rather than recomputing
-    //     from `LIBREFANG_HOME`/`~/.librefang`: when the operator boots
-    //     with a non-default `KernelConfig.home_dir`, the recomputed
-    //     default would write to the wrong path while `reload_config()`
-    //     and `reload_channels_from_disk()` read from the kernel's path.
+    // 3b. Resolve `~/.librefang` paths from the kernel's configured
+    //     `home_dir` rather than recomputing from `LIBREFANG_HOME` /
+    //     `~/.librefang`: when the operator boots with a non-default
+    //     `KernelConfig.home_dir`, the recomputed default would write
+    //     to the wrong path while `reload_config()` and
+    //     `reload_channels_from_disk()` read from the kernel's path.
+    //     (Shell-shadow detection for secret fields now lives under
+    //     the config_write_lock in step 4a below.)
     let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
@@ -1398,42 +1385,6 @@ pub async fn configure_sidecar_channel(
         ))
         .into_json_tuple());
     }
-    let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
-        &secrets_path,
-    )
-    .ok()
-    .map(|s| {
-        s.lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    return None;
-                }
-                let eq = line.find('=')?;
-                let k = line[..eq].trim();
-                if k.is_empty() {
-                    None
-                } else {
-                    Some(k.to_string())
-                }
-            })
-            .collect()
-    })
-    .unwrap_or_default();
-    let mut shadowed_secrets: Vec<String> = schema
-        .fields
-        .iter()
-        .filter(|f| f.field_type == "secret")
-        .filter(|f| {
-            body.values
-                .get(&f.key)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-        })
-        .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
-        .map(|f| f.key.clone())
-        .collect();
-    shadowed_secrets.sort();
 
     // 4. Split payload: secrets go to secrets.env, everything else
     //    accumulates into the [sidecar_channels.env] table.
@@ -1447,10 +1398,73 @@ pub async fn configure_sidecar_channel(
     //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
     //    The guard is dropped before `reload_config().await` so the
     //    hot-reload step does not gate other config-writing handlers.
+    //
+    //    The `secrets.env` membership read (for shell-shadow detection)
+    //    also lives inside the guard so two concurrent saves on
+    //    different keys cannot each see the pre-write file state and
+    //    falsely report shadows on keys the other handler is about to
+    //    write — a cosmetic-only TOCTOU but trivially closed by reading
+    //    under the same lock that gates the write.
     let mut nonsecret_env: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+    let shadowed_secrets: Vec<String>;
     {
         let _config_guard = state.config_write_lock.lock().await;
+
+        // 4a. Detect shell-environment shadowing of `secret` fields,
+        //     under the lock. The dotenv loader's priority is system env
+        //     > vault > .env > secrets.env (see
+        //     `librefang_extensions::dotenv`). If the operator exported
+        //     `TELEGRAM_BOT_TOKEN` before launching the daemon,
+        //     `std::env::var` returns that exported value and the
+        //     sidecar child inherits it — not whatever we write to
+        //     `secrets.env`. The save still succeeds mechanically, but
+        //     the new value never takes effect. Warn before the operator
+        //     chases this for an hour.
+        //
+        //     `std::env::var` also returns true for keys we loaded from
+        //     `secrets.env` into the process env at boot, so subtract
+        //     those out by reading the on-disk `secrets.env` once: a
+        //     key already in `secrets.env` means the env presence is
+        //     our own boot-time write, not a shell shadow.
+        let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
+            &secrets_path,
+        )
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        return None;
+                    }
+                    let eq = line.find('=')?;
+                    let k = line[..eq].trim();
+                    if k.is_empty() {
+                        None
+                    } else {
+                        Some(k.to_string())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        let mut shadowed: Vec<String> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type == "secret")
+            .filter(|f| {
+                body.values
+                    .get(&f.key)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
+            .map(|f| f.key.clone())
+            .collect();
+        shadowed.sort();
+        shadowed_secrets = shadowed;
+
         for f in &schema.fields {
             let Some(raw) = body.values.get(&f.key) else {
                 continue;
