@@ -47,8 +47,6 @@ pub mod flock;
 pub mod gitter;
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
-#[cfg(feature = "channel-gotify")]
-pub mod gotify;
 #[cfg(feature = "channel-guilded")]
 pub mod guilded;
 #[cfg(feature = "channel-irc")]
