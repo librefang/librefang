@@ -3333,6 +3333,43 @@ impl WorkflowEngine {
         }
     }
 
+    /// List every run currently paused at an operator step, paired with
+    /// the [`OperatorPause`] describing what the operator must act on. The
+    /// dashboard surfaces this as a worklist ("pending operator reviews")
+    /// so a human operator doesn't have to manually `GET /runs` and pick
+    /// out the paused ones. Per #4977 dashboard slice.
+    ///
+    /// Returns a list of `(WorkflowRun, OperatorPause)` tuples. The run is
+    /// included so the caller can render `workflow_name`, `started_at`,
+    /// and the `WorkflowRunState::Paused { paused_at, .. }` timestamp
+    /// without a follow-up fetch per row. Runs are returned in
+    /// `started_at` ascending order (oldest first) so the dashboard
+    /// surfaces the longest-waiting operator review at the top of the
+    /// worklist.
+    pub async fn list_pending_operator_runs(&self) -> Vec<(WorkflowRun, OperatorPause)> {
+        // Snapshot paused-run IDs under the dashmap iterator, then drop
+        // the iterator before awaiting `inspect_operator_pause` (which
+        // takes its own dashmap reads + awaits `get_workflow`).
+        let mut paused_ids: Vec<(WorkflowRunId, DateTime<Utc>)> = self
+            .runs
+            .iter()
+            .filter(|r| r.state.is_paused())
+            .map(|r| (r.id, r.started_at))
+            .collect();
+        // Oldest first — longest-waiting review surfaces at the top.
+        paused_ids.sort_by_key(|(_, started)| *started);
+
+        let mut out: Vec<(WorkflowRun, OperatorPause)> = Vec::with_capacity(paused_ids.len());
+        for (run_id, _) in paused_ids {
+            if let Some(pause) = self.inspect_operator_pause(run_id).await {
+                if let Some(run) = self.runs.get(&run_id).map(|r| r.value().clone()) {
+                    out.push((run, pause));
+                }
+            }
+        }
+        out
+    }
+
     /// #5133 — resolve a paused operator step with an [`OperatorAction`]
     /// and drive the workflow forward.
     ///
@@ -11842,5 +11879,106 @@ name = "topic"
         let dur = clamp_timeout_duration(u64::MAX);
         let r = tokio::time::timeout(dur, async { 7u8 }).await;
         assert_eq!(r.expect("inner future completed"), 7);
+    }
+
+    /// #4977 dashboard slice — `list_pending_operator_runs` returns every
+    /// currently-paused operator run with its inspectable `OperatorPause`,
+    /// and omits runs that are not paused (Pending / Running / Completed /
+    /// Failed) or that paused for a non-operator reason. Oldest run first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_pending_operator_runs_returns_all_operator_paused_runs_oldest_first() {
+        let engine = WorkflowEngine::new();
+        engine.set_operator_hooks(
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(NoopResumeDriver),
+        );
+
+        // Two distinct operator workflows so we can assert pairing
+        // (run → its own OperatorPause).
+        let mut wf_a = workflow_with_operator_step();
+        wf_a.name = "wf-A".to_string();
+        wf_a.steps[0].name = "review-A".to_string();
+        let wf_a_id = engine.register(wf_a).await;
+
+        let mut wf_b = workflow_with_operator_step();
+        wf_b.name = "wf-B".to_string();
+        wf_b.steps[0].name = "review-B".to_string();
+        wf_b.steps[0].mode = StepMode::Operator {
+            notify: vec!["dashboard:".to_string()],
+            actions: vec![OperatorAction::Approve, OperatorAction::Edit],
+            timeout_secs: None,
+            timeout_action: OperatorTimeoutAction::Continue,
+        };
+        let wf_b_id = engine.register(wf_b).await;
+
+        // A non-operator workflow that paused via the generic pause_run path —
+        // must NOT appear in the operator worklist.
+        let mut wf_nonop = workflow_with_operator_step();
+        wf_nonop.name = "wf-nonop".to_string();
+        wf_nonop.steps[0].mode = StepMode::Sequential;
+        let wf_nonop_id = engine.register(wf_nonop).await;
+
+        // Drive run A to operator pause first (oldest), then a small gap, then B,
+        // so ordering is deterministic.
+        let run_a = engine
+            .create_run(wf_a_id, "artifact-A".to_string())
+            .await
+            .expect("create_run A");
+        engine
+            .execute_run(run_a, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("A pauses at operator");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let run_b = engine
+            .create_run(wf_b_id, "artifact-B".to_string())
+            .await
+            .expect("create_run B");
+        engine
+            .execute_run(run_b, mock_resolver, |_id, _p, _m| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await
+            .expect("B pauses at operator");
+
+        // Non-operator run: create + externally pause via pause_run. It must
+        // be paused (so it's a candidate) but not at an operator step.
+        let run_nonop = engine
+            .create_run(wf_nonop_id, "artifact-nonop".to_string())
+            .await
+            .expect("create_run nonop");
+        let _tok = engine
+            .pause_run(run_nonop, "manual external pause")
+            .await
+            .expect("pause_run nonop");
+
+        let pending = engine.list_pending_operator_runs().await;
+        assert_eq!(
+            pending.len(),
+            2,
+            "exactly two operator-paused runs expected (non-operator pause excluded); got {}",
+            pending.len()
+        );
+        assert_eq!(pending[0].0.id, run_a, "oldest pause must come first");
+        assert_eq!(pending[1].0.id, run_b, "newer pause must come second");
+        assert_eq!(pending[0].1.step_name, "review-A");
+        assert_eq!(pending[1].1.step_name, "review-B");
+        assert_eq!(pending[0].1.artifact, "artifact-A");
+        assert_eq!(pending[1].1.artifact, "artifact-B");
+        assert!(
+            pending[1]
+                .1
+                .actions
+                .iter()
+                .any(|a| matches!(a, OperatorAction::Edit)),
+            "B's actions list must surface Edit"
+        );
+        assert!(
+            !pending.iter().any(|(r, _)| r.id == run_nonop),
+            "manually-paused (non-operator) run must not surface in the operator worklist"
+        );
     }
 }
