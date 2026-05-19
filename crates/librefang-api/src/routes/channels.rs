@@ -63,24 +63,17 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::types::ApiErrorResponse;
 
-/// Resolve the LibreFang home directory without depending on the kernel crate.
-///
-/// Mirrors `librefang_kernel::config::librefang_home`:
-/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
-/// (falling back to the system temp dir if no home directory is available).
-fn librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
-}
+// All channel handlers below resolve the LibreFang home directory via
+// `state.kernel.home_dir()` so they honour the kernel's authoritative
+// `KernelConfig.home_dir` setting (which itself respects `LIBREFANG_HOME`
+// and falls back to `~/.librefang`). The previously-local
+// `librefang_home()` helper was removed because it bypassed kernel config
+// overrides — see codex review fix #1 and its generalization in fix #7.
+
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -2129,7 +2122,7 @@ pub async fn configure_channel(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
     let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
@@ -2248,7 +2241,7 @@ pub async fn remove_channel(
         None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2708,7 +2701,7 @@ pub async fn create_channel_instance(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2847,7 +2840,7 @@ pub async fn update_channel_instance_handler(
         })
         .unwrap_or_default();
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -3032,7 +3025,7 @@ pub async fn delete_channel_instance(
         }
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let config_path = home.join("config.toml");
 
     {
