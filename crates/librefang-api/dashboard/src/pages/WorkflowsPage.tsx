@@ -45,6 +45,8 @@ import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
 import { extractImageRefs } from "../lib/workflowOutputImages";
 import { WorkflowStepImageGallery } from "../components/WorkflowStepImageGallery";
+import { OperatorActionBar } from "../components/OperatorActionBar";
+import { PendingOperatorReviewsBanner } from "../components/PendingOperatorReviewsBanner";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
@@ -643,6 +645,20 @@ export function WorkflowsPage() {
         }
       />
 
+      {/* HITL pending-operator-reviews banner (#4977). Renders only when
+          there is at least one workflow run paused at an operator step.
+          Clicking a row jumps the user into that workflow's run-detail
+          panel so the `OperatorActionBar` inside it is on screen. */}
+      <PendingOperatorReviewsBanner
+        onSelectRun={(runId, workflowId) => {
+          setSelectedWorkflowId(workflowId);
+          setSelectedRunId(runId);
+          // Banner only shows on the workflows tab — flip back if the
+          // operator was browsing templates.
+          setActiveTab("workflows");
+        }}
+      />
+
       {/* Tabs */}
       <div role="tablist" aria-label={t("nav.workflows", { defaultValue: "Workflows" })} className="flex items-center gap-1 border-b border-border-subtle">
         <button
@@ -1110,6 +1126,13 @@ export function WorkflowsPage() {
                                   <AlertCircle className="w-3 h-3 text-error shrink-0 mt-0.5" />
                                   <p className="text-[10px] text-error">{runDetailQuery.data.error}</p>
                                 </div>
+                              )}
+                              {/* HITL operator-step action bar (#4977).
+                                  Renders only when the run is paused at an
+                                  operator step; renders nothing otherwise
+                                  (404/409 from the inspect endpoint). */}
+                              {runId && runDetailQuery.data.state === "paused" && (
+                                <OperatorActionBar runId={runId} />
                               )}
                               <StepAccordion
                                 steps={runDetailQuery.data.step_results}

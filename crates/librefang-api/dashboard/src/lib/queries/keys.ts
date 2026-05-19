@@ -177,6 +177,16 @@ export const workflowKeys = {
     [...workflowKeys.runDetails(), runId] as const,
   templates: (filters: { q?: string; category?: string } = {}) =>
     [...workflowKeys.all, "templates", filters] as const,
+  // HITL operator-step pauses (#4977). Two surfaces:
+  //   - `operatorPause(runId)` — single-run inspector behind the
+  //     workflow-run detail panel; returns the artifact + allowed
+  //     actions.
+  //   - `pendingOperator()` — worklist across all currently-paused
+  //     operator runs.
+  operatorAll: () => [...workflowKeys.all, "operator"] as const,
+  operatorPause: (runId: string) =>
+    [...workflowKeys.operatorAll(), "pause", runId] as const,
+  pendingOperator: () => [...workflowKeys.operatorAll(), "pending"] as const,
 };
 
 export const scheduleKeys = {

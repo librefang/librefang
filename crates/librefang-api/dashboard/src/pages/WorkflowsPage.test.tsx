@@ -8,12 +8,15 @@ import {
   useWorkflowRuns,
   useWorkflowRunDetail,
   useWorkflowTemplates,
+  usePendingOperatorRuns,
+  useWorkflowOperatorPause,
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
+  useResolveOperatorStep,
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 
@@ -23,6 +26,11 @@ vi.mock("../lib/queries/workflows", () => ({
   useWorkflowRuns: vi.fn(),
   useWorkflowRunDetail: vi.fn(),
   useWorkflowTemplates: vi.fn(),
+  // HITL operator-step hooks (#4977) — the banner + action bar mounted
+  // from WorkflowsPage import them, so the mock must expose every
+  // symbol or the page crashes at module load.
+  usePendingOperatorRuns: vi.fn(),
+  useWorkflowOperatorPause: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/workflows", () => ({
@@ -30,6 +38,9 @@ vi.mock("../lib/mutations/workflows", () => ({
   useDryRunWorkflow: vi.fn(),
   useDeleteWorkflow: vi.fn(),
   useInstantiateTemplate: vi.fn(),
+  // Resolution mutation pulled in by the OperatorActionBar — same
+  // reason as above.
+  useResolveOperatorStep: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/schedules", () => ({
@@ -66,10 +77,16 @@ const useWorkflowDetailMock = useWorkflowDetail as unknown as ReturnType<typeof 
 const useWorkflowRunsMock = useWorkflowRuns as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowRunDetailMock = useWorkflowRunDetail as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowTemplatesMock = useWorkflowTemplates as unknown as ReturnType<typeof vi.fn>;
+const usePendingOperatorRunsMock =
+  usePendingOperatorRuns as unknown as ReturnType<typeof vi.fn>;
+const useWorkflowOperatorPauseMock =
+  useWorkflowOperatorPause as unknown as ReturnType<typeof vi.fn>;
 const useRunWorkflowMock = useRunWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useDryRunWorkflowMock = useDryRunWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useDeleteWorkflowMock = useDeleteWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useInstantiateTemplateMock = useInstantiateTemplate as unknown as ReturnType<typeof vi.fn>;
+const useResolveOperatorStepMock =
+  useResolveOperatorStep as unknown as ReturnType<typeof vi.fn>;
 const useCreateScheduleMock = useCreateSchedule as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
@@ -159,6 +176,12 @@ describe("WorkflowsPage", () => {
     useWorkflowRunsMock.mockReturnValue(makeQuery([]));
     useWorkflowRunDetailMock.mockReturnValue(makeQuery(undefined));
     useWorkflowTemplatesMock.mockReturnValue(makeQuery([]));
+    // #4977: default the operator banner to an empty worklist so the
+    // existing assertions ("no banner rendered") still hold. Individual
+    // tests can override to surface pending rows.
+    usePendingOperatorRunsMock.mockReturnValue(makeQuery([]));
+    useWorkflowOperatorPauseMock.mockReturnValue(makeQuery(undefined));
+    useResolveOperatorStepMock.mockReturnValue(makeMutation());
   });
 
   it("renders loading skeleton while workflows query is loading", () => {
@@ -429,5 +452,43 @@ describe("WorkflowsPage", () => {
 
     expect(screen.queryByText("AlphaTpl")).not.toBeInTheDocument();
     expect(screen.getByText("BetaTpl")).toBeInTheDocument();
+  });
+
+  // ----- HITL operator-step banner (#4977) -----
+
+  it("does not render the pending-operator banner when the worklist is empty", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    usePendingOperatorRunsMock.mockReturnValue(makeQuery([]));
+    renderPage();
+    expect(
+      screen.queryByText(/awaiting operator review/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the pending-operator banner with row counts when the worklist has entries", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    usePendingOperatorRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          run_id: "11111111-1111-1111-1111-111111111111",
+          workflow_id: "wf-1",
+          workflow_name: "alpha-flow",
+          step_name: "review_draft",
+          operator_step_index: 1,
+          artifact: "draft body",
+          actions: ["approve", "reject"],
+          started_at: "2026-05-01T12:00:00Z",
+          paused_at: "2026-05-01T12:00:30Z",
+        },
+      ]),
+    );
+    renderPage();
+    // The banner header reflects the row count.
+    expect(
+      screen.getByText(/1 workflow run awaiting operator review/i),
+    ).toBeInTheDocument();
+    // The row surfaces the step name + action count badge.
+    expect(screen.getByText("review_draft")).toBeInTheDocument();
+    expect(screen.getByText(/2 actions/i)).toBeInTheDocument();
   });
 });

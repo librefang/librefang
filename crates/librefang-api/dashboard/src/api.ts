@@ -2295,6 +2295,83 @@ export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> 
   return get<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(runId)}`);
 }
 
+// ---------------------------------------------------------------------------
+// HITL operator-step pause inspection + resolution (#4977).
+//
+// Wire shape mirrors `OperatorAction` on the Rust side. Verbs are
+// snake_case (`approve` / `reject` / `edit` / `freeform_input` /
+// `provide_input`); `provide_input` carries the additional `field`
+// name. `edit` / `freeform_input` / `provide_input` require a non-empty
+// `payload`; the rest ignore it.
+// ---------------------------------------------------------------------------
+
+/** Discriminator for the action verbs the operator may invoke at a paused
+ *  operator step. Matches `OperatorAction` serde shape exactly. */
+export type OperatorActionVerb =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | "provide_input";
+
+/** One element of the `actions` array returned by the inspect endpoint. */
+export type OperatorActionDescriptor =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | { provide_input: { field: string } };
+
+/** Snapshot of a single paused operator-step pause — what the dashboard
+ *  renders to drive the action-button UI. */
+export interface OperatorPause {
+  /** Workflow run id (string-encoded `WorkflowRunId`). */
+  run_id: string;
+  /** Workflow definition id. */
+  workflow_id: string;
+  /** Workflow name (denormalised for the worklist row). */
+  workflow_name: string;
+  /** Name of the operator step holding the run paused. */
+  step_name: string;
+  /** Index of the operator step inside the workflow's step list. */
+  operator_step_index: number;
+  /** Output of the step that ran immediately before the operator step —
+   *  the thing the operator must review. */
+  artifact: string;
+  /** Actions the workflow author authorised at this step. */
+  actions: OperatorActionDescriptor[];
+  /** ISO-8601 run start time. */
+  started_at: string;
+  /** ISO-8601 pause time. Null only in the race window between pause and
+   *  state-write — treat as "just now" if missing. */
+  paused_at: string | null;
+}
+
+/** Fetch the operator pause for a single run. 404 if the run doesn't
+ *  exist, 409 (`{error: "not_operator_pause"}`) if the run is not paused
+ *  at an operator step — the HTTP layer's `request()` helper surfaces
+ *  both as thrown errors the caller can branch on. */
+export async function inspectOperatorPause(runId: string): Promise<OperatorPause> {
+  return get<OperatorPause>(`/api/workflows/runs/${encodeURIComponent(runId)}/operator`);
+}
+
+/** List every run currently paused at an operator step (oldest first). */
+export async function listPendingOperatorRuns(): Promise<OperatorPause[]> {
+  return get<OperatorPause[]>(`/api/workflows/operator/pending`);
+}
+
+/** Resolve a paused operator step with an action + optional payload.
+ *  Returns 200 immediately; the workflow continues asynchronously. */
+export async function resolveOperatorStep(
+  runId: string,
+  body: { action: OperatorActionVerb; payload?: string; field?: string },
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/workflows/runs/${encodeURIComponent(runId)}/operator`,
+    body,
+  );
+}
+
 export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
 }

@@ -7,8 +7,13 @@ import {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  resolveOperatorStep,
 } from "../http/client";
-import type { WorkflowItem, WorkflowRunInput } from "../../api";
+import type {
+  WorkflowItem,
+  WorkflowRunInput,
+  OperatorActionVerb,
+} from "../../api";
 import { workflowKeys } from "../queries/keys";
 
 function invalidateWorkflowLists(qc: ReturnType<typeof useQueryClient>) {
@@ -122,5 +127,46 @@ export function useSaveWorkflowAsTemplate() {
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
     onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
+  });
+}
+
+/** HITL operator-step resolution (#4977). Posts `{action, payload?, field?}`
+ *  to `POST /api/workflows/runs/:run_id/operator`. The endpoint replies
+ *  200 immediately and the run resumes asynchronously, so on success we
+ *  invalidate the operator-pause inspector + the worklist + the run
+ *  detail + the workflow's run list so every surface re-fetches the new
+ *  state. */
+export function useResolveOperatorStep() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      runId,
+      action,
+      payload,
+      field,
+    }: {
+      runId: string;
+      action: OperatorActionVerb;
+      payload?: string;
+      field?: string;
+    }) => resolveOperatorStep(runId, { action, payload, field }),
+    onSuccess: (_data, variables) => {
+      return Promise.all([
+        // The inspected pause is now resolved — drop it from cache so
+        // the action bar disappears.
+        qc.invalidateQueries({
+          queryKey: workflowKeys.operatorPause(variables.runId),
+        }),
+        // Whole operator worklist shifts.
+        qc.invalidateQueries({ queryKey: workflowKeys.pendingOperator() }),
+        // The run itself transitions Paused → Running (and shortly to
+        // Completed / Failed), so the detail panel needs a refresh.
+        qc.invalidateQueries({
+          queryKey: workflowKeys.runDetail(variables.runId),
+        }),
+        // Per-workflow run lists may surface the new state.
+        qc.invalidateQueries({ queryKey: workflowKeys.all }),
+      ]);
+    },
   });
 }

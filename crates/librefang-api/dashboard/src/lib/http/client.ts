@@ -118,6 +118,9 @@ export {
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
+  // workflows — HITL operator-step (#4977)
+  inspectOperatorPause,
+  listPendingOperatorRuns,
   // terminal
   getTerminalHealth,
   listTerminalWindows,
@@ -162,6 +165,10 @@ export type {
   ChannelInstance,
   ChannelInstancesResponse,
   SidecarSaveResult,
+  // workflows — HITL operator-step (#4977)
+  OperatorPause,
+  OperatorActionVerb,
+  OperatorActionDescriptor,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -303,6 +310,8 @@ export {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  // workflows — HITL operator-step resolution (#4977)
+  resolveOperatorStep,
   // terminal
   createTerminalWindow,
   renameTerminalWindow,
