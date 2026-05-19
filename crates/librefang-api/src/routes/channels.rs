@@ -1033,6 +1033,112 @@ fn sidecar_channel_rows(
     rows
 }
 
+/// One discoverable, first-party sidecar adapter shipped in the SDK.
+///
+/// `name` doubles as the catalog key — it must match the value the
+/// operator will put in `[[sidecar_channels]].channel_type` (or
+/// `name`, when `channel_type` is omitted), so a configured entry
+/// suppresses the matching catalog row in `sidecar_discovery_rows`.
+struct SidecarCatalogEntry {
+    name: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    config_template: &'static str,
+}
+
+/// First-party sidecar adapters shipped under
+/// `sdk/python/librefang/sidecar/adapters/`. Listed here so they stay
+/// discoverable on the dashboard channels page after migrating out of
+/// `CHANNEL_REGISTRY` (#5241 / #5224) — without an entry, an operator
+/// who has never configured them sees no card and no picker entry, so
+/// the only way to learn telegram / ntfy exist is to read source code
+/// or release notes. `webhook` is deliberately omitted: it still has an
+/// in-process entry in `CHANNEL_REGISTRY` and we must not show two
+/// "webhook" cards on the page.
+const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
+    SidecarCatalogEntry {
+        name: "telegram",
+        display_name: "Telegram",
+        description: "Telegram Bot API adapter (out-of-process sidecar)",
+        config_template: "\
+[[sidecar_channels]]
+name = \"telegram\"
+channel_type = \"telegram\"
+command = \"python3\"
+args = [\"-m\", \"librefang.sidecar.adapters.telegram\"]
+
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = \"...\"
+",
+    },
+    SidecarCatalogEntry {
+        name: "ntfy",
+        display_name: "ntfy",
+        description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
+        config_template: "\
+[[sidecar_channels]]
+name = \"ntfy\"
+channel_type = \"ntfy\"
+command = \"python3\"
+args = [\"-m\", \"librefang.sidecar.adapters.ntfy\"]
+
+[sidecar_channels.env]
+NTFY_TOPIC = \"...\"
+",
+    },
+];
+
+/// Synthesize **unconfigured** dashboard rows for catalog sidecar
+/// adapters (`telegram`, `ntfy`) so they remain discoverable in the
+/// Add picker after the out-of-process migration. A catalog entry is
+/// suppressed when ANY `[[sidecar_channels]]` already has a matching
+/// `channel_type` (or, when `channel_type` is unset, a matching `name`)
+/// — i.e. once the operator has set up "telegram" under whatever local
+/// alias, the discovery card has done its job and should yield to the
+/// configured rows emitted by [`sidecar_channel_rows`].
+fn sidecar_discovery_rows(
+    sidecar: &[librefang_types::config::SidecarChannelConfig],
+) -> Vec<serde_json::Value> {
+    let registry: std::collections::HashSet<&str> =
+        CHANNEL_REGISTRY.iter().map(|c| c.name).collect();
+    let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for sc in sidecar {
+        let kind = sc.channel_type.as_deref().unwrap_or(sc.name.as_str());
+        covered.insert(kind);
+        covered.insert(sc.name.as_str());
+    }
+    let mut rows = Vec::new();
+    for entry in SIDECAR_CATALOG {
+        // Guard against a future where the same name appears both
+        // in-process and in the catalog — never shadow CHANNEL_REGISTRY.
+        if registry.contains(entry.name) || covered.contains(entry.name) {
+            continue;
+        }
+        rows.push(serde_json::json!({
+            "name": entry.name,
+            "display_name": entry.display_name,
+            "icon": "SC",
+            "description": entry.description,
+            "category": "sidecar",
+            "difficulty": "",
+            "setup_time": "",
+            "quick_setup": "",
+            "setup_type": "sidecar",
+            "configured": false,
+            "instance_count": 0,
+            "has_token": false,
+            "fields": Vec::<serde_json::Value>::new(),
+            "setup_steps": [
+                "Runs as an out-of-process sidecar adapter",
+                "Add a [[sidecar_channels]] entry in config.toml \
+                 (Config \u{2192} Sidecar Channels) using the template below",
+            ],
+            "config_template": entry.config_template,
+        }));
+    }
+    rows
+}
+
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
@@ -1413,12 +1519,15 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     // Sidecar-backed channels (telegram / ntfy / …) are not in
     // CHANNEL_REGISTRY but are still channels — surface the configured
-    // ones so the operator view stays consistent (#5241 / #5224).
+    // ones so the operator view stays consistent (#5241 / #5224), and
+    // emit unconfigured catalog rows for the first-party SDK adapters
+    // so they remain discoverable in the Add picker.
     {
         let kcfg = state.kernel.config_ref();
         let rows = sidecar_channel_rows(&kcfg.sidecar_channels, &msgs_24h, true);
         configured_count += rows.len() as u32;
         channels.extend(rows);
+        channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
     }
 
     let total = channels.len();
@@ -1482,7 +1591,8 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
     }
 
     // Sidecar-backed channels — keep the snapshot consistent with
-    // /api/channels (#5241 / #5224).
+    // /api/channels (#5241 / #5224), including the unconfigured
+    // catalog rows for first-party SDK adapters.
     {
         let kcfg = state.kernel.config_ref();
         channels.extend(sidecar_channel_rows(
@@ -1490,6 +1600,7 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
             &std::collections::HashMap::new(),
             false,
         ));
+        channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
     }
 
     channels

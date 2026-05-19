@@ -293,14 +293,23 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
               /api/channels configure/test endpoint (those are
               CHANNEL_REGISTRY-only and 404 for a sidecar name), so show
               a read-only note pointing at where they ARE managed
-              instead of broken Configure/Test buttons. */}
+              instead of broken Configure/Test buttons. For unconfigured
+              discovery rows we additionally render the TOML snippet so
+              the operator can copy it into config.toml directly. */}
           {channel.category === "sidecar" ? (
-            <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
-              <p className="text-xs text-text-dim">
-                Runs as an out-of-process sidecar adapter. Manage it in
-                config.toml (<code className="font-mono">[[sidecar_channels]]</code>)
-                — Config → Sidecar Channels.
-              </p>
+            <div className="space-y-3">
+              <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
+                <p className="text-xs text-text-dim">
+                  {channel.configured
+                    ? <>Runs as an out-of-process sidecar adapter. Manage it in config.toml (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels.</>
+                    : <>This adapter ships as an out-of-process sidecar. Paste the snippet below into <code className="font-mono">~/.librefang/config.toml</code>, set the required env vars, and reload — then it will appear here as configured.</>}
+                </p>
+              </div>
+              {!channel.configured && channel.config_template && (
+                <pre className="p-4 rounded-xl bg-main/30 border border-border-subtle text-[11px] font-mono text-text-main whitespace-pre overflow-x-auto select-all">
+                  {channel.config_template}
+                </pre>
+              )}
             </div>
           ) : (
             <div className="flex gap-2 pt-2">
@@ -1027,7 +1036,12 @@ export function ChannelsPage() {
   };
   const handlePick = (ch: Channel) => {
     setPickerOpen(false);
-    if (ch.setup_type === "qr") setQrLoginChannel(ch);
+    // Sidecar discovery rows have no in-process configure endpoint
+    // (Configure would 404 against CHANNEL_REGISTRY); the details modal
+    // already renders the read-only "manage via config.toml" note for
+    // category === "sidecar" — route the pick there.
+    if (ch.category === "sidecar") setDetailsChannel(ch);
+    else if (ch.setup_type === "qr") setQrLoginChannel(ch);
     else setConfiguringChannel(ch);
   };
 
