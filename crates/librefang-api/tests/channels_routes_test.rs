@@ -132,6 +132,70 @@ async fn boot_with_channels(channels: ChannelsConfig) -> Harness {
     }
 }
 
+/// Harness + a `LIBREFANG_HOME` drop-guard wired to the same tempdir the
+/// MockKernel uses as `home_dir_boot`. The sidecar-configure handler reads
+/// `LIBREFANG_HOME` to resolve `secrets.env` / `config.toml`, and the
+/// kernel's `reload_config()` reads `home_dir_boot.join("config.toml")` —
+/// pointing the env var at the kernel's own tempdir keeps the two paths
+/// in sync so the write and the subsequent reload see the same file.
+///
+/// Callers MUST hold `SIDECAR_CACHE_LOCK` for the lifetime of the
+/// returned `TempHomeHarness` because `std::env::set_var` is
+/// process-global and the schema-cache seed is process-static.
+struct TempHomeHarness {
+    h: Harness,
+    home: std::path::PathBuf,
+    prev: Option<String>,
+}
+
+impl TempHomeHarness {
+    fn home_dir(&self) -> &Path {
+        &self.home
+    }
+}
+
+impl Drop for TempHomeHarness {
+    fn drop(&mut self) {
+        // SAFETY: serialised via `SIDECAR_CACHE_LOCK` held by the caller.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for TempHomeHarness {
+    type Target = Harness;
+    fn deref(&self) -> &Harness {
+        &self.h
+    }
+}
+
+async fn boot_with_temp_home() -> TempHomeHarness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let home = test.tmp_path().to_path_buf();
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::channels::router())
+        .with_state(state.clone());
+    let prev = std::env::var("LIBREFANG_HOME").ok();
+    // SAFETY: serialised via `SIDECAR_CACHE_LOCK` held by the caller.
+    unsafe {
+        std::env::set_var("LIBREFANG_HOME", &home);
+    }
+    TempHomeHarness {
+        h: Harness {
+            app,
+            _state: state,
+            _test: test,
+        },
+        home,
+        prev,
+    }
+}
+
 async fn json_request(
     h: &Harness,
     method: Method,
@@ -1189,4 +1253,145 @@ async fn channels_list_discovery_row_hidden_when_kind_configured() {
             .any(|r| r["name"] == "ntfy" && r["configured"] == false),
         "ntfy discovery row remains when only telegram is configured"
     );
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/channels/sidecar/{name}/configure
+// ---------------------------------------------------------------------------
+
+/// Build a synthetic telegram schema with one required secret + one
+/// optional list field. Used by the configure-sidecar tests below so they
+/// don't depend on `pip install -e sdk/python` being available on CI.
+fn telegram_schema_with_required_secret() -> librefang_api::routes::sidecar_describe::SidecarSchema
+{
+    librefang_api::routes::sidecar_describe::SidecarSchema {
+        name: "telegram".into(),
+        display_name: "Telegram".into(),
+        description: "Telegram Bot API adapter".into(),
+        fields: vec![
+            librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "TELEGRAM_BOT_TOKEN".into(),
+                label: "Bot Token".into(),
+                field_type: "secret".into(),
+                required: true,
+                placeholder: "".into(),
+                advanced: false,
+                options: None,
+            },
+            librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "ALLOWED_USERS".into(),
+                label: "Allowed Users".into(),
+                field_type: "list".into(),
+                required: false,
+                placeholder: "".into(),
+                advanced: false,
+                options: None,
+            },
+        ],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
+    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({
+        "values": {
+            "TELEGRAM_BOT_TOKEN": "secret-123",
+            "ALLOWED_USERS": "1,2,3",
+        }
+    });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {resp}");
+    assert_eq!(resp["status"], "saved");
+
+    // Verify side effects on disk.
+    let home = h.home_dir();
+    let secrets = std::fs::read_to_string(home.join("secrets.env")).expect("secrets.env exists");
+    assert!(
+        secrets.contains("TELEGRAM_BOT_TOKEN=secret-123"),
+        "secret must land in secrets.env: {secrets}"
+    );
+    assert!(
+        !secrets.contains("ALLOWED_USERS"),
+        "non-secret fields must NOT land in secrets.env: {secrets}"
+    );
+
+    let toml = std::fs::read_to_string(home.join("config.toml")).expect("config.toml exists");
+    assert!(toml.contains("[[sidecar_channels]]"), "toml: {toml}");
+    assert!(toml.contains("name = \"telegram\""), "toml: {toml}");
+    assert!(
+        toml.contains("ALLOWED_USERS = \"1,2,3\""),
+        "non-secret must land under [sidecar_channels.env]: {toml}"
+    );
+    assert!(
+        !toml.contains("TELEGRAM_BOT_TOKEN"),
+        "secrets must NOT leak into config.toml: {toml}"
+    );
+
+    // Clear cache so sibling tests are not polluted by this seed.
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_missing_required_returns_400() {
+    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({ "values": { "ALLOWED_USERS": "1" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {resp}");
+    assert!(
+        resp.to_string().contains("TELEGRAM_BOT_TOKEN"),
+        "error body must name the missing field: {resp}"
+    );
+    // No disk side effect when validation rejects.
+    assert!(
+        !h.home_dir().join("secrets.env").exists(),
+        "secrets.env must not be created on validation failure"
+    );
+    assert!(
+        !h.home_dir().join("config.toml").exists(),
+        "config.toml must not be created on validation failure"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_unknown_name_returns_404() {
+    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({ "values": {} });
+    let (status, _resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/nonexistent/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

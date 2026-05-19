@@ -45,6 +45,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/registry",
             axum::routing::get(list_channel_registry),
         )
+        .route(
+            "/channels/sidecar/{name}/configure",
+            axum::routing::post(configure_sidecar_channel),
+        )
 }
 
 use super::skills::{
@@ -1207,6 +1211,145 @@ fn sidecar_discovery_rows(
         }));
     }
     rows
+}
+
+/// Request body for `POST /api/channels/sidecar/{name}/configure`.
+///
+/// `values` is a flat `key → string` map where each key matches a
+/// `SidecarSchemaField.key` returned by the sidecar's `--describe`.
+/// The endpoint splits the map by `field_type`: `secret` fields are
+/// written line-by-line to `~/.librefang/secrets.env`, every other
+/// field is written under `[sidecar_channels.env]` in
+/// `~/.librefang/config.toml`. All current first-party sidecar field
+/// types (text, secret, list, bool, select) are stringly representable,
+/// so a flat `HashMap<String, String>` is sufficient — payload-typed
+/// fields (numbers etc.) would need a richer shape.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ConfigureSidecarBody {
+    pub values: HashMap<String, String>,
+}
+
+/// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
+/// sidecar form values, splitting the payload across `secrets.env` and
+/// `config.toml`, then trigger a hot-reload so the kernel picks up the
+/// new `[[sidecar_channels]]` block without a restart. `name` is the
+/// `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).
+#[utoipa::path(
+    post,
+    path = "/api/channels/sidecar/{name}/configure",
+    tag = "channels",
+    request_body = ConfigureSidecarBody,
+    params(
+        ("name" = String, Path, description = "Sidecar catalog name (e.g. telegram, ntfy)")
+    ),
+    responses(
+        (status = 200, description = "Saved; reload plan returned", body = crate::types::JsonObject),
+        (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
+        (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
+    )
+)]
+pub async fn configure_sidecar_channel(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigureSidecarBody>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // 1. Catalog lookup — only first-party adapters listed in
+    //    SIDECAR_CATALOG can be configured through this endpoint.
+    let entry = SIDECAR_CATALOG
+        .iter()
+        .find(|e| e.name == name)
+        .ok_or_else(|| {
+            ApiErrorResponse::not_found(format!("no sidecar adapter named `{name}`"))
+                .into_json_tuple()
+        })?;
+
+    // 2. Pull the cached `--describe` schema. Without it we can't
+    //    validate required fields or split secret-vs-nonsecret.
+    let schema = schema_cache()
+        .read()
+        .unwrap()
+        .get(entry.name)
+        .cloned()
+        .ok_or_else(|| {
+            ApiErrorResponse::internal(format!(
+                "schema for `{name}` not cached — SDK module may be missing or `--describe` failed at boot"
+            ))
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .into_json_tuple()
+        })?;
+
+    // 3. Validate required fields: present in payload AND non-empty after trim.
+    for f in &schema.fields {
+        if f.required {
+            let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
+            if v.is_empty() {
+                return Err(ApiErrorResponse::bad_request(format!(
+                    "required field `{}` is missing or empty",
+                    f.key
+                ))
+                .into_json_tuple());
+            }
+        }
+    }
+
+    // 4. Split payload: secrets go to secrets.env, everything else
+    //    accumulates into the [sidecar_channels.env] table.
+    let home = librefang_home();
+    let secrets_path = home.join("secrets.env");
+    let mut nonsecret_env: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for f in &schema.fields {
+        let Some(raw) = body.values.get(&f.key) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if f.field_type == "secret" {
+            super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
+                ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                    .into_json_tuple()
+            })?;
+        } else {
+            nonsecret_env.insert(f.key.clone(), trimmed.to_string());
+        }
+    }
+
+    // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
+    //    Idempotent: a second POST with the same name replaces the
+    //    block in-place, preserving formatting of every other section.
+    let config_path = home.join("config.toml");
+    super::sidecar_toml::upsert_sidecar_block(
+        &config_path,
+        entry.name,
+        entry.name, // channel_type defaults to the catalog name
+        entry.command,
+        entry.args,
+        &nonsecret_env,
+    )
+    .map_err(|e| {
+        ApiErrorResponse::internal(format!("failed to write config.toml: {e}")).into_json_tuple()
+    })?;
+
+    // 6. Trigger hot-reload. The kernel diffs the on-disk config
+    //    against the live snapshot and returns the resulting plan;
+    //    the dashboard surfaces `restart_required` so the operator
+    //    knows whether further action is needed.
+    let plan = state.kernel.reload_config().await.map_err(|e| {
+        ApiErrorResponse::internal(format!("config reload failed: {e}")).into_json_tuple()
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "saved",
+        "hot_actions_applied": plan
+            .hot_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>(),
+        "restart_required": plan.restart_required,
+    })))
 }
 
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
