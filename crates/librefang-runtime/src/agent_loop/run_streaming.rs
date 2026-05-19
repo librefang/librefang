@@ -1027,6 +1027,7 @@ pub async fn run_agent_loop_streaming(
                         user_message,
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
+                        sender_channel: sender_channel.as_deref(),
                         streaming: true,
                         opts,
                     },

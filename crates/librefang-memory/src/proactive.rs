@@ -31,10 +31,11 @@ use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    text_similarity, DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern,
-    MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor, MemoryFilter, MemoryId,
-    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
-    ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
+    memory_scope_allows_recall, text_similarity, DefaultMemoryExtractor, Entity, EntityType,
+    ExtractionResult, GraphPattern, MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor,
+    MemoryFilter, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
+    ProactiveMemoryConfig, ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
+    CHAT_SCOPE_METADATA_KEY,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -2247,6 +2248,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         user_id: &str,
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
+        chat_scope: Option<&str>,
     ) -> LibreFangResult<ExtractionResult> {
         let cfg = self
             .config
@@ -2311,6 +2313,23 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             enriched
                 .metadata
                 .insert("auto_memorize".to_string(), serde_json::json!(true));
+            // #5227: stamp the originating chat scope so a memory
+            // extracted from one chat (e.g. a WhatsApp group) cannot be
+            // recalled into another chat (e.g. a DM with the same peer)
+            // by `auto_retrieve`. User-level memories that should cross
+            // chats (e.g. `MemoryLevel::User` set by the LLM extractor or
+            // stable preferences) deliberately get their scope stamped
+            // here too — the recall filter exempts `MemoryLevel::User`
+            // separately, so the tag is harmless for them and crucial
+            // for `MemoryLevel::Session` (the default).
+            if let Some(scope) = chat_scope {
+                if !scope.is_empty() {
+                    enriched.metadata.insert(
+                        CHAT_SCOPE_METADATA_KEY.to_string(),
+                        serde_json::Value::String(scope.to_string()),
+                    );
+                }
+            }
 
             match self.add_with_decision(agent_id, &enriched, peer_id).await {
                 Ok(Some(result)) => {
@@ -2383,6 +2402,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         user_id: &str,
         query: &str,
         peer_id: Option<&str>,
+        chat_scope: Option<&str>,
     ) -> LibreFangResult<Vec<MemoryItem>> {
         let cfg = self
             .config
@@ -2405,20 +2425,67 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             f
         });
 
+        // #5227: when an active chat_scope is supplied, fetch a wider
+        // candidate set so the post-filter (which drops memories tagged
+        // for a *different* chat) is unlikely to starve the caller of
+        // results. The semantic store ranks/orders candidates the same
+        // way regardless of LIMIT, so an enlarged fetch followed by a
+        // local truncate preserves ranking semantics. A 4× factor with a
+        // 50-row floor handles the worst observed mixing ratio in the
+        // bug reproducer (DM and group turns interleaving within minutes
+        // for the same agent+peer).
+        let chat_scope_active = chat_scope.map(str::trim).is_some_and(|s| !s.is_empty());
+        let fetch_limit = if chat_scope_active {
+            (cfg.max_retrieve * 4).max(50)
+        } else {
+            cfg.max_retrieve
+        };
+
         // Search across all memory levels — use vector search if available
         let results = if let Some(ref emb) = self.embedding {
             if let Ok(qe) = emb.embed_one(query).await {
                 self.semantic
-                    .recall_with_embedding(query, cfg.max_retrieve, filter, Some(&qe))?
+                    .recall_with_embedding(query, fetch_limit, filter, Some(&qe))?
             } else {
-                self.semantic.recall(query, cfg.max_retrieve, filter)?
+                self.semantic.recall(query, fetch_limit, filter)?
             }
         } else {
-            self.semantic.recall(query, cfg.max_retrieve, filter)?
+            self.semantic.recall(query, fetch_limit, filter)?
         };
 
-        Ok(results.into_iter().map(MemoryItem::from_fragment).collect())
+        let items: Vec<MemoryItem> = results.into_iter().map(MemoryItem::from_fragment).collect();
+
+        // Apply the cross-chat isolation filter (#5227) before truncating
+        // to `max_retrieve`. Three classes of memory survive the filter:
+        //   1. `MemoryLevel::User` — explicitly stable per-user facts;
+        //      always cross-chat by design.
+        //   2. Memories with no `chat_scope` tag — legacy rows from
+        //      before this fix landed, plus any memory written through
+        //      a non-channel path (direct API, dashboard); treat as
+        //      chat-agnostic to avoid silently hiding existing data.
+        //   3. Memories whose `chat_scope` equals the active scope —
+        //      same chat, same context, safe to surface.
+        let filtered: Vec<MemoryItem> = if chat_scope_active {
+            let want = chat_scope.unwrap();
+            items
+                .into_iter()
+                .filter(|m| memory_chat_scope_allows(m, want))
+                .take(cfg.max_retrieve)
+                .collect()
+        } else {
+            items.into_iter().take(cfg.max_retrieve).collect()
+        };
+
+        Ok(filtered)
     }
+}
+
+/// Thin adapter over `memory_scope_allows_recall` for `MemoryItem`,
+/// which carries the level enum instead of the storage scope string.
+/// Kept private to `proactive` so callers outside this crate use the
+/// canonical predicate in `librefang-types` directly.
+fn memory_chat_scope_allows(memory: &MemoryItem, current: &str) -> bool {
+    memory_scope_allows_recall(memory.level.scope_str(), &memory.metadata, current)
 }
 
 #[cfg(test)]
@@ -2497,6 +2564,7 @@ mod tests {
                     "content": "I prefer dark mode for all my editors"
                 })],
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2523,6 +2591,7 @@ mod tests {
                     "content": "I prefer to help you with that"
                 })],
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2547,10 +2616,253 @@ mod tests {
 
         // Retrieve - should find content from this agent
         let results = store
-            .auto_retrieve(&agent_id, "dark mode", None)
+            .auto_retrieve(&agent_id, "dark mode", None, None)
             .await
             .unwrap();
         assert!(!results.is_empty());
+    }
+
+    /// #5227 — `auto_retrieve` must hide memories tagged with a
+    /// **different** `chat_scope` from the active recall, while still
+    /// surfacing chat-agnostic and user-level memories. Writes are made
+    /// directly through `semantic.remember_with_embedding_and_peer` so the
+    /// test exercises the recall-side filter without coupling to the
+    /// `DefaultMemoryExtractor`'s rule-based level assignment (which
+    /// over-uses `MemoryLevel::User` and would otherwise mask the bug —
+    /// in production the LLM extractor defaults to `MemoryLevel::Session`,
+    /// matching what this test stamps explicitly).
+    #[tokio::test]
+    async fn test_auto_retrieve_cross_chat_isolation_5227() {
+        use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let peer = "+15551234567";
+        let dm_scope = "whatsapp:+15551234567@s.whatsapp.net";
+        let group_scope = "whatsapp:9999@g.us";
+
+        // Helper — write a session-level memory stamped with `scope`.
+        let write_scoped = |content: &str, scope: Option<&str>| {
+            let mut meta = std::collections::HashMap::new();
+            if let Some(s) = scope {
+                meta.insert(
+                    CHAT_SCOPE_METADATA_KEY.to_string(),
+                    serde_json::Value::String(s.to_string()),
+                );
+            }
+            store
+                .semantic
+                .remember_with_embedding_and_peer(
+                    agent_id,
+                    content,
+                    MemorySource::Conversation,
+                    MemoryLevel::Session.scope_str(),
+                    meta,
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                    Some(peer),
+                )
+                .unwrap();
+        };
+
+        // 1. Group-scoped session memory (the contamination source).
+        write_scoped(
+            "Discussed shipping project Atlas by Friday in the group",
+            Some(group_scope),
+        );
+        // 2. Legacy memory written before #5227 — no scope tag.
+        write_scoped("I prefer dark mode for all editors", None);
+        // 3. User-level memory written from the DM (should cross chats).
+        let mut user_meta = std::collections::HashMap::new();
+        user_meta.insert(
+            CHAT_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String(dm_scope.to_string()),
+        );
+        store
+            .semantic
+            .remember_with_embedding_and_peer(
+                agent_id,
+                "User's name is John",
+                MemorySource::Conversation,
+                MemoryLevel::User.scope_str(),
+                user_meta,
+                None,
+                None,
+                None,
+                Default::default(),
+                Some(peer),
+            )
+            .unwrap();
+
+        // DM-scoped recall must NOT see the group-scoped Atlas memory.
+        let dm_hits = store
+            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(dm_scope))
+            .await
+            .unwrap();
+        for c in dm_hits.iter().map(|m| m.content.as_str()) {
+            assert!(
+                !c.contains("Atlas"),
+                "regression: group-scoped memory leaked into DM recall: {c:?}"
+            );
+        }
+
+        // Conversely, when recalled with the matching scope, the group
+        // memory must still surface (the filter must not over-prune).
+        let group_hits = store
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(group_scope),
+            )
+            .await
+            .unwrap();
+        assert!(
+            group_hits.iter().any(|m| m.content.contains("Atlas")),
+            "scope-matching recall must surface the group memory; got {:?}",
+            group_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+
+        // Legacy unscoped memory crosses chats — both recalls hit it.
+        let legacy_in_dm = store
+            .auto_retrieve(&agent_id_str, "dark mode", Some(peer), Some(dm_scope))
+            .await
+            .unwrap();
+        assert!(
+            legacy_in_dm.iter().any(|m| m.content.contains("dark mode")),
+            "legacy unscoped memory must remain recallable cross-chat"
+        );
+
+        // User-level memory crosses chats too — its stamped scope is
+        // ignored because of the level-User exemption.
+        let user_in_group = store
+            .auto_retrieve(&agent_id_str, "John", Some(peer), Some(group_scope))
+            .await
+            .unwrap();
+        assert!(
+            user_in_group.iter().any(|m| m.content.contains("John")),
+            "user-level memory must remain recallable cross-chat"
+        );
+
+        // When chat_scope is None (no channel context — e.g. dashboard,
+        // direct API), the filter is a no-op and everything is visible.
+        let unscoped = store
+            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), None)
+            .await
+            .unwrap();
+        assert!(
+            unscoped.iter().any(|m| m.content.contains("Atlas")),
+            "no-scope recall must preserve legacy behaviour"
+        );
+    }
+
+    /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto
+    /// stored memories so the recall filter has something to act on.
+    /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a
+    /// `MemoryLevel::User` memory; that's fine — the assertion is only
+    /// about the metadata key being present and equal to the scope
+    /// supplied by the caller. (Level-User exemption is verified
+    /// separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
+    #[tokio::test]
+    async fn test_auto_memorize_stamps_chat_scope_5227() {
+        use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let substrate = Arc::new(substrate);
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let peer = "+15551234567";
+        let group_scope = "whatsapp:9999@g.us";
+
+        let result = store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer dark mode"
+                })],
+                Some(peer),
+                Some(group_scope),
+            )
+            .await
+            .unwrap();
+        assert!(result.has_content, "extractor must produce a memory");
+
+        // Fetch what landed in the substrate and assert the metadata key
+        // matches the scope we passed in.
+        let mut filter = MemoryFilter::agent(agent_id);
+        filter.peer_id = Some(peer.to_string());
+        let stored = substrate
+            .recall_with_embedding_async("dark mode", 10, Some(filter), None)
+            .await
+            .unwrap();
+        assert!(!stored.is_empty(), "memory must be persisted");
+        let with_scope: Vec<_> = stored
+            .iter()
+            .filter(|f| {
+                f.metadata
+                    .get(CHAT_SCOPE_METADATA_KEY)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == group_scope)
+            })
+            .collect();
+        assert!(
+            !with_scope.is_empty(),
+            "stored memory must carry the originating chat_scope metadata; \
+             actual metadata: {:?}",
+            stored.iter().map(|f| &f.metadata).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_memory_chat_scope_allows_predicate() {
+        use librefang_types::memory::{MemoryItem, MemoryLevel, CHAT_SCOPE_METADATA_KEY};
+
+        let mk = |level: MemoryLevel, scope: Option<&str>| {
+            let mut m = MemoryItem::new("c".into(), level);
+            if let Some(s) = scope {
+                m.metadata.insert(
+                    CHAT_SCOPE_METADATA_KEY.to_string(),
+                    serde_json::Value::String(s.to_string()),
+                );
+            }
+            m
+        };
+
+        // User level always passes.
+        assert!(memory_chat_scope_allows(
+            &mk(MemoryLevel::User, Some("group")),
+            "dm"
+        ));
+
+        // No tag passes (legacy / chat-agnostic).
+        assert!(memory_chat_scope_allows(
+            &mk(MemoryLevel::Session, None),
+            "dm"
+        ));
+
+        // Matching tag passes.
+        assert!(memory_chat_scope_allows(
+            &mk(MemoryLevel::Session, Some("dm")),
+            "dm"
+        ));
+
+        // Non-matching tag is blocked.
+        assert!(!memory_chat_scope_allows(
+            &mk(MemoryLevel::Session, Some("group")),
+            "dm"
+        ));
+
+        // Non-string sentinel = treated as missing (defensive).
+        let mut m = MemoryItem::new("c".into(), MemoryLevel::Session);
+        m.metadata
+            .insert(CHAT_SCOPE_METADATA_KEY.to_string(), serde_json::Value::Null);
+        assert!(memory_chat_scope_allows(&m, "dm"));
     }
 
     #[tokio::test]
@@ -2996,6 +3308,7 @@ mod tests {
                     "content": "I work at Google"
                 })],
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3019,6 +3332,7 @@ mod tests {
                     "role": "user",
                     "content": "I use vim for editing"
                 })],
+                None,
                 None,
             )
             .await

@@ -277,6 +277,22 @@ pub(super) fn select_running_experiment(
 }
 
 pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
+    // #5227: when an active chat scope is supplied, ask the substrate for
+    // a wider candidate window so the per-scope post-filter below has
+    // enough headroom to keep `MEMORY_RECALL_LIMIT` legitimate results.
+    // Without the inflation a substrate query that returns ~5 memories
+    // all stamped for the *other* chat would leave zero results after
+    // filtering. Matches the inflation factor used by `auto_retrieve`.
+    const MEMORY_RECALL_LIMIT: usize = 5;
+    let chat_scope_active = ctx
+        .sender_channel
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let recall_fetch_limit = if chat_scope_active {
+        (MEMORY_RECALL_LIMIT * 4).max(50)
+    } else {
+        MEMORY_RECALL_LIMIT
+    };
     let mut memories = if let Some(engine) = ctx.context_engine {
         recall_or_default(
             engine
@@ -303,7 +319,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                     ctx.memory
                         .recall_with_embedding_async(
                             ctx.user_message,
-                            5,
+                            recall_fetch_limit,
                             Some(MemoryFilter {
                                 agent_id: Some(ctx.session.agent_id),
                                 peer_id: ctx.sender_user_id.map(str::to_owned),
@@ -329,7 +345,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                     ctx.memory
                         .recall(
                             ctx.user_message,
-                            5,
+                            recall_fetch_limit,
                             Some(MemoryFilter {
                                 agent_id: Some(ctx.session.agent_id),
                                 peer_id: ctx.sender_user_id.map(str::to_owned),
@@ -350,7 +366,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             ctx.memory
                 .recall(
                     ctx.user_message,
-                    5,
+                    recall_fetch_limit,
                     Some(MemoryFilter {
                         agent_id: Some(ctx.session.agent_id),
                         peer_id: ctx.sender_user_id.map(str::to_owned),
@@ -365,6 +381,20 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             },
         )
     };
+
+    // #5227: drop fragments whose stored `chat_scope` belongs to a
+    // different chat (same agent + same peer, different conversation).
+    // `MemoryLevel::User` and untagged legacy rows pass through. The
+    // context-engine `ingest` path also funnels here so its results get
+    // filtered too — engines that perform their own scope filtering can
+    // pass `chat_scope` upstream and this becomes a no-op for them.
+    if chat_scope_active {
+        let want = ctx.sender_channel.unwrap();
+        memories.retain(|frag| {
+            librefang_types::memory::memory_scope_allows_recall(&frag.scope, &frag.metadata, want)
+        });
+    }
+    memories.truncate(MEMORY_RECALL_LIMIT);
 
     // Fork turns skip auto_retrieve: (a) it would add memory fragments
     // to the prompt that the parent turn didn't have, breaking byte-
@@ -389,7 +419,12 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                 Some(g) => match g.check_read("proactive") {
                     librefang_memory::namespace_acl::NamespaceGate::Allow => {
                         let mut items = pm_store_arc
-                            .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                            .auto_retrieve(
+                                &user_id,
+                                ctx.user_message,
+                                ctx.sender_user_id,
+                                ctx.sender_channel,
+                            )
                             .await;
                         if let Ok(ref mut its) = items {
                             g.redact_all(its);
@@ -403,7 +438,12 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                 },
                 None => {
                     pm_store_arc
-                        .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                        .auto_retrieve(
+                            &user_id,
+                            ctx.user_message,
+                            ctx.sender_user_id,
+                            ctx.sender_channel,
+                        )
                         .await
                 }
             };
