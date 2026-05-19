@@ -76,6 +76,8 @@ export {
   getModelOverrides,
   // providers
   listProviders,
+  // credential pools (#4965)
+  listCredentialPools,
   // network / peers / a2a
   getNetworkStatus,
   listPeers,

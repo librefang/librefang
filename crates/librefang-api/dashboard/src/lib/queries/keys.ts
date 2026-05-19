@@ -69,6 +69,15 @@ export const providerKeys = {
   lists: () => [...providerKeys.all, "list"] as const,
 };
 
+// Credential pools (#4965) — per-provider multi-key rotation status. Kept
+// hierarchical so an invalidate on `credentialPoolKeys.all` clears every
+// pool query after a mutation (future `auth pool add` / `strategy` HTTP
+// endpoint will live alongside `useCredentialPools`).
+export const credentialPoolKeys = {
+  all: ["credentialPools"] as const,
+  lists: () => [...credentialPoolKeys.all, "list"] as const,
+};
+
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,

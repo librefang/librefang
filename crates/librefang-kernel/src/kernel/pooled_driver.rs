@@ -61,14 +61,15 @@ impl PooledDriver {
 
     /// Classify a driver error and report it to the credential pool.
     ///
-    /// Classification policy:
-    /// - `RateLimit` (429): mark exhausted (caller already retried once for
-    ///   `complete()`; `stream()` has no retry).
-    /// - `CreditExhausted` (402): mark exhausted (1h cooldown).
-    /// - `AuthError` (401/bad key): mark **permanently** exhausted — the key
-    ///   is invalid and must be replaced outside the pool.
-    /// - `HttpError` (other 4xx/5xx including 403): mark exhausted — treat
-    ///   any provider-side error as a reason to rotate.
+    /// Classification policy (issue #4965 error decision matrix):
+    /// - `RateLimit` (429): mark exhausted — 1h cooldown (caller already
+    ///   retried once for `complete()`; `stream()` has no retry).
+    /// - `CreditExhausted` (402): mark credit-exhausted — 24h cooldown
+    ///   (quota refresh windows are typically daily).
+    /// - `AuthError` (401/403/bad key): mark **permanently** exhausted — the
+    ///   key is invalid and must be replaced outside the pool.
+    /// - `HttpError` (other 4xx/5xx): mark exhausted — treat any provider-
+    ///   side error as a reason to rotate.
     /// - `ModelUnavailable` / `Timeout`: don't mark the key — these are
     ///   provider-side issues, not key-specific.
     /// - `ContextTooLong` / `Unknown` / `ChainExhausted`: propagate without
@@ -80,7 +81,9 @@ impl PooledDriver {
                 self.pool.mark_exhausted(api_key);
             }
             FailoverReason::CreditExhausted => {
-                self.pool.mark_exhausted(api_key);
+                // 402 — quota / credits depleted. Issue #4965 spec: 24h
+                // cooldown to ride out the typical daily quota window.
+                self.pool.mark_credit_exhausted(api_key);
             }
             FailoverReason::AuthError => {
                 self.pool.mark_permanent(api_key);
@@ -171,5 +174,148 @@ impl LlmDriver for PooledDriver {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Behaviour tests for the `handle_driver_error` classification matrix —
+    //! exercises the issue #4965 error → rotation decision table directly
+    //! against a real `CredentialPool`, without needing to spin up a fake
+    //! HTTP server. We use a no-op driver constructor (the actual driver
+    //! handles aren't invoked here — only the error-classifier path).
+    //!
+    //! Full end-to-end coverage of the retry-on-429 + rotation flow happens
+    //! in the `librefang-llm-drivers::credential_pool::tests` module (which
+    //! is provider-agnostic) and in the `credential_pools_routes_test`
+    //! integration test (which exercises the HTTP surface).
+    use librefang_llm_driver::llm_errors::FailoverReason;
+    use librefang_llm_driver::LlmError;
+    use librefang_llm_drivers::{new_arc_pool, PoolStrategy};
+    use librefang_runtime::drivers::DriverCache;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn make_pooled() -> super::PooledDriver {
+        let pool = new_arc_pool(
+            vec![
+                ("key-a".to_string(), 10),
+                ("key-b".to_string(), 5),
+            ],
+            PoolStrategy::FillFirst,
+        );
+        let base_config = librefang_llm_driver::DriverConfig {
+            provider: "test-provider".to_string(),
+            api_key: None,
+            base_url: None,
+            ..Default::default()
+        };
+        super::PooledDriver::new(pool, Arc::new(DriverCache::new()), base_config)
+    }
+
+    /// 429 marks the key exhausted with the standard (1h) cooldown. Issue #4965
+    /// row 1: a 429 the kernel sees after retry-once also flips the key into
+    /// cooldown so FillFirst rolls forward to the next priority.
+    #[test]
+    fn rate_limit_marks_exhausted_short_cooldown() {
+        let p = make_pooled();
+        let err = LlmError::Api {
+            status: 429,
+            message: "Too many requests".into(),
+            code: None,
+        };
+        assert!(matches!(err.failover_reason(), FailoverReason::RateLimit(_)));
+        p.handle_driver_error("key-a", &err);
+        // FillFirst now picks key-b (priority 5) because key-a is in cooldown.
+        let snap = p.pool.snapshot();
+        assert!(snap[0].is_exhausted, "key-a should be exhausted");
+        let cooldown = snap[0].cooldown_remaining_secs.expect("cooldown set");
+        // 1h ≈ 3600s; allow generous lower bound for test jitter.
+        assert!(
+            (3500..=3600).contains(&cooldown),
+            "expected ~1h cooldown for 429, got {cooldown}s"
+        );
+    }
+
+    /// 402 marks the key exhausted with the long (24h) credit cooldown.
+    /// Issue #4965 row 2.
+    #[test]
+    fn credit_exhausted_marks_long_cooldown() {
+        let p = make_pooled();
+        let err = LlmError::Api {
+            status: 402,
+            message: "Insufficient credits".into(),
+            code: None,
+        };
+        assert!(matches!(err.failover_reason(), FailoverReason::CreditExhausted));
+        p.handle_driver_error("key-a", &err);
+        let snap = p.pool.snapshot();
+        assert!(snap[0].is_exhausted);
+        let cooldown = snap[0].cooldown_remaining_secs.expect("cooldown set");
+        // 24h ≈ 86_400s; assert it's clearly > 1h so we know we picked the
+        // right code path (and not the 429 branch).
+        assert!(
+            cooldown > Duration::from_secs(60 * 60 * 2).as_secs(),
+            "402 cooldown should exceed 2h to distinguish from 429 path, got {cooldown}s"
+        );
+        assert!(
+            cooldown <= 86_400,
+            "402 cooldown should not exceed 24h, got {cooldown}s"
+        );
+    }
+
+    /// 401 marks the key permanently invalid (sentinel = u64::MAX).
+    /// Issue #4965 row 3.
+    #[test]
+    fn auth_error_marks_permanent() {
+        let p = make_pooled();
+        let err = LlmError::Api {
+            status: 401,
+            message: "Invalid API key".into(),
+            code: None,
+        };
+        assert!(matches!(err.failover_reason(), FailoverReason::AuthError));
+        p.handle_driver_error("key-a", &err);
+        let snap = p.pool.snapshot();
+        assert_eq!(
+            snap[0].cooldown_remaining_secs,
+            Some(u64::MAX),
+            "401 should mark key permanently invalid"
+        );
+    }
+
+    /// 500/503/etc. mark the key exhausted (treated as a temporary fault).
+    /// Issue #4965 row 4.
+    #[test]
+    fn http_error_marks_exhausted() {
+        let p = make_pooled();
+        let err = LlmError::Api {
+            status: 500,
+            message: "Internal server error".into(),
+            code: None,
+        };
+        // 500 maps to HttpError (general HTTP failure path).
+        assert!(matches!(err.failover_reason(), FailoverReason::HttpError));
+        p.handle_driver_error("key-a", &err);
+        let snap = p.pool.snapshot();
+        assert!(snap[0].is_exhausted, "5xx should mark the key exhausted");
+    }
+
+    /// Timeouts and `ModelUnavailable` are provider-level conditions, not
+    /// key-level — they must NOT mark the key. Issue #4965 row 5.
+    #[test]
+    fn timeout_does_not_mark_key() {
+        let p = make_pooled();
+        let err = LlmError::TimedOut {
+            inactivity_secs: 30,
+            partial_text: None,
+            partial_text_len: 0,
+            last_activity: "test".into(),
+        };
+        assert!(matches!(err.failover_reason(), FailoverReason::Timeout));
+        p.handle_driver_error("key-a", &err);
+        let snap = p.pool.snapshot();
+        assert!(!snap[0].is_exhausted, "timeout must not mark the key");
+        assert_eq!(snap[0].cooldown_remaining_secs, None);
     }
 }

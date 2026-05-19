@@ -5223,6 +5223,29 @@
         }
       }
     },
+    "/api/credential-pools": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/credential-pools — Per-provider credential pool snapshot.",
+        "description": "Returns an array of provider pools (sorted by provider name) with their\nstrategy, available/total key counts, and per-credential redacted\nsnapshots. The raw API key is never serialized — only a `key_hint`\n(last 4 chars prefixed by `****`) and per-key telemetry are included.\n\nIssue #4965: backs the dashboard Providers page credential-pools card\nand the `librefang auth pool list` CLI command.",
+        "operationId": "list_credential_pools",
+        "responses": {
+          "200": {
+            "description": "Per-provider credential pool snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cron/jobs": {
       "get": {
         "tags": [

@@ -133,6 +133,15 @@ impl LlmSubsystemApi for LibreFangKernel {
     fn default_model_override_ref(&self) -> &RwLock<Option<DefaultModelConfig>> {
         self.llm.default_model_override_ref()
     }
+    #[inline]
+    fn credential_pool_summaries(
+        &self,
+    ) -> std::collections::BTreeMap<
+        String,
+        crate::kernel::subsystems::llm::CredentialPoolSummary,
+    > {
+        self.llm.credential_pool_summaries()
+    }
 }
 
 impl McpSubsystemApi for LibreFangKernel {

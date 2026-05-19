@@ -57,6 +57,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/providers/{name}/default",
             axum::routing::post(set_default_provider),
         )
+        // Credential pools (#4965) — list per-provider key-rotation pool
+        // status, with redacted snapshots and cooldown/usage telemetry.
+        .route(
+            "/credential-pools",
+            axum::routing::get(list_credential_pools),
+        )
 }
 
 use super::skills::{remove_secret_env, write_secret_env};
@@ -2006,6 +2012,107 @@ fn normalize_base_url(input: &str) -> String {
         // Bare host[:port] — assume OpenAI-compatible default.
         format!("{trimmed}/v1")
     }
+}
+
+// ── Credential pools (#4965) ────────────────────────────────────────────────
+
+/// Render a `CredentialPoolStrategy` into the snake_case string used in
+/// `config.toml`. Kept inline so the API JSON shape matches the config TOML
+/// exactly — `round_robin`, never `RoundRobin` — and so we never depend on
+/// `Debug` formatting (which would silently change response shape on a
+/// future variant rename).
+fn strategy_label(s: &librefang_llm_drivers::PoolStrategy) -> &'static str {
+    use librefang_llm_drivers::PoolStrategy;
+    match s {
+        PoolStrategy::FillFirst => "fill_first",
+        PoolStrategy::RoundRobin => "round_robin",
+        PoolStrategy::Random => "random",
+        PoolStrategy::LeastUsed => "least_used",
+    }
+}
+
+/// GET /api/credential-pools — Per-provider credential pool snapshot.
+///
+/// Returns an array of provider pools (sorted by provider name) with their
+/// strategy, available/total key counts, and per-credential redacted
+/// snapshots. The raw API key is never serialized — only a `key_hint`
+/// (last 4 chars prefixed by `****`) and per-key telemetry are included.
+///
+/// Issue #4965: backs the dashboard Providers page credential-pools card
+/// and the `librefang auth pool list` CLI command.
+#[utoipa::path(
+    get,
+    path = "/api/credential-pools",
+    tag = "models",
+    operation_id = "list_credential_pools",
+    responses(
+        (status = 200, description = "Per-provider credential pool snapshots", body = Vec<serde_json::Value>)
+    )
+)]
+pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // `credential_pool_summaries` is part of the `KernelApi` trait that
+    // `AppState::kernel` already implements via the inherent forward in
+    // `subsystem_forwards.rs` — the method is in scope on `state.kernel`
+    // without an explicit `use` import.
+    let summaries = state.kernel.credential_pool_summaries();
+
+    // Augment with the configured label list from config.toml so the
+    // dashboard can show "Primary" / "Backup" alongside the key hint.
+    // Labels are matched positionally against the priority-sorted credential
+    // list (the pool internally sorts by priority descending; we replay the
+    // same sort on the configured keys so the order lines up).
+    let cfg = state.kernel.config_ref();
+    let mut labels_by_provider: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+    for pool_cfg in &cfg.credential_pools {
+        let mut entries: Vec<(String, u32)> = pool_cfg
+            .keys
+            .iter()
+            .map(|k| (k.label.clone(), k.priority))
+            .collect();
+        // Stable sort by priority descending, matching CredentialPool::new.
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+        labels_by_provider.insert(pool_cfg.provider.clone(), entries);
+    }
+
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+    for (provider, summary) in summaries {
+        let labels = labels_by_provider.get(&provider);
+        let credentials: Vec<serde_json::Value> = summary
+            .credentials
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| {
+                let label = labels
+                    .and_then(|l| l.get(idx))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_default();
+                let cooldown = c.cooldown_remaining_secs.map(|secs| {
+                    if secs == u64::MAX {
+                        serde_json::json!("permanent")
+                    } else {
+                        serde_json::json!(secs)
+                    }
+                });
+                serde_json::json!({
+                    "label": label,
+                    "key_hint": c.key_hint,
+                    "priority": c.priority,
+                    "request_count": c.request_count,
+                    "is_exhausted": c.is_exhausted,
+                    "cooldown_remaining_secs": cooldown,
+                })
+            })
+            .collect();
+        out.push(serde_json::json!({
+            "provider": summary.provider,
+            "strategy": strategy_label(&summary.strategy),
+            "available_count": summary.available_count,
+            "total_count": summary.total_count,
+            "credentials": credentials,
+        }));
+    }
+
+    (StatusCode::OK, Json(out))
 }
 
 #[cfg(test)]

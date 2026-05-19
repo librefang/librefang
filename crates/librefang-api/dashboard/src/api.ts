@@ -1521,6 +1521,33 @@ export async function listProviders(): Promise<ProviderItem[]> {
   return data.providers ?? [];
 }
 
+// ── Credential pools (#4965) ────────────────────────────────────────────────
+
+/// Per-credential redacted snapshot returned by `GET /api/credential-pools`.
+/// `cooldown_remaining_secs` is either a number (seconds until cooldown
+/// expires) or the literal string `"permanent"` for keys marked invalid by
+/// a 401/403 response.
+export interface CredentialPoolKeySnapshot {
+  label: string;
+  key_hint: string;
+  priority: number;
+  request_count: number;
+  is_exhausted: boolean;
+  cooldown_remaining_secs: number | "permanent" | null;
+}
+
+export interface CredentialPoolStatus {
+  provider: string;
+  strategy: "fill_first" | "round_robin" | "random" | "least_used";
+  available_count: number;
+  total_count: number;
+  credentials: CredentialPoolKeySnapshot[];
+}
+
+export async function listCredentialPools(): Promise<CredentialPoolStatus[]> {
+  return get<CredentialPoolStatus[]>("/api/credential-pools");
+}
+
 export async function testProvider(providerId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/test`, {});
 }
