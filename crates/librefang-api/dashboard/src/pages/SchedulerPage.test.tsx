@@ -387,5 +387,24 @@ describe("SchedulerPage", () => {
     // Two occurrences of the cron text now expected: the schedule
     // list row AND the create-form chip we just clicked.
     expect(screen.getAllByText("0 9 * * *").length).toBeGreaterThanOrEqual(2);
+
+    // 6. Lock the z-index so the picker stays above PushDrawer's mobile
+    //    overlay (z-[55]). The Modal's containerClass is `fixed inset-0
+    //    ... bg-black/40 backdrop-blur-sm` and the inline style controls
+    //    z-index. On <lg viewports PushDrawer hosts its content as a
+    //    `fixed inset-0 z-[55]` overlay; if Modal kept its default
+    //    z-index of 50 the picker would render BEHIND that overlay and
+    //    phone users could not see or interact with it. Find the
+    //    Modal's outer wrapper via aria-modal and assert z >= 56.
+    const modalRoot = document.querySelector(
+      "[role='dialog'][aria-modal='true']",
+    );
+    expect(modalRoot).not.toBeNull();
+    // Walk up to the Modal's outer container (which carries the style
+    // attribute with the z-index) — motion mounts the container as the
+    // dialog's parent.
+    const overlay = modalRoot!.parentElement as HTMLElement;
+    const z = Number.parseInt(overlay.style.zIndex || "0", 10);
+    expect(z).toBeGreaterThanOrEqual(56);
   });
 });

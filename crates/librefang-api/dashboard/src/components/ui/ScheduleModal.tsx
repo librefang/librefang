@@ -227,8 +227,17 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
   // shape the picker had as a DrawerPanel ("xl" size). The header is
   // still rendered inline so the optional subtitle can sit beneath the
   // title — Modal's built-in title bar only takes a string.
+  //
+  // zIndex=70 is needed because on <lg viewports PushDrawer renders the
+  // hosting drawer as a `fixed inset-0 z-[55]` mobile overlay, and
+  // Modal's default z-index of 50 would put this picker BEHIND that
+  // drawer overlay — invisible to phone users. 70 sits above the
+  // mobile drawer (55) and the OfflineBanner (60), and below the
+  // notification dropdowns (z-[90]/z-[100]) and ConfirmDialog (z-[150])
+  // so global dismissal flows still win. On lg+ the host drawer is a
+  // flex `<aside>` (no fixed positioning), so any z-index ≥ 50 works.
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="3xl" hideCloseButton variant="panel-right">
+    <Modal isOpen={isOpen} onClose={onClose} size="3xl" hideCloseButton variant="panel-right" zIndex={70}>
       <div className="p-5 pb-3 border-b border-border-subtle">
         <h3 id="schedule-modal-title" className="text-base font-black">{title}</h3>
           {subtitle && <p className="text-[11px] text-text-dim mt-0.5 truncate">{subtitle}</p>}

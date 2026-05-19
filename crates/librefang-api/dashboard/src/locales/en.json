@@ -1413,6 +1413,7 @@
     "logic_actions": "Logic & Actions",
     "no_templates": "No templates available",
     "save_as_template": "Save as Template",
+    "save_before_schedule": "Save the workflow before scheduling",
     "save_error": "Failed to create workflow",
     "save_first_to_template": "Save the workflow first before saving as template",
     "saved_as_template": "Saved as template",

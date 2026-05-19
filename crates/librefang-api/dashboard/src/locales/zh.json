@@ -1318,6 +1318,7 @@
     "imported": "已导入",
     "import_error": "无效的工作流文件",
     "save_as_template": "存为模板",
+    "save_before_schedule": "请先保存工作流，再设置定时任务",
     "save_first_to_template": "请先保存工作流再存为模板",
     "saved_as_template": "已保存为模板",
     "shortcuts_title": "快捷键",
