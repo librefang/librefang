@@ -28,10 +28,7 @@ async fn describe_telegram_returns_schema_or_skips_when_sdk_missing() {
 
 #[tokio::test]
 async fn describe_failing_command_returns_err() {
-    let result = describe_sidecar(
-        "python3",
-        &["-c".into(), "import sys; sys.exit(2)".into()],
-    )
-    .await;
+    let result =
+        describe_sidecar("python3", &["-c".into(), "import sys; sys.exit(2)".into()]).await;
     assert!(result.is_err());
 }
