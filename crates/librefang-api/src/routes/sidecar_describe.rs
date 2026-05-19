@@ -35,10 +35,7 @@ pub struct SidecarSchema {
 /// Timeout is 5s — describe should be sub-second; if it hangs (the
 /// adapter's __init__ blocks on a network call before reading argv,
 /// for example) we'd rather skip than block daemon boot.
-pub async fn describe_sidecar(
-    command: &str,
-    args: &[String],
-) -> Result<SidecarSchema, String> {
+pub async fn describe_sidecar(command: &str, args: &[String]) -> Result<SidecarSchema, String> {
     let mut full_args: Vec<String> = args.to_vec();
     full_args.push("--describe".into());
 
