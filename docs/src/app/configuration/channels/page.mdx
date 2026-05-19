@@ -6,7 +6,7 @@ Configuration for all 45 channel adapters, per-channel behavior overrides, and s
 
 ### `[channels]`
 
-All 45 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
+All in-process channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
 
 **Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
 
@@ -225,28 +225,6 @@ allowed_channels = []
 | `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.irc]`
-
-```toml
-[channels.irc]
-server = "irc.libera.chat"
-port = 6667
-nick = "librefang"
-# password_env = "IRC_PASSWORD"
-channels = ["#librefang"]
-use_tls = false
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server` | string | `"irc.libera.chat"` | IRC server hostname. |
-| `port` | u16 | `6667` | IRC server port. |
-| `nick` | string | `"librefang"` | Bot nickname. |
-| `password_env` | string or null | `null` | Env var holding the server password (optional). |
-| `channels` | list of strings | `[]` | IRC channels to join (e.g., `["#librefang", "#general"]`). |
-| `use_tls` | bool | `false` | Use TLS for the connection. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.google_chat]`
 
 ```toml
@@ -315,26 +293,6 @@ streams = []
 | `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.xmpp]`
-
-```toml
-[channels.xmpp]
-jid = "bot@jabber.org"
-password_env = "XMPP_PASSWORD"
-server = ""
-port = 5222
-rooms = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `jid` | string | `""` | XMPP JID (e.g., `"bot@jabber.org"`). |
-| `password_env` | string | `"XMPP_PASSWORD"` | Env var holding the XMPP password. |
-| `server` | string | `""` | XMPP server hostname. Defaults to the JID domain if empty. |
-| `port` | u16 | `5222` | XMPP server port. |
-| `rooms` | list of strings | `[]` | MUC (multi-user chat) rooms to join. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.line]`
 
 ```toml
@@ -390,21 +348,23 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 `MASTODON_ACCESS_TOKEN` (OAuth bearer) goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Mastodon form. The sidecar inherits SSE-with-polling-fallback semantics from the removed in-process adapter.
 
-#### `[channels.bluesky]`
+#### Bluesky
+
+Bluesky is provided by the Python sidecar adapter (`librefang.sidecar.adapters.bluesky`). The in-process `[channels.bluesky]` config block was removed in the sidecar migration. Declare Bluesky as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.bluesky]
-identifier = "mybot.bsky.social"
-app_password_env = "BLUESKY_APP_PASSWORD"
-service_url = "https://bsky.social"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "mybot.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # custom PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `identifier` | string | `""` | Bluesky handle or DID. |
-| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | Env var holding the Bluesky app password. |
-| `service_url` | string | `"https://bsky.social"` | PDS (Personal Data Server) URL. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`BLUESKY_APP_PASSWORD` goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Bluesky form. The sidecar polls `app.bsky.notification.listNotifications` every 5 s and threads outbound replies back to the originating notification via an in-memory LRU cache (capacity 200).
 
 #### `[channels.feishu]`
 
@@ -420,20 +380,6 @@ app_secret_env = "FEISHU_APP_SECRET"
 | `app_id` | string | `""` | Feishu/Lark app ID. |
 | `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
 | `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.revolt]`
-
-```toml
-[channels.revolt]
-bot_token_env = "REVOLT_BOT_TOKEN"
-api_url = "https://api.revolt.chat"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | Env var holding the Revolt bot token. |
-| `api_url` | string | `"https://api.revolt.chat"` | Revolt API base URL. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.nextcloud]`
@@ -452,52 +398,6 @@ allowed_rooms = []
 | `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.guilded]`
-
-```toml
-[channels.guilded]
-bot_token_env = "GUILDED_BOT_TOKEN"
-server_ids = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | Env var holding the Guilded bot token. |
-| `server_ids` | list of strings | `[]` | Server IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.keybase]`
-
-```toml
-[channels.keybase]
-username = ""
-paperkey_env = "KEYBASE_PAPERKEY"
-allowed_teams = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `username` | string | `""` | Keybase username. |
-| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | Env var holding the Keybase paper key. |
-| `allowed_teams` | list of strings | `[]` | Team names to listen in. Empty = all DMs. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.threema]`
-
-```toml
-[channels.threema]
-threema_id = ""
-secret_env = "THREEMA_SECRET"
-# webhook_port = 8454  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `threema_id` | string | `""` | Threema Gateway ID. |
-| `secret_env` | string | `"THREEMA_SECRET"` | Env var holding the Threema API secret. |
-| `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.webex]`
 
 ```toml
@@ -510,70 +410,6 @@ allowed_rooms = []
 |-------|------|---------|-------------|
 | `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
 | `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.pumble]`
-
-```toml
-[channels.pumble]
-bot_token_env = "PUMBLE_BOT_TOKEN"
-# webhook_port = 8455  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | Env var holding the Pumble bot token. |
-| `webhook_port` | u16 | `8455` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.flock]`
-
-```toml
-[channels.flock]
-bot_token_env = "FLOCK_BOT_TOKEN"
-# webhook_port = 8456  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | Env var holding the Flock bot token. |
-| `webhook_port` | u16 | `8456` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.twist]`
-
-```toml
-[channels.twist]
-token_env = "TWIST_TOKEN"
-workspace_id = ""
-allowed_channels = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `token_env` | string | `"TWIST_TOKEN"` | Env var holding the Twist API token. |
-| `workspace_id` | string | `""` | Twist workspace ID. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.mumble]`
-
-```toml
-[channels.mumble]
-host = "mumble.example.com"
-port = 64738
-username = "librefang"
-password_env = "MUMBLE_PASSWORD"
-channel = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `host` | string | `""` | Mumble server hostname. |
-| `port` | u16 | `64738` | Mumble server port. |
-| `username` | string | `"librefang"` | Bot username in Mumble. |
-| `password_env` | string | `"MUMBLE_PASSWORD"` | Env var holding the Mumble server password. |
-| `channel` | string | `""` | Mumble channel to join. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.dingtalk]`
@@ -604,20 +440,6 @@ secret_env = "DINGTALK_SECRET"
 | `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). **Required** — webhook mode rejects requests without a numeric `timestamp` header (400), with a stale or mismatched signature (401). |
 | `webhook_port` | u16 | `8457` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.gitter]`
-
-```toml
-[channels.gitter]
-token_env = "GITTER_TOKEN"
-room_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `token_env` | string | `"GITTER_TOKEN"` | Env var holding the Gitter auth token. |
-| `room_id` | string | `""` | Gitter room ID to listen in. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.ntfy]`
@@ -668,29 +490,6 @@ listen_port = 8460
 | `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
 | `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.voice]`
-
-WebSocket-based voice channel with STT (Speech-to-Text) and TTS (Text-to-Speech) support.
-
-```toml
-[channels.voice]
-api_key_env = "OPENAI_API_KEY"
-stt_url = "https://api.openai.com"
-tts_url = "https://api.openai.com"
-tts_voice = "alloy"
-# buffer_threshold = 32768
-# default_agent = "assistant"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var holding the API key for STT/TTS services. |
-| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT API (OpenAI Whisper-compatible). |
-| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS API. |
-| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
-| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
-| `default_agent` | string or null | `null` | Agent name to route voice messages to. |
 
 #### `[channels.qq]`
 

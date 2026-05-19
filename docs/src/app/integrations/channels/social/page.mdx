@@ -94,34 +94,31 @@ The Mastodon sidecar connects to the instance's user streaming API via Server-Se
 - A Bluesky account (see [Bluesky API docs](https://docs.bsky.app))
 - An app password (generated in Bluesky **Settings > App Passwords**)
 
+Bluesky runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.bluesky`, ships in `librefang-sdk`).
+
 ### Setup
 
 1. In Bluesky, go to **Settings > App Passwords** and create a new app password.
-2. Set environment variables:
-
-```bash
-export BLUESKY_IDENTIFIER=your-handle.bsky.social  # Environment variable
-export BLUESKY_APP_PASSWORD=your-app-password
-librefang vault set BLUESKY_IDENTIFIER        # Encrypted vault (recommended)
-librefang vault set BLUESKY_APP_PASSWORD
-librefang config set-key bluesky              # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-3. Add to config:
+2. Add a `[[sidecar_channels]]` entry:
 
 ```toml
-[channels.bluesky]
-identifier_env = "BLUESKY_IDENTIFIER"
-app_password_env = "BLUESKY_APP_PASSWORD"
-default_agent = "social-media"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "your-handle.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # custom PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
+3. Set the app password via the dashboard's Channels page (writes `BLUESKY_APP_PASSWORD` to `~/.librefang/secrets.env`), or place it directly in your vault / `.env`.
 4. Restart the daemon.
 
 ### How It Works
 
-The Bluesky adapter authenticates using the AT Protocol and monitors notifications (mentions) via REST polling. Responses are posted as reply posts through the AT Protocol's `com.atproto.repo.createRecord` endpoint.
+The sidecar authenticates with `com.atproto.server.createSession` and refreshes the session JWT before expiry. It polls `app.bsky.notification.listNotifications` every 5 s (filtering `mention` + `reply` reasons) and posts replies via `com.atproto.repo.createRecord` using the `app.bsky.feed.post` lexicon. An in-memory LRU cache (capacity 200) maps inbound notification URIs to their `{root, parent}` reply refs so outbound responses thread back to the originating post; on a chunked reply every chunk reuses the same reply ref to keep the thread tight.
 
 ---
 
@@ -163,111 +160,3 @@ default_agent = "assistant"
 ### How It Works
 
 The Twitch adapter connects to Twitch's IRC gateway (`irc.chat.twitch.tv:6697` over TLS) and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as chat messages via the IRC protocol.
-
----
-
-## Gitter
-
-### Prerequisites
-
-- A Gitter account and personal access token (from the [Gitter Developer Portal](https://developer.gitter.im/docs/))
-
-### Setup
-
-1. Go to [developer.gitter.im](https://developer.gitter.im/) and generate a personal access token.
-2. Set the environment variable:
-
-```bash
-export GITTER_TOKEN=your-gitter-token         # Environment variable
-librefang vault set GITTER_TOKEN              # Encrypted vault (recommended)
-librefang config set-key gitter               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-3. Add to config:
-
-```toml
-[channels.gitter]
-token_env = "GITTER_TOKEN"
-default_agent = "assistant"
-```
-
-4. Restart the daemon.
-
-### How It Works
-
-The Gitter adapter connects to the Gitter Streaming API to receive messages in real time. Responses are sent back via the Gitter REST API's message endpoint.
-
----
-
-## Revolt
-
-### Prerequisites
-
-- A Revolt bot token (from the [Revolt Developer Portal](https://developers.revolt.chat/api/))
-
-### Setup
-
-1. Go to [app.revolt.chat/settings/bots](https://app.revolt.chat/settings/bots) and create a new bot.
-2. Copy the bot token.
-3. Set the environment variable:
-
-```bash
-export REVOLT_TOKEN=your-revolt-bot-token     # Environment variable
-librefang vault set REVOLT_TOKEN              # Encrypted vault (recommended)
-librefang config set-key revolt               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-4. Add to config:
-
-```toml
-[channels.revolt]
-token_env = "REVOLT_TOKEN"
-default_agent = "assistant"
-```
-
-5. Restart the daemon.
-
-### How It Works
-
-The Revolt adapter connects to the Revolt API via WebSocket for real-time message events. Responses are sent through the Revolt REST API's channel message endpoints.
-
----
-
-## Keybase
-
-### Prerequisites
-
-- A Keybase account with a paper key (see [Keybase API docs](https://keybase.io/docs/api/))
-
-### Setup
-
-1. Install the [Keybase client](https://keybase.io/download).
-2. Log in and generate a paper key via `keybase paperkey`.
-3. Set environment variables:
-
-```bash
-export KEYBASE_USERNAME=your-username         # Environment variable
-export KEYBASE_PAPERKEY="your paper key words here"
-librefang vault set KEYBASE_USERNAME          # Encrypted vault (recommended)
-librefang vault set KEYBASE_PAPERKEY
-librefang config set-key keybase              # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-4. Add to config:
-
-```toml
-[channels.keybase]
-username_env = "KEYBASE_USERNAME"
-paperkey_env = "KEYBASE_PAPERKEY"
-default_agent = "assistant"
-```
-
-5. Restart the daemon.
-
-### How It Works
-
-The Keybase adapter uses the Keybase Bot API to poll for new messages. It authenticates with the paper key and listens for chat messages across teams and direct conversations. Responses are sent via the Keybase chat API.
-
