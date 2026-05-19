@@ -107,7 +107,6 @@ channel-rocketchat = ["librefang-channels/channel-rocketchat"]
 channel-zulip = ["librefang-channels/channel-zulip"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-line = ["librefang-channels/channel-line"]
-channel-reddit = ["librefang-channels/channel-reddit"]
 channel-nextcloud = ["librefang-channels/channel-nextcloud"]
 channel-webex = ["librefang-channels/channel-webex"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
@@ -134,7 +133,6 @@ all-channels = [
     "channel-teams", "channel-mattermost", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip",
     "channel-feishu", "channel-line",
-    "channel-reddit",
     "channel-nextcloud",
     "channel-webex", "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
@@ -148,7 +146,6 @@ all-channels-no-email = [
     "channel-teams", "channel-mattermost", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip",
     "channel-feishu", "channel-line",
-    "channel-reddit",
     "channel-nextcloud",
     "channel-webex", "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
