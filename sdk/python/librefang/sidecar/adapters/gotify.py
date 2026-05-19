@@ -54,6 +54,14 @@ from librefang.sidecar import logging as log
 
 # Gotify caps individual messages at this length (matches the Rust adapter).
 MAX_MESSAGE_LEN = 65535
+# Maximum bytes accepted for a single inbound WebSocket frame payload.
+# RFC 6455 allows up to 2^63 — well beyond anything Gotify legitimately
+# sends (its frames are short JSON). Capping protects against a hostile
+# server that announces a 64-bit length to make us spin reading a
+# multi-exabyte payload. 1 MiB leaves comfortable headroom over the
+# largest realistic Gotify payload (a 65 535-char message body wrapped
+# in a JSON envelope is well under 100 KiB).
+MAX_FRAME_PAYLOAD = 1 << 20  # 1 MiB
 SEND_TIMEOUT_SECS = 10
 HANDSHAKE_TIMEOUT_SECS = 15.0
 # RFC 6455 magic GUID used to derive Sec-WebSocket-Accept.
@@ -234,6 +242,11 @@ class _WebSocketReader:
                 ln = struct.unpack(">H", self._recv_exact(2))[0]
             elif ln == 127:
                 ln = struct.unpack(">Q", self._recv_exact(8))[0]
+            if ln > MAX_FRAME_PAYLOAD:
+                raise RuntimeError(
+                    f"websocket frame payload {ln} exceeds cap "
+                    f"{MAX_FRAME_PAYLOAD}; failing the stream"
+                )
             mask_key = self._recv_exact(4) if masked else None
             payload = self._recv_exact(ln)
             if mask_key is not None:

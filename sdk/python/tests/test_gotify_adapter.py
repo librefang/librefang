@@ -390,3 +390,201 @@ def test_websocket_reader_rejects_non_ws_url():
     with pytest.raises(ValueError, match="not a websocket url"):
         with ga._WebSocketReader("http://example.com/stream"):
             pass
+
+
+# ---- WS server pings, close echo, oversized frame rejection -------
+
+
+def _server_ping_frame(payload: bytes) -> bytes:
+    # Server→client control frame (FIN | ping), unmasked.
+    return bytes([0x89, len(payload)]) + payload
+
+
+def _parse_client_frame(blob: bytes) -> tuple[int, bytes]:
+    """Decode one client→server frame. Client frames are always masked."""
+    assert len(blob) >= 2
+    fin_opcode = blob[0]
+    opcode = fin_opcode & 0x0F
+    mask_bit = (blob[1] & 0x80) != 0
+    assert mask_bit, "client→server frames must be masked"
+    ln = blob[1] & 0x7F
+    off = 2
+    if ln == 126:
+        ln = int.from_bytes(blob[off:off + 2], "big")
+        off += 2
+    elif ln == 127:
+        ln = int.from_bytes(blob[off:off + 8], "big")
+        off += 8
+    mask = blob[off:off + 4]
+    off += 4
+    raw = blob[off:off + ln]
+    unmasked = bytes(b ^ mask[i % 4] for i, b in enumerate(raw))
+    return opcode, unmasked
+
+
+def _ws_handshake_reply(req_head: bytes) -> bytes:
+    import base64 as _b64
+    import hashlib as _hl
+    key = None
+    for line in req_head.split(b"\r\n")[1:]:
+        name, _, val = line.partition(b":")
+        if name.strip().lower() == b"sec-websocket-key":
+            key = val.strip()
+            break
+    assert key is not None
+    accept = _b64.b64encode(
+        _hl.sha1(key + ga._WS_GUID.encode("ascii")).digest()
+    )
+    return (
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+    )
+
+
+def test_websocket_reader_responds_to_server_ping_with_pong():
+    """Server sends ping with a payload between two text frames; the
+    client must reply with a masked pong carrying the same payload,
+    and continue yielding the text frames around it."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    host, port = server.getsockname()
+
+    captured: dict = {"client_frames": []}
+
+    def _serve():
+        conn, _ = server.accept()
+        try:
+            req = b""
+            while b"\r\n\r\n" not in req:
+                req += conn.recv(4096)
+            head = req.split(b"\r\n\r\n", 1)[0]
+            conn.sendall(_ws_handshake_reply(head))
+            conn.sendall(_server_text_frame('{"id":1,"message":"a"}'))
+            conn.sendall(_server_ping_frame(b"ping-payload"))
+            conn.sendall(_server_text_frame('{"id":2,"message":"b"}'))
+            conn.sendall(_server_close_frame())
+            # Read whatever the client sends back (pong + close echo).
+            conn.settimeout(2.0)
+            try:
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    captured["client_frames"].append(chunk)
+            except (OSError, socket.timeout):
+                pass
+        finally:
+            conn.close()
+            server.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    out: list[str] = []
+    url = f"ws://{host}:{port}/stream?token=Cclient"
+    with ga._WebSocketReader(url, handshake_timeout=5.0) as ws:
+        for text in ws:
+            out.append(text)
+
+    t.join(timeout=3.0)
+    assert out == [
+        '{"id":1,"message":"a"}',
+        '{"id":2,"message":"b"}',
+    ]
+    # Concatenate everything the server saw — the client should have
+    # sent one pong (opcode 0xA, payload b"ping-payload") and one
+    # close echo (opcode 0x8, payload b"").
+    blob = b"".join(captured["client_frames"])
+    opcodes = []
+    i = 0
+    while i < len(blob):
+        # Each client frame: 1 (fin|op) + 1 (mask|len7) + maybe 2/8 +
+        # 4 mask + payload. Header is at least 2 bytes here because
+        # we send small payloads.
+        opcode = blob[i] & 0x0F
+        ln = blob[i + 1] & 0x7F
+        off = 2
+        if ln == 126:
+            ln = int.from_bytes(blob[i + 2:i + 4], "big")
+            off = 4
+        elif ln == 127:
+            ln = int.from_bytes(blob[i + 2:i + 10], "big")
+            off = 10
+        off += 4  # mask
+        opcodes.append((opcode, blob[i:i + off + ln]))
+        i += off + ln
+    # Find the pong and verify payload.
+    pongs = [_parse_client_frame(raw) for op, raw in opcodes if op == 0xA]
+    closes = [_parse_client_frame(raw) for op, raw in opcodes if op == 0x8]
+    assert len(pongs) == 1, f"expected 1 pong, got {len(pongs)}"
+    assert pongs[0] == (0xA, b"ping-payload")
+    assert len(closes) == 1, f"expected 1 close echo, got {len(closes)}"
+    assert closes[0] == (0x8, b"")
+
+
+def test_websocket_reader_rejects_oversized_frame():
+    """Server announces a 64-bit payload length exceeding the cap; the
+    client must fail the stream with a RuntimeError instead of trying
+    to read multi-gigabyte payload."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    host, port = server.getsockname()
+
+    def _serve():
+        conn, _ = server.accept()
+        try:
+            req = b""
+            while b"\r\n\r\n" not in req:
+                req += conn.recv(4096)
+            head = req.split(b"\r\n\r\n", 1)[0]
+            conn.sendall(_ws_handshake_reply(head))
+            # Text frame, 64-bit length, 1 GiB — well over the 1 MiB cap.
+            payload_len = (1 << 30)
+            frame = bytes([0x81, 127]) + payload_len.to_bytes(8, "big")
+            conn.sendall(frame)
+            conn.settimeout(2.0)
+            try:
+                while conn.recv(4096):
+                    pass
+            except (OSError, socket.timeout):
+                pass
+        finally:
+            conn.close()
+            server.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    url = f"ws://{host}:{port}/stream?token=Cclient"
+    with pytest.raises(RuntimeError, match="exceeds cap"):
+        with ga._WebSocketReader(url, handshake_timeout=5.0) as ws:
+            for _ in ws:
+                pass
+    t.join(timeout=3.0)
+
+
+# ---- account_id surfaced via ready_event --------------------------
+
+
+def test_account_id_surfaced_via_ready_event():
+    """`GOTIFY_ACCOUNT_ID` env var should reach LibreFang through the
+    base SidecarAdapter.ready_event() multi-bot routing key."""
+    a = _adapter(GOTIFY_ACCOUNT_ID="prod-server")
+    ev = a.ready_event()
+    # ready event params include account_id when set.
+    assert ev["method"] == "ready"
+    params = ev["params"]
+    assert params.get("account_id") == "prod-server"
+
+
+def test_no_account_id_when_unset():
+    a = _adapter(GOTIFY_ACCOUNT_ID="")
+    ev = a.ready_event()
+    params = ev["params"]
+    # When None, protocol.ready should omit the field (matches ntfy
+    # behaviour and the base-class contract).
+    assert params.get("account_id") in (None, )
