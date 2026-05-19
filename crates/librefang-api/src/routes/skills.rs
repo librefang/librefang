@@ -2721,6 +2721,11 @@ pub async fn install_hand_deps(
 
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
+        // `kill_on_drop(true)` so a timeout / dropped Future SIGKILLs the
+        // child instead of orphaning it. Same defect class as codex fix
+        // #3 on the sidecar describe subprocess: a 300s `tokio::time::timeout`
+        // without `kill_on_drop` leaves the install command running in the
+        // background after the timeout fires.
         let output = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
             tokio::process::Command::new(program)
@@ -2728,6 +2733,7 @@ pub async fn install_hand_deps(
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -6751,42 +6757,42 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         let f = fields_for(&[
-            ("bot_token_env", "TELEGRAM_BOT_TOKEN", FieldType::Text),
+            ("bot_token_env", "DISCORD_BOT_TOKEN", FieldType::Text),
             ("default_agent", "support", FieldType::Text),
         ]);
-        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        let idx = append_channel_instance(&path, "discord", &f).unwrap();
         assert_eq!(idx, 0, "first append must land at index 0");
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
-            raw.contains("[[channels.telegram]]"),
-            "first append should write [[channels.telegram]] (array of tables): {raw}"
+            raw.contains("[[channels.discord]]"),
+            "first append should write [[channels.discord]] (array of tables): {raw}"
         );
-        assert!(raw.contains("bot_token_env = \"TELEGRAM_BOT_TOKEN\""));
+        assert!(raw.contains("bot_token_env = \"DISCORD_BOT_TOKEN\""));
     }
 
     #[test]
     fn append_channel_instance_promotes_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        // Seed with a legacy `[channels.telegram]` single-table layout — the
+        // Seed with a legacy `[channels.discord]` single-table layout — the
         // shape produced by every previous version of the dashboard.
         std::fs::write(
             &path,
-            "[channels.telegram]\nbot_token_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
+            "[channels.discord]\nbot_token_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
         )
         .unwrap();
         let f = fields_for(&[
             ("bot_token_env", "SECOND", FieldType::Text),
             ("default_agent", "beta", FieldType::Text),
         ]);
-        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        let idx = append_channel_instance(&path, "discord", &f).unwrap();
         assert_eq!(idx, 1, "appending to single table should land at index 1");
 
         let raw = std::fs::read_to_string(&path).unwrap();
         // Must now be an array-of-tables — the single-table form cannot
         // coexist with a second instance.
         assert!(
-            raw.contains("[[channels.telegram]]"),
+            raw.contains("[[channels.discord]]"),
             "single Table must be promoted to ArrayOfTables: {raw}"
         );
         assert!(
@@ -6802,7 +6808,7 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.telegram.len(), 2);
+        assert_eq!(parsed.channels.discord.len(), 2);
     }
 
     #[test]
@@ -6811,11 +6817,11 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n",
+            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n",
         )
         .unwrap();
         let f = fields_for(&[("bot_token_env", "C", FieldType::Text)]);
-        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        let idx = append_channel_instance(&path, "discord", &f).unwrap();
         assert_eq!(idx, 2, "third instance must land at index 2");
         let raw = std::fs::read_to_string(&path).unwrap();
         for needle in ["\"A\"", "\"B\"", "\"C\""] {
@@ -6829,14 +6835,14 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n",
+            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n",
         )
         .unwrap();
         let f = fields_for(&[
             ("bot_token_env", "B_UPDATED", FieldType::Text),
             ("default_agent", "ops", FieldType::Text),
         ]);
-        update_channel_instance(&path, "telegram", 1, &f).unwrap();
+        update_channel_instance(&path, "discord", 1, &f).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"A\""), "instance 0 must be preserved: {raw}");
         assert!(
@@ -6853,9 +6859,9 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
     fn update_channel_instance_replaces_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
         let f = fields_for(&[("bot_token_env", "NEW", FieldType::Text)]);
-        update_channel_instance(&path, "telegram", 0, &f).unwrap();
+        update_channel_instance(&path, "discord", 0, &f).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
             raw.contains("NEW"),
@@ -6868,9 +6874,9 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
     fn update_channel_instance_out_of_bounds_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"A\"\n").unwrap();
+        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"A\"\n").unwrap();
         let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "telegram", 5, &f).unwrap_err();
+        let err = update_channel_instance(&path, "discord", 5, &f).unwrap_err();
         assert!(
             err.to_string().contains("out of bounds"),
             "out-of-range update should error: {err}"
@@ -6883,7 +6889,7 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "[other]\nx = 1\n").unwrap();
         let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "telegram", 0, &f).unwrap_err();
+        let err = update_channel_instance(&path, "discord", 0, &f).unwrap_err();
         assert!(
             err.to_string().contains("not configured"),
             "unconfigured channel update should error: {err}"
@@ -6896,10 +6902,10 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n\n[[channels.telegram]]\nbot_token_env = \"C\"\n",
+            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n\n[[channels.discord]]\nbot_token_env = \"C\"\n",
         )
         .unwrap();
-        remove_channel_instance(&path, "telegram", 1).unwrap();
+        remove_channel_instance(&path, "discord", 1).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"A\""));
         assert!(raw.contains("\"C\""));
@@ -6913,17 +6919,17 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.telegram.len(), 2);
+        assert_eq!(parsed.channels.discord.len(), 2);
     }
 
     #[test]
     fn remove_channel_instance_drops_section_when_array_empties() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"ONLY\"\n").unwrap();
-        remove_channel_instance(&path, "telegram", 0).unwrap();
+        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"ONLY\"\n").unwrap();
+        remove_channel_instance(&path, "discord", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        // Either the channels.telegram entry is gone entirely, or the channels
+        // Either the channels.discord entry is gone entirely, or the channels
         // table itself is empty — both forms parse back to zero instances.
         #[derive(serde::Deserialize, Default)]
         struct Doc {
@@ -6931,15 +6937,15 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
-        assert_eq!(parsed.channels.telegram.len(), 0);
+        assert_eq!(parsed.channels.discord.len(), 0);
     }
 
     #[test]
     fn remove_channel_instance_drops_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
-        remove_channel_instance(&path, "telegram", 0).unwrap();
+        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
+        remove_channel_instance(&path, "discord", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
             !raw.contains("bot_token_env"),
@@ -6951,8 +6957,8 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
     fn remove_channel_instance_out_of_bounds_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"A\"\n").unwrap();
-        let err = remove_channel_instance(&path, "telegram", 7).unwrap_err();
+        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"A\"\n").unwrap();
+        let err = remove_channel_instance(&path, "discord", 7).unwrap_err();
         assert!(
             err.to_string().contains("out of bounds"),
             "out-of-range remove should error: {err}"
@@ -6970,8 +6976,8 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
-             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+            "[[channels.discord]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.discord]]\nbot_token_env = \"TG_B\"\n",
         )
         .unwrap();
         let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
@@ -6979,7 +6985,7 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             "bot_token_env".to_string(),
             ("TG_REPLACEMENT".to_string(), FieldType::Text),
         );
-        let err = upsert_channel_config(&path, "telegram", &fields).unwrap_err();
+        let err = upsert_channel_config(&path, "discord", &fields).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
@@ -7004,11 +7010,11 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
-             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+            "[[channels.discord]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.discord]]\nbot_token_env = \"TG_B\"\n",
         )
         .unwrap();
-        let err = remove_channel_config(&path, "telegram").unwrap_err();
+        let err = remove_channel_config(&path, "discord").unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
@@ -7026,13 +7032,13 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
     fn upsert_channel_config_still_replaces_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
         let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
         fields.insert(
             "bot_token_env".to_string(),
             ("NEW_TOKEN".to_string(), FieldType::Text),
         );
-        upsert_channel_config(&path, "telegram", &fields).expect("legacy single-table replace");
+        upsert_channel_config(&path, "discord", &fields).expect("legacy single-table replace");
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("NEW_TOKEN"), "replacement must land: {raw}");
         assert!(!raw.contains("OLD"), "old value must be gone: {raw}");

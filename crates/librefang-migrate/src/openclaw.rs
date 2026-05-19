@@ -1606,27 +1606,26 @@ fn migrate_channels_from_json(
         });
     }
 
-    // --- Telegram ---
+    // --- Telegram (now an out-of-process sidecar adapter) ---
+    // The in-process Telegram channel was removed; Telegram now runs as a
+    // `[[sidecar_channels]]` adapter. We still migrate the bot token to
+    // secrets.env (the sidecar reads `TELEGRAM_BOT_TOKEN`), but we no
+    // longer emit a `[channels.telegram]` block the kernel would reject.
     if let Some(ref tg) = oc_channels.telegram {
         if tg.enabled.unwrap_or(true) {
             if let Some(ref token) = tg.bot_token {
                 emit_secret(&secrets_path, dry_run, "TELEGRAM_BOT_TOKEN", token, report);
             }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "bot_token_env",
-                toml::Value::String("TELEGRAM_BOT_TOKEN".into()),
-            )];
-            if let Some(arr) = allow_from_to_toml_array(tg.allow_from.as_ref()) {
-                fields.push(("allowed_users", arr));
-            }
-            channels_table.insert(
-                "telegram".to_string(),
-                build_channel_table(fields, tg.dm_policy.as_deref(), tg.group_policy.as_deref()),
-            );
-            report.imported.push(MigrateItem {
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "telegram".to_string(),
-                destination: "config.toml [channels.telegram]".to_string(),
+                reason: "Telegram is now an out-of-process sidecar adapter. \
+                         The bot token was migrated to secrets.env; add a \
+                         [[sidecar_channels]] block running `python3 -m \
+                         librefang.sidecar.adapters.telegram` with \
+                         channel_type = \"telegram\" to enable it (see \
+                         docs/architecture/sidecar-channels.md)."
+                    .to_string(),
             });
         }
     }
@@ -1893,52 +1892,25 @@ fn migrate_channels_from_json(
     }
 
     // --- IRC ---
+    //
+    // IRC was removed as an in-process adapter — users migrating from
+    // OpenClaw can ship a sidecar adapter
+    // (`sdk/python/librefang/sidecar/adapters/`) if they still need IRC.
+    // We still detect the legacy block so the operator gets a clear
+    // signal instead of silent data loss.
     if let Some(ref irc) = oc_channels.irc {
         if irc.enabled.unwrap_or(true) {
-            if let Some(ref pw) = irc.password {
-                emit_secret(&secrets_path, dry_run, "IRC_PASSWORD", pw, report);
-            }
-            let mut fields: Vec<(&str, toml::Value)> = Vec::new();
-            if let Some(ref host) = irc.host {
-                fields.push(("server", toml::Value::String(host.clone())));
-            }
-            if let Some(port) = irc.port {
-                fields.push(("port", toml::Value::Integer(port as i64)));
-            }
-            if let Some(ref nick) = irc.nick {
-                fields.push(("nick", toml::Value::String(nick.clone())));
-            }
-            if let Some(tls) = irc.tls {
-                fields.push(("use_tls", toml::Value::Boolean(tls)));
-            }
-            if irc.password.is_some() {
-                fields.push(("password_env", toml::Value::String("IRC_PASSWORD".into())));
-            }
-            if let Some(ref chans_val) = irc.channels {
-                let chans = extract_string_list(chans_val);
-                if !chans.is_empty() {
-                    let arr: Vec<toml::Value> = chans
-                        .iter()
-                        .map(|c| toml::Value::String(c.clone()))
-                        .collect();
-                    fields.push(("channels", toml::Value::Array(arr)));
-                }
-            }
-            if allow_from_to_toml_array(irc.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "IRC: OpenClaw 'allow_from' could not be auto-mapped — \
-                     IrcConfig has no per-user allowlist field."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "irc".to_string(),
-                build_channel_table(fields, irc.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "IRC in-process adapter was removed in v2026.5. \
+                          Your OpenClaw IRC block was NOT migrated — ship an \
+                          IRC sidecar adapter (see \
+                          docs/architecture/sidecar-channels.md) or pin a \
+                          pre-removal LibreFang release."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "irc".to_string(),
-                destination: "config.toml [channels.irc]".to_string(),
+                reason,
             });
         }
     }
@@ -2907,30 +2879,18 @@ fn parse_legacy_channels(
 
         match *name {
             "telegram" => {
-                let token_env = ch
-                    .bot_token_env
-                    .unwrap_or_else(|| "TELEGRAM_BOT_TOKEN".to_string());
-                let mut fields: Vec<(&str, toml::Value)> =
-                    vec![("bot_token_env", toml::Value::String(token_env))];
-                if !ch.allowed_users.is_empty() {
-                    let arr: Vec<toml::Value> = ch
-                        .allowed_users
-                        .iter()
-                        .map(|u| toml::Value::String(u.clone()))
-                        .collect();
-                    fields.push(("allowed_users", toml::Value::Array(arr)));
-                }
-                if let Some(ref da) = ch.default_agent {
-                    fields.push(("default_agent", toml::Value::String(da.clone())));
-                }
-                channels_table.insert(
-                    "telegram".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // Telegram is now an out-of-process sidecar adapter; the
+                // in-process `[channels.telegram]` block was removed.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "telegram".to_string(),
-                    destination: "config.toml [channels.telegram]".to_string(),
+                    reason: "Telegram is now an out-of-process sidecar \
+                             adapter. Add a [[sidecar_channels]] block \
+                             running `python3 -m \
+                             librefang.sidecar.adapters.telegram` with \
+                             channel_type = \"telegram\" to enable it (see \
+                             docs/architecture/sidecar-channels.md)."
+                        .to_string(),
                 });
             }
             "discord" => {
@@ -3021,15 +2981,18 @@ fn parse_legacy_channels(
                 });
             }
             "irc" => {
-                let mut fields: Vec<(&str, toml::Value)> = Vec::new();
-                if let Some(ref tok) = ch.bot_token_env {
-                    fields.push(("password_env", toml::Value::String(tok.clone())));
-                }
-                channels_table.insert("irc".to_string(), build_channel_table(fields, None, None));
-                report.imported.push(MigrateItem {
+                // IRC was removed as an in-process adapter; surface a
+                // warning instead of writing a [channels.irc] block the
+                // kernel would refuse to deserialize. Users who still
+                // need IRC should ship a sidecar adapter.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "irc".to_string(),
-                    destination: "config.toml [channels.irc]".to_string(),
+                    reason: "IRC in-process adapter was removed in v2026.5. \
+                             Ship an IRC sidecar adapter (see \
+                             docs/architecture/sidecar-channels.md) or pin a \
+                             pre-removal LibreFang release."
+                        .to_string(),
                 });
             }
             "mattermost" => {
@@ -3526,12 +3489,19 @@ mod tests {
         )
         .unwrap();
 
-        // messaging/telegram.yaml
+        // messaging/telegram.yaml (now migrated as a skipped sidecar
+        // channel) + messaging/discord.yaml (still an in-process channel,
+        // so the legacy path keeps exercising channel import).
         let msg_dir = dir.join("messaging");
         std::fs::create_dir_all(&msg_dir).unwrap();
         std::fs::write(
             msg_dir.join("telegram.yaml"),
             "type: telegram\nbot_token_env: TELEGRAM_BOT_TOKEN\ndefault_agent: coder\n",
+        )
+        .unwrap();
+        std::fs::write(
+            msg_dir.join("discord.yaml"),
+            "type: discord\nbot_token_env: DISCORD_BOT_TOKEN\ndefault_agent: coder\n",
         )
         .unwrap();
     }
@@ -3716,22 +3686,42 @@ mod tests {
         assert!(target.path().join("agents/coder/agent.toml").exists());
         assert!(target.path().join("agents/researcher/agent.toml").exists());
 
-        // Channels imported (11 supported channels from fixture)
+        // Channels imported (10 in-process channels from fixture).
         let channel_items: Vec<_> = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        assert_eq!(channel_items.len(), 11); // 13 - imessage - bluebubbles
+        // 13 - imessage - bluebubbles - telegram - irc (telegram migrated
+        // to a sidecar adapter, irc removed entirely in v2026.5: both are
+        // reported as skipped, not imported).
+        assert_eq!(channel_items.len(), 9);
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "telegram"
+            && s.reason.contains("sidecar")));
 
         let config_toml = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
-        assert!(config_toml.contains("[channels.telegram]"));
+        assert!(
+            !config_toml.contains("[channels.telegram]"),
+            "telegram is a sidecar channel now; the migrator must not emit \
+             a [channels.telegram] block the kernel would reject"
+        );
         assert!(config_toml.contains("[channels.discord]"));
         assert!(config_toml.contains("[channels.slack]"));
         assert!(config_toml.contains("[channels.whatsapp]"));
         assert!(config_toml.contains("[channels.signal]"));
         assert!(config_toml.contains("[channels.matrix]"));
-        assert!(config_toml.contains("[channels.irc]"));
+        // IRC adapter was removed in v2026.5; the migrator now emits a
+        // skipped entry instead of a [channels.irc] block (which the
+        // kernel would refuse to deserialize).
+        assert!(
+            !config_toml.contains("[channels.irc]"),
+            "IRC is no longer an in-process adapter; the migrator must not \
+             emit a [channels.irc] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "irc"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.mattermost]"));
         assert!(config_toml.contains("[channels.feishu]"));
         assert!(config_toml.contains("[channels.teams]"));
@@ -3758,7 +3748,9 @@ mod tests {
         assert!(secrets.contains("DISCORD_BOT_TOKEN=discord-token-here"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
         assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
-        assert!(secrets.contains("IRC_PASSWORD=irc-secret-pw"));
+        // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted to
+        // secrets.env; the migrator now skips IRC entirely with a warning.
+        assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
         assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
@@ -3844,7 +3836,7 @@ mod tests {
       groupPolicy: "open",
       allowFrom: ["123", "456"]
     },
-    discord: { token: "dc-token", allowFrom: ["user-1"] },
+    discord: { token: "dc-token", allowFrom: ["user-1"], dmPolicy: "allowlist", groupPolicy: "open" },
     slack: { botToken: "xoxb", appToken: "xapp" },
     whatsapp: { allowFrom: ["+1555"] },
     signal: { httpHost: "localhost", httpPort: 8080, account: "+1555", allowFrom: ["+1556"] },
@@ -3908,13 +3900,8 @@ mod tests {
         );
 
         // 5. Channel top-level allowlists are populated (not stuffed into overrides).
-        let tg = cfg
-            .channels
-            .telegram
-            .iter()
-            .next()
-            .expect("telegram configured");
-        assert_eq!(tg.allowed_users, vec!["123".to_string(), "456".to_string()]);
+        //    (Telegram is a sidecar channel now and no longer round-trips
+        //    through `cfg.channels`; its token is migrated to secrets.env.)
         let dc = cfg
             .channels
             .discord
@@ -3946,12 +3933,11 @@ mod tests {
 
         // 6. Policy mappings land on valid enum variants (no "respond" on group_policy).
         use librefang_types::config::{DmPolicy, GroupPolicy};
-        assert_eq!(tg.overrides.dm_policy, DmPolicy::AllowedOnly);
-        assert_eq!(tg.overrides.group_policy, GroupPolicy::All);
+        assert_eq!(dc.overrides.dm_policy, DmPolicy::AllowedOnly);
+        assert_eq!(dc.overrides.group_policy, GroupPolicy::All);
 
         // 7. Per-struct field-name corrections.
-        let irc = cfg.channels.irc.iter().next().expect("irc configured");
-        assert_eq!(irc.nick, "bot"); // was "nickname" before the fix
+        // IRC removed in v2026.5 — used to check `irc.nick == "bot"` here.
         let mm = cfg
             .channels
             .mattermost
@@ -4039,7 +4025,7 @@ mod tests {
         let json5_content = r#"{
   channels: {
     telegram: { botToken: "123", allowFrom: ["alice"], enabled: true },
-    discord: { token: "abc", enabled: true },
+    discord: { token: "abc", allowFrom: ["alice"], enabled: true },
     slack: { botToken: "xoxb", appToken: "xapp" }
   }
 }"#;
@@ -4050,28 +4036,34 @@ mod tests {
         assert!(channels.is_some());
         let ch = channels.unwrap();
         let ch_table = ch.as_table().unwrap();
-        assert!(ch_table.contains_key("telegram"));
+        // Telegram is a sidecar channel now — skipped, not in the table.
+        assert!(!ch_table.contains_key("telegram"));
+        assert!(report
+            .skipped
+            .iter()
+            .any(|s| s.kind == ItemKind::Channel && s.name == "telegram"));
         assert!(ch_table.contains_key("discord"));
         assert!(ch_table.contains_key("slack"));
 
-        // Check telegram has allowed_users and bot_token_env
-        let tg = ch_table["telegram"].as_table().unwrap();
-        assert_eq!(tg["bot_token_env"].as_str().unwrap(), "TELEGRAM_BOT_TOKEN");
-        let users = tg["allowed_users"].as_array().unwrap();
+        // Check discord has allowed_users and bot_token_env
+        let dc = ch_table["discord"].as_table().unwrap();
+        assert_eq!(dc["bot_token_env"].as_str().unwrap(), "DISCORD_BOT_TOKEN");
+        let users = dc["allowed_users"].as_array().unwrap();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].as_str().unwrap(), "alice");
 
-        // 3 channel imports
+        // 2 channel imports (discord + slack; telegram → sidecar/skipped)
         assert_eq!(
             report
                 .imported
                 .iter()
                 .filter(|i| i.kind == ItemKind::Channel)
                 .count(),
-            3
+            2
         );
 
-        // 4 secrets extracted (telegram + discord + slack bot + slack app)
+        // 4 secrets extracted (telegram token still goes to secrets.env so
+        // the sidecar can read it + discord + slack bot + slack app)
         assert_eq!(
             report
                 .imported
@@ -4529,7 +4521,7 @@ mod tests {
         assert!(agent_toml.contains("shell_exec"));
 
         let config_toml = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
-        assert!(config_toml.contains("[channels.telegram]"));
+        assert!(!config_toml.contains("[channels.telegram]"));
         assert!(!target.path().join("channels_import.toml").exists());
 
         assert!(target.path().join("migration_report.md").exists());
@@ -4730,8 +4722,9 @@ mod tests {
         assert_eq!(result.agents.len(), 1);
         assert_eq!(result.agents[0].name, "coder");
         assert!(result.agents[0].has_memory);
-        assert_eq!(result.channels.len(), 1);
+        assert_eq!(result.channels.len(), 2);
         assert!(result.channels.contains(&"telegram".to_string()));
+        assert!(result.channels.contains(&"discord".to_string()));
     }
 
     #[test]
@@ -4802,7 +4795,8 @@ mod tests {
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
         assert!(secrets.contains("SLACK_APP_TOKEN=xapp-slack"));
         assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
-        assert!(secrets.contains("IRC_PASSWORD=irc-secret-pw"));
+        // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted.
+        assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
         assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
@@ -4815,7 +4809,6 @@ mod tests {
             "xoxb-slack",
             "xapp-slack",
             "syt_matrix_token_xyz",
-            "irc-secret-pw",
             "mm-token-abc",
             "feishu-secret-xyz",
             "teams-pw-secret",
@@ -4826,15 +4819,16 @@ mod tests {
             );
         }
 
-        // Secret items in report
+        // Secret items in report (was >=9 before IRC removal in v2026.5
+        // dropped IRC_PASSWORD; 8 is the post-removal floor).
         let secret_count = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Secret)
             .count();
         assert!(
-            secret_count >= 9,
-            "expected >=9 Secret items, got {secret_count}"
+            secret_count >= 8,
+            "expected >=8 Secret items, got {secret_count}"
         );
     }
 
@@ -4843,14 +4837,15 @@ mod tests {
         let target = TempDir::new().unwrap();
         let json5_content = r#"{
   channels: {
-    telegram: {
-      botToken: "tok",
+    discord: {
+      token: "tok",
       dmPolicy: "allowlist",
       groupPolicy: "open",
       allowFrom: ["alice", "bob"]
     },
-    discord: {
-      token: "tok2",
+    slack: {
+      botToken: "b",
+      appToken: "a",
       dmPolicy: "disabled"
     }
   }
@@ -4863,11 +4858,11 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Telegram should have overrides with mapped policies.
+        // Discord should have overrides with mapped policies.
         // OpenClaw group_policy "open" → LibreFang "all" (was incorrectly
         // mapped to "respond" before the 2026-04 sync fix).
-        let tg = table["telegram"].as_table().unwrap();
-        let overrides = tg["overrides"].as_table().unwrap();
+        let dc = table["discord"].as_table().unwrap();
+        let overrides = dc["overrides"].as_table().unwrap();
         assert_eq!(overrides["dm_policy"].as_str().unwrap(), "allowed_only");
         assert_eq!(overrides["group_policy"].as_str().unwrap(), "all");
         // allowed_users lives at the top level of the channel table, not inside
@@ -4877,13 +4872,14 @@ mod tests {
             "allowed_users must not be written inside overrides — it's not a \
              ChannelOverrides field"
         );
-        let users = tg["allowed_users"].as_array().unwrap();
+        let users = dc["allowed_users"].as_array().unwrap();
         assert_eq!(users.len(), 2);
 
-        // Discord should have overrides with mapped dm_policy
-        let dc = table["discord"].as_table().unwrap();
-        let dc_overrides = dc["overrides"].as_table().unwrap();
-        assert_eq!(dc_overrides["dm_policy"].as_str().unwrap(), "ignore");
+        // Slack should have overrides with mapped dm_policy ("disabled" →
+        // "ignore").
+        let sl = table["slack"].as_table().unwrap();
+        let sl_overrides = sl["overrides"].as_table().unwrap();
+        assert_eq!(sl_overrides["dm_policy"].as_str().unwrap(), "ignore");
     }
 
     #[test]

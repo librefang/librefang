@@ -973,23 +973,24 @@ async fn boot_fails_on_stale_channel_output_format_key() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
 
-    // A `[channels.telegram]` block where `poll_interval_secs` has the
+    // A `[channels.discord]` block where `initial_backoff_secs` has the
     // wrong shape (string instead of u64) — the canonical "stale renamed
     // channel key" scenario the issue tracks: an older release tolerated
-    // a string here (e.g. "30s"), the current schema is `u64` seconds,
+    // a string here (e.g. "1s"), the current schema is `u64` seconds,
     // and the operator's config still carries the old value.
     //
-    // We use `poll_interval_secs` rather than the literal `output_format`
-    // from the issue write-up because `output_format` was never a real
-    // schema field — making the test trip the unknown-field tolerance
-    // path (warn-and-proceed by design, see #5130) instead of the
-    // hard-fail path #5186 actually closes. The behavioural assertion
-    // (boot fails, message names the channel field, no "auth" leakage)
-    // is identical either way and is the real regression contract.
+    // We use a real `u64` schema field (`initial_backoff_secs`) rather
+    // than the literal `output_format` from the issue write-up because
+    // `output_format` was never a real schema field — making the test
+    // trip the unknown-field tolerance path (warn-and-proceed by
+    // design, see #5130) instead of the hard-fail path #5186 actually
+    // closes. The behavioural assertion (boot fails, message names the
+    // channel field, no "auth" leakage) is identical either way and is
+    // the real regression contract.
     let bad_toml = "\
-[channels.telegram]
-bot_token_env = \"TELEGRAM_BOT_TOKEN\"
-poll_interval_secs = \"thirty-seconds\"
+[channels.discord]
+bot_token_env = \"DISCORD_BOT_TOKEN\"
+initial_backoff_secs = \"thirty-seconds\"
 ";
     std::fs::write(&config_path, bad_toml).expect("write bad config.toml");
 
@@ -1004,19 +1005,19 @@ poll_interval_secs = \"thirty-seconds\"
     // TOML deserializer; we lock the substring contract on the field
     // name and the section path.
     assert!(
-        err.contains("poll_interval_secs"),
+        err.contains("initial_backoff_secs"),
         "boot error must name the offending channel field; got: {err}"
     );
     assert!(
-        err.contains("channels") && err.contains("telegram"),
-        "boot error must locate the field under [channels.telegram]; got: {err}"
+        err.contains("channels") && err.contains("discord"),
+        "boot error must locate the field under [channels.discord]; got: {err}"
     );
 
     // The critical regression guard from the issue: the failure must NOT
     // be misclassified as an auth / token error downstream. Pre-#5186,
     // the load tolerated the bad value, defaults wiped the operator's
-    // `[channels.telegram] bot_token_env`, and the next layer surfaced
-    // it as "telegram bot token missing — authentication failed". Now
+    // `[channels.discord] bot_token_env`, and the next layer surfaced
+    // it as "discord bot token missing — authentication failed". Now
     // we abort at parse time with the field name and never reach auth.
     let lower = err.to_lowercase();
     assert!(

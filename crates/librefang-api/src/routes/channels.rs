@@ -45,8 +45,13 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/registry",
             axum::routing::get(list_channel_registry),
         )
+        .route(
+            "/channels/sidecar/{name}/configure",
+            axum::routing::post(configure_sidecar_channel),
+        )
 }
 
+use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::skills::{
     append_channel_instance, remove_channel_config, remove_channel_instance, remove_secret_env,
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
@@ -58,24 +63,17 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::types::ApiErrorResponse;
 
-/// Resolve the LibreFang home directory without depending on the kernel crate.
-///
-/// Mirrors `librefang_kernel::config::librefang_home`:
-/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
-/// (falling back to the system temp dir if no home directory is available).
-fn librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
-}
+// All channel handlers below resolve the LibreFang home directory via
+// `state.kernel.home_dir()` so they honour the kernel's authoritative
+// `KernelConfig.home_dir` setting (which itself respects `LIBREFANG_HOME`
+// and falls back to `~/.librefang`). The previously-local
+// `librefang_home()` helper was removed because it bypassed kernel config
+// overrides — see codex review fix #1 and its generalization in fix #7.
+
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -140,22 +138,10 @@ struct ChannelMeta {
 }
 
 const CHANNEL_REGISTRY: &[ChannelMeta] = &[
-    // ── Messaging (12) ──────────────────────────────────────────────
-    ChannelMeta {
-        name: "telegram", display_name: "Telegram", icon: "TG",
-        description: "Telegram Bot API — long-polling adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token from @BotFather",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("TELEGRAM_BOT_TOKEN"), required: true, placeholder: "123456:ABC-DEF...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "12345, 67890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "poll_interval_secs", label: "Poll Interval (sec)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "1", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open @BotFather on Telegram", "Send /newbot and follow the prompts", "Paste the token below"],
-        config_template: "[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"",
-    },
+    // ── Messaging (11) ──────────────────────────────────────────────
+    // telegram migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.telegram); no longer an in-process
+    // channel.
     ChannelMeta {
         name: "discord", display_name: "Discord", icon: "DC",
         description: "Discord Gateway bot adapter",
@@ -267,66 +253,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
         config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
     },
-    ChannelMeta {
-        name: "viber", display_name: "Viber", icon: "VB",
-        description: "Viber Bot API adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your auth token from partners.viber.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "auth_token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("VIBER_AUTH_TOKEN"), required: true, placeholder: "4dc...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_url", label: "Webhook URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://your-domain.com/viber", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8451", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot at partners.viber.com", "Copy the auth token", "Paste it below"],
-        config_template: "[channels.viber]\nauth_token_env = \"VIBER_AUTH_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "messenger", display_name: "Messenger", icon: "FB",
-        description: "Facebook Messenger Platform adapter",
-        category: "messaging", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Paste your Page Access Token from developers.facebook.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "page_token_env", label: "Page Access Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_PAGE_TOKEN"), required: true, placeholder: "EAAx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8452", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Facebook App and add Messenger", "Generate a Page Access Token", "Paste it below"],
-        config_template: "[channels.messenger]\npage_token_env = \"MESSENGER_PAGE_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "threema", display_name: "Threema", icon: "3M",
-        description: "Threema Gateway adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your Gateway ID and API secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "secret_env", label: "API Secret", field_type: FieldType::Secret, env_var: Some("THREEMA_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "threema_id", label: "Gateway ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "*MYID01", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8454", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Register at gateway.threema.ch", "Copy your ID and API secret", "Paste them below"],
-        config_template: "[channels.threema]\nthreema_id = \"\"\nsecret_env = \"THREEMA_SECRET\"",
-    },
-    ChannelMeta {
-        name: "keybase", display_name: "Keybase", icon: "KB",
-        description: "Keybase chat bot adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your username and paper key",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "username", label: "Username", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang_bot", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "paperkey_env", label: "Paper Key", field_type: FieldType::Secret, env_var: Some("KEYBASE_PAPERKEY"), required: true, placeholder: "word1 word2 word3...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_teams", label: "Allowed Teams", field_type: FieldType::List, env_var: None, required: false, placeholder: "team1, team2", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Keybase bot account", "Generate a paper key", "Enter username and paper key below"],
-        config_template: "[channels.keybase]\nusername = \"\"\npaperkey_env = \"KEYBASE_PAPERKEY\"",
-    },
     // ── Social (5) ──────────────────────────────────────────────────
     ChannelMeta {
         name: "reddit", display_name: "Reddit", icon: "RD",
@@ -345,63 +271,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
         config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "mastodon", display_name: "Mastodon", icon: "MA",
-        description: "Mastodon Streaming API adapter",
-        category: "social", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your access token from Settings > Development",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("MASTODON_ACCESS_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "instance_url", label: "Instance URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://mastodon.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > Development on your instance", "Create an app and copy the token", "Paste it below"],
-        config_template: "[channels.mastodon]\ninstance_url = \"https://mastodon.social\"\naccess_token_env = \"MASTODON_ACCESS_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "bluesky", display_name: "Bluesky", icon: "BS",
-        description: "Bluesky/AT Protocol adapter",
-        category: "social", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Enter your handle and app password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "identifier", label: "Handle", field_type: FieldType::Text, env_var: None, required: true, placeholder: "user.bsky.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("BLUESKY_APP_PASSWORD"), required: true, placeholder: "xxxx-xxxx-xxxx-xxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "service_url", label: "PDS URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://bsky.social", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > App Passwords in Bluesky", "Create an app password", "Enter handle and password below"],
-        config_template: "[channels.bluesky]\nidentifier = \"\"\napp_password_env = \"BLUESKY_APP_PASSWORD\"",
-    },
-    ChannelMeta {
-        name: "linkedin", display_name: "LinkedIn", icon: "LI",
-        description: "LinkedIn Messaging API adapter",
-        category: "social", difficulty: "Hard", setup_time: "~15 min",
-        quick_setup: "Paste your OAuth2 access token and Organization ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("LINKEDIN_ACCESS_TOKEN"), required: true, placeholder: "AQV...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "organization_id", label: "Organization ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "12345678", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a LinkedIn App at linkedin.com/developers", "Generate an OAuth2 token", "Enter token and org ID below"],
-        config_template: "[channels.linkedin]\naccess_token_env = \"LINKEDIN_ACCESS_TOKEN\"\norganization_id = \"\"",
-    },
-    ChannelMeta {
-        name: "nostr", display_name: "Nostr", icon: "NS",
-        description: "Nostr relay protocol adapter",
-        category: "social", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your private key (nsec or hex)",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "private_key_env", label: "Private Key", field_type: FieldType::Secret, env_var: Some("NOSTR_PRIVATE_KEY"), required: true, placeholder: "nsec1...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "relays", label: "Relay URLs", field_type: FieldType::List, env_var: None, required: false, placeholder: "wss://relay.damus.io", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Generate or use an existing Nostr keypair", "Paste your private key below"],
-        config_template: "[channels.nostr]\nprivate_key_env = \"NOSTR_PRIVATE_KEY\"",
-    },
+    // mastodon and bluesky migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{mastodon,bluesky} in the SDK package);
+    // no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
     ChannelMeta {
         name: "teams", display_name: "Microsoft Teams", icon: "MS",
@@ -496,49 +368,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
     },
     ChannelMeta {
-        name: "pumble", display_name: "Pumble", icon: "PB",
-        description: "Pumble bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("PUMBLE_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8455", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Pumble Integrations", "Copy the token", "Paste it below"],
-        config_template: "[channels.pumble]\nbot_token_env = \"PUMBLE_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "flock", display_name: "Flock", icon: "FL",
-        description: "Flock bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("FLOCK_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Build an app in Flock App Store", "Copy the bot token", "Paste it below"],
-        config_template: "[channels.flock]\nbot_token_env = \"FLOCK_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "twist", display_name: "Twist", icon: "TW",
-        description: "Twist API v3 adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API token and workspace ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "token_env", label: "API Token", field_type: FieldType::Secret, env_var: Some("TWIST_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "workspace_id", label: "Workspace ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "12345", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Channel IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123, 456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an integration in Twist Settings", "Copy the API token", "Enter token and workspace ID below"],
-        config_template: "[channels.twist]\ntoken_env = \"TWIST_TOKEN\"\nworkspace_id = \"\"",
-    },
-    ChannelMeta {
         name: "zulip", display_name: "Zulip", icon: "ZL",
         description: "Zulip event queue adapter",
         category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
@@ -554,99 +383,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot in Zulip Settings > Your Bots", "Copy the API key", "Enter server URL, bot email, and key below"],
         config_template: "[channels.zulip]\nserver_url = \"\"\nbot_email = \"\"\napi_key_env = \"ZULIP_API_KEY\"",
     },
-    // ── Developer (9) ───────────────────────────────────────────────
-    ChannelMeta {
-        name: "irc", display_name: "IRC", icon: "IR",
-        description: "IRC raw TCP adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter server and nickname",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server", label: "Server", field_type: FieldType::Text, env_var: None, required: true, placeholder: "irc.libera.chat", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "nick", label: "Nickname", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channels", label: "Channels", field_type: FieldType::List, env_var: None, required: false, placeholder: "#librefang, #general", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "6667", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "use_tls", label: "Use TLS", field_type: FieldType::Text, env_var: None, required: false, placeholder: "false", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Choose an IRC server", "Enter server, nick, and channels below"],
-        config_template: "[channels.irc]\nserver = \"irc.libera.chat\"\nnick = \"librefang\"",
-    },
-    ChannelMeta {
-        name: "xmpp", display_name: "XMPP/Jabber", icon: "XM",
-        description: "XMPP/Jabber protocol adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your JID and password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "jid", label: "JID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@jabber.org", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Password", field_type: FieldType::Secret, env_var: Some("XMPP_PASSWORD"), required: true, placeholder: "password", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server", label: "Server", field_type: FieldType::Text, env_var: None, required: false, placeholder: "jabber.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "5222", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "rooms", label: "MUC Rooms", field_type: FieldType::List, env_var: None, required: false, placeholder: "room@conference.jabber.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot account on your XMPP server", "Enter JID and password below"],
-        config_template: "[channels.xmpp]\njid = \"\"\npassword_env = \"XMPP_PASSWORD\"",
-    },
-    ChannelMeta {
-        name: "gitter", display_name: "Gitter", icon: "GT",
-        description: "Gitter Streaming API adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your auth token and room ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("GITTER_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "room_id", label: "Room ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "abc123def456", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Get a token from developer.gitter.im", "Find your room ID", "Paste both below"],
-        config_template: "[channels.gitter]\ntoken_env = \"GITTER_TOKEN\"\nroom_id = \"\"",
-    },
-    ChannelMeta {
-        name: "discourse", display_name: "Discourse", icon: "DS",
-        description: "Discourse forum API adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API key and forum URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "base_url", label: "Forum URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://forum.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_key_env", label: "API Key", field_type: FieldType::Secret, env_var: Some("DISCOURSE_API_KEY"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_username", label: "API Username", field_type: FieldType::Text, env_var: None, required: false, placeholder: "system", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "categories", label: "Categories", field_type: FieldType::List, env_var: None, required: false, placeholder: "general, support", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Admin > API > Keys", "Generate an API key", "Enter forum URL and key below"],
-        config_template: "[channels.discourse]\nbase_url = \"\"\napi_key_env = \"DISCOURSE_API_KEY\"",
-    },
-    ChannelMeta {
-        name: "revolt", display_name: "Revolt", icon: "RV",
-        description: "Revolt bot adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("REVOLT_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_url", label: "API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.revolt.chat", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > My Bots in Revolt", "Create a bot and copy the token", "Paste it below"],
-        config_template: "[channels.revolt]\nbot_token_env = \"REVOLT_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "guilded", display_name: "Guilded", icon: "GD",
-        description: "Guilded bot adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Paste your bot token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("GUILDED_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "server_ids", label: "Server IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Server Settings > Bots in Guilded", "Create a bot and copy the token", "Paste it below"],
-        config_template: "[channels.guilded]\nbot_token_env = \"GUILDED_BOT_TOKEN\"",
-    },
+    // ── Developer ───────────────────────────────────────────────────
     ChannelMeta {
         name: "nextcloud", display_name: "Nextcloud Talk", icon: "NC",
         description: "Nextcloud Talk REST adapter",
@@ -694,24 +431,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
     },
     // ── Notifications (3) ───────────────────────────────────────────
-    // ntfy migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.ntfy in the SDK package); no longer
-    // an in-process channel.
-    ChannelMeta {
-        name: "gotify", display_name: "Gotify", icon: "GF",
-        description: "Gotify WebSocket notification adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your server URL and tokens",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://gotify.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_token_env", label: "App Token (send)", field_type: FieldType::Secret, env_var: Some("GOTIFY_APP_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "client_token_env", label: "Client Token (receive)", field_type: FieldType::Secret, env_var: Some("GOTIFY_CLIENT_TOKEN"), required: true, placeholder: "def456...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an app and a client in Gotify", "Copy both tokens", "Enter URL and tokens below"],
-        config_template: "[channels.gotify]\nserver_url = \"\"\napp_token_env = \"GOTIFY_APP_TOKEN\"\nclient_token_env = \"GOTIFY_CLIENT_TOKEN\"",
-    },
+    // ntfy and gotify migrated to out-of-process sidecar adapters
+    // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
+    // in the SDK package); no longer in-process channels.
     ChannelMeta {
         name: "webhook", display_name: "Webhook", icon: "WH",
         description: "Generic HMAC-signed webhook adapter",
@@ -726,41 +448,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         ],
         setup_steps: &["Enter an HMAC secret (or leave blank)", "Click Save — that's it!"],
         config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
-    },
-    ChannelMeta {
-        name: "voice", display_name: "Voice", icon: "VC",
-        description: "Voice channel via WebSocket with STT/TTS",
-        category: "media", difficulty: "Medium", setup_time: "~3 min",
-        quick_setup: "Set an OpenAI API key for Whisper STT and TTS",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "api_key_env", label: "API Key (STT/TTS)", field_type: FieldType::Secret, env_var: Some("OPENAI_API_KEY"), required: true, placeholder: "sk-...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "listen_port", label: "WebSocket Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "4546", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "stt_url", label: "STT API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "tts_url", label: "TTS API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "tts_voice", label: "TTS Voice", field_type: FieldType::Text, env_var: None, required: false, placeholder: "alloy", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "buffer_threshold", label: "Audio Buffer (bytes)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "32768", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Set OPENAI_API_KEY environment variable", "Optionally configure STT/TTS endpoints", "Connect via WebSocket at ws://host:4546/voice"],
-        config_template: "[channels.voice]\napi_key_env = \"OPENAI_API_KEY\"\nlisten_port = 4546",
-    },
-    ChannelMeta {
-        name: "mumble", display_name: "Mumble", icon: "MB",
-        description: "Mumble text chat adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter server host and username",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "host", label: "Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "mumble.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "username", label: "Username", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Server Password", field_type: FieldType::Secret, env_var: Some("MUMBLE_PASSWORD"), required: false, placeholder: "password", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "port", label: "Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "64738", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channel", label: "Channel", field_type: FieldType::Text, env_var: None, required: false, placeholder: "Root", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enter host and username below", "Optionally add a password"],
-        config_template: "[channels.mumble]\nhost = \"\"\nusername = \"librefang\"",
     },
     ChannelMeta {
         name: "wechat", display_name: "WeChat", icon: "WX",
@@ -814,7 +501,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
-        "telegram" => config.telegram.is_some(),
         "discord" => config.discord.is_some(),
         "slack" => config.slack.is_some(),
         "whatsapp" => config.whatsapp.is_some(),
@@ -822,38 +508,18 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "line" => config.line.is_some(),
-        "viber" => config.viber.is_some(),
-        "messenger" => config.messenger.is_some(),
-        "threema" => config.threema.is_some(),
-        "keybase" => config.keybase.is_some(),
         "reddit" => config.reddit.is_some(),
-        "mastodon" => config.mastodon.is_some(),
-        "bluesky" => config.bluesky.is_some(),
-        "linkedin" => config.linkedin.is_some(),
-        "nostr" => config.nostr.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "webex" => config.webex.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
-        "pumble" => config.pumble.is_some(),
-        "flock" => config.flock.is_some(),
-        "twist" => config.twist.is_some(),
         "zulip" => config.zulip.is_some(),
-        "irc" => config.irc.is_some(),
-        "xmpp" => config.xmpp.is_some(),
-        "gitter" => config.gitter.is_some(),
-        "discourse" => config.discourse.is_some(),
-        "revolt" => config.revolt.is_some(),
-        "guilded" => config.guilded.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
         "twitch" => config.twitch.is_some(),
-        "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
-        "voice" => config.voice.is_some(),
-        "mumble" => config.mumble.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
         "qq" => config.qq.is_some(),
@@ -954,9 +620,9 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "messenger" | "viber" | "google_chat"
-        | "flock" | "pumble" | "threema" | "webhook" | "wecom" => Some("/webhook"),
-        "voice" => Some("/ws"),
+        "feishu" | "teams" | "dingtalk" | "line" | "google_chat" | "webhook" | "wecom" => {
+            Some("/webhook")
+        }
         _ => None,
     }
 }
@@ -972,16 +638,637 @@ fn find_channel_meta(name: &str) -> Option<&'static ChannelMeta> {
     CHANNEL_REGISTRY.iter().find(|c| c.name == name)
 }
 
+/// Synthesize dashboard channel rows for configured `[[sidecar_channels]]`.
+///
+/// telegram / ntfy (and any other sidecar adapter) were removed from
+/// `CHANNEL_REGISTRY` when they migrated out-of-process (#5241 / #5224),
+/// which silently dropped them from the dashboard channels page. They
+/// are still channels — surface the configured ones here so the
+/// operator view stays consistent regardless of whether an adapter
+/// runs in-process or as a sidecar. These rows are config.toml-managed
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
+/// they carry no editable `fields`; the page renders them as
+/// configured/online cards (it conditionally hides empty
+/// `fields`/`setup_steps`).
+fn sidecar_channel_rows(
+    sidecar: &[librefang_types::config::SidecarChannelConfig],
+    msgs_24h: &std::collections::HashMap<String, u64>,
+    with_msgs: bool,
+) -> Vec<serde_json::Value> {
+    let registry: std::collections::HashSet<&str> =
+        CHANNEL_REGISTRY.iter().map(|c| c.name).collect();
+    let mut instance_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for sc in sidecar {
+        *instance_counts.entry(sc.name.as_str()).or_insert(0) += 1;
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for sc in sidecar {
+        let name = sc.name.as_str();
+        // One card per distinct sidecar name; never shadow an
+        // in-process registry entry that happens to share the name.
+        if registry.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let mut row = serde_json::json!({
+            "name": name,
+            "display_name": name,
+            "icon": "SC",
+            "description": format!(
+                "Out-of-process sidecar adapter ({} {})",
+                sc.command,
+                sc.args.join(" ")
+            ),
+            "category": "sidecar",
+            "difficulty": "",
+            "setup_time": "",
+            "quick_setup": "",
+            "setup_type": "sidecar",
+            "configured": true,
+            "instance_count": instance_counts.get(name).copied().unwrap_or(1),
+            "has_token": true,
+            "fields": Vec::<serde_json::Value>::new(),
+            "setup_steps": [
+                "Runs as an out-of-process sidecar adapter",
+                "Configured via [[sidecar_channels]] in config.toml \
+                 (Config \u{2192} Sidecar Channels)",
+            ],
+            "config_template": format!(
+                "[[sidecar_channels]]\nname = \"{name}\"\nchannel_type = \"{channel_type}\""
+            ),
+        });
+        if with_msgs {
+            let m = msgs_24h
+                .get(channel_type)
+                .or_else(|| msgs_24h.get(name))
+                .copied()
+                .unwrap_or(0);
+            row["msgs_24h"] = serde_json::json!(m);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// One discoverable, first-party sidecar adapter shipped in the SDK.
+///
+/// `name` doubles as the catalog key — it must match the value the
+/// operator will put in `[[sidecar_channels]].channel_type` (or
+/// `name`, when `channel_type` is omitted), so a configured entry
+/// suppresses the matching catalog row in `sidecar_discovery_rows`.
+struct SidecarCatalogEntry {
+    name: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    /// Executable spawned by `populate_sidecar_schema_cache()` with `--describe`
+    /// to retrieve the field schema. Also the value the operator would write
+    /// to `[[sidecar_channels]].command` if configuring by hand.
+    command: &'static str,
+    /// Module / script arguments passed to `command`. `--describe` is appended
+    /// by `describe_sidecar()` at probe time.
+    args: &'static [&'static str],
+}
+
+/// First-party sidecar adapters shipped under
+/// `sdk/python/librefang/sidecar/adapters/`. Listed here so they stay
+/// discoverable on the dashboard channels page after migrating out of
+/// `CHANNEL_REGISTRY` (#5241 / #5224) — without an entry, an operator
+/// who has never configured them sees no card and no picker entry, so
+/// the only way to learn telegram / ntfy exist is to read source code
+/// or release notes. `webhook` is deliberately omitted: it still has an
+/// in-process entry in `CHANNEL_REGISTRY` and we must not show two
+/// "webhook" cards on the page.
+const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
+    SidecarCatalogEntry {
+        name: "telegram",
+        display_name: "Telegram",
+        description: "Telegram Bot API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.telegram"],
+    },
+    SidecarCatalogEntry {
+        name: "ntfy",
+        display_name: "ntfy",
+        description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.ntfy"],
+    },
+    SidecarCatalogEntry {
+        name: "gotify",
+        display_name: "Gotify",
+        description: "Gotify push notifications (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.gotify"],
+    },
+    SidecarCatalogEntry {
+        name: "mastodon",
+        display_name: "Mastodon",
+        description: "Mastodon Streaming API (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.mastodon"],
+    },
+    SidecarCatalogEntry {
+        name: "bluesky",
+        display_name: "Bluesky",
+        description: "Bluesky / AT Protocol adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.bluesky"],
+    },
+];
+
+/// Process-wide cache of sidecar `--describe` schemas, keyed by
+/// `SidecarCatalogEntry::name`. Populated once at daemon boot by
+/// [`populate_sidecar_schema_cache`]; consumed on every `GET /api/channels`
+/// to emit `fields[]` for unconfigured discovery rows. A `RwLock` is used
+/// so the in-test seeder ([`__test_seed_sidecar_schema_cache`]) can replace
+/// entries deterministically between tests without rebuilding the daemon.
+static SIDECAR_SCHEMA_CACHE: OnceLock<RwLock<HashMap<&'static str, SidecarSchema>>> =
+    OnceLock::new();
+
+fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
+    SIDECAR_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Spawn `<command> <args> --describe` for every catalog entry and cache
+/// the resulting schemas. Called once at daemon boot from
+/// `server::build_router`. Failures (SDK not installed, describe crashed)
+/// are logged at WARN and the row falls back to an empty `fields[]` — the
+/// operator then sees the description + setup-steps text but no form.
+/// This keeps daemon boot resilient in dev environments that have not
+/// run `pip install -e sdk/python`.
+pub async fn populate_sidecar_schema_cache() {
+    for entry in SIDECAR_CATALOG {
+        let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
+        match describe_sidecar(entry.command, &args).await {
+            Ok(schema) => {
+                tracing::info!(
+                    adapter = entry.name,
+                    fields = schema.fields.len(),
+                    "sidecar schema cached"
+                );
+                schema_cache().write().unwrap().insert(entry.name, schema);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    "sidecar --describe failed; discovery card will have no form fields"
+                );
+            }
+        }
+    }
+}
+
+/// Test-only seeder for the sidecar schema cache. Wipes any existing
+/// entries and replaces them with the supplied pairs so integration tests
+/// can assert deterministic `fields[]` payloads without depending on a
+/// working Python SDK installation. `#[doc(hidden)]` because no production
+/// caller should ever reach for this — the public path is
+/// [`populate_sidecar_schema_cache`] at boot.
+#[doc(hidden)]
+pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
+    let mut guard = schema_cache().write().unwrap();
+    guard.clear();
+    for (k, v) in entries {
+        guard.insert(*k, v.clone());
+    }
+}
+
+/// Synthesize **unconfigured** dashboard rows for catalog sidecar
+/// adapters (`telegram`, `ntfy`) so they remain discoverable in the
+/// Add picker after the out-of-process migration. A catalog entry is
+/// suppressed when ANY `[[sidecar_channels]]` already has a matching
+/// `channel_type` (or, when `channel_type` is unset, a matching `name`)
+/// — i.e. once the operator has set up "telegram" under whatever local
+/// alias, the discovery card has done its job and should yield to the
+/// configured rows emitted by [`sidecar_channel_rows`].
+fn sidecar_discovery_rows(
+    sidecar: &[librefang_types::config::SidecarChannelConfig],
+) -> Vec<serde_json::Value> {
+    let registry: std::collections::HashSet<&str> =
+        CHANNEL_REGISTRY.iter().map(|c| c.name).collect();
+    let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for sc in sidecar {
+        let kind = sc.channel_type.as_deref().unwrap_or(sc.name.as_str());
+        covered.insert(kind);
+        covered.insert(sc.name.as_str());
+    }
+
+    let cache_guard = schema_cache().read().unwrap();
+    let mut rows = Vec::new();
+    for entry in SIDECAR_CATALOG {
+        // Guard against a future where the same name appears both
+        // in-process and in the catalog — never shadow CHANNEL_REGISTRY.
+        if registry.contains(entry.name) || covered.contains(entry.name) {
+            continue;
+        }
+        let fields: Vec<serde_json::Value> = cache_guard
+            .get(entry.name)
+            .map(|s| {
+                s.fields
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "key": f.key,
+                            "label": f.label,
+                            "type": f.field_type,
+                            "required": f.required,
+                            "placeholder": f.placeholder,
+                            "advanced": f.advanced,
+                            "options": f.options,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        rows.push(serde_json::json!({
+            "name": entry.name,
+            "display_name": entry.display_name,
+            "icon": "SC",
+            "description": entry.description,
+            "category": "sidecar",
+            "difficulty": "",
+            "setup_time": "",
+            "quick_setup": "",
+            "setup_type": "sidecar",
+            "configured": false,
+            "instance_count": 0,
+            "has_token": false,
+            "fields": fields,
+            "setup_steps": [
+                "Runs as an out-of-process sidecar adapter",
+                "Fill the form to save credentials to ~/.librefang/secrets.env \
+                 (secrets) and ~/.librefang/config.toml (non-secrets)",
+            ],
+        }));
+    }
+    rows
+}
+
+/// Request body for `POST /api/channels/sidecar/{name}/configure`.
+///
+/// `values` is a flat `key → string` map where each key matches a
+/// `SidecarSchemaField.key` returned by the sidecar's `--describe`.
+/// The endpoint splits the map by `field_type`: `secret` fields are
+/// written line-by-line to `~/.librefang/secrets.env`, every other
+/// field is written under `[sidecar_channels.env]` in
+/// `~/.librefang/config.toml`. All current first-party sidecar field
+/// types (text, secret, list, bool, select) are stringly representable,
+/// so a flat `HashMap<String, String>` is sufficient — payload-typed
+/// fields (numbers etc.) would need a richer shape.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ConfigureSidecarBody {
+    pub values: HashMap<String, String>,
+}
+
+/// Detect `[[sidecar_channels]]` entries in files referenced from the root
+/// config's `include = [...]` directive.
+///
+/// Background: librefang merges every file in `include` into the runtime
+/// config (`librefang_kernel::config::load_config`). The merge concatenates
+/// arrays-of-tables — so if an included file declares `[[sidecar_channels]]`
+/// and we write a fresh root-level `[[sidecar_channels]]` here, the live
+/// config will contain BOTH entries. The freshly-written root entry will
+/// silently shadow the included one on dashboard / configure paths
+/// (the kernel reads them in include-first order, but the dashboard
+/// configure flow expects to be editing the canonical entry).
+///
+/// Cheap heuristic: substring-match `[[sidecar_channels]]` in each included
+/// file. False positives on a comment containing that exact string are
+/// acceptable — the operator can either remove the comment or edit the
+/// included file directly as the 409 message recommends. Returns the list
+/// of include paths that contain at least one `[[sidecar_channels]]`
+/// header. Empty list = safe to write to root.
+fn included_files_with_sidecars(config_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let doc: toml_edit::DocumentMut = match content.parse() {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    // `include` may be a string array at the document root.
+    let include_arr = match doc.get("include").and_then(|i| i.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let parent = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut hits = Vec::new();
+    for entry in include_arr.iter() {
+        let raw = match entry.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let path = if std::path::Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            parent.join(raw)
+        };
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if body.contains("[[sidecar_channels]]") {
+                hits.push(path);
+            }
+        }
+    }
+    hits
+}
+
+/// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
+/// sidecar form values, splitting the payload across `secrets.env` and
+/// `config.toml`, then trigger a hot-reload so the kernel picks up the
+/// new `[[sidecar_channels]]` block without a restart. `name` is the
+/// `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).
+#[utoipa::path(
+    post,
+    path = "/api/channels/sidecar/{name}/configure",
+    tag = "channels",
+    request_body = ConfigureSidecarBody,
+    params(
+        ("name" = String, Path, description = "Sidecar catalog name (e.g. telegram, ntfy)")
+    ),
+    responses(
+        (status = 200, description = "Saved; reload plan returned. Body fields: \
+            `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), \
+            `shadowed_secrets` ([String]) — secret field keys whose value is already \
+            present in the daemon's process environment (e.g. exported by the launching \
+            shell). Those values will out-rank the freshly-written secrets.env entry \
+            until the operator unsets them and restarts the daemon.", body = crate::types::JsonObject),
+        (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
+        (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
+        (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
+    )
+)]
+pub async fn configure_sidecar_channel(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigureSidecarBody>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // 1. Catalog lookup — only first-party adapters listed in
+    //    SIDECAR_CATALOG can be configured through this endpoint.
+    let entry = SIDECAR_CATALOG
+        .iter()
+        .find(|e| e.name == name)
+        .ok_or_else(|| {
+            ApiErrorResponse::not_found(format!("no sidecar adapter named `{name}`"))
+                .into_json_tuple()
+        })?;
+
+    // 2. Pull the cached `--describe` schema. Without it we can't
+    //    validate required fields or split secret-vs-nonsecret.
+    let schema = schema_cache()
+        .read()
+        .unwrap()
+        .get(entry.name)
+        .cloned()
+        .ok_or_else(|| {
+            ApiErrorResponse::internal(format!(
+                "schema for `{name}` not cached — SDK module may be missing or `--describe` failed at boot"
+            ))
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .into_json_tuple()
+        })?;
+
+    // 3. Validate required fields: present in payload AND non-empty after trim.
+    for f in &schema.fields {
+        if f.required {
+            let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
+            if v.is_empty() {
+                return Err(ApiErrorResponse::bad_request(format!(
+                    "required field `{}` is missing or empty",
+                    f.key
+                ))
+                .into_json_tuple());
+            }
+        }
+    }
+
+    // 3b. Resolve `~/.librefang` paths from the kernel's configured
+    //     `home_dir` rather than recomputing from `LIBREFANG_HOME` /
+    //     `~/.librefang`: when the operator boots with a non-default
+    //     `KernelConfig.home_dir`, the recomputed default would write
+    //     to the wrong path while `reload_config()` and
+    //     `reload_channels_from_disk()` read from the kernel's path.
+    //     (Shell-shadow detection for secret fields now lives under
+    //     the config_write_lock in step 4a below.)
+    let home = state.kernel.home_dir().to_path_buf();
+    let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
+
+    // 3c. Refuse to save when an `include`d file already owns the
+    //     `[[sidecar_channels]]` array. Writing a root-level entry on
+    //     top of that would silently shadow the included one after the
+    //     kernel merges them — the operator's intent (edit *that*
+    //     entry) and our behaviour (append a fresh root entry) would
+    //     diverge without warning. The dashboard / docs steer the
+    //     operator to the file that owns the existing block.
+    let shadowing = included_files_with_sidecars(&config_path);
+    if !shadowing.is_empty() {
+        let files = shadowing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiErrorResponse::conflict(format!(
+            "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
+        ))
+        .into_json_tuple());
+    }
+
+    // 4. Split payload: secrets go to secrets.env, everything else
+    //    accumulates into the [sidecar_channels.env] table.
+    //
+    //    Both the secrets.env upserts and the config.toml upsert below
+    //    run inside `state.config_write_lock`. That mutex also gates
+    //    `POST /api/config/set` and the legacy `configure_channel`
+    //    handler (issue #3183), so two concurrent
+    //    `POST /api/channels/sidecar/{a,b}/configure` calls — or one of
+    //    those interleaved with `config_set` — cannot lost-update on
+    //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
+    //    The guard is dropped before `reload_config().await` so the
+    //    hot-reload step does not gate other config-writing handlers.
+    //
+    //    The `secrets.env` membership read (for shell-shadow detection)
+    //    also lives inside the guard so two concurrent saves on
+    //    different keys cannot each see the pre-write file state and
+    //    falsely report shadows on keys the other handler is about to
+    //    write — a cosmetic-only TOCTOU but trivially closed by reading
+    //    under the same lock that gates the write.
+    let mut nonsecret_env: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let shadowed_secrets: Vec<String>;
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        // 4a. Detect shell-environment shadowing of `secret` fields,
+        //     under the lock. The dotenv loader's priority is system env
+        //     > vault > .env > secrets.env (see
+        //     `librefang_extensions::dotenv`). If the operator exported
+        //     `TELEGRAM_BOT_TOKEN` before launching the daemon,
+        //     `std::env::var` returns that exported value and the
+        //     sidecar child inherits it — not whatever we write to
+        //     `secrets.env`. The save still succeeds mechanically, but
+        //     the new value never takes effect. Warn before the operator
+        //     chases this for an hour.
+        //
+        //     `std::env::var` also returns true for keys we loaded from
+        //     `secrets.env` into the process env at boot, so subtract
+        //     those out by reading the on-disk `secrets.env` once: a
+        //     key already in `secrets.env` means the env presence is
+        //     our own boot-time write, not a shell shadow.
+        // KEY-only extraction: this set is used purely for membership
+        // checks against the schema's secret field names (i.e. "is
+        // TELEGRAM_BOT_TOKEN listed in secrets.env?"). Quotes never
+        // appear inside dotenv KEYS, so the parser here intentionally
+        // mirrors `librefang_channels::sidecar::parse_secrets_env`'s
+        // key-extraction path but skips the value-side quote-stripping
+        // that `parse_secrets_env` performs. If a future change starts
+        // comparing VALUES here, switch to invoking the channels-crate
+        // helper directly so quote/whitespace handling stays consistent
+        // with how the sidecar actually inherits env vars at spawn time
+        // (codex review fix #9).
+        let secrets_env_keys: std::collections::HashSet<String> =
+            std::fs::read_to_string(&secrets_path)
+                .ok()
+                .map(|s| {
+                    s.lines()
+                        .filter_map(|line| {
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') {
+                                return None;
+                            }
+                            let eq = line.find('=')?;
+                            let k = line[..eq].trim();
+                            if k.is_empty() {
+                                None
+                            } else {
+                                Some(k.to_string())
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        let mut shadowed: Vec<String> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type == "secret")
+            .filter(|f| {
+                body.values
+                    .get(&f.key)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
+            .map(|f| f.key.clone())
+            .collect();
+        shadowed.sort();
+        shadowed_secrets = shadowed;
+
+        for f in &schema.fields {
+            let Some(raw) = body.values.get(&f.key) else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if f.field_type == "secret" {
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
+                    ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                        .into_json_tuple()
+                })?;
+            } else {
+                nonsecret_env.insert(f.key.clone(), trimmed.to_string());
+            }
+        }
+
+        // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
+        //    Idempotent: a second POST with the same name replaces the
+        //    block in-place, preserving formatting of every other section.
+        //    `managed_env_keys` is the form's set of NON-SECRET schema
+        //    fields — i.e. the keys the configure form is the source of
+        //    truth for. Every OTHER env key already in the block (operator
+        //    hand-edits such as `PYTHONPATH`, `HTTP_PROXY`, locale vars,
+        //    or even a hand-edited `TELEGRAM_BOT_TOKEN` inline) is
+        //    preserved untouched. Secret schema fields never appear in
+        //    config.toml at all — they live in `secrets.env` — so they
+        //    are intentionally excluded from this set.
+        let managed_env_keys: Vec<&str> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type != "secret")
+            .map(|f| f.key.as_str())
+            .collect();
+        super::sidecar_toml::upsert_sidecar_block(
+            &config_path,
+            entry.name,
+            entry.name, // channel_type defaults to the catalog name
+            entry.command,
+            entry.args,
+            &nonsecret_env,
+            &managed_env_keys,
+        )
+        .map_err(|e| {
+            ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
+                .into_json_tuple()
+        })?;
+    }
+
+    // 6. Trigger hot-reload. The kernel diffs the on-disk config
+    //    against the live snapshot and returns the resulting plan;
+    //    the dashboard surfaces `restart_required` so the operator
+    //    knows whether further action is needed.
+    let plan = state.kernel.reload_config().await.map_err(|e| {
+        ApiErrorResponse::internal(format!("config reload failed: {e}")).into_json_tuple()
+    })?;
+
+    // 7. When the plan emits `ReloadChannels`, the kernel has already
+    //    cleared `mesh.channel_adapters` — but the supervisor map is
+    //    only re-populated by re-entering `start_channel_bridge_with_config`
+    //    via `channel_bridge::reload_channels_from_disk`. Without this
+    //    follow-up the [[sidecar_channels]] entry we just wrote stays
+    //    on disk only and no sidecar process is spawned until daemon
+    //    restart — silently breaking the operator's expectation that
+    //    `hot_actions_applied: [ReloadChannels]` means a new sidecar
+    //    is live. Mirrors `routes/config.rs::config_reload` and
+    //    `routes/channels.rs::configure_channel`.
+    if plan
+        .hot_actions
+        .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+    {
+        if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
+            tracing::error!("sidecar configure: bridge restart failed: {e}");
+            return Err(ApiErrorResponse::internal(format!(
+                "saved config.toml but bridge restart failed: {e}"
+            ))
+            .into_json_tuple());
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "saved",
+        "hot_actions_applied": plan
+            .hot_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>(),
+        "restart_required": plan.restart_required,
+        "shadowed_secrets": shadowed_secrets,
+    })))
+}
+
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "telegram" => config
-            .telegram
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "discord" => config
             .discord
             .as_ref()
@@ -1014,10 +1301,6 @@ fn channel_config_values(
             .mattermost
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "irc" => config
-            .irc
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
             .as_ref()
@@ -1034,108 +1317,32 @@ fn channel_config_values(
             .zulip
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "xmpp" => config
-            .xmpp
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "line" => config
             .line
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "viber" => config
-            .viber
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "messenger" => config
-            .messenger
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "reddit" => config
             .reddit
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "mastodon" => config
-            .mastodon
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "bluesky" => config
-            .bluesky
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "revolt" => config
-            .revolt
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "nextcloud" => config
             .nextcloud
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "guilded" => config
-            .guilded
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "keybase" => config
-            .keybase
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "threema" => config
-            .threema
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "nostr" => config
-            .nostr
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "pumble" => config
-            .pumble
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "flock" => config
-            .flock
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "twist" => config
-            .twist
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "mumble" => config
-            .mumble
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "discourse" => config
-            .discourse
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "gitter" => config
-            .gitter
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "gotify" => config
-            .gotify
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "voice" => config
-            .voice
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "linkedin" => config
-            .linkedin
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "wechat" => config
@@ -1162,7 +1369,6 @@ fn channel_config_values(
 /// `instance_count`.
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
-        "telegram" => config.telegram.len(),
         "discord" => config.discord.len(),
         "slack" => config.slack.len(),
         "whatsapp" => config.whatsapp.len(),
@@ -1170,38 +1376,18 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "line" => config.line.len(),
-        "viber" => config.viber.len(),
-        "messenger" => config.messenger.len(),
-        "threema" => config.threema.len(),
-        "keybase" => config.keybase.len(),
         "reddit" => config.reddit.len(),
-        "mastodon" => config.mastodon.len(),
-        "bluesky" => config.bluesky.len(),
-        "linkedin" => config.linkedin.len(),
-        "nostr" => config.nostr.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
         "webex" => config.webex.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
-        "pumble" => config.pumble.len(),
-        "flock" => config.flock.len(),
-        "twist" => config.twist.len(),
         "zulip" => config.zulip.len(),
-        "irc" => config.irc.len(),
-        "xmpp" => config.xmpp.len(),
-        "gitter" => config.gitter.len(),
-        "discourse" => config.discourse.len(),
-        "revolt" => config.revolt.len(),
-        "guilded" => config.guilded.len(),
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
         "twitch" => config.twitch.len(),
-        "gotify" => config.gotify.len(),
         "webhook" => config.webhook.len(),
-        "voice" => config.voice.len(),
-        "mumble" => config.mumble.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
         "qq" => config.qq.len(),
@@ -1228,7 +1414,6 @@ fn channel_instances_serialized(
             .collect()
     }
     match name {
-        "telegram" => ser(&config.telegram),
         "discord" => ser(&config.discord),
         "slack" => ser(&config.slack),
         "whatsapp" => ser(&config.whatsapp),
@@ -1236,38 +1421,18 @@ fn channel_instances_serialized(
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "line" => ser(&config.line),
-        "viber" => ser(&config.viber),
-        "messenger" => ser(&config.messenger),
-        "threema" => ser(&config.threema),
-        "keybase" => ser(&config.keybase),
         "reddit" => ser(&config.reddit),
-        "mastodon" => ser(&config.mastodon),
-        "bluesky" => ser(&config.bluesky),
-        "linkedin" => ser(&config.linkedin),
-        "nostr" => ser(&config.nostr),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
         "webex" => ser(&config.webex),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
-        "pumble" => ser(&config.pumble),
-        "flock" => ser(&config.flock),
-        "twist" => ser(&config.twist),
         "zulip" => ser(&config.zulip),
-        "irc" => ser(&config.irc),
-        "xmpp" => ser(&config.xmpp),
-        "gitter" => ser(&config.gitter),
-        "discourse" => ser(&config.discourse),
-        "revolt" => ser(&config.revolt),
-        "guilded" => ser(&config.guilded),
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
         "twitch" => ser(&config.twitch),
-        "gotify" => ser(&config.gotify),
         "webhook" => ser(&config.webhook),
-        "voice" => ser(&config.voice),
-        "mumble" => ser(&config.mumble),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),
         "qq" => ser(&config.qq),
@@ -1356,6 +1521,19 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    // Sidecar-backed channels (telegram / ntfy / …) are not in
+    // CHANNEL_REGISTRY but are still channels — surface the configured
+    // ones so the operator view stays consistent (#5241 / #5224), and
+    // emit unconfigured catalog rows for the first-party SDK adapters
+    // so they remain discoverable in the Add picker.
+    {
+        let kcfg = state.kernel.config_ref();
+        let rows = sidecar_channel_rows(&kcfg.sidecar_channels, &msgs_24h, true);
+        configured_count += rows.len() as u32;
+        channels.extend(rows);
+        channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
+    }
+
     let total = channels.len();
     // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
     // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
@@ -1414,6 +1592,19 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
         }
         channels.push(channel_json);
+    }
+
+    // Sidecar-backed channels — keep the snapshot consistent with
+    // /api/channels (#5241 / #5224), including the unconfigured
+    // catalog rows for first-party SDK adapters.
+    {
+        let kcfg = state.kernel.config_ref();
+        channels.extend(sidecar_channel_rows(
+            &kcfg.sidecar_channels,
+            &std::collections::HashMap::new(),
+            false,
+        ));
+        channels.extend(sidecar_discovery_rows(&kcfg.sidecar_channels));
     }
 
     channels
@@ -1521,7 +1712,7 @@ pub async fn configure_channel(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
     let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
@@ -1640,7 +1831,7 @@ pub async fn remove_channel(
         None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -1716,7 +1907,7 @@ fn build_instance_fields_json(
         .collect();
 
     // For per-instance secret fields, override `has_value` to check the env
-    // var that THIS instance's `<key>` points at (e.g. `TELEGRAM_BOT_TOKEN_2`)
+    // var that THIS instance's `<key>` points at (e.g. `DISCORD_BOT_TOKEN_2`)
     // instead of the field schema's default env var. Without this, every
     // instance would report the same `has_value` derived from the default
     // env var, defeating the purpose of multiple instances.
@@ -1742,7 +1933,7 @@ fn build_instance_fields_json(
             if field_json.get("key").and_then(|v| v.as_str()) == Some(field_def.key) {
                 field_json["has_value"] = serde_json::Value::Bool(has_value);
                 // Surface the env-var name the instance is pointing at so
-                // the UI can show "TELEGRAM_BOT_TOKEN_2" next to the secret
+                // the UI can show "DISCORD_BOT_TOKEN_2" next to the secret
                 // field — otherwise the user can't tell instances apart.
                 field_json["env_var"] = serde_json::Value::String(pointed_env_name.to_string());
             }
@@ -1835,7 +2026,7 @@ fn resolve_secret_env_overrides(
 /// — `OneOrMany`'s deserialiser coerces TOML integers to JSON strings in
 /// some fields (see `librefang-types/src/config/serde_helpers.rs`), and
 /// the two views diverge. All sites that build the hash today route
-/// through `serde_json::to_value(&TelegramConfig)` (and friends) so this
+/// through `serde_json::to_value(&DiscordConfig)` (and friends) so this
 /// holds; the test `instance_signature_stable_across_key_order` pins it.
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
@@ -2100,7 +2291,7 @@ pub async fn create_channel_instance(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2239,7 +2430,7 @@ pub async fn update_channel_instance_handler(
         })
         .unwrap_or_default();
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2424,7 +2615,7 @@ pub async fn delete_channel_instance(
         }
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let config_path = home.join("config.toml");
 
     {
@@ -2595,21 +2786,6 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(format!("Discord API error: {body}"));
-            }
-        }
-        "telegram" => {
-            let token = std::env::var("TELEGRAM_BOT_TOKEN")
-                .map_err(|_| "TELEGRAM_BOT_TOKEN not set".to_string())?;
-            let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({ "chat_id": target_id, "text": test_msg }))
-                .send()
-                .await
-                .map_err(|e| format!("HTTP request failed: {e}"))?;
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Telegram API error: {body}"));
             }
         }
         "slack" => {
@@ -3125,12 +3301,12 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Telegram requires TELEGRAM_BOT_TOKEN. With it unset we must surface
+        // Discord requires DISCORD_BOT_TOKEN. With it unset we must surface
         // a 412 — NOT a 200 with a "status: error" body, which silently passes
         // dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("TELEGRAM_BOT_TOKEN");
+        let _g = EnvGuard::unset("DISCORD_BOT_TOKEN");
 
-        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3146,9 +3322,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "test-token-not-real");
+        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "test-token-not-real");
 
-        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3157,25 +3333,25 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn downstream_send_failure_returns_502() {
         let _lock = ENV_LOCK.lock().await;
-        // Telegram bot token is set (so we get past the 412 gate) but the
+        // Discord bot token is set (so we get past the 412 gate) but the
         // value is bogus, so Bot API will reject the call. We pass a
         // `chat_id` to force the live-send branch. Result: handler must
         // surface a 502 Bad Gateway.
         //
-        // This exercises a real network round-trip to api.telegram.org —
+        // This exercises a real network round-trip to discord.com —
         // it'll be skipped in offline CI environments. We detect that by
         // looking at the response status: anything other than 502 in an
         // offline run means we couldn't reach the network at all, which
         // is fine for the purpose of *this* assertion (we already cover
         // the 200 / 412 / 404 paths deterministically above).
-        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "0:invalid-token-for-test");
+        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "0:invalid-token-for-test");
 
         let body = axum::body::Bytes::from_static(b"{\"chat_id\":\"1\"}");
-        let resp = test_channel(Path("telegram".to_string()), body)
+        let resp = test_channel(Path("discord".to_string()), body)
             .await
             .into_response();
 
-        // Either: we reached Telegram and got a 401-equivalent → handler
+        // Either: we reached Discord and got a 401-equivalent → handler
         // returns 502; or we have no network → reqwest errors out which
         // also gets mapped to 502. Both are acceptable. A 200 here would
         // be the bug from #3507.
@@ -3195,8 +3371,8 @@ mod instance_helper_tests {
     //! and have no business reaching production untested.
     use super::*;
 
-    fn telegram_meta() -> &'static ChannelMeta {
-        find_channel_meta("telegram").expect("telegram is in the registry")
+    fn discord_meta() -> &'static ChannelMeta {
+        find_channel_meta("discord").expect("discord is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
@@ -3207,11 +3383,11 @@ mod instance_helper_tests {
     /// env-var name (no suffix), matching the legacy single-instance flow.
     #[test]
     fn resolve_overrides_picks_default_for_first_instance() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN"),
+            Some("DISCORD_BOT_TOKEN"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -3222,15 +3398,15 @@ mod instance_helper_tests {
     /// at idx 1) — it must pick `_BOT_TOKEN_2`, the lowest unused suffix.
     #[test]
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
-            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN_2"),
+            Some("DISCORD_BOT_TOKEN_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -3241,15 +3417,15 @@ mod instance_helper_tests {
     /// bot token in place" actually rotate in place.
     #[test]
     fn resolve_overrides_preserves_existing_env_name_on_update() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
-            inst_with_env("MY_CUSTOM_TG_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
+            inst_with_env("MY_CUSTOM_DC_TOKEN"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_TG_TOKEN"),
+            Some("MY_CUSTOM_DC_TOKEN"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -3261,18 +3437,18 @@ mod instance_helper_tests {
     /// row should still be allowed to pick its own slot).
     #[test]
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
-        let meta = telegram_meta();
+        let meta = discord_meta();
         let existing = vec![
-            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("DISCORD_BOT_TOKEN"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+            inst_with_env("DISCORD_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("TELEGRAM_BOT_TOKEN_2")
+            Some("DISCORD_BOT_TOKEN_2")
         );
     }
 

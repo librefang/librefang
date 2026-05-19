@@ -1520,6 +1520,18 @@ impl ChannelsResource {
         .await
     }
 
+    pub async fn configure_sidecar_channel(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &format!("/api/channels/sidecar/{}/configure", name),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn wechat_qr_start(&self) -> Result<Value> {
         do_req(
             &self.client,

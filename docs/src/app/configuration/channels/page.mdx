@@ -6,7 +6,7 @@ Configuration for all 45 channel adapters, per-channel behavior overrides, and s
 
 ### `[channels]`
 
-All 45 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
+All in-process channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
 
 **Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
 
@@ -22,12 +22,12 @@ Channels that receive inbound traffic over HTTP enforce a uniform contract:
 
 | Outcome | Status |
 |---|---|
-| Required header missing or malformed (`X-Hub-Signature`, `X-Line-Signature`, `X-Viber-Content-Signature`, `Authorization: HMAC …`, DingTalk `timestamp`/`sign`) | **400 Bad Request** |
+| Required header missing or malformed (`X-Line-Signature`, `Authorization: HMAC …`, DingTalk `timestamp`/`sign`) | **400 Bad Request** |
 | Header present but signature mismatched, replayed, or expired | **401 Unauthorized** |
 
 HMAC verification covers the **raw wire bytes** (not bytes round-tripped through `serde_json::Value`), so the signing key set in the platform portal must match the env var configured below. Comparison runs in constant time.
 
-Channels with a per-secret env var (Messenger `app_secret_env`, Teams `security_token_env`) fall back to "skip verification + log a startup warning" when the env var is unset — this preserves backwards compatibility but should never be left unset in production.
+Channels with a per-secret env var (Teams `security_token_env`) fall back to "skip verification + log a startup warning" when the env var is unset — this preserves backwards compatibility but should never be left unset in production.
 
 Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through an SSRF guard at adapter construction: any private (`10/8`, `172.16/12`, `192.168/16`), CGN (`100.64/10`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), multicast, or cloud-metadata (`169.254.169.254`, `metadata.google.internal`, `metadata.azure.com`) target — including IPv6-bracket forms like `[::]`, `[::ffff:127.0.0.1]`, NAT64 `[64:ff9b::7f00:1]`, and trailing-dot FQDNs — is rejected with a startup error.
 
@@ -35,34 +35,28 @@ Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through a
 
 If you are upgrading from a release before this contract was introduced:
 
-1. **Operating Messenger?** Copy your **App Secret** from the Facebook app dashboard and export it as `MESSENGER_APP_SECRET` (or whatever name you set `app_secret_env` to). Without it, inbound webhooks still work but are unauthenticated — a warning is logged once at startup.
-2. **Operating Teams?** Copy the outgoing-webhook **security token** (base64) from the Teams portal and export it as `TEAMS_SECURITY_TOKEN` (or whatever you set `security_token_env` to). Same fallback semantics — warning once, no verification.
-3. **Operating LINE / Viber / DingTalk?** No new env var to set, but probes/health-checks that hit the webhook path without the platform's signature header now return `400`/`401`. Real platform traffic always carries a signature, so genuine inbound is unaffected; only direct probes break.
-4. **Using `[channels.webhook]` with `callback_url` pointing at a private address?** The most common case is a local dev setup with `callback_url = "http://127.0.0.1/..."`. The adapter now refuses to start with that. Switch to a public tunnel (e.g. ngrok, cloudflared) or omit `callback_url` entirely if you don't need outbound delivery.
+1. **Operating Teams?** Copy the outgoing-webhook **security token** (base64) from the Teams portal and export it as `TEAMS_SECURITY_TOKEN` (or whatever you set `security_token_env` to). Without it, inbound webhooks still work but are unauthenticated — a warning is logged once at startup.
+2. **Operating LINE / DingTalk?** No new env var to set, but probes/health-checks that hit the webhook path without the platform's signature header now return `400`/`401`. Real platform traffic always carries a signature, so genuine inbound is unaffected; only direct probes break.
+3. **Using `[channels.webhook]` with `callback_url` pointing at a private address?** The most common case is a local dev setup with `callback_url = "http://127.0.0.1/..."`. The adapter now refuses to start with that. Switch to a public tunnel (e.g. ngrok, cloudflared) or omit `callback_url` entirely if you don't need outbound delivery.
 
 If you operate **none** of the channels above, no action is required — your existing config keeps working unchanged.
 
-#### `[channels.telegram]`
+#### Telegram
+
+Telegram is provided by the Python sidecar adapter (`librefang.sidecar.adapters.telegram`). The in-process `[channels.telegram]` config block was removed in #5241. Declare Telegram as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = []
-# default_agent = "assistant"
-poll_interval_secs = 1
-# api_url = "https://api.telegram.org"  # override for local Bot API server
-# account_id = "my-telegram-bot"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "111,@alice"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Env var holding the Telegram Bot API token. |
-| `allowed_users` | list of i64 | `[]` | Telegram user IDs allowed to interact. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `poll_interval_secs` | u64 | `1` | Long-polling interval in seconds. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `api_url` | string or null | `null` | Override the Telegram Bot API base URL. Useful for local Bot API server instances. Defaults to `https://api.telegram.org`. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+See [`[[sidecar_channels]]`](#sidecar_channels) below for all fields. The sidecar preserves the same runtime semantics: `TELEGRAM_BOT_TOKEN` env var, optional `ALLOWED_USERS` allowlist, `channel_type = "telegram"`, and RBAC mapping via `channel_role_mapping.telegram`.
 
 #### `[channels.discord]`
 
@@ -231,28 +225,6 @@ allowed_channels = []
 | `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.irc]`
-
-```toml
-[channels.irc]
-server = "irc.libera.chat"
-port = 6667
-nick = "librefang"
-# password_env = "IRC_PASSWORD"
-channels = ["#librefang"]
-use_tls = false
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server` | string | `"irc.libera.chat"` | IRC server hostname. |
-| `port` | u16 | `6667` | IRC server port. |
-| `nick` | string | `"librefang"` | Bot nickname. |
-| `password_env` | string or null | `null` | Env var holding the server password (optional). |
-| `channels` | list of strings | `[]` | IRC channels to join (e.g., `["#librefang", "#general"]`). |
-| `use_tls` | bool | `false` | Use TLS for the connection. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.google_chat]`
 
 ```toml
@@ -321,26 +293,6 @@ streams = []
 | `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.xmpp]`
-
-```toml
-[channels.xmpp]
-jid = "bot@jabber.org"
-password_env = "XMPP_PASSWORD"
-server = ""
-port = 5222
-rooms = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `jid` | string | `""` | XMPP JID (e.g., `"bot@jabber.org"`). |
-| `password_env` | string | `"XMPP_PASSWORD"` | Env var holding the XMPP password. |
-| `server` | string | `""` | XMPP server hostname. Defaults to the JID domain if empty. |
-| `port` | u16 | `5222` | XMPP server port. |
-| `rooms` | list of strings | `[]` | MUC (multi-user chat) rooms to join. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.line]`
 
 ```toml
@@ -355,40 +307,6 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. **Required** — every inbound webhook must carry a matching `X-Line-Signature`; missing → 400, mismatched → 401. |
 | `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
 | `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-# webhook_port = 8451  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. **Required** — also used as the HMAC-SHA256 key to verify every inbound `X-Viber-Content-Signature`; missing → 400, mismatched → 401. |
-| `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
-| `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-app_secret_env = "MESSENGER_APP_SECRET"
-# webhook_port = 8452  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
-| `app_secret_env` | string | `"MESSENGER_APP_SECRET"` | Env var holding the **Facebook App Secret**. Used for HMAC-SHA1 verification of every inbound `X-Hub-Signature` header. If unset, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
-| `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.reddit]`
@@ -411,35 +329,42 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | Subreddit names to monitor. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon is provided by the Python sidecar adapter (`librefang.sidecar.adapters.mastodon`). The in-process `[channels.mastodon]` config block was removed in the sidecar migration. Declare Mastodon as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # raise for higher-limit instances
+# MASTODON_ACCOUNT_ID = "prod"              # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `instance_url` | string | `""` | Mastodon instance URL (e.g., `"https://mastodon.social"`). |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | Env var holding the Mastodon access token. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`MASTODON_ACCESS_TOKEN` (OAuth bearer) goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Mastodon form. The sidecar inherits SSE-with-polling-fallback semantics from the removed in-process adapter.
 
-#### `[channels.bluesky]`
+#### Bluesky
+
+Bluesky is provided by the Python sidecar adapter (`librefang.sidecar.adapters.bluesky`). The in-process `[channels.bluesky]` config block was removed in the sidecar migration. Declare Bluesky as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.bluesky]
-identifier = "mybot.bsky.social"
-app_password_env = "BLUESKY_APP_PASSWORD"
-service_url = "https://bsky.social"
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "mybot.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # custom PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `identifier` | string | `""` | Bluesky handle or DID. |
-| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | Env var holding the Bluesky app password. |
-| `service_url` | string | `"https://bsky.social"` | PDS (Personal Data Server) URL. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`BLUESKY_APP_PASSWORD` goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Bluesky form. The sidecar polls `app.bsky.notification.listNotifications` every 5 s and threads outbound replies back to the originating notification via an in-memory LRU cache (capacity 200).
 
 #### `[channels.feishu]`
 
@@ -455,20 +380,6 @@ app_secret_env = "FEISHU_APP_SECRET"
 | `app_id` | string | `""` | Feishu/Lark app ID. |
 | `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
 | `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.revolt]`
-
-```toml
-[channels.revolt]
-bot_token_env = "REVOLT_BOT_TOKEN"
-api_url = "https://api.revolt.chat"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | Env var holding the Revolt bot token. |
-| `api_url` | string | `"https://api.revolt.chat"` | Revolt API base URL. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.nextcloud]`
@@ -487,66 +398,6 @@ allowed_rooms = []
 | `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.guilded]`
-
-```toml
-[channels.guilded]
-bot_token_env = "GUILDED_BOT_TOKEN"
-server_ids = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | Env var holding the Guilded bot token. |
-| `server_ids` | list of strings | `[]` | Server IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.keybase]`
-
-```toml
-[channels.keybase]
-username = ""
-paperkey_env = "KEYBASE_PAPERKEY"
-allowed_teams = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `username` | string | `""` | Keybase username. |
-| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | Env var holding the Keybase paper key. |
-| `allowed_teams` | list of strings | `[]` | Team names to listen in. Empty = all DMs. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.threema]`
-
-```toml
-[channels.threema]
-threema_id = ""
-secret_env = "THREEMA_SECRET"
-# webhook_port = 8454  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `threema_id` | string | `""` | Threema Gateway ID. |
-| `secret_env` | string | `"THREEMA_SECRET"` | Env var holding the Threema API secret. |
-| `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | Env var holding the Nostr private key (nsec or hex format). |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | Nostr relay WebSocket URLs to connect to. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.webex]`
 
 ```toml
@@ -559,70 +410,6 @@ allowed_rooms = []
 |-------|------|---------|-------------|
 | `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
 | `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.pumble]`
-
-```toml
-[channels.pumble]
-bot_token_env = "PUMBLE_BOT_TOKEN"
-# webhook_port = 8455  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | Env var holding the Pumble bot token. |
-| `webhook_port` | u16 | `8455` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.flock]`
-
-```toml
-[channels.flock]
-bot_token_env = "FLOCK_BOT_TOKEN"
-# webhook_port = 8456  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | Env var holding the Flock bot token. |
-| `webhook_port` | u16 | `8456` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.twist]`
-
-```toml
-[channels.twist]
-token_env = "TWIST_TOKEN"
-workspace_id = ""
-allowed_channels = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `token_env` | string | `"TWIST_TOKEN"` | Env var holding the Twist API token. |
-| `workspace_id` | string | `""` | Twist workspace ID. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.mumble]`
-
-```toml
-[channels.mumble]
-host = "mumble.example.com"
-port = 64738
-username = "librefang"
-password_env = "MUMBLE_PASSWORD"
-channel = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `host` | string | `""` | Mumble server hostname. |
-| `port` | u16 | `64738` | Mumble server port. |
-| `username` | string | `"librefang"` | Bot username in Mumble. |
-| `password_env` | string | `"MUMBLE_PASSWORD"` | Env var holding the Mumble server password. |
-| `channel` | string | `""` | Mumble channel to join. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.dingtalk]`
@@ -655,38 +442,6 @@ secret_env = "DINGTALK_SECRET"
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `base_url` | string | `""` | Discourse forum base URL. |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | Env var holding the Discourse API key. |
-| `api_username` | string | `"system"` | Discourse API username. |
-| `categories` | list of strings | `[]` | Category slugs to monitor. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.gitter]`
-
-```toml
-[channels.gitter]
-token_env = "GITTER_TOKEN"
-room_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `token_env` | string | `"GITTER_TOKEN"` | Env var holding the Gitter auth token. |
-| `room_id` | string | `""` | Gitter room ID to listen in. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.ntfy]`
 
 ```toml
@@ -703,21 +458,22 @@ token_env = "NTFY_TOKEN"
 | `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.gotify]`
+#### Gotify
+
+Gotify is provided by the Python sidecar adapter (`librefang.sidecar.adapters.gotify`). The in-process `[channels.gotify]` config block was removed in the sidecar migration. Declare Gotify as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.gotify]
-server_url = "https://gotify.example.com"
-app_token_env = "GOTIFY_APP_TOKEN"
-client_token_env = "GOTIFY_CLIENT_TOKEN"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Gotify server URL. |
-| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | Env var holding the Gotify app token (for sending messages). |
-| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | Env var holding the Gotify client token (for receiving messages via WebSocket). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`GOTIFY_APP_TOKEN` (used for outbound publish) and `GOTIFY_CLIENT_TOKEN` (used for inbound WebSocket subscribe) go into `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
 #### `[channels.webhook]`
 
@@ -733,43 +489,6 @@ listen_port = 8460
 | `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
 | `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
 | `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.voice]`
-
-WebSocket-based voice channel with STT (Speech-to-Text) and TTS (Text-to-Speech) support.
-
-```toml
-[channels.voice]
-api_key_env = "OPENAI_API_KEY"
-stt_url = "https://api.openai.com"
-tts_url = "https://api.openai.com"
-tts_voice = "alloy"
-# buffer_threshold = 32768
-# default_agent = "assistant"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var holding the API key for STT/TTS services. |
-| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT API (OpenAI Whisper-compatible). |
-| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS API. |
-| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
-| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
-| `default_agent` | string or null | `null` | Agent name to route voice messages to. |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | Env var holding the LinkedIn OAuth2 access token. |
-| `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.qq]`
@@ -842,15 +561,15 @@ allowed_users = []
 Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 model = "claude-haiku-4-5-20251001"
-system_prompt = "You are a concise Telegram assistant."
+system_prompt = "You are a concise Discord assistant."
 dm_policy = "respond"
 group_policy = "mention_only"
 rate_limit_per_minute = 0
 rate_limit_per_user = 10
 threading = true
-output_format = "telegram_html"
+output_format = "markdown"
 usage_footer = "tokens"
 typing_mode = "instant"
 disable_commands = false
@@ -920,16 +639,16 @@ The three command-policy fields gate the built-in commands per channel. **Preced
 **Recipe: locked-down public bot (no commands at all)**
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 disable_commands = true
 ```
 
 **Recipe: public bot that keeps platform UX commands**
 
-Telegram's UX expects `/start` to display a welcome message. Keep only the safe ones:
+Keep only the safe built-in commands:
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 allowed_commands = ["start", "help"]
 ```
 
@@ -938,7 +657,7 @@ allowed_commands = ["start", "help"]
 For an operator-facing bot (with an `allowed_users` gate), you may still want to block commands that change costly state:
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 blocked_commands = ["agent", "new", "reboot", "model", "stop"]
 ```
 

@@ -148,6 +148,11 @@ export interface ChannelItem {
   setup_type?: string;
   setup_steps?: string[];
   fields?: ChannelField[];
+  /** TOML snippet shown for read-only sidecar discovery rows so operators
+   *  can copy it into config.toml. Backend always emits this; the UI only
+   *  renders it for `category === "sidecar"` to avoid noise on regular
+   *  CHANNEL_REGISTRY rows that already have a setup form. */
+  config_template?: string;
   /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
   webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
@@ -1721,6 +1726,34 @@ export async function testChannel(channelName: string): Promise<ApiActionRespons
 
 export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
+}
+
+export interface SidecarSaveResult {
+  status: "saved";
+  restart_required: boolean;
+  hot_actions_applied: string[];
+  // Secret-typed field keys whose value is already present in the
+  // daemon's process environment (e.g. exported by the launching shell).
+  // The dotenv loader's priority puts process env above secrets.env, so
+  // those shell-exported values will out-rank the freshly-written
+  // secrets.env entry until the operator unsets them and restarts the
+  // daemon. Always emitted; empty when no shadow detected.
+  shadowed_secrets: string[];
+}
+
+// Sidecar channel save (Phase 5, sidecar-channel-configure). Splits values
+// across `secrets.env` (secret-typed fields) and `config.toml` (everything
+// else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
+// hot-reload of the channels registry; whether the sidecar child needs an
+// out-of-band restart is reported via `restart_required`.
+export async function saveSidecarConfig(
+  name: string,
+  values: Record<string, string>,
+): Promise<SidecarSaveResult> {
+  return post<SidecarSaveResult>(
+    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
+    { values },
+  );
 }
 
 export async function reloadChannels(): Promise<ApiActionResponse> {

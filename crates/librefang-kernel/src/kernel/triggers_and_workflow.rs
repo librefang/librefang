@@ -825,17 +825,21 @@ impl LibreFangKernel {
 // `KernelCronBridge` shape.
 // ========================================================================
 
-/// Operator-step notification bridge (#5135). Holds an `Arc<LibreFangKernel>`
-/// so a single recipient send goes through the kernel's existing
-/// `send_channel_message` (parses the `scheme:target` recipient, resolves
-/// the channel adapter, formats per platform).
+/// Operator-step notification bridge (#5135). Holds a `Weak<LibreFangKernel>`
+/// so the engine's `OnceLock`-stored handle does not pin the kernel Arc
+/// alive (which would form a self-cycle through `kernel.workflows.engine`
+/// and break `Arc::try_unwrap` on shutdown / restart). Send path goes
+/// through the kernel's existing `send_channel_message` after `upgrade()`.
 struct KernelOperatorBridge {
-    kernel: Arc<LibreFangKernel>,
+    kernel: Weak<LibreFangKernel>,
 }
 
 #[async_trait::async_trait]
 impl crate::workflow::OperatorNotifier for KernelOperatorBridge {
     async fn notify_operator(&self, recipient: &str, message: &str) -> Result<(), String> {
+        let Some(kernel) = self.kernel.upgrade() else {
+            return Err("operator notify dropped: kernel no longer alive".to_string());
+        };
         // `notify` entries are `scheme:target` (e.g. `telegram:@pakman`,
         // `dashboard:`). Split on the FIRST colon: the scheme maps to the
         // channel adapter key, the remainder is the platform recipient.
@@ -857,7 +861,7 @@ impl crate::workflow::OperatorNotifier for KernelOperatorBridge {
             return Ok(());
         }
         use librefang_runtime::kernel_handle::ChannelSender;
-        self.kernel
+        kernel
             .send_channel_message(scheme, target, message, None, None)
             .await
             .map(|_| ())
@@ -865,12 +869,14 @@ impl crate::workflow::OperatorNotifier for KernelOperatorBridge {
     }
 }
 
-/// Operator-step timeout resume driver (#5134). Rebuilds the same
-/// resolver/sender closures `LibreFangKernel::run_workflow` uses and
-/// re-enters `WorkflowEngine::resolve_operator_timeout` so the auto-resolve
-/// drives any downstream steps exactly like a real run would.
+/// Operator-step timeout resume driver (#5134). Held as `Weak<LibreFangKernel>`
+/// for the same self-cycle reason as `KernelOperatorBridge`. On wake it
+/// rebuilds the same resolver/sender closures `LibreFangKernel::run_workflow`
+/// uses and re-enters `WorkflowEngine::resolve_operator_timeout`; if the
+/// kernel has been dropped by the time the watchdog fires, the auto-resolve
+/// is silently skipped (there is no kernel left to drive).
 struct KernelOperatorResumeDriver {
-    kernel: Arc<LibreFangKernel>,
+    kernel: Weak<LibreFangKernel>,
 }
 
 #[async_trait::async_trait]
@@ -881,7 +887,13 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
         operator_step_index: usize,
         timeout_action: crate::workflow::OperatorTimeoutAction,
     ) {
-        let kernel = self.kernel.clone();
+        let Some(kernel) = self.kernel.upgrade() else {
+            tracing::debug!(
+                run_id = %run_id,
+                "Operator timeout auto-resolve skipped: kernel dropped"
+            );
+            return;
+        };
         let resolver = {
             let kernel = kernel.clone();
             move |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
@@ -956,11 +968,11 @@ impl LibreFangKernel {
     /// `Arc<LibreFangKernel>`.
     pub(crate) fn install_operator_hooks(self: &Arc<Self>) {
         let notifier: Arc<dyn crate::workflow::OperatorNotifier> = Arc::new(KernelOperatorBridge {
-            kernel: self.clone(),
+            kernel: Arc::downgrade(self),
         });
         let driver: Arc<dyn crate::workflow::OperatorResumeDriver> =
             Arc::new(KernelOperatorResumeDriver {
-                kernel: self.clone(),
+                kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
     }

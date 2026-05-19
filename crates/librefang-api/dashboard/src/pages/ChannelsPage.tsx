@@ -15,6 +15,7 @@ import {
   useCreateChannelInstance,
   useDeleteChannelInstance,
   useReloadChannels,
+  useSaveSidecarConfig,
   useTestChannel,
   useUpdateChannelInstance,
 } from "../lib/mutations/channels";
@@ -29,11 +30,12 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
   Settings, AlertCircle, CheckSquare, Square, Plus, Trash2, Pencil, ArrowLeft,
-  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
+  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe
 } from "lucide-react";
 
 const channelIcons: Record<string, React.ReactNode> = {
@@ -46,7 +48,6 @@ const channelIcons: Record<string, React.ReactNode> = {
   webhook: <Link2 className="w-5 h-5" />,
   http: <Globe className="w-5 h-5" />,
   websocket: <Radio className="w-5 h-5" />,
-  mqtt: <Wifi className="w-5 h-5" />,
   slack_events: <Bell className="w-5 h-5" />,
   teams: <MessageCircle className="w-5 h-5" />,
 };
@@ -142,15 +143,21 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
           {msgs > 0 ? t("common.running") : t("common.idle")}
         </span>
       </Badge>
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-        className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
-        aria-label={t("channels.config")}
-        title={t("channels.config")}
-      >
-        <Settings className="w-3.5 h-3.5" />
-      </button>
+      {/* Sidecar channels are config.toml-managed (no /api/channels
+          configure endpoint — it would 404), so suppress the inline
+          Configure affordance; the whole-card click still opens the
+          read-only details drawer. */}
+      {c.category !== "sidecar" && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+          className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
+          aria-label={t("channels.config")}
+          title={t("channels.config")}
+        >
+          <Settings className="w-3.5 h-3.5" />
+        </button>
+      )}
       {viewMode === "grid" && (
         <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
       )}
@@ -283,23 +290,194 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex gap-2 pt-2">
-            <Button variant="primary" className="flex-1" onClick={onConfigure} leftIcon={<Settings className="w-4 h-4" />}>
-              {channel.configured ? t("channels.update_config") : t("channels.setup_adapter")}
-            </Button>
-            {channel.configured && (
-              <Button variant="secondary" onClick={onTest} leftIcon={<CheckCircle2 className="w-4 h-4" />}>
-                {t("channels.test") || "Test"}
+          {/* Actions — sidecar channels run out-of-process and have no
+              /api/channels configure/test endpoint (those are
+              CHANNEL_REGISTRY-only and 404 for a sidecar name), so show
+              a read-only note pointing at where they ARE managed
+              instead of broken Configure/Test buttons. For unconfigured
+              discovery rows we additionally render the TOML snippet so
+              the operator can copy it into config.toml directly. */}
+          {channel.category === "sidecar" ? (
+            <div className="space-y-3">
+              <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
+                <p className="text-xs text-text-dim">
+                  {channel.configured
+                    ? <>Runs as an out-of-process sidecar adapter. Manage it in config.toml (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels.</>
+                    : <>This adapter ships as an out-of-process sidecar. Paste the snippet below into <code className="font-mono">~/.librefang/config.toml</code>, set the required env vars, and reload — then it will appear here as configured.</>}
+                </p>
+              </div>
+              {!channel.configured && channel.config_template && (
+                <pre className="p-4 rounded-xl bg-main/30 border border-border-subtle text-[11px] font-mono text-text-main whitespace-pre overflow-x-auto select-all">
+                  {channel.config_template}
+                </pre>
+              )}
+            </div>
+          ) : (
+            <div className="flex gap-2 pt-2">
+              <Button variant="primary" className="flex-1" onClick={onConfigure} leftIcon={<Settings className="w-4 h-4" />}>
+                {channel.configured ? t("channels.update_config") : t("channels.setup_adapter")}
               </Button>
-            )}
-          </div>
+              {channel.configured && (
+                <Button variant="secondary" onClick={onTest} leftIcon={<CheckCircle2 className="w-4 h-4" />}>
+                  {t("channels.test") || "Test"}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div className="p-4 border-t border-border-subtle flex justify-end">
           <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
         </div>
+    </DrawerPanel>
+  );
+}
+
+// Schema-driven save form for sidecar discovery rows
+// (`category === "sidecar"`). Sidecar adapters expose their config schema
+// via `python -m <module> --describe`; the daemon caches that schema and
+// surfaces `channel.fields[]` on `/api/channels`. Submit hits the
+// `POST /api/channels/sidecar/{name}/configure` endpoint, which splits
+// values across `secrets.env` (secret-typed fields) and `config.toml`
+// (everything else) — see `useSaveSidecarConfig` for the wire shape.
+//
+// Why not reuse `ChannelForm`? Sidecars never participate in the
+// multi-instance (`[[channels.<name>]]`) flow that `InstancesDialog`
+// drives, and their save endpoint has a different response shape
+// (`restart_required`). Keep them on a dedicated, much simpler form.
+function SidecarForm({
+  channel,
+  onClose,
+  t,
+}: {
+  channel: Channel;
+  onClose: () => void;
+  t: (key: string, opts?: { defaultValue?: string; keys?: string }) => string;
+}) {
+  const addToast = useUIStore((s) => s.addToast);
+  const saveMut = useSaveSidecarConfig();
+  const allFields = channel.fields ?? [];
+  const fields = allFields.filter((f) => !f.advanced);
+  const advanced = allFields.filter((f) => f.advanced);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const visible = showAdvanced ? [...fields, ...advanced] : fields;
+
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(allFields.map((f) => [f.key, ""])),
+  );
+
+  const handleSubmit = () => {
+    // Drop empty optional values; server validates required.
+    const payload: Record<string, string> = {};
+    for (const f of allFields) {
+      const v = values[f.key]?.trim();
+      if (v) payload[f.key] = v;
+    }
+    saveMut.mutate(
+      { name: channel.name, values: payload },
+      {
+        onSuccess: (res) => {
+          addToast(
+            res.restart_required
+              ? t("channels.saved_restart_required", {
+                  defaultValue: "Saved — restart daemon to apply",
+                })
+              : t("channels.saved", { defaultValue: "Saved" }),
+            "success",
+          );
+          // Plan Risk #5: surface shell-environment shadowing of secret
+          // fields. `addToast` has no "warning" variant (success | error
+          // | info), so fall back to "error" with an explicit prefix —
+          // visually distinct from the "Saved" success toast above, and
+          // tells the operator the save *did* happen but the new value
+          // is being shadowed until they unset the shell export.
+          if (res.shadowed_secrets && res.shadowed_secrets.length > 0) {
+            addToast(
+              t("channels.shadowed_secrets_warning", {
+                defaultValue:
+                  "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}",
+                keys: res.shadowed_secrets.join(", "),
+              }),
+              "error",
+            );
+          }
+          onClose();
+        },
+        onError: (err) =>
+          addToast(toastErr(err, t("common.error", { defaultValue: "Error" })), "error"),
+      },
+    );
+  };
+
+  return (
+    <DrawerPanel isOpen onClose={onClose} size="lg" hideCloseButton>
+      <div className="h-2 bg-linear-to-r from-brand via-brand/60 to-brand/30" />
+      <div className="p-6 border-b border-border-subtle flex items-center justify-between">
+        <h2 className="text-xl font-black">{channel.display_name || channel.name}</h2>
+        <button onClick={onClose} className="p-2" aria-label={t("common.close", { defaultValue: "Close" })}>
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+      <div className="p-6 space-y-3">
+        {visible.map((f) => (
+          <div key={f.key} className="space-y-1">
+            <label className="text-xs font-bold">
+              {f.label || f.key}
+              {f.required && <span className="text-error">*</span>}
+              {f.type === "secret" && f.env_var && (
+                <span className="ml-2 font-mono text-[10px] text-text-dim/80 normal-case">
+                  {f.env_var}
+                </span>
+              )}
+            </label>
+            {f.type === "select" && f.options && f.options.length > 0 ? (
+              <Select
+                options={f.options.map((o) => ({ value: o, label: o }))}
+                value={values[f.key] ?? ""}
+                placeholder={f.placeholder ?? undefined}
+                onChange={(e) =>
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
+                }
+              />
+            ) : (
+              <Input
+                type={f.type === "secret" ? "password" : "text"}
+                value={values[f.key] ?? ""}
+                placeholder={f.placeholder ?? undefined}
+                onChange={(e) =>
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }))
+                }
+              />
+            )}
+          </div>
+        ))}
+        {advanced.length > 0 && (
+          <button
+            type="button"
+            className="text-xs text-text-dim underline"
+            onClick={() => setShowAdvanced((s) => !s)}
+          >
+            {showAdvanced
+              ? t("common.hide_advanced", { defaultValue: "Hide advanced" })
+              : t("common.show_advanced", { defaultValue: "Show advanced" })}
+          </button>
+        )}
+      </div>
+      <div className="p-4 border-t border-border-subtle flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={saveMut.isPending}>
+          {t("common.cancel")}
+        </Button>
+        <Button
+          variant="primary"
+          onClick={handleSubmit}
+          disabled={saveMut.isPending}
+        >
+          {saveMut.isPending
+            ? t("common.saving", { defaultValue: "Saving…" })
+            : t("common.save", { defaultValue: "Save" })}
+        </Button>
+      </div>
     </DrawerPanel>
   );
 }
@@ -938,6 +1116,7 @@ export function ChannelsPage() {
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
   const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
   const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
+  const [sidecarFormChannel, setSidecarFormChannel] = useState<Channel | null>(null);
   // The picker drawer holds the catalog of unconfigured channel types
   // (slack / discord / email / …). Default view shows only configured
   // channels so the page stays focused on what's actually wired up.
@@ -1007,7 +1186,13 @@ export function ChannelsPage() {
   };
   const handlePick = (ch: Channel) => {
     setPickerOpen(false);
-    if (ch.setup_type === "qr") setQrLoginChannel(ch);
+    // Sidecar discovery rows now have a schema-driven save endpoint
+    // (`POST /api/channels/sidecar/{name}/configure`) backed by
+    // `useSaveSidecarConfig`. Route the pick to the dedicated
+    // `SidecarForm`; the legacy read-only "manage via config.toml"
+    // details modal remains available via the configured-cards path.
+    if (ch.category === "sidecar") setSidecarFormChannel(ch);
+    else if (ch.setup_type === "qr") setQrLoginChannel(ch);
     else setConfiguringChannel(ch);
   };
 
@@ -1227,6 +1412,16 @@ export function ChannelsPage() {
         <QrLoginDialog
           channel={qrLoginChannel}
           onClose={closeQrLogin}
+          t={t}
+        />
+      )}
+
+      {/* Sidecar configure form (Phase 5, sidecar-channel-configure) —
+          schema-driven, hits the dedicated save endpoint. */}
+      {sidecarFormChannel && (
+        <SidecarForm
+          channel={sidecarFormChannel}
+          onClose={() => setSidecarFormChannel(null)}
           t={t}
         />
       )}

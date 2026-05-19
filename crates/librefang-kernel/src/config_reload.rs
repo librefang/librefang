@@ -314,6 +314,15 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadChannels);
     }
 
+    if field_changed(&old.sidecar_channels, &new.sidecar_channels) {
+        // Reuses the same hot action — `mesh.channel_adapters.clear()`
+        // forces channel_bridge to re-init from `kernel.config_ref()`,
+        // which already iterates `sidecar_channels` on every init pass.
+        if !plan.hot_actions.contains(&HotAction::ReloadChannels) {
+            plan.hot_actions.push(HotAction::ReloadChannels);
+        }
+    }
+
     if field_changed(&old.skills, &new.skills) {
         plan.hot_actions.push(HotAction::ReloadSkills);
     }
@@ -655,15 +664,46 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Telegram config
-        b.channels.telegram =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::TelegramConfig {
-                bot_token_env: "TG_TOKEN".to_string(),
+        // Change the channels config by adding a Discord config
+        b.channels.discord =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::DiscordConfig {
+                bot_token_env: "DISCORD_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadChannels));
+    }
+
+    /// Sidecar channels participate in the same hot-reload action as the
+    /// in-process channels block. Without this the dashboard's
+    /// "configure → save → telegram comes up" flow stays dark until
+    /// daemon restart because `mesh.channel_adapters` is never cleared.
+    /// `SidecarChannelConfig` has no `Default`, so build via JSON (mirrors
+    /// the `sidecar_telegram()` helper in `channels_routes_test.rs`).
+    #[test]
+    fn sidecar_channels_change_triggers_reload_channels_action() {
+        use librefang_types::config::SidecarChannelConfig;
+        let a = default_cfg();
+        let mut b = default_cfg();
+        let sidecar: SidecarChannelConfig = serde_json::from_value(serde_json::json!({
+            "name": "telegram",
+            "command": "python3",
+            "args": ["-m", "librefang.sidecar.adapters.telegram"],
+            "channel_type": "telegram",
+        }))
+        .expect("valid SidecarChannelConfig");
+        b.sidecar_channels = vec![sidecar];
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "sidecar_channels edits must be hot-reloadable"
+        );
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadChannels),
+            "expected ReloadChannels in {:?}",
+            plan.hot_actions,
+        );
     }
 
     #[test]

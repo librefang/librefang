@@ -2883,7 +2883,7 @@ pub struct KernelConfig {
     pub memory_wiki: MemoryWikiConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Channel bridge configuration (Telegram, etc.).
+    /// Channel bridge configuration (Discord, Slack, etc.).
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.
@@ -5662,11 +5662,6 @@ fn default_signal_poll_interval_secs() -> u64 {
     2
 }
 
-/// Default Telegram long-poll timeout (30s).
-fn default_telegram_long_poll_timeout_secs() -> u64 {
-    30
-}
-
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -6362,13 +6357,11 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
-/// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`)
+/// and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Telegram bot configuration(s).
-    pub telegram: OneOrMany<TelegramConfig>,
     /// Discord bot configuration(s).
     pub discord: OneOrMany<DiscordConfig>,
     /// Slack bot configuration(s).
@@ -6385,8 +6378,6 @@ pub struct ChannelsConfig {
     pub teams: OneOrMany<TeamsConfig>,
     /// Mattermost configuration(s).
     pub mattermost: OneOrMany<MattermostConfig>,
-    /// IRC configuration(s).
-    pub irc: OneOrMany<IrcConfig>,
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
     /// Twitch chat configuration(s).
@@ -6395,63 +6386,25 @@ pub struct ChannelsConfig {
     pub rocketchat: OneOrMany<RocketChatConfig>,
     /// Zulip configuration(s).
     pub zulip: OneOrMany<ZulipConfig>,
-    /// XMPP/Jabber configuration(s).
-    pub xmpp: OneOrMany<XmppConfig>,
     // Wave 3 — High-value channels
     /// LINE Messaging API configuration(s).
     pub line: OneOrMany<LineConfig>,
-    /// Viber Bot API configuration(s).
-    pub viber: OneOrMany<ViberConfig>,
-    /// Facebook Messenger configuration(s).
-    pub messenger: OneOrMany<MessengerConfig>,
     /// Reddit API configuration(s).
     pub reddit: OneOrMany<RedditConfig>,
-    /// Mastodon Streaming API configuration(s).
-    pub mastodon: OneOrMany<MastodonConfig>,
-    /// Bluesky/AT Protocol configuration(s).
-    pub bluesky: OneOrMany<BlueskyConfig>,
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
-    /// Revolt (Discord-like) configuration(s).
-    pub revolt: OneOrMany<RevoltConfig>,
     // Wave 4 — Enterprise & community channels
     /// Nextcloud Talk configuration(s).
     pub nextcloud: OneOrMany<NextcloudConfig>,
-    /// Guilded bot configuration(s).
-    pub guilded: OneOrMany<GuildedConfig>,
-    /// Keybase chat configuration(s).
-    pub keybase: OneOrMany<KeybaseConfig>,
-    /// Threema Gateway configuration(s).
-    pub threema: OneOrMany<ThreemaConfig>,
-    /// Nostr relay configuration(s).
-    pub nostr: OneOrMany<NostrConfig>,
     /// Webex bot configuration(s).
     pub webex: OneOrMany<WebexConfig>,
-    /// Pumble bot configuration(s).
-    pub pumble: OneOrMany<PumbleConfig>,
-    /// Flock bot configuration(s).
-    pub flock: OneOrMany<FlockConfig>,
-    /// Twist API configuration(s).
-    pub twist: OneOrMany<TwistConfig>,
     // Wave 5 — Niche & differentiating channels
-    /// Mumble text chat configuration(s).
-    pub mumble: OneOrMany<MumbleConfig>,
     /// DingTalk robot configuration(s).
     pub dingtalk: OneOrMany<DingTalkConfig>,
     /// QQ Bot API v2 configuration(s).
     pub qq: OneOrMany<QqConfig>,
-    /// Discourse forum configuration(s).
-    pub discourse: OneOrMany<DiscourseConfig>,
-    /// Gitter streaming configuration(s).
-    pub gitter: OneOrMany<GitterConfig>,
-    /// Gotify notification configuration(s).
-    pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
-    /// Voice channel (WebSocket + STT/TTS) configuration(s).
-    pub voice: OneOrMany<VoiceConfig>,
-    /// LinkedIn messaging configuration(s).
-    pub linkedin: OneOrMany<LinkedInConfig>,
     /// WeChat personal account (iLink) configuration(s).
     pub wechat: OneOrMany<WeChatConfig>,
     /// WeCom/WeChat Work configuration(s).
@@ -6508,7 +6461,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            telegram: OneOrMany::default(),
             discord: OneOrMany::default(),
             slack: OneOrMany::default(),
             whatsapp: OneOrMany::default(),
@@ -6517,38 +6469,18 @@ impl Default for ChannelsConfig {
             email: OneOrMany::default(),
             teams: OneOrMany::default(),
             mattermost: OneOrMany::default(),
-            irc: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             twitch: OneOrMany::default(),
             rocketchat: OneOrMany::default(),
             zulip: OneOrMany::default(),
-            xmpp: OneOrMany::default(),
             line: OneOrMany::default(),
-            viber: OneOrMany::default(),
-            messenger: OneOrMany::default(),
             reddit: OneOrMany::default(),
-            mastodon: OneOrMany::default(),
-            bluesky: OneOrMany::default(),
             feishu: OneOrMany::default(),
-            revolt: OneOrMany::default(),
             nextcloud: OneOrMany::default(),
-            guilded: OneOrMany::default(),
-            keybase: OneOrMany::default(),
-            threema: OneOrMany::default(),
-            nostr: OneOrMany::default(),
             webex: OneOrMany::default(),
-            pumble: OneOrMany::default(),
-            flock: OneOrMany::default(),
-            twist: OneOrMany::default(),
-            mumble: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
-            discourse: OneOrMany::default(),
-            gitter: OneOrMany::default(),
-            gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
-            voice: OneOrMany::default(),
-            linkedin: OneOrMany::default(),
             wechat: OneOrMany::default(),
             wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
@@ -6578,128 +6510,14 @@ impl ChannelsConfig {
     }
 }
 
-/// Telegram channel adapter configuration.
-//
-// `deny_unknown_fields` catches typos inside `[[channels.telegram]]`
-// elements at deserialize time. The detect_unknown_nested_fields walker
-// can't see into repeated-table elements (#5130), so the only way to
-// surface a typo here is for serde itself to reject it.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct TelegramConfig {
-    /// Env var name holding the bot token (NOT the token itself).
-    pub bot_token_env: String,
-    /// Telegram user IDs allowed to interact (empty = allow all).
-    /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Polling interval in seconds.
-    pub poll_interval_secs: u64,
-    /// Custom Telegram Bot API base URL for proxies or mirrors.
-    /// Defaults to `https://api.telegram.org` when not set.
-    #[serde(default)]
-    pub api_url: Option<String>,
-    /// Initial backoff in seconds on API failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on API failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
-    #[serde(default = "default_telegram_long_poll_timeout_secs")]
-    pub long_poll_timeout_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Message coalescing window in milliseconds for Telegram-specific
-    /// ergonomics (#4145). When set, messages from the same sender arriving
-    /// within this window are buffered and dispatched to the agent as a
-    /// single batched context. This prevents out-of-order processing in the
-    /// common pattern where a user forwards a message and immediately follows
-    /// up with a comment.
-    ///
-    /// This is a thin alias for [`ChannelOverrides::message_debounce_ms`]:
-    /// if `overrides.message_debounce_ms` is non-zero it wins; otherwise the
-    /// value here is applied. `Some(0)` explicitly disables coalescing.
-    /// `None` (default) leaves behavior unchanged.
-    #[serde(default)]
-    pub message_coalesce_window_ms: Option<u64>,
-    /// Thread-based agent routing for forum topics.
-    ///
-    /// Maps Telegram `message_thread_id` (as string) to an agent name.
-    /// Messages in a matched thread are routed to that agent instead of
-    /// the `default_agent`. Unmatched threads fall back to normal routing.
-    ///
-    /// ```toml
-    /// [channels.telegram.thread_routes]
-    /// "12345" = "research-agent"
-    /// "67890" = "coding-agent"
-    /// ```
-    #[serde(default)]
-    pub thread_routes: std::collections::HashMap<String, String>,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
-    /// adapter's REST client (#4795). When unset, the adapter follows
-    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
-    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
-    /// overrides any env var.
-    ///
-    /// Accepted schemes: `http://`, `https://`, `socks5://`,
-    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
-    /// Invalid URLs are rejected at adapter init.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            poll_interval_secs: 1,
-            api_url: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
-            overrides: ChannelOverrides::default(),
-            message_coalesce_window_ms: None,
-            thread_routes: std::collections::HashMap::new(),
-            proxy: None,
-        }
-    }
-}
-
-impl TelegramConfig {
-    /// Returns a [`ChannelOverrides`] with the Telegram-specific
-    /// `message_coalesce_window_ms` alias applied to
-    /// [`ChannelOverrides::message_debounce_ms`].
-    ///
-    /// Resolution rules (#4145):
-    /// 1. If `overrides.message_debounce_ms` is non-zero, it wins.
-    /// 2. Otherwise, if `message_coalesce_window_ms` is `Some`, that value
-    ///    is copied into `message_debounce_ms` (including `Some(0)`, which
-    ///    is a no-op since the existing field is already 0).
-    /// 3. Otherwise the unmodified clone of `overrides` is returned.
-    pub fn effective_overrides(&self) -> ChannelOverrides {
-        let mut ov = self.overrides.clone();
-        if ov.message_debounce_ms == 0 {
-            if let Some(window) = self.message_coalesce_window_ms {
-                ov.message_debounce_ms = window;
-            }
-        }
-        ov
-    }
-}
-
 /// Discord channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` catches typos inside `[[channels.discord]]`
+// elements at deserialize time. The detect_unknown_nested_fields walker
+// can't see into repeated-table elements (#5130), so the only way to
+// surface a typo here is for serde itself to reject it. This is the
+// canonical statement of the rationale; the other channel configs in
+// this module refer back to `DiscordConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
@@ -6740,8 +6558,16 @@ pub struct DiscordConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the gateway WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
-    /// and env-var interaction.
+    /// proxy.
+    ///
+    /// When unset, the adapter follows reqwest's normal env-var
+    /// fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+    /// `NO_PROXY`). When set, the per-channel value overrides any env
+    /// var. Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init. This is the canonical
+    /// proxy doc; other channel configs refer back to
+    /// `DiscordConfig::proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
 }
@@ -6767,7 +6593,7 @@ impl Default for DiscordConfig {
 
 /// Slack channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
@@ -6804,7 +6630,7 @@ pub struct SlackConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
     /// adapter's REST client (#4795). Affects Web API calls only —
     /// the Socket Mode WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// proxy. See `DiscordConfig::proxy` for accepted URL shapes
     /// and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -6830,7 +6656,7 @@ impl Default for SlackConfig {
 
 /// WhatsApp Cloud API channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
@@ -7128,7 +6954,7 @@ impl Default for TeamsConfig {
 
 /// Mattermost channel adapter configuration.
 //
-// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
@@ -7156,7 +6982,7 @@ pub struct MattermostConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// through the proxy. See `DiscordConfig::proxy` for accepted
     /// URL shapes and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -7174,57 +7000,6 @@ impl Default for MattermostConfig {
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             proxy: None,
-        }
-    }
-}
-
-/// IRC channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct IrcConfig {
-    /// IRC server hostname.
-    pub server: String,
-    /// IRC server port.
-    pub port: u16,
-    /// Bot nickname.
-    pub nick: String,
-    /// Env var name holding the server password (optional).
-    pub password_env: Option<String>,
-    /// Channels to join (e.g., `["#librefang", "#general"]`).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub channels: Vec<String>,
-    /// Use TLS (requires tokio-native-tls).
-    pub use_tls: bool,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Initial backoff in seconds on connection failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on connection failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for IrcConfig {
-    fn default() -> Self {
-        Self {
-            server: "irc.libera.chat".to_string(),
-            port: 6667,
-            nick: "librefang".to_string(),
-            password_env: None,
-            channels: vec![],
-            use_tls: false,
-            account_id: None,
-            default_agent: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
         }
     }
 }
@@ -7376,46 +7151,6 @@ impl Default for ZulipConfig {
     }
 }
 
-/// XMPP/Jabber channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct XmppConfig {
-    /// JID (e.g., "bot@jabber.org").
-    pub jid: String,
-    /// Env var name holding the password.
-    pub password_env: String,
-    /// XMPP server hostname (defaults to JID domain).
-    pub server: String,
-    /// XMPP server port.
-    pub port: u16,
-    /// MUC rooms to join.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for XmppConfig {
-    fn default() -> Self {
-        Self {
-            jid: String::new(),
-            password_env: "XMPP_PASSWORD".to_string(),
-            server: String::new(),
-            port: 5222,
-            rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 // ── Wave 3 channel configs ─────────────────────────────────────────
 
 /// LINE Messaging API channel adapter configuration.
@@ -7444,79 +7179,6 @@ impl Default for LineConfig {
             channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
             access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
             webhook_port: 8450,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Viber Bot API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ViberConfig {
-    /// Env var name holding the auth token.
-    pub auth_token_env: String,
-    /// Webhook URL for receiving messages.
-    pub webhook_url: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for ViberConfig {
-    fn default() -> Self {
-        Self {
-            auth_token_env: "VIBER_AUTH_TOKEN".to_string(),
-            webhook_url: String::new(),
-            webhook_port: 8451,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Facebook Messenger Platform channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MessengerConfig {
-    /// Env var name holding the page access token.
-    pub page_token_env: String,
-    /// Env var name holding the webhook verify token.
-    pub verify_token_env: String,
-    /// Env var name holding the Facebook App Secret.
-    /// Used for HMAC-SHA1 verification of incoming webhook POST requests
-    /// via `X-Hub-Signature`. If absent or empty, verification is skipped
-    /// with a warning (backwards compatibility).
-    #[serde(default)]
-    pub app_secret_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MessengerConfig {
-    fn default() -> Self {
-        Self {
-            page_token_env: "MESSENGER_PAGE_TOKEN".to_string(),
-            verify_token_env: "MESSENGER_VERIFY_TOKEN".to_string(),
-            app_secret_env: "MESSENGER_APP_SECRET".to_string(),
-            webhook_port: 8452,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -7557,69 +7219,6 @@ impl Default for RedditConfig {
             username: String::new(),
             password_env: "REDDIT_PASSWORD".to_string(),
             subreddits: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MastodonConfig {
-    /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
-    pub instance_url: String,
-    /// Env var name holding the access token.
-    pub access_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MastodonConfig {
-    fn default() -> Self {
-        Self {
-            instance_url: String::new(),
-            access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Bluesky/AT Protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct BlueskyConfig {
-    /// Bluesky identifier (handle or DID).
-    pub identifier: String,
-    /// Env var name holding the app password.
-    pub app_password_env: String,
-    /// PDS service URL.
-    pub service_url: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for BlueskyConfig {
-    fn default() -> Self {
-        Self {
-            identifier: String::new(),
-            app_password_env: "BLUESKY_APP_PASSWORD".to_string(),
-            service_url: "https://bsky.social".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -7784,43 +7383,6 @@ impl Default for WeChatConfig {
     }
 }
 
-/// Revolt (Discord-like) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct RevoltConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
-    pub api_url: String,
-    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
-    pub ws_url: String,
-    /// Restrict to specific channel IDs (empty = all channels the bot is in).
-    #[serde(default)]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for RevoltConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
-            api_url: "https://api.revolt.chat".to_string(),
-            ws_url: "wss://ws.revolt.chat".to_string(),
-            allowed_channels: Vec::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 // ── Wave 4 channel configs ─────────────────────────────────────────
 
 /// Nextcloud Talk channel adapter configuration.
@@ -7850,135 +7412,6 @@ impl Default for NextcloudConfig {
             server_url: String::new(),
             token_env: "NEXTCLOUD_TOKEN".to_string(),
             allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Guilded bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GuildedConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Server IDs to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub server_ids: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GuildedConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "GUILDED_BOT_TOKEN".to_string(),
-            server_ids: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Keybase chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct KeybaseConfig {
-    /// Keybase username.
-    pub username: String,
-    /// Env var name holding the paper key.
-    pub paperkey_env: String,
-    /// Team names to listen in (empty = all DMs).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_teams: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for KeybaseConfig {
-    fn default() -> Self {
-        Self {
-            username: String::new(),
-            paperkey_env: "KEYBASE_PAPERKEY".to_string(),
-            allowed_teams: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Threema Gateway channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ThreemaConfig {
-    /// Threema Gateway ID.
-    pub threema_id: String,
-    /// Env var name holding the API secret.
-    pub secret_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for ThreemaConfig {
-    fn default() -> Self {
-        Self {
-            threema_id: String::new(),
-            secret_env: "THREEMA_SECRET".to_string(),
-            webhook_port: 8454,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Nostr relay channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NostrConfig {
-    /// Env var name holding the private key (nsec or hex).
-    pub private_key_env: String,
-    /// Relay URLs to connect to.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub relays: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NostrConfig {
-    fn default() -> Self {
-        Self {
-            private_key_env: "NOSTR_PRIVATE_KEY".to_string(),
-            relays: vec!["wss://relay.damus.io".to_string()],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -8017,140 +7450,7 @@ impl Default for WebexConfig {
     }
 }
 
-/// Pumble bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct PumbleConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for PumbleConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "PUMBLE_BOT_TOKEN".to_string(),
-            webhook_port: 8455,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Flock bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct FlockConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for FlockConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "FLOCK_BOT_TOKEN".to_string(),
-            webhook_port: 8456,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Twist API v3 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TwistConfig {
-    /// Env var name holding the API token.
-    pub token_env: String,
-    /// Workspace ID.
-    pub workspace_id: String,
-    /// Channel IDs to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TwistConfig {
-    fn default() -> Self {
-        Self {
-            token_env: "TWIST_TOKEN".to_string(),
-            workspace_id: String::new(),
-            allowed_channels: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 // ── Wave 5 channel configs ─────────────────────────────────────────
-
-/// Mumble text chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MumbleConfig {
-    /// Mumble server hostname.
-    pub host: String,
-    /// Mumble server port.
-    pub port: u16,
-    /// Bot username.
-    pub username: String,
-    /// Env var name holding the server password.
-    pub password_env: String,
-    /// Channel to join.
-    pub channel: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MumbleConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 64738,
-            username: "librefang".to_string(),
-            password_env: "MUMBLE_PASSWORD".to_string(),
-            channel: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
 
 /// How the DingTalk adapter receives inbound events.
 #[derive(
@@ -8254,106 +7554,6 @@ impl Default for QqConfig {
     }
 }
 
-/// Discourse forum channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct DiscourseConfig {
-    /// Discourse base URL.
-    pub base_url: String,
-    /// Env var name holding the API key.
-    pub api_key_env: String,
-    /// API username.
-    pub api_username: String,
-    /// Category slugs to monitor.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub categories: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for DiscourseConfig {
-    fn default() -> Self {
-        Self {
-            base_url: String::new(),
-            api_key_env: "DISCOURSE_API_KEY".to_string(),
-            api_username: "system".to_string(),
-            categories: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Gitter Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GitterConfig {
-    /// Env var name holding the auth token.
-    pub token_env: String,
-    /// Room ID to listen in.
-    pub room_id: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GitterConfig {
-    fn default() -> Self {
-        Self {
-            token_env: "GITTER_TOKEN".to_string(),
-            room_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Gotify WebSocket channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GotifyConfig {
-    /// Gotify server URL.
-    pub server_url: String,
-    /// Env var name holding the app token (for sending).
-    pub app_token_env: String,
-    /// Env var name holding the client token (for receiving).
-    pub client_token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GotifyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            app_token_env: "GOTIFY_APP_TOKEN".to_string(),
-            client_token_env: "GOTIFY_CLIENT_TOKEN".to_string(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Generic webhook channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -8394,90 +7594,6 @@ impl Default for WebhookConfig {
             overrides: ChannelOverrides::default(),
             deliver_only: false,
             deliver: None,
-        }
-    }
-}
-
-/// Voice channel adapter configuration.
-///
-/// Runs a WebSocket server that accepts audio streams, transcribes via STT,
-/// sends text to the agent, and returns synthesized speech via TTS.
-///
-/// ```toml
-/// [channels.voice]
-/// listen_port = 4546
-/// api_key_env = "OPENAI_API_KEY"
-/// stt_url = "https://api.openai.com"
-/// tts_url = "https://api.openai.com"
-/// tts_voice = "alloy"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct VoiceConfig {
-    /// WebSocket server listen port (default: 4546).
-    pub listen_port: u16,
-    /// Env var name holding the API key for STT/TTS services.
-    pub api_key_env: String,
-    /// Base URL for the STT (Speech-to-Text) API.
-    pub stt_url: String,
-    /// Base URL for the TTS (Text-to-Speech) API.
-    pub tts_url: String,
-    /// TTS voice name (default: "alloy").
-    pub tts_voice: String,
-    /// Audio buffer threshold in bytes before triggering STT (default: 32768).
-    pub buffer_threshold: usize,
-    /// Unique identifier for this voice instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route voice messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for VoiceConfig {
-    fn default() -> Self {
-        Self {
-            listen_port: 4546,
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            stt_url: "https://api.openai.com".to_string(),
-            tts_url: "https://api.openai.com".to_string(),
-            tts_voice: "alloy".to_string(),
-            buffer_threshold: 32768,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// LinkedIn Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct LinkedInConfig {
-    /// Env var name holding the OAuth2 access token.
-    pub access_token_env: String,
-    /// Organization ID for messaging.
-    pub organization_id: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for LinkedInConfig {
-    fn default() -> Self {
-        Self {
-            access_token_env: "LINKEDIN_ACCESS_TOKEN".to_string(),
-            organization_id: String::new(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
         }
     }
 }
@@ -8781,58 +7897,6 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn telegram_message_coalesce_window_default_is_none() {
-        let tg = TelegramConfig::default();
-        assert!(tg.message_coalesce_window_ms.is_none());
-        // Backward compat: effective overrides leaves debounce disabled.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_alias_fills_debounce() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 2000);
-    }
-
-    #[test]
-    fn telegram_explicit_overrides_debounce_wins_over_alias() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            overrides: ChannelOverrides {
-                message_debounce_ms: 500,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        // The explicit `overrides.message_debounce_ms` is non-zero, so the
-        // alias must NOT clobber it.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 500);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_zero_keeps_disabled() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_parses_from_toml() {
-        let toml_str = r#"
-            bot_token_env = "TG"
-            message_coalesce_window_ms = 1500
-        "#;
-        let tg: TelegramConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(tg.message_coalesce_window_ms, Some(1500));
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 1500);
-    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {
