@@ -272,11 +272,11 @@ For real-world examples, study these existing adapters (simplest to most complex
 
 | Adapter | File | Pattern |
 |---------|------|---------|
-| **ntfy** | `ntfy.rs` | SSE subscription + plain POST publishing |
+| **discord** | `discord.rs` | Gateway WebSocket via `serenity` + REST publishing |
 | **webhook** | `webhook.rs` | HTTP server with HMAC-SHA256 signature verification |
 | **gotify** | `gotify.rs` | WebSocket subscription + REST API publishing |
 | **slack** | `slack.rs` | WebSocket (Socket Mode) + Web API |
-| **telegram** | `telegram.rs` | Long-polling + Bot API |
+| **matrix** | `matrix.rs` | Client-server API + Markdown→HTML |
 
 ## Further Reading
 

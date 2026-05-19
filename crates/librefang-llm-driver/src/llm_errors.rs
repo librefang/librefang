@@ -797,6 +797,7 @@ pub fn is_html_error_page(body: &str) -> bool {
 /// | `Timeout`         | network timeout      | skip to next provider               |
 /// | `HttpError`       | other 4xx/5xx        | skip to next provider               |
 /// | `AuthError`       | 401 / bad API key    | skip to next provider               |
+/// | `ChainExhausted`  | every slot dry       | propagate (no more retries)         |
 /// | `Unknown`         | anything else        | propagate immediately               |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum FailoverReason {
@@ -816,6 +817,12 @@ pub enum FailoverReason {
     /// 401 or invalid API key — skip to next provider (another slot may have a
     /// valid key).
     AuthError,
+    /// Every slot in the chain was either pre-skipped (marked exhausted) or
+    /// attempted-and-failed with an exhaustion-class reason. Distinct from
+    /// [`FailoverReason::Unknown`] — the classification IS known, the chain
+    /// is simply dry. Terminal: callers should propagate to the user /
+    /// operator, not continue retrying. (#4807, review nit 7)
+    ChainExhausted,
     /// Unclassifiable error — propagate to caller.
     Unknown,
 }

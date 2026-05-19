@@ -130,6 +130,7 @@ pub struct MemoryListQuery {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryAddBody {
     pub messages: Vec<serde_json::Value>,
     #[serde(default)]
@@ -139,6 +140,7 @@ pub struct MemoryAddBody {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryUpdateBody {
     pub content: String,
 }

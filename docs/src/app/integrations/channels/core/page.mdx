@@ -27,17 +27,17 @@ librefang config set-key telegram             # .env file
 5. Add to config:
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "assistant"
-# Optional: restrict to specific Telegram user IDs
-# allowed_users = ["123456789"]
-
-[channels.telegram.overrides]
-# Optional: Telegram-native HTML formatting
-# output_format = "telegram_html"
-# group_policy = "mention_only"
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "123456789,@alice"
 ```
+
+The in-process `[channels.telegram]` block is no longer accepted. Declare Telegram as a `[[sidecar_channels]]` entry as shown above.
 
 6. Restart the daemon:
 
@@ -47,9 +47,9 @@ librefang start
 
 ### How It Works
 
-The Telegram adapter uses long-polling via the `getUpdates` API. It polls every few seconds with a 30-second long-poll timeout. On API failures, it applies exponential backoff (starting at 1 second, up to 60 seconds). Shutdown is coordinated via a `watch::channel`.
+The Telegram sidecar adapter (`librefang.sidecar.adapters.telegram`, shipped in `librefang-sdk`) uses long-polling via the `getUpdates` API with a 30-second server timeout. On API failures it applies supervised exponential backoff. The daemon restarts the subprocess on crash.
 
-Messages from authorized users are converted to `ChannelMessage` events and routed to the configured agent. Responses are sent back via the `sendMessage` API. Long responses are automatically split into multiple messages to respect Telegram's 4096-character limit using the shared `split_message()` utility.
+Messages from authorized users are converted to `ChannelMessage` events and routed to the configured agent. Responses are sent back via the `sendMessage` API. Long responses are automatically split to respect Telegram's 4096-character limit.
 
 ### File Attachments
 
@@ -475,8 +475,8 @@ If you want BossFang to truncate rather than split long messages for a specific
 channel, set `split_long_messages = false` in the channel configuration:
 
 ```toml
-[channels.telegram]
-split_long_messages = false   # truncate at 4096 instead of splitting
+[channels.discord]
+split_long_messages = false   # truncate instead of splitting
 ```
 
-The default is `true` for Telegram and Discord.
+The default is `true` for Discord and the Telegram sidecar adapter.

@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.5.12-beta.11"
+    "version": "2026.5.17-beta.12"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -4079,6 +4079,88 @@
         }
       }
     },
+    "/api/channels/sidecar/{name}/configure": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/channels/sidecar/{name}/configure` — save schema-driven\nsidecar form values, splitting the payload across `secrets.env` and\n`config.toml`, then trigger a hot-reload so the kernel picks up the\nnew `[[sidecar_channels]]` block without a restart. `name` is the\n`SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).",
+        "operationId": "configure_sidecar_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sidecar catalog name (e.g. telegram, ntfy)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureSidecarBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; reload plan returned. Body fields: `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), `shadowed_secrets` ([String]) — secret field keys whose value is already present in the daemon's process environment (e.g. exported by the launching shell). Those values will out-rank the freshly-written secrets.env entry until the operator unsets them and restarts the daemon.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required field or invalid value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown catalog name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Schema not cached — SDK module may be missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/channels/wechat/qr/start": {
       "post": {
         "tags": [
@@ -7986,6 +8068,16 @@
               }
             }
           },
+          "207": {
+            "description": "Default provider updated, but one or more agents could not be migrated; response includes `sync_failures`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "400": {
             "description": "No model found for provider"
           },
@@ -8058,6 +8150,16 @@
         "responses": {
           "200": {
             "description": "API key set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "API key saved and default provider switched, but one or more agents could not be migrated; response includes `sync_failures`",
             "content": {
               "application/json": {
                 "schema": {
@@ -10174,7 +10276,8 @@
           "filename": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkActionResult": {
         "type": "object",
@@ -10217,7 +10320,8 @@
               "type": "string"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkCreateRequest": {
         "type": "object",
@@ -10232,7 +10336,8 @@
               "$ref": "#/components/schemas/SpawnRequest"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkCreateResult": {
         "type": "object",
@@ -10282,7 +10387,8 @@
               "$ref": "#/components/schemas/UserUpsert"
             }
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkImportResult": {
         "type": "object",
@@ -10385,7 +10491,8 @@
             ],
             "description": "New username — optional, omit to keep the current username."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ClawHubInstallRequest": {
         "type": "object",
@@ -10405,7 +10512,8 @@
             "type": "string",
             "description": "ClawHub skill slug (e.g., \"github-helper\")."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CloneAgentRequest": {
         "type": "object",
@@ -10425,6 +10533,25 @@
           "new_name": {
             "type": "string"
           }
+        },
+        "additionalProperties": false
+      },
+      "ConfigureSidecarBody": {
+        "type": "object",
+        "description": "Request body for `POST /api/channels/sidecar/{name}/configure`.\n\n`values` is a flat `key → string` map where each key matches a\n`SidecarSchemaField.key` returned by the sidecar's `--describe`.\nThe endpoint splits the map by `field_type`: `secret` fields are\nwritten line-by-line to `~/.librefang/secrets.env`, every other\nfield is written under `[sidecar_channels.env]` in\n`~/.librefang/config.toml`. All current first-party sidecar field\ntypes (text, secret, list, bool, select) are stringly representable,\nso a flat `HashMap<String, String>` is sufficient — payload-typed\nfields (numbers etc.) would need a richer shape.",
+        "required": [
+          "values"
+        ],
+        "properties": {
+          "values": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
         }
       },
       "ExtensionInstallRequest": {
@@ -10438,7 +10565,8 @@
             "type": "string",
             "description": "Extension/integration ID (e.g., \"github\", \"slack\")."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ExtensionUninstallRequest": {
         "type": "object",
@@ -10451,7 +10579,8 @@
             "type": "string",
             "description": "Extension/integration ID to remove."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "InjectMessageRequest": {
         "type": "object",
@@ -10471,7 +10600,8 @@
             ],
             "description": "Optional session id; when omitted the message broadcasts to all live sessions for the agent."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "InjectMessageResponse": {
         "type": "object",
@@ -10582,7 +10712,8 @@
             "type": "boolean",
             "description": "Whether the bot was @mentioned in a group message."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MessageResponse": {
         "type": "object",
@@ -10680,7 +10811,8 @@
           "target_dir": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MigrateScanRequest": {
         "type": "object",
@@ -10692,7 +10824,8 @@
           "path": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ParticipantRefSchema": {
         "type": "object",
@@ -10825,7 +10958,8 @@
             ],
             "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "PushMessageRequest": {
         "type": "object",
@@ -10855,7 +10989,8 @@
             ],
             "description": "Optional thread/topic ID for threaded replies (platform-specific)."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "RefreshRequest": {
         "type": "object",
@@ -10908,7 +11043,8 @@
           "content": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetAgentToolsRequest": {
         "type": "object",
@@ -10944,7 +11080,8 @@
             },
             "description": "Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetEnabledRequest": {
         "type": "object",
@@ -10955,7 +11092,8 @@
           "enabled": {
             "type": "boolean"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SetModeRequest": {
         "type": "object",
@@ -10965,6 +11103,70 @@
         ],
         "properties": {
           "mode": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SidecarSchema": {
+        "type": "object",
+        "required": [
+          "name",
+          "display_name",
+          "description",
+          "fields"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SidecarSchemaField"
+            }
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SidecarSchemaField": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "type"
+        ],
+        "properties": {
+          "advanced": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "options": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "type": {
             "type": "string"
           }
         }
@@ -10986,7 +11188,8 @@
           "name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SkillUninstallRequest": {
         "type": "object",
@@ -10998,7 +11201,8 @@
           "name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SpawnRequest": {
         "type": "object",
@@ -11029,7 +11233,8 @@
             ],
             "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SpawnResponse": {
         "type": "object",
@@ -11087,7 +11292,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UserUpsert": {
         "type": "object",
@@ -11117,7 +11323,8 @@
           "role": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UserView": {
         "type": "object",

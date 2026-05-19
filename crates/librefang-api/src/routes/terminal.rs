@@ -520,6 +520,7 @@ async fn list_windows(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateWindowRequest {
     name: Option<String>,
 }
@@ -636,6 +637,7 @@ async fn delete_window(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RenameWindowRequest {
     name: String,
 }

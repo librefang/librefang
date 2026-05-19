@@ -28,7 +28,7 @@ use walkdir::WalkDir;
 /// - Missing required fields on agent manifests
 ///
 /// **What this does NOT catch:**
-/// - Unknown fields **nested inside** sections (e.g. `[channels.telegram].foo`).
+/// - Unknown fields **nested inside** sections (e.g. `[channels.discord].foo`).
 ///   LibreFang's channel structs use `#[serde(default)]` without
 ///   `deny_unknown_fields`, so unknown nested fields are silently ignored at
 ///   deserialization time. Catching these would require per-struct field-list
@@ -592,10 +592,10 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.telegram]\n\
+             [channels.discord]\n\
              bot_token_env = \"TG_TOKEN\"\n\
              \n\
-             [channels.telegram.overrides]\n\
+             [channels.discord.overrides]\n\
              group_policy = \"respond\"\n",
         )
         .unwrap();
@@ -618,12 +618,15 @@ mod tests {
         );
     }
 
-    /// Known limitation: an unknown field **nested** inside a section (e.g.
-    /// `[channels.telegram].old_field`) is NOT caught, because LibreFang's
-    /// channel structs use `#[serde(default)]` and silently drop unknown
-    /// fields. This test pins that behaviour so we notice if it ever changes.
+    /// Since #5129 / #5130 the five locked-down structs (`DiscordConfig`,
+    /// `SlackConfig`, `WhatsAppConfig`, `MattermostConfig`,
+    /// `McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`, so an
+    /// unknown field nested inside any of them now surfaces as a
+    /// "does not cleanly deserialize" warning at migrate time. The remaining
+    /// nested config structs are still tolerant and silently drop unknown
+    /// fields — see #5130 for the explicit scoping decision.
     #[test]
-    fn test_schema_drift_check_does_not_catch_nested_unknown_fields() {
+    fn test_schema_drift_check_catches_nested_unknown_fields_in_locked_down_sections() {
         let src = TempDir::new().unwrap();
         let dst = TempDir::new().unwrap();
 
@@ -632,7 +635,7 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.telegram]\n\
+             [channels.discord]\n\
              bot_token_env = \"TG_TOKEN\"\n\
              nickname = \"this-field-does-not-exist\"\n",
         )
@@ -646,11 +649,15 @@ mod tests {
         };
         let report = migrate(&options).unwrap();
 
-        // Document the limitation: nested unknown fields produce no warnings.
+        // The deny_unknown_fields attribute on DiscordConfig surfaces the
+        // unknown nested key as a deserialize-failure warning. The bad field
+        // name must appear in the message so operators can locate the typo.
         assert!(
-            report.warnings.is_empty(),
-            "nested unknown fields are expected to slip through (see function \
-             doc comment for rationale), got: {:?}",
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not cleanly deserialize") && w.contains("nickname")),
+            "expected deserialize-failure warning naming `nickname`, got: {:?}",
             report.warnings
         );
     }

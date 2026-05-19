@@ -3,6 +3,18 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
+
+/**
+ * Catalog entry for the skill/tool finder (#5049). Both fields are
+ * optional so the caller can pass partial data: an unknown skill or
+ * tool that the user has typed in still renders as a chip even if the
+ * registry doesn't know its description.
+ */
+export interface ManifestCatalogEntry {
+  name: string;
+  description?: string;
+}
 
 interface AgentManifestFormProps {
   value: ManifestFormState;
@@ -15,6 +27,26 @@ interface AgentManifestFormProps {
   // contents (e.g. a full `[exec_policy]` table) so the user isn't
   // misled by a default-looking dropdown that hides serialized state.
   extras: ManifestExtras;
+  /**
+   * Installed-skill catalog from `GET /api/skills`. When present, the
+   * "Skills" field renders a fuzzy-find combobox seeded with these
+   * names (#5049); when absent (or empty), the field falls back to the
+   * plain tag-input so users can still type unknown identifiers.
+   */
+  skillCatalog?: ManifestCatalogEntry[];
+  /**
+   * Tool catalog from `GET /api/tools`. Drives the same finder
+   * affordance for the "Tool ID Allowlist" capability field.
+   */
+  toolCatalog?: ManifestCatalogEntry[];
+  /**
+   * Configured MCP servers catalog from `GET /api/mcp/servers`. When
+   * present, the "MCP Servers" field renders a multi-select dropdown
+   * seeded with these names (#5246); when absent the field falls back
+   * to the plain tag input so callers without a catalog still work and
+   * users can reference servers the dashboard doesn't know about yet.
+   */
+  mcpCatalog?: ManifestCatalogEntry[];
 }
 
 export function AgentManifestForm({
@@ -24,6 +56,9 @@ export function AgentManifestForm({
   models,
   invalidFields,
   extras,
+  skillCatalog,
+  toolCatalog,
+  mcpCatalog,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -45,6 +80,24 @@ export function AgentManifestForm({
   const filteredModels = useMemo(
     () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
     [models, value.model.provider],
+  );
+
+  // Build {options, meta} pairs for the skill/tool finders (#5049).
+  // The catalog is union-ed with the user's current selection so
+  // entries the registry doesn't know about (e.g. a skill the user
+  // typed in by hand, or one that is staged but not yet installed)
+  // remain visible as chips and selectable in the dropdown.
+  const skillFinder = useMemo(
+    () => mergeCatalog(skillCatalog, value.skills),
+    [skillCatalog, value.skills],
+  );
+  const toolFinder = useMemo(
+    () => mergeCatalog(toolCatalog, value.capabilities.tools),
+    [toolCatalog, value.capabilities.tools],
+  );
+  const mcpFinder = useMemo(
+    () => mergeCatalog(mcpCatalog, value.mcp_servers),
+    [mcpCatalog, value.mcp_servers],
   );
 
   const jsonSchemaFormat =
@@ -315,11 +368,28 @@ export function AgentManifestForm({
           />
         </Field>
         <Field label={t("agents.form.cap_tools")} hint={t("agents.form.cap_tools_hint")}>
-          <TagInput
-            value={value.capabilities.tools}
-            onChange={(next) => updateCapabilities({ tools: next })}
-            placeholder={t("agents.form.cap_tools_placeholder")}
-          />
+          {toolFinder ? (
+            <MultiSelectCmdk
+              options={toolFinder.options}
+              optionMeta={toolFinder.meta}
+              value={value.capabilities.tools}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.capabilities.tools) : next;
+                updateCapabilities({ tools: nextValue });
+              }}
+              placeholder={t("agents.form.cap_tools_search_placeholder", {
+                defaultValue: "Search tools…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.capabilities.tools}
+              onChange={(next) => updateCapabilities({ tools: next })}
+              placeholder={t("agents.form.cap_tools_placeholder")}
+            />
+          )}
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
@@ -373,19 +443,53 @@ export function AgentManifestForm({
             placeholder={t("agents.form.tags_placeholder")}
           />
         </Field>
-        <Field label={t("agents.form.skills")}>
-          <TagInput
-            value={value.skills}
-            onChange={(next) => update({ skills: next })}
-            placeholder={t("agents.form.skills_placeholder")}
-          />
+        <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
+          {skillFinder ? (
+            <MultiSelectCmdk
+              options={skillFinder.options}
+              optionMeta={skillFinder.meta}
+              value={value.skills}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.skills) : next;
+                update({ skills: nextValue });
+              }}
+              placeholder={t("agents.form.skills_search_placeholder", {
+                defaultValue: "Search installed skills…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.skills}
+              onChange={(next) => update({ skills: next })}
+              placeholder={t("agents.form.skills_placeholder")}
+            />
+          )}
         </Field>
-        <Field label={t("agents.form.mcp_servers")}>
-          <TagInput
-            value={value.mcp_servers}
-            onChange={(next) => update({ mcp_servers: next })}
-            placeholder={t("agents.form.mcp_servers_placeholder")}
-          />
+        <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
+          {mcpFinder ? (
+            <MultiSelectCmdk
+              options={mcpFinder.options}
+              optionMeta={mcpFinder.meta}
+              value={value.mcp_servers}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.mcp_servers) : next;
+                update({ mcp_servers: nextValue });
+              }}
+              placeholder={t("agents.form.mcp_servers_search_placeholder", {
+                defaultValue: "Search MCP servers…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.mcp_servers}
+              onChange={(next) => update({ mcp_servers: next })}
+              placeholder={t("agents.form.mcp_servers_placeholder")}
+            />
+          )}
         </Field>
       </Section>
 
@@ -957,6 +1061,35 @@ function patchListItem<T>(list: T[], idx: number, patch: T | ((item: T) => T)): 
   return next;
 }
 
+/**
+ * Build the options + description map for the skill/tool finders
+ * (#5049). The catalog is union-ed with the currently-selected values
+ * so chips for unknown entries stay rendered even before the catalog
+ * loads. Returns `null` when no catalog is available so the caller can
+ * fall back to a plain tag input.
+ *
+ * The returned `options` list is sorted for stable rendering order.
+ */
+function mergeCatalog(
+  catalog: ManifestCatalogEntry[] | undefined,
+  selected: string[],
+): { options: string[]; meta: Record<string, { description?: string }> } | null {
+  if (!catalog) return null;
+  const meta: Record<string, { description?: string }> = {};
+  const seen = new Set<string>();
+  for (const entry of catalog) {
+    if (!entry?.name || seen.has(entry.name)) continue;
+    seen.add(entry.name);
+    if (entry.description) meta[entry.name] = { description: entry.description };
+  }
+  for (const name of selected) {
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+  }
+  const options = Array.from(seen).sort((a, b) => a.localeCompare(b));
+  return { options, meta };
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
@@ -1006,11 +1139,20 @@ function Field({
   invalid?: boolean;
   children: React.ReactNode;
 }) {
-  // Wrap children inside the <label> rather than relying on htmlFor —
-  // implicit association works without each child needing an id, and
-  // clicking the label text focuses the input as users expect.
+  // Use a <div> wrapper rather than a <label> (#5246). A <label>
+  // forwards every click within its bounds to its first labelable form
+  // control, which silently steals clicks on composite widgets like
+  // MultiSelectCmdk (cmdk dropdown options): the click that lights up
+  // an item was being redirected to the search input, so picking a
+  // skill / tool from the catalog never reached the option's
+  // onSelect handler and the chip was never added. Switching to <div>
+  // makes each interactive child (input, button, option) receive its
+  // own click as the user intends. The trade-off is that the label
+  // text no longer focuses the input on click — which is a non-issue
+  // here because every field already gets focus via direct click on
+  // its visible control.
   return (
-    <label className="block">
+    <div className="block">
       {label && (
         <span
           className={`text-[10px] font-bold uppercase block ${
@@ -1023,7 +1165,7 @@ function Field({
       )}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
-    </label>
+    </div>
   );
 }
 

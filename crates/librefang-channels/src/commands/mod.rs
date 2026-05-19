@@ -606,8 +606,7 @@ pub fn cli_help_text() -> String {
 
 /// Pairs of `(name, description)` for the Telegram BotCommands menu.
 ///
-/// Adapters are responsible for converting to their wire type
-/// (e.g. `telegram::BotCommand`).
+/// Adapters are responsible for converting to their own wire type.
 pub fn telegram_bot_commands() -> Vec<(String, String)> {
     COMMAND_REGISTRY
         .iter()

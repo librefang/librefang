@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 39;
+const SCHEMA_VERSION: u32 = 40;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -108,6 +108,16 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // session without touching the agent manifest. NULL means "use the
     // agent default" (backwards-compatible with all existing rows).
     run_step!(39, migrate_v39);
+    // v40 (#5138): fold the `agents.session_id` / `agents.identity` /
+    // `agents.source_toml_path` columns into the migration ladder. They
+    // were previously bolted on by three `let _ = ALTER TABLE agents ADD
+    // COLUMN ...` calls fired on *every* `save_agent`, swallowing the
+    // duplicate-column error. That bypassed `user_version` / the
+    // `migrations` audit trail entirely and made a refactor that dropped
+    // one ALTER silently break fresh installs. Also adds
+    // `sessions.messages_generation` so the repair-skip optimisation
+    // survives a reload instead of paying a full repair pass every boot.
+    run_step!(40, migrate_v40);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1451,6 +1461,62 @@ fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 40: Ladder-ize the `agents` schema-evolution columns and add
+/// `sessions.messages_generation` (#5138).
+///
+/// `StructuredStore::save_agent` historically added `session_id`,
+/// `identity`, and `source_toml_path` to `agents` via three
+/// `let _ = conn.execute("ALTER TABLE agents ADD COLUMN ...")` calls on
+/// every save, silencing the duplicate-column error on the steady-state
+/// path. Because these columns were never declared in any `migrate_vN`,
+/// the `migrations` audit trail and `user_version` never reflected them,
+/// and removing one of those ALTERs in a later refactor would silently
+/// break new installs that never had the column. This migration declares
+/// the columns once, in-ladder, inside the transactional `run_step!`.
+///
+/// It also adds `sessions.messages_generation INTEGER NOT NULL DEFAULT 0`
+/// so the in-memory repair-skip generation counter (`Session::
+/// messages_generation`) round-trips across a reload instead of resetting
+/// to `0` every cold load — which forced a full repair pass on the first
+/// post-load save even when the loaded blob was already repaired
+/// (performance only, not correctness).
+///
+/// `column_exists` keeps every `ADD COLUMN` idempotent: fresh installs
+/// (whose v1 CREATE TABLE never carried these) and any DB already carrying
+/// the column from the legacy per-save ALTER both no-op cleanly.
+fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "agents", "session_id") {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN session_id TEXT DEFAULT ''",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "agents", "identity") {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN identity TEXT DEFAULT '{}'",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "agents", "source_toml_path") {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN source_toml_path TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "sessions", "messages_generation") {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN messages_generation INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (40, datetime('now'), 'Ladder-ize agents schema columns + add sessions.messages_generation (#5138)')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1835,6 +1901,47 @@ mod tests {
         run_migrations(&conn).unwrap();
         assert!(column_exists(&conn, "usage_events", "user_id"));
         assert!(column_exists(&conn, "usage_events", "channel"));
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_v40_ladderizes_agents_columns_and_session_generation_5138() {
+        // #5138: the three `agents` schema-evolution columns were
+        // previously bolted on by per-save ALTERs that bypassed the
+        // ladder. v40 must declare them in-ladder and add
+        // `sessions.messages_generation`, all reflected in the audit
+        // trail / user_version.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "agents", "session_id"));
+        assert!(column_exists(&conn, "agents", "identity"));
+        assert!(column_exists(&conn, "agents", "source_toml_path"));
+        assert!(column_exists(&conn, "sessions", "messages_generation"));
+
+        // The migration must be recorded in the audit trail so
+        // `user_version` and `SELECT version FROM migrations` agree.
+        let v40_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 40",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v40_rows, 1, "v40 must record its audit row");
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_v40_is_idempotent_5138() {
+        // Re-running on an already-v40 schema (and on a DB that already
+        // carries the columns from the legacy per-save ALTER) must no-op
+        // cleanly via the `column_exists` guard.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "agents", "session_id"));
+        assert!(column_exists(&conn, "sessions", "messages_generation"));
         assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
     }
 

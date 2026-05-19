@@ -56,6 +56,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
+import { safeStorageGet } from "../lib/safeStorage";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
 import { getStoredApiKey } from "../api";

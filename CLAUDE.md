@@ -79,7 +79,7 @@ LibreFang is an open-source Agent Operating System written in Rust (31 crates in
 ### Crate map
 - **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
-- **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`
+- **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`, `librefang-runtime-audit`, `librefang-runtime-media`, `librefang-runtime-sandbox-docker`
 - **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, uar, …)
 - **Memory**: `librefang-memory` (SurrealDB + SQLite fallback substrate), `librefang-memory-wiki` (durable file-based knowledge vault)
 - **Storage**: `librefang-storage` (BossFang — SurrealDB abstraction layer + 24 SurrealQL migrations; see BossFang-Exclusive Features below)
@@ -221,7 +221,7 @@ The daemon command is `start` (not `daemon`).
 - **Message-history trim cap** is configurable per-agent
   (`agent.toml: max_history_messages`) and globally
   (`config.toml: max_history_messages`). Default is
-  `DEFAULT_MAX_HISTORY_MESSAGES = 40`; values below
+  `DEFAULT_MAX_HISTORY_MESSAGES = 60`; values below
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.

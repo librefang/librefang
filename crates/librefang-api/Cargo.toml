@@ -103,7 +103,6 @@ telemetry = [
 ]
 
 # Individual channel features — forwarded to librefang-channels
-channel-telegram = ["librefang-channels/channel-telegram"]
 channel-discord = ["librefang-channels/channel-discord"]
 channel-slack = ["librefang-channels/channel-slack"]
 channel-matrix = ["librefang-channels/channel-matrix"]
@@ -143,7 +142,6 @@ channel-gitter = ["librefang-channels/channel-gitter"]
 channel-gotify = ["librefang-channels/channel-gotify"]
 channel-linkedin = ["librefang-channels/channel-linkedin"]
 channel-mumble = ["librefang-channels/channel-mumble"]
-channel-ntfy = ["librefang-channels/channel-ntfy"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
@@ -156,15 +154,13 @@ channel-wecom = ["librefang-channels/channel-wecom"]
 # `librefang-cli`'s `default`. Anything bigger should opt in via
 # `all-channels` (or pick individual channels).
 core-channels = [
-    "channel-telegram",
     "channel-discord",
     "channel-slack",
     "channel-webhook",
-    "channel-ntfy",
 ]
 
 all-channels = [
-    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-discord", "channel-slack", "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
@@ -173,14 +169,14 @@ all-channels = [
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-gotify", "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
 # All channels except email — used for Android targets where rustls-connector's
 # rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
 all-channels-no-email = [
-    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-discord", "channel-slack", "channel-matrix",
     "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
@@ -189,13 +185,13 @@ all-channels-no-email = [
     "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
-    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-gotify", "channel-linkedin", "channel-mumble",
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
 # Mini: 12 core channels
 mini = [
-    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-discord", "channel-slack", "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
 ]
@@ -226,6 +222,11 @@ librefang-testing = { path = "../librefang-testing" }
 # tool-exec backend integration test (#3332)
 librefang-runtime = { path = "../librefang-runtime" }
 totp-rs = { workspace = true }
+# OIDC `sub` claim enforcement integration test (#5128): generates RSA
+# keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the
+# resulting JWKS over a local axum listener so `validate_jwt_cached` can
+# be driven end-to-end without a live identity provider.
+rsa = { workspace = true }
 
 [lints]
 workspace = true

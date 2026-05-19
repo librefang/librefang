@@ -14,6 +14,10 @@
 # ── Core (kernel, runtime, types, memory) ────────────────────────────
 crates/librefang-kernel/ @librefang/core
 crates/librefang-runtime/ @librefang/core
+crates/librefang-runtime-audit/ @librefang/core
+crates/librefang-runtime-mcp/ @librefang/core
+crates/librefang-runtime-media/ @librefang/core
+crates/librefang-runtime-sandbox-docker/ @librefang/core
 crates/librefang-types/ @librefang/core
 crates/librefang-memory/ @librefang/core
 crates/librefang-api/ @librefang/core

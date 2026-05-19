@@ -146,17 +146,16 @@ librefang channel setup telegram
 librefang channel list
 ```
 
-手动配置示例：
+手动配置示例（Telegram 使用 sidecar 适配器）：
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "customer-support"
-allowed_users = []
-
-[channels.telegram.overrides]
-system_prompt = "Reply as a concise and polite support bot."
-rate_limit_per_user = 10
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
 ```
 
 修改完配置后重启：
@@ -346,7 +345,7 @@ JSON
 ## 10. 当前源码里的几个关键点
 
 - Agent 提示词写在 `[model].system_prompt`，不是 `[system_prompt].prompt`。
-- 通道配置写在 `[channels.<name>]`，例如 `[channels.telegram]`。
+- 通道配置写在 `[channels.<name>]`，例如 `[channels.discord]`。Telegram 现已改为 sidecar 模式，使用 `[[sidecar_channels]]` 而非 `[channels.telegram]`。
 - 工作流步骤使用 `agent_name` 或 `agent_id` 加 `prompt`，不是 `type/agent/input` 这一套。
 - 定时任务用 `librefang cron ...`，Webhook 用 `librefang webhooks ...`。
 - 当前 CLI 没有 `librefang memory search` 或 `librefang kg query` 这两个命令。

@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::MeteringSubsystemApi;
+use librefang_types::error::LibreFangError;
 
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
@@ -26,7 +27,8 @@ impl LibreFangKernel {
 
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
-        let config = load_config(config_path);
+        let config = load_config(config_path)
+            .map_err(|e| crate::error::KernelError::LibreFang(LibreFangError::Config(e)))?;
         Self::boot_with_config(config)
     }
 
@@ -76,20 +78,22 @@ impl LibreFangKernel {
                     if let Err(e) = vault.verify_or_install_sentinel() {
                         match e {
                             librefang_extensions::ExtensionError::VaultKeyMismatch { hint } => {
-                                return Err(KernelError::BootFailed(format!(
+                                return Err(LibreFangError::BootFailed(format!(
                                     "Vault key mismatch — refusing to boot. {hint} \
                                      Recovery: restore the original LIBREFANG_VAULT_KEY env var, \
                                      restore the vault file from backup, or run \
                                      `librefang vault rotate-key` if you intended to rotate."
-                                )));
+                                ))
+                                .into());
                             }
                             other => {
                                 // Sentinel backfill failed for some other
                                 // reason (disk full, permissions). Surface
                                 // it but don't pretend it's a key mismatch.
-                                return Err(KernelError::BootFailed(format!(
+                                return Err(LibreFangError::BootFailed(format!(
                                     "Vault sentinel write failed: {other}"
-                                )));
+                                ))
+                                .into());
                             }
                         }
                     }
@@ -111,13 +115,14 @@ impl LibreFangKernel {
                     // Non-locked unlock failure is almost always wrong-key
                     // (AES-GCM decrypt fails). Refuse to boot — same
                     // rationale as the sentinel-mismatch branch above.
-                    return Err(KernelError::BootFailed(format!(
+                    return Err(LibreFangError::BootFailed(format!(
                         "Vault unlock failed at boot ({e}). This usually means \
                          LIBREFANG_VAULT_KEY does not match the key the vault \
                          was encrypted with. Recovery: restore the original \
                          env var, restore the vault file from backup, or run \
                          `librefang vault rotate-key` if you intended to rotate."
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -146,9 +151,9 @@ impl LibreFangKernel {
         // with an unusable backend that fails on first tool call.
         // Lost during the kernel/mod split; restored here.
         if let Err(e) = config.tool_exec.validate() {
-            return Err(KernelError::BootFailed(format!(
-                "Invalid [tool_exec] config: {e}"
-            )));
+            return Err(
+                LibreFangError::BootFailed(format!("Invalid [tool_exec] config: {e}")).into(),
+            );
         }
 
         // Check TOTP configuration consistency
@@ -175,7 +180,7 @@ impl LibreFangKernel {
 
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
-            .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
+            .map_err(|e| LibreFangError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
@@ -202,14 +207,14 @@ impl LibreFangKernel {
             config.memory.chunking.clone(),
             config.memory.pool_size,
         )
-        .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
+        .map_err(|e| LibreFangError::BootFailed(format!("Memory init failed: {e}")))?;
 
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {
                 "http" => {
                     let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
-                        KernelError::BootFailed(
+                        LibreFangError::BootFailed(
                             "vector_backend = \"http\" requires vector_store_url".into(),
                         )
                     })?;
@@ -219,9 +224,10 @@ impl LibreFangKernel {
                 }
                 "sqlite" | "" => { /* default — no external backend */ }
                 other => {
-                    return Err(KernelError::BootFailed(format!(
+                    return Err(LibreFangError::BootFailed(format!(
                         "Unknown vector_backend: {other:?}"
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -511,11 +517,15 @@ impl LibreFangKernel {
             }
         }
 
-        // Add fallback providers to the chain (with model names for cross-provider fallback)
+        // Add fallback providers to the chain (with model names for cross-provider fallback).
+        // We also track provider names per slot so the FallbackDriver can
+        // participate in the shared ProviderExhaustionStore (#4807).
         let mut model_chain: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+        let mut provider_chain: Vec<String> = Vec::new();
         // Primary driver uses empty model name (uses the request's model field as-is)
         for d in &driver_chain {
             model_chain.push((d.clone(), String::new()));
+            provider_chain.push(config.default_model.provider.clone());
         }
         for fb in &config.fallback_providers {
             let fb_api_key = if !fb.api_key_env.is_empty() {
@@ -553,6 +563,7 @@ impl LibreFangKernel {
                     );
                     driver_chain.push(d.clone());
                     model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
+                    provider_chain.push(fb.provider.clone());
                 }
                 Err(e) => {
                     warn!(
@@ -564,9 +575,29 @@ impl LibreFangKernel {
             }
         }
 
+        // Shared provider-exhaustion store (#4807). Built before the
+        // primary driver so we can attach it to `FallbackDriver`; the
+        // same handle is later forwarded into `MeteringEngine` and
+        // `AuxClient` so all three layers observe a coherent skip view.
+        // Cheap-clone (internal Arc).
+        let exhaustion_store = ProviderExhaustionStore::new();
+
         // Use the chain, or create a stub driver if everything failed
         let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
-            Arc::new(librefang_runtime::drivers::fallback::FallbackDriver::with_models(model_chain))
+            // Zip model_chain with provider_chain so each slot's
+            // provider name lands in `FallbackDriver`'s exhaustion-store
+            // keys. The two vectors are built in lock-step above.
+            let triples: Vec<(Arc<dyn LlmDriver>, String, String)> = model_chain
+                .into_iter()
+                .zip(provider_chain.iter())
+                .map(|((d, m), p)| (d, m, p.clone()))
+                .collect();
+            let fb =
+                librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(
+                    triples,
+                )
+                .with_exhaustion_store(exhaustion_store.clone());
+            Arc::new(fb)
         } else if let Some(single) = driver_chain.into_iter().next() {
             single
         } else {
@@ -576,26 +607,35 @@ impl LibreFangKernel {
             Arc::new(StubDriver) as Arc<dyn LlmDriver>
         };
 
-        // Initialize metering engine (shares the same SQLite connection as the memory substrate)
-        let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.pool()),
-        )));
+        // Initialize metering engine (shares the same SQLite connection as the memory substrate).
+        // The metering engine carries the same exhaustion store so a
+        // per-provider budget gate trip records a skip the LLM
+        // fallback chain honours on the next dispatch (#4807).
+        let metering = Arc::new(
+            MeteringEngine::new(Arc::new(librefang_memory::usage::UsageStore::new(
+                memory.pool(),
+            )))
+            .with_exhaustion_store(exhaustion_store.clone()),
+        );
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
         let prompt_store =
             librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
-                .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::BootFailed(format!("Prompt store init failed: {e}"))
+                })?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::with_concurrency(
+        let background = BackgroundExecutor::with_config(
             supervisor.subscribe(),
             config.max_concurrent_bg_llm,
+            config.background.max_consecutive_rate_limits,
         );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
-            .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
+            .map_err(|e| LibreFangError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
         // Initialize RBAC authentication manager. Tool groups are passed
         // through so per-user `tool_categories` (RBAC M3) can resolve
@@ -776,13 +816,23 @@ impl LibreFangKernel {
         let config = if migrated {
             let cfg_path = config.home_dir.join("config.toml");
             if cfg_path.is_file() {
-                let reloaded = load_config(Some(&cfg_path));
-                // Defensive: only accept the reloaded view if it didn't drop
-                // any `[[mcp_servers]]` entries the caller already had.
-                if reloaded.mcp_servers.len() >= config.mcp_servers.len() {
-                    reloaded
-                } else {
-                    config
+                match load_config(Some(&cfg_path)) {
+                    Ok(reloaded) => {
+                        // Defensive: only accept the reloaded view if it didn't drop
+                        // any `[[mcp_servers]]` entries the caller already had.
+                        if reloaded.mcp_servers.len() >= config.mcp_servers.len() {
+                            reloaded
+                        } else {
+                            config
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to re-read migrated config; using in-memory copy"
+                        );
+                        config
+                    }
                 }
             } else {
                 config
@@ -1190,10 +1240,16 @@ impl LibreFangKernel {
         // can clone the snapshot without re-loading from the swap. The
         // primary driver is shared by `Arc::clone` so failover behaviour
         // matches the kernel's main `default_driver`.
+        //
+        // The aux client carries the SAME `ProviderExhaustionStore` that
+        // the primary driver and metering engine were wired with, so an
+        // exhaustion on the main path (rate limit, operator budget cap)
+        // is honoured by every aux chain — and vice versa (#4807).
         let initial_aux_client = librefang_runtime::aux_client::AuxClient::new(
             std::sync::Arc::new(config.clone()),
             Arc::clone(&driver),
-        );
+        )
+        .with_exhaustion_store(exhaustion_store.clone());
         // Pre-parse `config.toml` once at boot so the per-message hot path
         // never has to re-read it (#3722). Errors here are non-fatal — the
         // skill config injection layer treats a missing/invalid file as an
@@ -1216,6 +1272,63 @@ impl LibreFangKernel {
 
         // Extract before config is moved into ArcSwap.
         let wf_default_total_timeout = config.workflow_default_total_timeout_secs;
+
+        // ── Credential pools ────────────────────────────────────────────────
+        // Build per-provider key rotation pools from `[[credential_pools]]` in
+        // config.toml. Each pool is a `DashMap<String, ArcCredentialPool>`.
+        let credential_pools = {
+            use librefang_llm_drivers::PoolStrategy;
+            let pools = dashmap::DashMap::new();
+            for pool_cfg in &config.credential_pools {
+                if pool_cfg.keys.is_empty() {
+                    continue;
+                }
+                let mut key_priority_pairs = Vec::with_capacity(pool_cfg.keys.len());
+                for key_cfg in &pool_cfg.keys {
+                    match std::env::var(&key_cfg.api_key_env) {
+                        Ok(key) => {
+                            key_priority_pairs.push((key, key_cfg.priority));
+                        }
+                        Err(_) => {
+                            warn!(
+                                env_var = %key_cfg.api_key_env,
+                                label = %key_cfg.label,
+                                provider = %pool_cfg.provider,
+                                "Credential pool key env var not set — skipping"
+                            );
+                        }
+                    }
+                }
+                if key_priority_pairs.is_empty() {
+                    warn!(
+                        provider = %pool_cfg.provider,
+                        "Credential pool has no resolvable keys — skipping"
+                    );
+                    continue;
+                }
+                let strategy: PoolStrategy = match pool_cfg.strategy {
+                    librefang_types::config::CredentialPoolStrategy::FillFirst => {
+                        PoolStrategy::FillFirst
+                    }
+                    librefang_types::config::CredentialPoolStrategy::RoundRobin => {
+                        PoolStrategy::RoundRobin
+                    }
+                    librefang_types::config::CredentialPoolStrategy::Random => PoolStrategy::Random,
+                    librefang_types::config::CredentialPoolStrategy::LeastUsed => {
+                        PoolStrategy::LeastUsed
+                    }
+                };
+                let pool = librefang_llm_drivers::new_arc_pool(key_priority_pairs, strategy);
+                info!(
+                    provider = %pool_cfg.provider,
+                    strategy = ?pool_cfg.strategy,
+                    key_count = pool_cfg.keys.len(),
+                    "Initialized credential pool"
+                );
+                pools.insert(pool_cfg.provider.clone(), pool);
+            }
+            pools
+        };
 
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
@@ -1249,6 +1362,7 @@ impl LibreFangKernel {
                 initial_aux_client,
                 embedding_driver,
                 model_catalog,
+                credential_pools,
             ),
             wasm_sandbox,
             security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
@@ -1588,11 +1702,27 @@ impl LibreFangKernel {
                                                             persisted_hand_configs
                                                                 .get(&hand_id)
                                                                 .unwrap_or(&empty);
-                                                        let _ = apply_settings_block_to_manifest(
-                                                            &mut entry.manifest,
-                                                            &def.settings,
-                                                            cfg_for_settings,
-                                                        );
+                                                        // Capture the returned env-var allowlist
+                                                        // and re-inject it into
+                                                        // metadata["hand_allowed_env"] — mirroring
+                                                        // the activation path in
+                                                        // `activate_hand_with_id`. Discarding it
+                                                        // here meant hand-injected env passthrough
+                                                        // silently disappeared on every restart
+                                                        // until a manual re-activation (#5137).
+                                                        let allowed_env =
+                                                            apply_settings_block_to_manifest(
+                                                                &mut entry.manifest,
+                                                                &def.settings,
+                                                                cfg_for_settings,
+                                                            );
+                                                        if !allowed_env.is_empty() {
+                                                            entry.manifest.metadata.insert(
+                                                                "hand_allowed_env".to_string(),
+                                                                serde_json::to_value(&allowed_env)
+                                                                    .unwrap_or_default(),
+                                                            );
+                                                        }
                                                     }
 
                                                     // Re-render `## Reference Knowledge` and
@@ -1899,6 +2029,65 @@ impl LibreFangKernel {
             }
         }
 
+        // Reconcile declarative `[[triggers]]` from each restored agent's
+        // manifest against the runtime trigger store loaded earlier from
+        // `trigger_jobs.json` (#5014).
+        //
+        // Runs once after the full registry is populated so that
+        // `target_agent` lookups by name see every restored agent. The
+        // reconcile is idempotent — restarting a daemon with unchanged
+        // manifests is a no-op (no writes to the persist file, no log
+        // spam beyond a single "registered/updated" line per drift).
+        {
+            let snapshot: Vec<(AgentId, librefang_types::agent::AgentManifest)> = kernel
+                .agents
+                .registry
+                .list()
+                .into_iter()
+                .map(|e| (e.id, e.manifest.clone()))
+                .collect();
+            let mut any_change = false;
+            for (agent_id, manifest) in snapshot {
+                if manifest.triggers.is_empty()
+                    && matches!(
+                        manifest.reconcile_orphans,
+                        librefang_types::agent::OrphanPolicy::Keep
+                    )
+                {
+                    continue;
+                }
+                let report = kernel.workflows.triggers.reconcile_manifest_triggers(
+                    agent_id,
+                    &manifest.triggers,
+                    manifest.reconcile_orphans,
+                    |target_name| {
+                        kernel
+                            .agents
+                            .registry
+                            .find_by_name(target_name)
+                            .map(|e| e.id)
+                    },
+                );
+                if report.mutated() {
+                    any_change = true;
+                    info!(
+                        agent_id = %agent_id,
+                        created = report.created,
+                        updated = report.updated,
+                        deleted = report.deleted,
+                        skipped = report.skipped,
+                        orphans_kept = report.orphans_kept,
+                        "Reconciled manifest triggers on boot"
+                    );
+                }
+            }
+            if any_change {
+                if let Err(e) = kernel.workflows.triggers.persist() {
+                    tracing::warn!("Failed to persist trigger reconcile on boot: {e}");
+                }
+            }
+        }
+
         // One-time webui → canonical session migration.
         //
         // Before the unify fix, the dashboard WS wrote to
@@ -1980,6 +2169,122 @@ impl LibreFangKernel {
             }
         }
 
+        // Canonical-pointer recovery: on every boot, for each agent whose
+        // canonical pointer is either absent from the sessions table or
+        // lags behind a more-recently-updated unlabeled session, advance
+        // the pointer to the most-recently-updated unlabeled session.
+        //
+        // Motivation (#5198): when the daemon restarts after a WS-driven
+        // conversation, the canonical pointer (entry.session_id) stays
+        // correct for clean shutdowns, but may trail for crash or process-
+        // kill scenarios where in-memory writes were not flushed.  The
+        // post-message sessions table update (save_session_async) IS
+        // durable because it runs inside the spawned loop task, but
+        // update_session_id / save_agent are not called on the streaming
+        // path when effective_session_id already equals entry.session_id.
+        // The query here uses updated_at (the write timestamp in the
+        // sessions table) as the tiebreaker so we always advance to the
+        // session that received the most-recent write, irrespective of
+        // creation order.
+        //
+        // Safety conditions: we only advance, never retreat; we skip
+        // labeled sessions (the user explicitly named / switched to them);
+        // we skip the canonical if it's already labeled (same reason as
+        // the webui migration block above).
+        {
+            let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .agents
+                .registry
+                .list()
+                .iter()
+                .map(|e| (e.id, e.session_id))
+                .collect();
+            for (agent_id, canonical_session_id) in registry_snapshot {
+                // Skip agents whose canonical is already labeled — user
+                // explicitly manages those.
+                let canonical_session = kernel
+                    .memory
+                    .substrate
+                    .get_session(canonical_session_id)
+                    .ok()
+                    .flatten();
+                if canonical_session
+                    .as_ref()
+                    .and_then(|s| s.label.as_ref())
+                    .is_some()
+                {
+                    continue;
+                }
+                let canonical_msgs = canonical_session
+                    .as_ref()
+                    .map(|s| s.messages.len())
+                    .unwrap_or(0);
+
+                // Find the most-recently-updated session for this agent.
+                let recent_ids = match kernel
+                    .memory
+                    .substrate
+                    .list_agent_sessions_touched_since(agent_id, 0, 1, None)
+                {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        warn!(agent_id = %agent_id, "canonical recovery: failed to list sessions: {e}");
+                        continue;
+                    }
+                };
+                let most_recent_id = match recent_ids.into_iter().next() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let most_recent_sid = match most_recent_id.parse::<uuid::Uuid>() {
+                    Ok(u) => SessionId(u),
+                    Err(_) => continue,
+                };
+                if most_recent_sid == canonical_session_id {
+                    continue;
+                }
+                // Only advance to sessions that are unlabeled.
+                let candidate_session = match kernel
+                    .memory
+                    .substrate
+                    .get_session(most_recent_sid)
+                    .ok()
+                    .flatten()
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if candidate_session.label.is_some() {
+                    continue;
+                }
+                let candidate_msgs = candidate_session.messages.len();
+                if candidate_msgs <= canonical_msgs {
+                    continue;
+                }
+                if let Err(e) = kernel
+                    .agents
+                    .registry
+                    .update_session_id(agent_id, most_recent_sid)
+                {
+                    warn!(agent_id = %agent_id, "canonical recovery: failed to update pointer: {e}");
+                    continue;
+                }
+                if let Some(entry) = kernel.agents.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
+                        warn!(agent_id = %agent_id, "canonical recovery: failed to persist: {e}");
+                    }
+                }
+                info!(
+                    agent_id = %agent_id,
+                    from_session = %canonical_session_id,
+                    to_session = %most_recent_sid,
+                    candidate_messages = candidate_msgs,
+                    canonical_messages = canonical_msgs,
+                    "Advanced canonical pointer to most-recently-active session"
+                );
+            }
+        }
+
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.agents.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
@@ -2003,7 +2308,7 @@ system_prompt = "You are a helpful assistant."
                     .map_err(|e| format!("fallback manifest parse error: {e}"))
                 })
                 .map_err(|e| {
-                    KernelError::BootFailed(format!("failed to load assistant template: {e}"))
+                    LibreFangError::BootFailed(format!("failed to load assistant template: {e}"))
                 })?;
             match kernel.spawn_agent(manifest) {
                 Ok(id) => info!(id = %id, "Default assistant spawned"),
@@ -2057,14 +2362,32 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel
+                let recovered_run_ids = kernel
                     .workflows
                     .engine
                     .recover_stale_running_runs(stale_timeout);
-                if recovered > 0 {
+                if !recovered_run_ids.is_empty() {
                     info!(
-                        "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
+                        "Recovered {} stale workflow run(s) interrupted by daemon restart",
+                        recovered_run_ids.len()
                     );
+                    // (#5033 review fix.) For each demoted run, drain any
+                    // async-task tracker entry that was still pointing at
+                    // it and synthesize a `Failed` completion event so
+                    // the originating agent does not wait forever for an
+                    // event that will never fire. At fresh boot the
+                    // registry is empty (it's in-memory, repopulated by
+                    // live agents), so this is a no-op on a clean cold
+                    // start; the hook exists to (a) cover the
+                    // hypothetical future where the registry is
+                    // persisted, and (b) cover any caller that re-runs
+                    // the recovery sweep mid-runtime with live
+                    // registrations present. Synchronous: builds the
+                    // `Failed` events and pushes them into the kernel's
+                    // injection senders without spawning an LLM turn —
+                    // the wake-idle path is deliberately skipped because
+                    // `self_handle` is not yet set at this point in boot.
+                    kernel.synthesize_task_failures_for_recovered_runs(&recovered_run_ids);
                 }
             }
         }

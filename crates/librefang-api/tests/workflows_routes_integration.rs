@@ -16,9 +16,12 @@
 //! - `POST /api/workflows/{id}/run` and `POST /api/schedules/{id}/run` —
 //!   actually invoke an LLM-backed agent loop, which our test kernel has no
 //!   credentials for.
-//! - `POST /api/workflows/{id}/dry-run` — same reason; the dry-run path
-//!   instantiates step contexts that walk into agent-registry lookups for
-//!   agents we haven't registered.
+//! - `POST /api/workflows/{id}/dry-run` agent-execution coverage — the
+//!   step-context path walks into agent-registry lookups for agents we
+//!   haven't registered, so `agent_found` is always false here. The
+//!   prompt-resolution half (object-shaped `input` → `{{var}}` binding)
+//!   *is* covered: it computes `resolved_prompt` without an agent. See
+//!   `dry_run_binds_object_input_keys_to_template_vars`.
 //! - `POST /api/triggers` — requires a registered `AgentId` plus a
 //!   `register_trigger_with_target` call into a fully-wired kernel; the
 //!   creation path is exercised indirectly via the negative-validation tests.
@@ -272,6 +275,162 @@ async fn workflow_create_parses_per_step_session_mode() {
         steps[3]["session_mode"].is_null(),
         "malformed session_mode must be silently ignored at the boundary (lenient parse)"
     );
+}
+
+/// POST /api/workflows with a well-formed `input_schema` array must
+/// accept it and GET /api/workflows/{id} must round-trip every declared
+/// row verbatim (#4982 — gap 2 parameter discovery). Pins the route
+/// boundary; the kernel-side resolution path is covered by
+/// `workflow_describe_returns_explicit_input_schema` in the kernel
+/// integration tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_accepts_input_schema_and_round_trips() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "with-schema",
+            "description": "input_schema round-trip",
+            "steps": [
+                {"name": "draft", "agent_id": agent_id, "prompt": "Topic={{topic}}"}
+            ],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true, "description": "Article topic"},
+                {"name": "cover", "param_type": "file",   "required": false}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(schema.len(), 2, "both declared rows must survive");
+    // Lookup by name — POST doesn't promise ordering at the route boundary.
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = schema
+        .iter()
+        .map(|p| (p["name"].as_str().unwrap(), p))
+        .collect();
+    assert_eq!(by_name["topic"]["param_type"], "string");
+    assert_eq!(by_name["topic"]["required"], true);
+    assert_eq!(by_name["topic"]["description"], "Article topic");
+    assert_eq!(by_name["cover"]["param_type"], "file");
+    assert_eq!(by_name["cover"]["required"], false);
+    // List-view advertises has_input_schema=true so the agent knows to
+    // call workflow_describe before workflow_run.
+    let (status, list_body) = get(&h, "/api/workflows").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = list_body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == wf_id)
+        .expect("created workflow appears in list");
+    assert_eq!(row["name"], "with-schema");
+}
+
+/// PUT /api/workflows/{id} replaces `input_schema` when an explicit
+/// `input_schema` key is supplied (#4982 — gap 2). Pins the documented
+/// "explicit key replaces; absent key preserves" PATCH-style semantics
+/// of `parse_input_schema`.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_replaces_input_schema() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    // Seed with one schema row.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "to-update",
+            "steps": [{"name": "s", "agent_id": agent_id, "prompt": "go"}],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    // PUT a different schema — must replace, not merge.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({
+            "input_schema": [
+                {"name": "cover", "param_type": "image", "required": false}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(
+        schema.len(),
+        1,
+        "PUT replaces; old 'topic' row must be gone"
+    );
+    assert_eq!(schema[0]["name"], "cover");
+    assert_eq!(schema[0]["param_type"], "image");
+    assert_eq!(schema[0]["required"], false);
+}
+
+/// POST /api/workflows with a malformed `input_schema` row must skip the
+/// bad row (lenient `parse_input_schema` policy — same shape as
+/// `parse_step_session_mode`) and persist the well-formed rows. Returns
+/// 201 rather than 4xx; the bad row simply doesn't appear in GET. Pins
+/// the documented `parse_input_schema` behavior (#4982 — gap 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_skips_malformed_input_schema_rows() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "partial-schema",
+            "steps": [{"name": "s", "agent_id": agent_id, "prompt": "go"}],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true},
+                // Missing the required `name` field — must be skipped.
+                {"param_type": "string", "required": true},
+                {"name": "cover", "param_type": "file", "required": false},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(
+        schema.len(),
+        2,
+        "malformed row must be silently skipped, leaving the 2 well-formed rows"
+    );
+    let names: Vec<&str> = schema.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"topic"));
+    assert!(names.contains(&"cover"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1076,5 +1235,102 @@ async fn schedule_update_rejects_ssrf_webhook_in_delivery_targets() {
         StatusCode::BAD_REQUEST,
         "must be 400, not 404: SSRF rejection on /api/schedules/{{id}} \
          must surface as bad request, not as a missing-resource error: {response:?}"
+    );
+}
+
+/// Regression: a workflow whose step prompt references a named
+/// placeholder (`{{challenge}}`) must resolve that placeholder from an
+/// object-shaped run `input` (the brainstorm-template repro). Before the
+/// fix the `/run` and `/dry-run` handlers only accepted `input` as a
+/// string, so the per-parameter form value never reached
+/// `seed_input_vars_from_json` and the entry agent saw the literal
+/// `{{challenge}}` ("no challenge provided, cannot run").
+///
+/// `dry-run` is used as the probe because it computes `resolved_prompt`
+/// through the exact same `seed_input_vars_from_json` + `expand_variables`
+/// path a real run uses, but without needing LLM credentials. The step
+/// prompt deliberately uses BOTH a named placeholder (`{{challenge}}`)
+/// and the free-text `{{input}}` so the cases below also pin that a
+/// parameterised workflow can still receive readable free-form context
+/// via `{{input}}` instead of a JSON blob.
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_binds_object_input_keys_to_template_vars() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "brainstorm-repro",
+            "steps": [
+                {"name": "ideate", "agent_id": agent_id,
+                 "prompt": "Brainstorm: {{challenge}} | Context: {{input}}"}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    // Object input with a named key + a free-text `input` key: the named
+    // key binds `{{challenge}}` and the string `input` key renders as
+    // `{{input}}` (NOT a `{...}` JSON dump). This is the dashboard
+    // parameter-form + additional-context shape.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({
+            "input": { "challenge": "reduce churn", "input": "q3 notes" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["steps"][0]["resolved_prompt"], "Brainstorm: reduce churn | Context: q3 notes",
+        "named key binds {{{{challenge}}}} and the string `input` key \
+         renders as {{{{input}}}} free-text, not a JSON blob: {body:?}"
+    );
+
+    // Object input WITHOUT a string `input` key: `{{challenge}}` still
+    // binds; `{{input}}` falls back to the raw blob (the pre-existing
+    // #4982 whole-input contract — agent `workflow_run` callers rely on
+    // this, so it must stay unchanged).
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({ "input": { "challenge": "reduce churn" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let resolved = body["steps"][0]["resolved_prompt"]
+        .as_str()
+        .expect("resolved_prompt");
+    assert!(
+        resolved.starts_with("Brainstorm: reduce churn | Context: {"),
+        "no `input` key → {{{{challenge}}}} binds, {{{{input}}}} is the raw \
+         blob (unchanged #4982 contract): {resolved}"
+    );
+
+    // Legacy plain string: named placeholders never bind (a string is
+    // the whole-blob `{{input}}`, not a per-key source). Pins the
+    // string-vs-object boundary.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({ "input": "reduce churn" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["steps"][0]["resolved_prompt"], "Brainstorm: {{challenge}} | Context: reduce churn",
+        "a plain-string input must NOT bind named placeholders: {body:?}"
     );
 }

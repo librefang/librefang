@@ -1033,7 +1033,17 @@ pub async fn remove_custom_model(
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
-#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = crate::types::JsonObject, responses((status = 200, description = "API key set", body = crate::types::JsonObject)))]
+#[utoipa::path(
+    post,
+    path = "/api/providers/{name}/key",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider name")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "API key set", body = crate::types::JsonObject),
+        (status = 207, description = "API key saved and default provider switched, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
+    )
+)]
 pub async fn set_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1066,18 +1076,11 @@ pub async fn set_provider_key(
             .into_json_tuple();
     }
 
-    // Set env var in current process so detect_auth picks it up.
-    // `std::env::set_var` is not thread-safe in an async context; delegate to
-    // a blocking thread to avoid undefined behaviour in the tokio runtime.
-    {
-        let env_var_clone = env_var.clone();
-        let key_clone = key.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::set_var(&env_var_clone, &key_clone) };
-        })
-        .await;
-    }
+    // Set env var in current process so detect_auth picks it up. Serialized
+    // through the process-global env write guard (#5142) — `spawn_blocking`
+    // does NOT serialize concurrent env mutations, it fans out across the
+    // blocking pool.
+    crate::secrets_env::set_env_var_guarded(env_var.clone(), key.clone()).await;
 
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
@@ -1218,9 +1221,25 @@ pub async fn set_provider_key(
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
         };
-        state
+        let sync_failures = state
             .kernel
             .sync_default_model_agents(&current_provider, &new_dm);
+        if !sync_failures.is_empty() {
+            let mut resp = serde_json::json!({"status": "saved", "provider": name});
+            resp["switched_default"] = serde_json::json!(true);
+            resp["sync_failures"] = serde_json::json!(sync_failures
+                .iter()
+                .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
+                .collect::<Vec<_>>());
+            resp["message"] = serde_json::json!(format!(
+                "API key saved and default provider switched to '{name}', but {} agent(s) \
+                 could not be migrated and remain pinned to the old provider on disk.",
+                sync_failures.len()
+            ));
+            // Mixed outcome: the key was saved but the fan-out half-applied.
+            // 207 surfaces the partial failure instead of a lying 200.
+            return (StatusCode::MULTI_STATUS, Json(resp));
+        }
     }
 
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
@@ -1265,19 +1284,11 @@ pub async fn delete_provider_key(
             .into_json_tuple();
     }
 
-    // Remove from process environment. `std::env::remove_var` became unsafe
-    // in Rust 1.82 for the same reason `set_var` did — concurrent reads
-    // from other threads race the mutation. Delegate to a blocking thread
-    // so the tokio worker stays unblocked, mirroring the `set_provider_key`
-    // path above.
-    {
-        let env_var_clone = env_var.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // SAFETY: single mutation on a dedicated blocking thread.
-            unsafe { std::env::remove_var(&env_var_clone) };
-        })
-        .await;
-    }
+    // Remove from process environment. `std::env::remove_var` carries the
+    // same writer/reader UB contract as `set_var`; serialize it through the
+    // SAME process-global env write guard (#5142) so a remove can never race
+    // a concurrent guarded `set_var`. `spawn_blocking` does NOT serialize.
+    crate::secrets_env::remove_env_var_guarded(env_var.clone()).await;
 
     // Suppress fallback/CLI detection for this provider and refresh auth
     {
@@ -1808,6 +1819,7 @@ pub async fn set_provider_url(
     request_body(content = Option<crate::types::JsonObject>, content_type = "application/json", description = "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default"),
     responses(
         (status = 200, description = "Default provider updated", body = crate::types::JsonObject),
+        (status = 207, description = "Default provider updated, but one or more agents could not be migrated; response includes `sync_failures`", body = crate::types::JsonObject),
         (status = 400, description = "No model found for provider"),
         (status = 404, description = "Provider not found")
     )
@@ -1893,24 +1905,41 @@ pub async fn set_default_provider(
     }
 
     // Update registry entries for agents that were tracking the old default
-    state
+    let sync_failures = state
         .kernel
         .sync_default_model_agents(&old_provider, &new_dm);
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "updated",
-            "provider": name,
-            "model": model_id,
-            "api_key_env": env_var,
-            "persisted": persisted,
-        })),
-    )
+    let mut body = serde_json::json!({
+        "status": "updated",
+        "provider": name,
+        "model": model_id,
+        "api_key_env": env_var,
+        "persisted": persisted,
+    });
+    if sync_failures.is_empty() {
+        (StatusCode::OK, Json(body))
+    } else {
+        body["sync_failures"] = serde_json::json!(sync_failures
+            .iter()
+            .map(|(agent, err)| serde_json::json!({"agent": agent, "error": err}))
+            .collect::<Vec<_>>());
+        // Some agents stayed pinned to the old provider on disk — surface
+        // the partial failure instead of a lying 200 (#5137).
+        (StatusCode::MULTI_STATUS, Json(body))
+    }
 }
 
 /// Safely persist the `[default_model]` section into config.toml using proper
 /// TOML serialization (avoids format-string injection).
+///
+/// Read failures other than `NotFound` are propagated rather than silently
+/// degrading to an empty config — the previous `unwrap_or_default()` path
+/// would destroy every operator-authored section (e.g. `[email]`,
+/// `[telegram]`, `[proxy]`) on any transient `EACCES` / `EIO` because the
+/// rewrite then serialized a fresh table that contained only
+/// `[default_model]`. See #5116. The on-disk replacement still goes through
+/// [`crate::atomic_write`] so a crash between the temp-write and the rename
+/// can never leave a partially-written `config.toml`.
 fn persist_default_model(
     config_path: &std::path::Path,
     provider: &str,
@@ -1928,7 +1957,16 @@ fn persist_default_model(
         toml::Value::String(api_key_env.to_string()),
     );
 
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    // Read existing config. A missing file is fine — the daemon may write
+    // config.toml for the first time here — but any *other* read error
+    // (permission denied, I/O failure) must abort: degrading to an empty
+    // string would wipe out every other operator-authored section on
+    // rewrite (refs #5116).
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Box::new(e)),
+    };
     let mut doc: toml::Value = if content.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
@@ -2226,17 +2264,10 @@ pub async fn copilot_oauth_poll(
                 );
             }
 
-            // Set in current process.
-            // `std::env::set_var` is not thread-safe inside async; push to a
-            // blocking thread to avoid UB in the multithreaded tokio runtime.
-            {
-                let token = access_token.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // SAFETY: single mutation on a dedicated blocking thread.
-                    unsafe { std::env::set_var("GITHUB_TOKEN", &token) };
-                })
-                .await;
-            }
+            // Set in current process. Serialized through the process-global
+            // env write guard (#5142) — `spawn_blocking` does NOT serialize
+            // concurrent env mutations.
+            crate::secrets_env::set_env_var_guarded("GITHUB_TOKEN", access_token.to_string()).await;
 
             // Refresh auth detection
             state.kernel.model_catalog_update(&mut |catalog| {

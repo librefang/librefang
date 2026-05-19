@@ -17,7 +17,10 @@ sha2 = { workspace = true }
 # Kept xtask-local; not promoted to workspace.dependencies because no
 # production crate consumes it. Default features are disabled — we only need
 # the system probe, not disks/networks/processes.
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# Capped at 0.38: the entire sysinfo 0.39.x line requires rustc 1.95, which
+# exceeds this workspace's pinned MSRV (Cargo.toml rust-version = 1.94.1).
+# 0.38.4 needs only rustc 1.88 and exposes the same probe API we use.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 librefang-migrate = { path = "../crates/librefang-migrate" }
 
 [lints]

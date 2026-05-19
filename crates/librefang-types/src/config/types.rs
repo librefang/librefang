@@ -13,6 +13,18 @@ pub use librefang_storage::{
     DEFAULT_NAMESPACE_NAME as STORAGE_DEFAULT_NAMESPACE_NAME,
 };
 
+/// Hard ceiling on messages persisted per session, enforced by
+/// `librefang_memory::session::SessionStore::save_session` before the
+/// blob is written to SQLite (#5121 / #5138).
+///
+/// This is the single source of truth shared between the substrate (which
+/// enforces it) and config validation (which warns when an operator's
+/// `cron_session_max_messages` exceeds it, since the substrate will
+/// silently truncate beyond this point regardless of the cron cap). 2000
+/// keeps a worst-case session blob at roughly ~2 MB while leaving room
+/// for unusually long cron-driven sessions.
+pub const MAX_PERSISTED_SESSION_MESSAGES: usize = 2000;
+
 /// DM (direct message) policy for a channel.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -996,6 +1008,60 @@ impl Default for WebhookTriggerConfig {
             rate_limit_per_minute: 30,
         }
     }
+}
+
+/// Credential selection strategy for a credential pool.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPoolStrategy {
+    /// Always try the highest-priority available key first.
+    #[default]
+    FillFirst,
+    /// Cycle through available keys in priority order.
+    RoundRobin,
+    /// Choose a random available key.
+    Random,
+    /// Choose the key with the fewest successful requests so far.
+    LeastUsed,
+}
+
+/// A single API key entry inside a [`CredentialPoolConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolKeyConfig {
+    /// Environment variable holding the API key.
+    pub api_key_env: String,
+    /// Human-readable label for this key (e.g. "Primary", "Backup").
+    pub label: String,
+    /// Higher-priority keys are tried first in FillFirst / RoundRobin.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub priority: u32,
+}
+
+/// Multi-key credential pool for a single provider.
+///
+/// Configurable in `config.toml` as `[[credential_pools]]`:
+/// ```toml
+/// [[credential_pools]]
+/// provider = "openai"
+/// strategy = "round_robin"
+///
+/// [[credential_pools.keys]]
+/// api_key_env = "OPENAI_API_KEY_1"
+/// label = "Primary"
+/// priority = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CredentialPoolConfig {
+    /// Provider name (e.g., "openai", "anthropic").
+    pub provider: String,
+    /// Key selection strategy.
+    #[serde(default)]
+    pub strategy: CredentialPoolStrategy,
+    /// List of API keys in the pool.
+    pub keys: Vec<CredentialPoolKeyConfig>,
 }
 
 /// Fallback provider chain — tried in order if the primary provider fails.
@@ -2055,6 +2121,29 @@ pub enum ResponseFormat {
     },
 }
 
+/// Backpressure policy when the bounded inbound message buffer is full.
+///
+/// Selected via [`SidecarChannelConfig::overflow`].
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarOverflowPolicy {
+    /// Apply backpressure: the reader awaits buffer space (default).
+    /// Correct for chat — dropping a user message is worse than
+    /// slowing the producer.
+    #[default]
+    Block,
+    /// Shed load: drop the just-arrived message when the buffer is
+    /// full (counted + rate-limited warn). For high-volume,
+    /// loss-tolerant notification sidecars.
+    ///
+    /// Note: a tokio mpsc can't evict the *oldest* entry from the
+    /// producer side, so this drops the newest. Named for intent
+    /// (shed load).
+    DropNewest,
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2065,7 +2154,7 @@ pub enum ResponseFormat {
 /// [[sidecar_channels]]
 /// name = "my-telegram"
 /// command = "python3"
-/// args = ["adapters/telegram_adapter.py"]
+/// args = ["-m", "librefang.sidecar.adapters.telegram"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2083,6 +2172,66 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Restart the subprocess automatically when it exits unexpectedly.
+    #[serde(default = "default_sidecar_restart")]
+    pub restart: bool,
+    /// Initial restart backoff in ms (doubles per consecutive failure).
+    #[serde(default = "default_sidecar_restart_initial_backoff_ms")]
+    pub restart_initial_backoff_ms: u64,
+    /// Cap on the restart backoff in ms.
+    #[serde(default = "default_sidecar_restart_max_backoff_ms")]
+    pub restart_max_backoff_ms: u64,
+    /// Consecutive failures before the supervisor gives up (circuit-break).
+    #[serde(default = "default_sidecar_restart_max_retries")]
+    pub restart_max_retries: u32,
+    /// Stable uptime (secs) after which the failure counter resets.
+    #[serde(default = "default_sidecar_restart_reset_after_secs")]
+    pub restart_reset_after_secs: u64,
+    /// How long (secs) to wait for the adapter's `ready` before
+    /// treating the spawn as failed.
+    #[serde(default = "default_sidecar_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
+    #[serde(default = "default_sidecar_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Bounded inbound message buffer (also the backpressure point).
+    #[serde(default = "default_sidecar_message_buffer")]
+    pub message_buffer: usize,
+    /// What to do when `message_buffer` is full.
+    #[serde(default)]
+    pub overflow: SidecarOverflowPolicy,
+}
+
+fn default_sidecar_restart() -> bool {
+    true
+}
+
+fn default_sidecar_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_sidecar_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+fn default_sidecar_restart_max_retries() -> u32 {
+    10
+}
+
+fn default_sidecar_restart_reset_after_secs() -> u64 {
+    60
+}
+
+fn default_sidecar_ready_timeout_secs() -> u64 {
+    30
+}
+
+fn default_sidecar_shutdown_grace_secs() -> u64 {
+    5
+}
+
+fn default_sidecar_message_buffer() -> usize {
+    256
 }
 
 // ---------------------------------------------------------------------------
@@ -2793,7 +2942,7 @@ pub struct KernelConfig {
     pub memory_wiki: MemoryWikiConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Channel bridge configuration (Telegram, etc.).
+    /// Channel bridge configuration (Discord, Slack, etc.).
     pub channels: ChannelsConfig,
     /// API authentication key. When set, all API endpoints (except /api/health)
     /// require a `Authorization: Bearer <key>` header.
@@ -2909,6 +3058,10 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
+    /// Credential pools — multi-key rotation per provider.
+    /// Configure in config.toml as `[[credential_pools]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_pools: Vec<CredentialPoolConfig>,
     /// `[llm]` section — currently carries the auxiliary side-task chain
     /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
     #[serde(default)]
@@ -2969,6 +3122,15 @@ pub struct KernelConfig {
     /// each cron fire. Applied in addition to `cron_session_max_tokens`.
     ///
     /// `None` (default) disables message-count pruning.
+    ///
+    /// NOTE (#5138): the memory substrate independently enforces a hard
+    /// persistence ceiling of [`MAX_PERSISTED_SESSION_MESSAGES`] messages
+    /// per session, applied at `save_session` regardless of this value. A
+    /// `cron_session_max_messages` set *above* that ceiling cannot keep
+    /// more than [`MAX_PERSISTED_SESSION_MESSAGES`] across daemon restarts —
+    /// the tail beyond the ceiling is silently truncated on save. Config
+    /// validation emits a warning when this value exceeds the ceiling so
+    /// the discrepancy is not invisible.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
     /// Fraction of the effective token budget (post-prune) at which the
@@ -3358,6 +3520,12 @@ pub struct KernelConfig {
     /// Default: `None` (unbounded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_total_timeout_secs: Option<u64>,
+    /// Background autonomous-loop executor knobs (issue #5168).
+    /// Currently governs the rate-limit circuit breaker that stops a
+    /// continuous / periodic loop from re-firing forever when the LLM
+    /// provider is rate-limited or quota-exhausted.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4750,6 +4918,46 @@ impl Default for AutoDreamConfig {
     }
 }
 
+/// Background autonomous-loop executor configuration (issue #5168).
+///
+/// Tunes the circuit breaker that stops a continuous / periodic background
+/// loop from re-firing forever when the LLM provider is rate-limited or
+/// quota-exhausted. See the `MAX_CONSECUTIVE_RATE_LIMITS` doc comment in
+/// `librefang_kernel::background` for the rationale.
+///
+/// Configure in `config.toml`:
+/// ```toml
+/// [background]
+/// max_consecutive_rate_limits = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    /// Maximum number of *consecutive* background ticks whose agent turn
+    /// failed because the LLM provider was rate-limited / quota-exhausted
+    /// before the continuous / periodic loop stops re-firing the agent.
+    ///
+    /// A single non-rate-limited tick resets the counter, so transient
+    /// blips do not permanently park a healthy agent. Set to `0` to
+    /// disable the breaker entirely (the loop re-fires forever — only
+    /// appropriate when running against a provider with no quota).
+    /// Default: `5`.
+    #[serde(default = "default_max_consecutive_rate_limits")]
+    pub max_consecutive_rate_limits: u32,
+}
+
+fn default_max_consecutive_rate_limits() -> u32 {
+    5
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_rate_limits: default_max_consecutive_rate_limits(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -5316,7 +5524,13 @@ pub struct NamedTaintRuleSet {
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
+//
+// `deny_unknown_fields` catches typos inside `[[mcp_servers]]` elements at
+// deserialize time. The detect_unknown_nested_fields walker can't see into
+// repeated-table elements (#5130), so the only way to surface a typo in,
+// say, `[[mcp_servers]] timout_secs = 30` is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -5563,11 +5777,6 @@ fn default_signal_poll_interval_secs() -> u64 {
     2
 }
 
-/// Default Telegram long-poll timeout (30s).
-fn default_telegram_long_poll_timeout_secs() -> u64 {
-    30
-}
-
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -5603,6 +5812,7 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
+            credential_pools: Vec::new(),
             llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
@@ -5693,6 +5903,7 @@ impl Default for KernelConfig {
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
             workflow_default_total_timeout_secs: None,
+            background: BackgroundConfig::default(),
         }
     }
 }
@@ -5784,6 +5995,10 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "fallback_providers",
                 &format!("{} provider(s)", self.fallback_providers.len()),
+            )
+            .field(
+                "credential_pools",
+                &format!("{} pool(s)", self.credential_pools.len()),
             )
             .field("browser", &self.browser)
             .field("extensions", &self.extensions)
@@ -6266,13 +6481,11 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
-/// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`)
+/// and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Telegram bot configuration(s).
-    pub telegram: OneOrMany<TelegramConfig>,
     /// Discord bot configuration(s).
     pub discord: OneOrMany<DiscordConfig>,
     /// Slack bot configuration(s).
@@ -6348,8 +6561,6 @@ pub struct ChannelsConfig {
     pub discourse: OneOrMany<DiscourseConfig>,
     /// Gitter streaming configuration(s).
     pub gitter: OneOrMany<GitterConfig>,
-    /// ntfy.sh pub/sub configuration(s).
-    pub ntfy: OneOrMany<NtfyConfig>,
     /// Gotify notification configuration(s).
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
@@ -6414,7 +6625,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            telegram: OneOrMany::default(),
             discord: OneOrMany::default(),
             slack: OneOrMany::default(),
             whatsapp: OneOrMany::default(),
@@ -6451,7 +6661,6 @@ impl Default for ChannelsConfig {
             qq: OneOrMany::default(),
             discourse: OneOrMany::default(),
             gitter: OneOrMany::default(),
-            ntfy: OneOrMany::default(),
             gotify: OneOrMany::default(),
             webhook: OneOrMany::default(),
             voice: OneOrMany::default(),
@@ -6485,123 +6694,16 @@ impl ChannelsConfig {
     }
 }
 
-/// Telegram channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TelegramConfig {
-    /// Env var name holding the bot token (NOT the token itself).
-    pub bot_token_env: String,
-    /// Telegram user IDs allowed to interact (empty = allow all).
-    /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Polling interval in seconds.
-    pub poll_interval_secs: u64,
-    /// Custom Telegram Bot API base URL for proxies or mirrors.
-    /// Defaults to `https://api.telegram.org` when not set.
-    #[serde(default)]
-    pub api_url: Option<String>,
-    /// Initial backoff in seconds on API failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on API failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
-    #[serde(default = "default_telegram_long_poll_timeout_secs")]
-    pub long_poll_timeout_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Message coalescing window in milliseconds for Telegram-specific
-    /// ergonomics (#4145). When set, messages from the same sender arriving
-    /// within this window are buffered and dispatched to the agent as a
-    /// single batched context. This prevents out-of-order processing in the
-    /// common pattern where a user forwards a message and immediately follows
-    /// up with a comment.
-    ///
-    /// This is a thin alias for [`ChannelOverrides::message_debounce_ms`]:
-    /// if `overrides.message_debounce_ms` is non-zero it wins; otherwise the
-    /// value here is applied. `Some(0)` explicitly disables coalescing.
-    /// `None` (default) leaves behavior unchanged.
-    #[serde(default)]
-    pub message_coalesce_window_ms: Option<u64>,
-    /// Thread-based agent routing for forum topics.
-    ///
-    /// Maps Telegram `message_thread_id` (as string) to an agent name.
-    /// Messages in a matched thread are routed to that agent instead of
-    /// the `default_agent`. Unmatched threads fall back to normal routing.
-    ///
-    /// ```toml
-    /// [channels.telegram.thread_routes]
-    /// "12345" = "research-agent"
-    /// "67890" = "coding-agent"
-    /// ```
-    #[serde(default)]
-    pub thread_routes: std::collections::HashMap<String, String>,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
-    /// adapter's REST client (#4795). When unset, the adapter follows
-    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
-    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
-    /// overrides any env var.
-    ///
-    /// Accepted schemes: `http://`, `https://`, `socks5://`,
-    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
-    /// Invalid URLs are rejected at adapter init.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            poll_interval_secs: 1,
-            api_url: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
-            overrides: ChannelOverrides::default(),
-            message_coalesce_window_ms: None,
-            thread_routes: std::collections::HashMap::new(),
-            proxy: None,
-        }
-    }
-}
-
-impl TelegramConfig {
-    /// Returns a [`ChannelOverrides`] with the Telegram-specific
-    /// `message_coalesce_window_ms` alias applied to
-    /// [`ChannelOverrides::message_debounce_ms`].
-    ///
-    /// Resolution rules (#4145):
-    /// 1. If `overrides.message_debounce_ms` is non-zero, it wins.
-    /// 2. Otherwise, if `message_coalesce_window_ms` is `Some`, that value
-    ///    is copied into `message_debounce_ms` (including `Some(0)`, which
-    ///    is a no-op since the existing field is already 0).
-    /// 3. Otherwise the unmodified clone of `overrides` is returned.
-    pub fn effective_overrides(&self) -> ChannelOverrides {
-        let mut ov = self.overrides.clone();
-        if ov.message_debounce_ms == 0 {
-            if let Some(window) = self.message_coalesce_window_ms {
-                ov.message_debounce_ms = window;
-            }
-        }
-        ov
-    }
-}
-
 /// Discord channel adapter configuration.
+//
+// `deny_unknown_fields` catches typos inside `[[channels.discord]]`
+// elements at deserialize time. The detect_unknown_nested_fields walker
+// can't see into repeated-table elements (#5130), so the only way to
+// surface a typo here is for serde itself to reject it. This is the
+// canonical statement of the rationale; the other channel configs in
+// this module refer back to `DiscordConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
@@ -6640,8 +6742,16 @@ pub struct DiscordConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the gateway WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
-    /// and env-var interaction.
+    /// proxy.
+    ///
+    /// When unset, the adapter follows reqwest's normal env-var
+    /// fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+    /// `NO_PROXY`). When set, the per-channel value overrides any env
+    /// var. Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init. This is the canonical
+    /// proxy doc; other channel configs refer back to
+    /// `DiscordConfig::proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
 }
@@ -6666,8 +6776,10 @@ impl Default for DiscordConfig {
 }
 
 /// Slack channel adapter configuration.
+//
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
     /// Env var name holding the app-level token (xapp-) for Socket Mode.
     pub app_token_env: String,
@@ -6702,7 +6814,7 @@ pub struct SlackConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
     /// adapter's REST client (#4795). Affects Web API calls only —
     /// the Socket Mode WebSocket is not currently routed through the
-    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// proxy. See `DiscordConfig::proxy` for accepted URL shapes
     /// and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -6727,8 +6839,10 @@ impl Default for SlackConfig {
 }
 
 /// WhatsApp Cloud API channel adapter configuration.
+//
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
     /// Env var name holding the access token (Cloud API mode).
     pub access_token_env: String,
@@ -7023,8 +7137,10 @@ impl Default for TeamsConfig {
 }
 
 /// Mattermost channel adapter configuration.
+//
+// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
     /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
     pub server_url: String,
@@ -7050,7 +7166,7 @@ pub struct MattermostConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// through the proxy. See `DiscordConfig::proxy` for accepted
     /// URL shapes and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -8215,39 +8331,6 @@ impl Default for GitterConfig {
     }
 }
 
-/// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NtfyConfig {
-    /// ntfy server URL.
-    pub server_url: String,
-    /// Topic to subscribe/publish to.
-    pub topic: String,
-    /// Env var name holding the auth token (optional for public topics).
-    pub token_env: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            server_url: "https://ntfy.sh".to_string(),
-            topic: String::new(),
-            token_env: "NTFY_TOKEN".to_string(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
 /// Gotify WebSocket channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -8708,58 +8791,6 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn telegram_message_coalesce_window_default_is_none() {
-        let tg = TelegramConfig::default();
-        assert!(tg.message_coalesce_window_ms.is_none());
-        // Backward compat: effective overrides leaves debounce disabled.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_alias_fills_debounce() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 2000);
-    }
-
-    #[test]
-    fn telegram_explicit_overrides_debounce_wins_over_alias() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(2000),
-            overrides: ChannelOverrides {
-                message_debounce_ms: 500,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        // The explicit `overrides.message_debounce_ms` is non-zero, so the
-        // alias must NOT clobber it.
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 500);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_zero_keeps_disabled() {
-        let tg = TelegramConfig {
-            message_coalesce_window_ms: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
-    }
-
-    #[test]
-    fn telegram_message_coalesce_window_parses_from_toml() {
-        let toml_str = r#"
-            bot_token_env = "TG"
-            message_coalesce_window_ms = 1500
-        "#;
-        let tg: TelegramConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(tg.message_coalesce_window_ms, Some(1500));
-        assert_eq!(tg.effective_overrides().message_debounce_ms, 1500);
-    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {

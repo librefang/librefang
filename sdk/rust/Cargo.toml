@@ -5,7 +5,7 @@
 # the upstream `librefang` name available for legitimate library uses
 # and to avoid confusion between the two builds.
 name = "bossfang-sdk"
-version = "2026.5.12-beta.11"
+version = "2026.5.17-beta.12"
 edition = "2021"
 description = "Official Rust client for BossFang Agent OS"
 license = "MIT"

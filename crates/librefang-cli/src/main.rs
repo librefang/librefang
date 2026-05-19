@@ -3,6 +3,13 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+// The in-process agent loop's deeply-nested async future chain — now
+// carrying the per-task held-agent-lock `scope` layer (#5125/#5126) —
+// exceeds the default type-recursion limit when this binary crate is
+// monomorphised. Matches the `librefang-kernel` / `librefang-api` crate
+// roots.
+#![recursion_limit = "256"]
+
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -245,7 +252,7 @@ enum Commands {
     /// Manage channel integrations (setup, test, enable, disable) [*].
     #[command(
         subcommand,
-        long_about = "Manage messaging channel integrations (Telegram, Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup telegram    # Interactive Telegram setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test telegram     # Send a test message\n  librefang channel enable telegram   # Enable a channel\n  librefang channel disable telegram  # Disable without removing config"
+        long_about = "Manage messaging channel integrations (Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup discord     # Interactive Discord setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test discord      # Send a test message\n  librefang channel enable discord    # Enable a channel\n  librefang channel disable discord   # Disable without removing config"
     )]
     Channel(ChannelCommands),
     /// Manage hands (list, activate, status, pause, info) [*].
@@ -937,15 +944,15 @@ enum ChannelCommands {
     List,
     /// Interactive setup wizard for a channel.
     #[command(
-        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup telegram   # Set up Telegram\n  librefang channel setup discord    # Set up Discord"
+        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup discord    # Set up Discord\n  librefang channel setup slack      # Set up Slack"
     )]
     Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
+        /// Channel name (discord, slack, whatsapp, etc.). Shows picker if omitted.
         channel: Option<String>,
     },
     /// Test a channel by sending a test message.
     #[command(
-        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test telegram --chat-id 123456789\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890"
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890\n  librefang channel test whatsapp --chat-id 123456789"
     )]
     Test {
         /// Channel name.
@@ -954,7 +961,7 @@ enum ChannelCommands {
         /// Target channel ID for Discord or Slack live message tests.
         #[arg(long = "channel", conflicts_with = "chat_id")]
         channel_id: Option<String>,
-        /// Target chat ID for Telegram live message tests.
+        /// Target chat/channel ID for live message tests.
         #[arg(long, conflicts_with = "channel_id")]
         chat_id: Option<String>,
     },
@@ -2033,7 +2040,10 @@ struct DaemonConfigContext {
 }
 
 fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
-    let config = load_config(config);
+    let config = load_config(config).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; using default config values for this command");
+        librefang_types::config::KernelConfig::default()
+    });
     let api_key = {
         let trimmed = config.api_key.trim();
         if trimmed.is_empty() {
@@ -3677,6 +3687,21 @@ fn cmd_start(
 ) {
     ensure_initialized(&config);
 
+    // Issue #5186 follow-up: `cmd_start` boots a real daemon, so a bad
+    // `config.toml` must abort here BEFORE `daemon_config_context` swallows
+    // the load error and substitutes `KernelConfig::default()`. The
+    // tolerant default would silently change `home_dir` (used a few lines
+    // below to detect an already-running daemon) and the spawned child
+    // would only fail-closed during its own boot — losing the field-name
+    // diagnostic from the parent's stderr in the process.
+    //
+    // `load_config` already prints the underlying error to stderr (so
+    // operators see the field name even before the tracing subscriber is
+    // wired up); we only need to short-circuit with a non-zero exit.
+    if load_config(config.as_deref()).is_err() {
+        std::process::exit(1);
+    }
+
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -3967,6 +3992,15 @@ fn cmd_stop(config: Option<PathBuf>) {
 }
 
 fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
+    // Same fail-closed rule as `cmd_start` (#5186 follow-up): a bad config
+    // must abort before we read `home_dir` to look up a running daemon, or
+    // we'd `find_daemon_in_home` on `~/.librefang` (the default) and either
+    // miss a real daemon at a user-configured `home_dir` or "stop" the
+    // wrong one. `load_config` already eprintln!s the underlying error.
+    if load_config(config.as_deref()).is_err() {
+        std::process::exit(1);
+    }
+
     let daemon = daemon_config_context(config.as_deref());
     if find_daemon_in_home(&daemon.home_dir).is_some() {
         ui::hint(&i18n::t("daemon-restarting"));
@@ -4812,7 +4846,10 @@ fn render_status_daemon(
         .api_key
         .as_deref()
         .and_then(|k| fetch_status_detail(base, k));
-    let cfg = load_config(config);
+    let cfg = load_config(config).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; using default config values for status display");
+        librefang_types::config::KernelConfig::default()
+    });
 
     let exit_code = classify_exit(health.as_ref());
     let is_public_bind = info
@@ -5331,7 +5368,12 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     // Use config-only data; never boot the kernel here.  If any other process
     // holds the embedded DB lock (stale crash, etc.) opening the kernel would
     // deadlock / fail with a RocksDB lock error.
-    let cfg = load_config(config.as_deref());
+    // `load_config` now fails closed on a hard parse error (#5209); for a
+    // status display we degrade gracefully to defaults rather than abort.
+    let cfg = load_config(config.as_deref()).unwrap_or_else(|e| {
+        eprintln!("warning: {e}; using default config values for status display");
+        librefang_types::config::KernelConfig::default()
+    });
 
     // Count agents from disk (registry/agents/<name>/agent.toml) so we can
     // display a useful count without touching the database.
@@ -5724,7 +5766,7 @@ fn cmd_doctor(json: bool, repair: bool) {
                     if latest != current_version {
                         if !json {
                             ui::check_warn(&format!(
-                                "Update available: {current_version} -> {latest} (see https://github.com/librefang/librefang/releases)"
+                                "Update available: {current_version} -> {latest} (see https://github.com/GQAdonis/librefang/releases)"
                             ));
                         }
                         checks.push(serde_json::json!({"check": "version_update", "status": "warn", "current": current_version, "latest": latest}));
@@ -8145,7 +8187,6 @@ fn cmd_channel_list() {
 
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("telegram", "TELEGRAM_BOT_TOKEN"),
         ("discord", "DISCORD_BOT_TOKEN"),
         ("slack", "SLACK_BOT_TOKEN"),
         ("whatsapp", "WA_ACCESS_TOKEN"),
@@ -8190,7 +8231,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("telegram", "Telegram bot (BotFather)"),
                 ("discord", "Discord bot"),
                 ("slack", "Slack app (Socket Mode)"),
                 ("whatsapp", "WhatsApp Cloud API"),
@@ -8219,33 +8259,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
     };
 
     match channel.as_str() {
-        "telegram" => {
-            ui::section(&i18n::t("section-setup-telegram"));
-            ui::blank();
-            println!("  1. Open Telegram and message @BotFather");
-            println!("  2. Send /newbot and follow the prompts");
-            println!("  3. Copy the bot token");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error(&i18n::t("channel-no-token"));
-                return;
-            }
-
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("telegram", config_block);
-
-            // Save token to .env
-            match dotenv::save_env_key("TELEGRAM_BOT_TOKEN", &token) {
-                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
-                Err(_) => println!("    export TELEGRAM_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Telegram")]));
-            notify_daemon_restart();
-        }
         "discord" => {
             ui::section(&i18n::t("section-setup-discord"));
             ui::blank();
@@ -11416,7 +11429,12 @@ fn cmd_security_verify() {
 #[cfg(feature = "sqlite-backend")]
 fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
-    let kernel_config = load_config(config.as_deref());
+    // `load_config` already eprintln!s the underlying parse / deserialize
+    // error (see #5186); printing it again here would double the message.
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
 
     let db_path = kernel_config
         .memory

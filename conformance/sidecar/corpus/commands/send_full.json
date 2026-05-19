@@ -1,0 +1,14 @@
+{
+  "method": "send",
+  "params": {
+    "channel_id": "c1",
+    "text": "hello",
+    "content": { "Text": "hello" },
+    "thread_id": "t1",
+    "user": {
+      "platform_id": "c1",
+      "display_name": "Alice",
+      "librefang_user": null
+    }
+  }
+}

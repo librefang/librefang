@@ -2235,6 +2235,22 @@ pub async fn get_agent_session(
             }
 
             let messages = built_messages;
+
+            // Expose the LLM-generated compaction summary only for the
+            // canonical session. A pinned ?sessionId= that is not canonical
+            // has no associated summary — return null rather than an error
+            // so the dashboard banner simply stays hidden.
+            let compacted_summary: Option<String> = if target_session_id == entry.session_id {
+                state
+                    .kernel
+                    .memory_substrate()
+                    .canonical_context(agent_id, None, Some(0))
+                    .ok()
+                    .and_then(|(summary, _)| summary)
+            } else {
+                None
+            };
+
             // #3511: tag session_id (and agent_id) so the access-log
             // middleware can emit them as structured fields.
             crate::extensions::with_session_id(
@@ -2250,6 +2266,7 @@ pub async fn get_agent_session(
                             "context_window_tokens": session.context_window_tokens,
                             "label": session.label,
                             "messages": messages,
+                            "compacted_summary": compacted_summary,
                         })),
                     ),
                 ),
@@ -2271,6 +2288,17 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
+            // For the canonical session (no pinned session_id override), expose
+            // any LLM-generated compaction summary even when the session row
+            // itself is not yet materialised (e.g. agent just spawned but
+            // store_llm_summary was called directly, as in tests).
+            let compacted_summary: Option<String> = state
+                .kernel
+                .memory_substrate()
+                .canonical_context(agent_id, None, Some(0))
+                .ok()
+                .and_then(|(summary, _)| summary);
+
             // #3511: tag both identifiers even for the empty-session case.
             crate::extensions::with_session_id(
                 entry.session_id,
@@ -2284,6 +2312,7 @@ pub async fn get_agent_session(
                             "message_count": 0,
                             "context_window_tokens": 0,
                             "messages": [],
+                            "compacted_summary": compacted_summary,
                         })),
                     ),
                 ),
@@ -3623,7 +3652,7 @@ pub async fn compact_session(
             )
         }
     };
-    match state.kernel.compact_agent_session(agent_id).await {
+    match state.kernel.compact_agent_session(agent_id, true).await {
         Ok(msg) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": msg})),
@@ -3949,6 +3978,7 @@ pub async fn get_agent_tools(
 
 /// Request body for updating an agent's tool configuration.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetAgentToolsRequest {
     /// Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted.
     pub capabilities_tools: Option<Vec<String>>,
@@ -4418,15 +4448,58 @@ pub async fn patch_agent(
         }
     }
 
-    // Persist updated entry to SQLite
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
-            tracing::warn!("Failed to persist agent state: {e}");
+    // Track whether `set_agent_schedule` already persisted (SQLite + disk).
+    // Branches above only mutate the in-memory registry, so the generic
+    // persist block at the end of this handler is required for them. The
+    // schedule branch, however, routes through `set_agent_schedule` which
+    // saves to SQLite and writes `agent.toml` internally — picking up any
+    // earlier partial updates already applied to the registry entry. Calling
+    // `save_agent` + `persist_manifest_to_disk` again here would be a
+    // redundant double-write on every schedule PATCH.
+    let mut schedule_persisted = false;
+    if let Some(schedule_val) = body.get("schedule") {
+        match serde_json::from_value::<librefang_types::agent::ScheduleMode>(schedule_val.clone()) {
+            Ok(schedule) => {
+                // Go through `set_agent_schedule` (not `agent_registry()
+                // .update_schedule`) so the background loop is stopped /
+                // restarted to match — otherwise a Reactive→Continuous
+                // (or Continuous→Reactive) toggle from the dashboard
+                // would return 200 but the runtime would keep running
+                // the previous schedule until the daemon restarts
+                // (#4984).
+                if let Err(e) = state.kernel.clone().set_agent_schedule(agent_id, schedule) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                        ),
+                    );
+                }
+                schedule_persisted = true;
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
         }
+    }
 
-        // Write updated manifest to agent.toml on disk so disk doesn't override
-        // dashboard changes on next boot (#996, #1018).
-        state.kernel.persist_manifest_to_disk(agent_id);
+    // Persist updated entry to SQLite (skipped when the schedule branch
+    // already handled it — see `schedule_persisted` above).
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if !schedule_persisted {
+            if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
+                tracing::warn!("Failed to persist agent state: {e}");
+            }
+
+            // Write updated manifest to agent.toml on disk so disk doesn't override
+            // dashboard changes on next boot (#996, #1018).
+            state.kernel.persist_manifest_to_disk(agent_id);
+        }
 
         (
             StatusCode::OK,
@@ -4473,6 +4546,7 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
 
 /// Request body for updating agent visual identity.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateIdentityRequest {
     pub emoji: Option<String>,
     pub avatar_url: Option<String>,
@@ -4577,6 +4651,7 @@ pub async fn update_agent_identity(
 
 /// Request body for patching agent config (name, description, prompt, identity, model).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
@@ -5095,7 +5170,8 @@ pub async fn delete_hand_agent_runtime_config(
 
 /// Request body for cloning an agent.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct CloneAgentRequest {
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneAgentRequest {
     pub new_name: String,
     /// Whether to copy skills from the source agent (default: true).
     #[serde(default = "default_clone_true")]
@@ -5527,6 +5603,7 @@ pub async fn get_agent_file(
 
 /// Request body for writing a workspace identity file.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetAgentFileRequest {
     pub content: String,
 }

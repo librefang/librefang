@@ -75,8 +75,6 @@ pub mod mumble;
 pub mod nextcloud;
 #[cfg(feature = "channel-nostr")]
 pub mod nostr;
-#[cfg(feature = "channel-ntfy")]
-pub mod ntfy;
 #[cfg(feature = "channel-pumble")]
 pub mod pumble;
 #[cfg(feature = "channel-qq")]
@@ -93,8 +91,6 @@ pub mod signal;
 pub mod slack;
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-telegram")]
-pub mod telegram;
 #[cfg(feature = "channel-threema")]
 pub mod threema;
 #[cfg(feature = "channel-twist")]

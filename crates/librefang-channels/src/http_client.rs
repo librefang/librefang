@@ -962,6 +962,11 @@ mod tests {
     /// (`*_with_proxy_some_sets_ws_bypass_warn_flag`) — this just pins
     /// that the helper itself does not panic and accepts the three
     /// adapter names the start() paths pass in.
+    #[cfg(any(
+        feature = "channel-slack",
+        feature = "channel-discord",
+        feature = "channel-mattermost",
+    ))]
     #[test]
     fn warn_ws_proxy_bypass_smoke() {
         warn_ws_proxy_bypass("slack");

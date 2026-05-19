@@ -130,9 +130,7 @@ librefang-llm-driver        용 LLM 드라이버 trait 및 공유 타입
 librefang-llm-drivers       trait를 구현하는 구체적인 LLM 제공자 드라이버(anthropic, openai, gemini 등)
 librefang-runtime-mcp       런타임용 MCP(Model Context Protocol) 클라이언트
 librefang-kernel-handle     커널로의 인프로세스(in-process) 호출자를 위한 KernelHandle trait
-librefang-runtime-wasm      런타임용 WASM 스킬 샌드박스
 librefang-kernel-router     커널용 Hand/Template 라우팅 엔진
-librefang-runtime-oauth     런타임 드라이버용 OAuth 플로우(ChatGPT, GitHub Copilot)
 librefang-kernel-metering   커널에 대한 비용 측정 및 할당량(quota) 적용
 xtask                       빌드 자동화
 ```

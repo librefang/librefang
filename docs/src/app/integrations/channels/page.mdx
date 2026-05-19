@@ -26,13 +26,18 @@ All channel credentials can be stored using any of the four methods (highest pri
 The examples below show all four methods. In production, use the vault.
 </Note>
 
-All channel configurations live in `~/.librefang/config.toml` under the `[channels]` section. Each channel is a subsection:
+Most channel configurations live in `~/.librefang/config.toml` under the `[channels]` section. Each in-process channel is a subsection. Telegram is now sidecar-only and uses `[[sidecar_channels]]` instead:
 
 ```toml
-[channels.telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "assistant"
-allowed_users = ["123456789"]
+# Telegram (sidecar-only since #5241)
+[[sidecar_channels]]
+name = "telegram"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.telegram"]
+channel_type = "telegram"
+[sidecar_channels.env]
+TELEGRAM_BOT_TOKEN = "..."
+# ALLOWED_USERS = "123456789,@alice"
 
 [channels.discord]
 bot_token_env = "DISCORD_BOT_TOKEN"
@@ -110,14 +115,14 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 
 ```toml
 # config.toml — channel-level default for every agent on that channel
-[channels.telegram.overrides]
+[channels.discord.overrides]
 model = "gemini-2.5-flash"
-system_prompt = "You are a concise Telegram assistant. Keep replies under 200 words."
+system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
 dm_policy = "respond"
 group_policy = "mention_only"
 rate_limit_per_user = 10
 threading = true
-output_format = "telegram_html"
+output_format = "markdown"
 usage_footer = "compact"
 ```
 
@@ -202,7 +207,7 @@ Set `prefix_agent_name` in `ChannelOverrides` to prepend the agent's name to eve
 | `BoldBracket` | `**[agent-name]** reply text` (bold rendering depends on the channel's output format) |
 
 ```toml
-[channels.telegram.overrides]
+[channels.discord.overrides]
 prefix_agent_name = "BoldBracket"
 ```
 

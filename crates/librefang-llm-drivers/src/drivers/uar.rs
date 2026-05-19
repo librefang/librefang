@@ -181,6 +181,9 @@ impl LlmDriver for UarDriver {
             stop_reason,
             tool_calls,
             usage,
+            // UarDriver is a leaf driver — the outermost chain wrapper
+            // populates actual_provider for failover billing attribution.
+            actual_provider: None,
         })
     }
 
@@ -316,6 +319,9 @@ impl LlmDriver for UarDriver {
             stop_reason,
             tool_calls,
             usage,
+            // UarDriver is a leaf driver — the outermost chain wrapper
+            // populates actual_provider for failover billing attribution.
+            actual_provider: None,
         })
     }
 }

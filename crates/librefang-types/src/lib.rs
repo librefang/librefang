@@ -28,6 +28,7 @@ pub mod scheduler;
 pub mod serde_compat;
 pub mod subagent;
 pub mod taint;
+pub mod task;
 pub mod tool;
 pub mod tool_class;
 pub mod tool_compat;
@@ -37,6 +38,7 @@ pub mod user_policy;
 pub mod webhook;
 pub mod workflow_template;
 
+pub use task::{TaskCompletionEvent, TaskHandle, TaskId, TaskKind, TaskStatus, WorkflowRunId};
 pub use tool_class::ToolApprovalClass;
 
 /// Check if a response is a NO\_REPLY sentinel. Matches:

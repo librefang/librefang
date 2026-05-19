@@ -166,7 +166,12 @@ impl MemoryItem {
 /// auto_retrieve = true
 /// max_retrieve = 10
 /// session_ttl_hours = 24
-/// extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
+/// # Use the kernel's default provider:
+/// extraction_model = "gpt-4o-mini"
+/// # Or target a specific provider with `provider/model` format:
+/// extraction_model = "anthropic/claude-haiku-4"
+/// # The colon form (`provider:model`) also works:
+/// extraction_model = "anthropic:claude-haiku-4"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -183,6 +188,18 @@ pub struct ProactiveMemoryConfig {
     /// Confidence threshold for near-duplicate detection (0.0 - 1.0).
     pub extraction_threshold: f32,
     /// LLM model to use for extraction. If None, uses rule-based extraction.
+    ///
+    /// The value is parsed by `resolve_extraction_model_target`. Three forms
+    /// are accepted, in priority order:
+    ///
+    /// 1. `provider:model` — e.g. `"anthropic:claude-haiku-4"`
+    /// 2. `provider/model` — e.g. `"anthropic/claude-haiku-4"`
+    /// 3. Bare model name — e.g. `"gpt-4o-mini"`
+    ///
+    /// For bare model names the kernel's `default_model.provider` is used as
+    /// the driver. Use the `provider/model` form when extraction should run
+    /// through a different provider — there is no separate
+    /// `extraction_provider` field.
     pub extraction_model: Option<String>,
     /// Categories to extract from conversations.
     pub extract_categories: Vec<String>,

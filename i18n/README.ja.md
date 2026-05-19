@@ -130,9 +130,7 @@ librefang-llm-driver        向けのLLMドライバーtraitおよび共有型
 librefang-llm-drivers       traitを実装する具体的なLLMプロバイダードライバー（anthropic、openai、geminiなど）
 librefang-runtime-mcp       ランタイム向けのMCP（Model Context Protocol）クライアント
 librefang-kernel-handle     カーネルへのインプロセス呼び出し元のためのKernelHandle trait
-librefang-runtime-wasm      ランタイム向けのWASMスキルサンドボックス
 librefang-kernel-router     カーネル向けのHand/Templateルーティングエンジン
-librefang-runtime-oauth     ランタイムドライバー向けのOAuthフロー（ChatGPT、GitHub Copilot）
 librefang-kernel-metering   カーネル向けのコスト計量、クォータ適用
 xtask                       ビルド自動化
 ```

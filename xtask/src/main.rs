@@ -57,6 +57,10 @@ enum Command {
     /// Run the full CI check suite locally (build + test + clippy + web lint)
     Ci(ci::CiArgs),
 
+    /// Sidecar-first gate: reject in-process channel adapters not on
+    /// the allowlist. Build-free; run on every PR in CI.
+    ChannelPolicy(ci::ChannelPolicyArgs),
+
     /// Generate CHANGELOG.md entry from merged PRs since last tag
     Changelog(changelog::ChangelogArgs),
 
@@ -160,6 +164,7 @@ fn main() {
         Command::Release(args) => release::run(args),
         Command::BuildWeb(args) => build_web::run(args),
         Command::Ci(args) => ci::run(args),
+        Command::ChannelPolicy(args) => ci::run_channel_policy(args),
         Command::Changelog(args) => changelog::run(args),
         Command::SyncVersions(args) => sync_versions::run(args),
         Command::IntegrationTest(args) => integration_test::run(args),

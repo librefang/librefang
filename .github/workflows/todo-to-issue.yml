@@ -19,4 +19,9 @@ jobs:
           AUTO_ASSIGN: false
           # Skip files that contain TODO markers inside string-literal code templates
           # (e.g. plugin scaffolding) — those are placeholders for end users, not tasks.
-          IGNORE: crates/librefang-runtime/src/plugin_manager.rs
+          #
+          # After the #3710 god-crate split (#5053) the plugin_manager.rs file became
+          # a directory (plugin_manager/{mod,scaffold,...}.rs); the scaffolder's TODO
+          # strings now live in plugin_manager/scaffold.rs. Match the directory so
+          # any future siblings (e.g. another templating module) are also covered.
+          IGNORE: crates/librefang-runtime/src/plugin_manager/

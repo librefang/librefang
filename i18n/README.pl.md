@@ -130,9 +130,7 @@ librefang-llm-driver        Trait drivera LLM i współdzielone typy dla LibreFa
 librefang-llm-drivers       Konkretne drivery dostawców LLM (anthropic, openai, gemini, …) implementujące trait librefang-llm-driver
 librefang-runtime-mcp       Klient MCP (Model Context Protocol) dla środowiska uruchomieniowego (runtime) LibreFang
 librefang-kernel-handle     Trait KernelHandle dla wywołań wewnątrzprocesowych (in-process) do kernela LibreFang
-librefang-runtime-wasm      Sandbox umiejętności (skills) WASM dla środowiska uruchomieniowego LibreFang
 librefang-kernel-router     Silnik routingu Hand/Template dla kernela LibreFang
-librefang-runtime-oauth     Przepływy OAuth (ChatGPT, GitHub Copilot) dla driverów środowiska uruchomieniowego LibreFang
 librefang-kernel-metering   Pomiar kosztów i egzekwowanie limitów (quota) dla kernela LibreFang
 xtask                       Automatyzacja budowania
 ```
