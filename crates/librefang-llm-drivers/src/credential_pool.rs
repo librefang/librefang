@@ -70,6 +70,13 @@ pub enum PoolStrategy {
 pub struct PooledCredential {
     /// The API key string.
     pub api_key: String,
+    /// Operator-facing label from `config.toml` (e.g. `"Primary"`, `"Backup"`).
+    /// Carried with the credential so the snapshot can attribute labels to
+    /// the right materialized key — never reconstruct by indexing into the
+    /// original config list, which loses alignment when boot skips a key
+    /// whose env var is unset (Codex #5260 review: "Do not match credential
+    /// labels by position").
+    pub label: String,
     /// Higher value = higher priority. Credentials are sorted descending by
     /// priority on pool creation.
     pub priority: u32,
@@ -86,6 +93,7 @@ impl std::fmt::Debug for PooledCredential {
         let hint = redact_key_hint(&self.api_key);
         f.debug_struct("PooledCredential")
             .field("api_key", &hint)
+            .field("label", &self.label)
             .field("priority", &self.priority)
             .field("request_count", &self.request_count)
             .field("is_exhausted", &!self.is_available())
@@ -94,9 +102,10 @@ impl std::fmt::Debug for PooledCredential {
 }
 
 impl PooledCredential {
-    fn new(api_key: String, priority: u32) -> Self {
+    fn new(api_key: String, label: String, priority: u32) -> Self {
         Self {
             api_key,
+            label,
             priority,
             request_count: 0,
             exhausted_until: None,
@@ -120,6 +129,11 @@ impl PooledCredential {
 /// characters (prefixed by `****`) is included.
 #[derive(Debug, Clone)]
 pub struct CredentialSnapshot {
+    /// Operator-facing label from `config.toml` (e.g. `"Primary"`, `"Backup"`).
+    /// Empty string when the pool was built without labels (legacy callers /
+    /// tests). Always carried alongside the credential — never reconstructed
+    /// by positional indexing into the original config list (Codex #5260).
+    pub label: String,
     /// Redacted key hint, e.g. `"****abcd"`.
     pub key_hint: String,
     /// Higher value = higher priority.
@@ -157,6 +171,7 @@ impl CredentialSnapshot {
             }
         };
         Self {
+            label: c.label.clone(),
             key_hint: hint,
             priority: c.priority,
             request_count: c.request_count,
@@ -213,10 +228,31 @@ impl CredentialPool {
     ///
     /// Credentials are sorted by priority **descending** so that `FillFirst`
     /// simply picks the first available entry.
+    ///
+    /// Each credential is materialized with an empty operator-facing label.
+    /// Callers that have labels available from `config.toml` should use
+    /// [`CredentialPool::new_with_labels`] so the redacted snapshot can
+    /// attribute labels correctly (see Codex #5260).
     pub fn new(keys: Vec<(String, u32)>, strategy: PoolStrategy) -> Self {
+        let labeled: Vec<(String, String, u32)> = keys
+            .into_iter()
+            .map(|(k, p)| (k, String::new(), p))
+            .collect();
+        Self::new_with_labels(labeled, strategy)
+    }
+
+    /// Create a new pool from `(api_key, label, priority)` triples.
+    ///
+    /// Use this constructor in any code path where the operator-facing label
+    /// from `config.toml` is available. The label is carried inside each
+    /// [`PooledCredential`] and emitted by [`CredentialPool::snapshot`], so
+    /// diagnostics never reconstruct the label by indexing into the original
+    /// config list (which loses alignment when boot skips a key whose env
+    /// var is unset).
+    pub fn new_with_labels(keys: Vec<(String, String, u32)>, strategy: PoolStrategy) -> Self {
         let mut credentials: Vec<PooledCredential> = keys
             .into_iter()
-            .map(|(k, p)| PooledCredential::new(k, p))
+            .map(|(k, label, p)| PooledCredential::new(k, label, p))
             .collect();
         // Sort descending: highest priority first.
         credentials.sort_unstable_by_key(|c| std::cmp::Reverse(c.priority));
@@ -455,8 +491,25 @@ impl CredentialPool {
 pub type ArcCredentialPool = Arc<CredentialPool>;
 
 /// Construct a new [`ArcCredentialPool`] from key-priority pairs.
+///
+/// Credentials are stored without operator-facing labels — use
+/// [`new_arc_pool_with_labels`] when labels from `config.toml` are available
+/// so [`CredentialPool::snapshot`] can return them in the right order.
 pub fn new_arc_pool(keys: Vec<(String, u32)>, strategy: PoolStrategy) -> ArcCredentialPool {
     Arc::new(CredentialPool::new(keys, strategy))
+}
+
+/// Construct a new [`ArcCredentialPool`] from `(api_key, label, priority)` triples.
+///
+/// Preferred over [`new_arc_pool`] in the kernel boot path so labels are
+/// carried with the materialized credentials (Codex #5260: never attribute
+/// labels by positional index after env-var resolution may have skipped a
+/// configured key).
+pub fn new_arc_pool_with_labels(
+    keys: Vec<(String, String, u32)>,
+    strategy: PoolStrategy,
+) -> ArcCredentialPool {
+    Arc::new(CredentialPool::new_with_labels(keys, strategy))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -651,8 +704,8 @@ mod tests {
         let pool = CredentialPool::with_cooldowns(
             vec![("key-a".to_string(), 1)],
             PoolStrategy::FillFirst,
-            Duration::from_secs(0),     // rate-limit TTL — would recover immediately
-            Duration::from_secs(3600),  // credit TTL — would block for an hour
+            Duration::from_secs(0), // rate-limit TTL — would recover immediately
+            Duration::from_secs(3600), // credit TTL — would block for an hour
         );
         pool.mark_credit_exhausted("key-a");
         assert!(
@@ -700,6 +753,63 @@ mod tests {
             Some(u64::MAX),
             "mark_permanent should sentinel-encode as u64::MAX"
         );
+    }
+
+    // ── label carry-through (#5260 round-2) ──────────────────────────────────
+
+    /// The label travels with the credential through pool construction,
+    /// snapshot rendering, and priority sort — never reconstructed by
+    /// positional indexing into the original config list.
+    #[test]
+    fn snapshot_carries_label_per_credential() {
+        let pool = CredentialPool::new_with_labels(
+            vec![
+                ("sk-low".to_string(), "Backup".to_string(), 5),
+                ("sk-high".to_string(), "Primary".to_string(), 10),
+            ],
+            PoolStrategy::FillFirst,
+        );
+        let snap = pool.snapshot();
+        // Priority-descending order: Primary (10) before Backup (5).
+        assert_eq!(snap[0].label, "Primary");
+        assert_eq!(snap[0].priority, 10);
+        assert_eq!(snap[1].label, "Backup");
+        assert_eq!(snap[1].priority, 5);
+    }
+
+    /// Cooldown is recorded against the underlying api_key match, which
+    /// continues to carry its label — so an exhausted key's snapshot row
+    /// still reports the correct operator-facing label.
+    #[test]
+    fn snapshot_label_survives_mark_exhausted() {
+        let pool = CredentialPool::new_with_labels(
+            vec![
+                ("sk-a".to_string(), "Primary".to_string(), 10),
+                ("sk-b".to_string(), "Backup".to_string(), 5),
+            ],
+            PoolStrategy::FillFirst,
+        );
+        pool.mark_exhausted("sk-a");
+        let snap = pool.snapshot();
+        assert_eq!(
+            snap[0].label, "Primary",
+            "Primary remains labelled Primary even when exhausted"
+        );
+        assert!(snap[0].is_exhausted);
+        assert_eq!(snap[1].label, "Backup");
+        assert!(!snap[1].is_exhausted);
+    }
+
+    /// The legacy unlabeled constructor still works and emits empty labels.
+    /// This keeps the in-kernel `pooled_driver` unit-test helpers and any
+    /// future internal call sites compiling without touching them.
+    #[test]
+    fn unlabeled_constructor_emits_empty_labels() {
+        let pool = make_pool(&[("sk-a", 10), ("sk-b", 5)], PoolStrategy::FillFirst);
+        let snap = pool.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].label, "");
+        assert_eq!(snap[1].label, "");
     }
 
     // ── key_hint redaction (UTF-8 boundary safety) ────────────────────────────

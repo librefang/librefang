@@ -572,11 +572,14 @@ fn rebuild_credential_pools(
         if pool_cfg.keys.is_empty() {
             continue;
         }
-        let mut key_priority_pairs = Vec::with_capacity(pool_cfg.keys.len());
+        // Same labeled-keys discipline as the boot path: carry the operator
+        // label so the snapshot endpoint never reconstructs labels
+        // positionally against the original config list (Codex #5260).
+        let mut labeled_keys: Vec<(String, String, u32)> = Vec::with_capacity(pool_cfg.keys.len());
         for key_cfg in &pool_cfg.keys {
             match std::env::var(&key_cfg.api_key_env) {
                 Ok(key) => {
-                    key_priority_pairs.push((key, key_cfg.priority));
+                    labeled_keys.push((key, key_cfg.label.clone(), key_cfg.priority));
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -588,7 +591,7 @@ fn rebuild_credential_pools(
                 }
             }
         }
-        if key_priority_pairs.is_empty() {
+        if labeled_keys.is_empty() {
             tracing::warn!(
                 provider = %pool_cfg.provider,
                 "Hot-reload: credential pool has no resolvable keys — skipping"
@@ -602,7 +605,7 @@ fn rebuild_credential_pools(
             librefang_types::config::CredentialPoolStrategy::Random => PoolStrategy::Random,
             librefang_types::config::CredentialPoolStrategy::LeastUsed => PoolStrategy::LeastUsed,
         };
-        let pool = librefang_llm_drivers::new_arc_pool(key_priority_pairs, strategy);
+        let pool = librefang_llm_drivers::new_arc_pool_with_labels(labeled_keys, strategy);
         tracing::info!(
             provider = %pool_cfg.provider,
             strategy = ?pool_cfg.strategy,

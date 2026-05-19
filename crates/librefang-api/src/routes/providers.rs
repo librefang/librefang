@@ -2038,6 +2038,28 @@ fn strategy_label(s: &librefang_llm_drivers::PoolStrategy) -> &'static str {
 /// snapshots. The raw API key is never serialized — only a `key_hint`
 /// (last 4 chars prefixed by `****`) and per-key telemetry are included.
 ///
+/// Each credential entry has the shape:
+/// ```json
+/// {
+///   "label": "Primary",
+///   "key_hint": "****abcd",
+///   "priority": 10,
+///   "request_count": 42,
+///   "is_exhausted": false,
+///   "cooldown_remaining_secs": null
+/// }
+/// ```
+/// `cooldown_remaining_secs` is `null` while available, a non-negative
+/// integer (seconds) while in a 429/402/5xx cooldown, or the literal
+/// string `"permanent"` for keys marked permanently invalid by an auth
+/// failure (the kernel encodes this as the `u64::MAX` sentinel
+/// internally; this endpoint converts it to `"permanent"` so SDK
+/// consumers do not encounter a `2^64 - 1` magic number).
+///
+/// Labels are carried with each materialized credential, so partial
+/// env-var resolution (a configured pool entry whose env var is unset at
+/// boot time) never shifts a label onto the wrong key/cooldown row.
+///
 /// Issue #4965: backs the dashboard Providers page credential-pools card
 /// and the `librefang auth pool list` CLI command.
 #[utoipa::path(
@@ -2046,7 +2068,15 @@ fn strategy_label(s: &librefang_llm_drivers::PoolStrategy) -> &'static str {
     tag = "models",
     operation_id = "list_credential_pools",
     responses(
-        (status = 200, description = "Per-provider credential pool snapshots", body = Vec<serde_json::Value>)
+        (status = 200, description = "Per-provider credential pool snapshots. \
+            Each entry has `provider`, `strategy` (snake_case: \
+            fill_first / round_robin / random / least_used), \
+            `available_count`, `total_count`, and `credentials[]` with \
+            fields `label`, `key_hint` (last 4 chars prefixed by `****`), \
+            `priority`, `request_count`, `is_exhausted`, and \
+            `cooldown_remaining_secs` (null | non-negative integer seconds \
+            | literal string \"permanent\").",
+         body = Vec<serde_json::Value>)
     )
 )]
 pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2056,36 +2086,15 @@ pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl I
     // without an explicit `use` import.
     let summaries = state.kernel.credential_pool_summaries();
 
-    // Augment with the configured label list from config.toml so the
-    // dashboard can show "Primary" / "Backup" alongside the key hint.
-    // Labels are matched positionally against the priority-sorted credential
-    // list (the pool internally sorts by priority descending; we replay the
-    // same sort on the configured keys so the order lines up).
-    let cfg = state.kernel.config_ref();
-    let mut labels_by_provider: HashMap<String, Vec<(String, u32)>> = HashMap::new();
-    for pool_cfg in &cfg.credential_pools {
-        let mut entries: Vec<(String, u32)> = pool_cfg
-            .keys
-            .iter()
-            .map(|k| (k.label.clone(), k.priority))
-            .collect();
-        // Stable sort by priority descending, matching CredentialPool::new.
-        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
-        labels_by_provider.insert(pool_cfg.provider.clone(), entries);
-    }
-
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
-    for (provider, summary) in summaries {
-        let labels = labels_by_provider.get(&provider);
+    for (_provider, summary) in summaries {
         let credentials: Vec<serde_json::Value> = summary
             .credentials
             .iter()
-            .enumerate()
-            .map(|(idx, c)| {
-                let label = labels
-                    .and_then(|l| l.get(idx))
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_default();
+            .map(|c| {
+                // The label travels with the credential inside the pool
+                // (see PooledCredential::label), so a missing env-var skip
+                // at boot can never shift labels onto the wrong row.
                 let cooldown = c.cooldown_remaining_secs.map(|secs| {
                     if secs == u64::MAX {
                         serde_json::json!("permanent")
@@ -2094,7 +2103,7 @@ pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl I
                     }
                 });
                 serde_json::json!({
-                    "label": label,
+                    "label": c.label,
                     "key_hint": c.key_hint,
                     "priority": c.priority,
                     "request_count": c.request_count,

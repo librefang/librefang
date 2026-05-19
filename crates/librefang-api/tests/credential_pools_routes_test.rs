@@ -21,7 +21,11 @@ fn ev(name: &str) -> String {
     format!("LIBREFANG_TEST_CP_{name}")
 }
 
-fn pool_cfg(provider: &str, strategy: CredentialPoolStrategy, keys: &[(&str, &str, u32)]) -> CredentialPoolConfig {
+fn pool_cfg(
+    provider: &str,
+    strategy: CredentialPoolStrategy,
+    keys: &[(&str, &str, u32)],
+) -> CredentialPoolConfig {
     CredentialPoolConfig {
         provider: provider.to_string(),
         strategy,
@@ -51,7 +55,10 @@ async fn boot_with_pools(pools: Vec<CredentialPoolConfig>) -> Arc<librefang_api:
     state
 }
 
-async fn get_json(state: &Arc<librefang_api::routes::AppState>, path: &str) -> (axum::http::StatusCode, Json) {
+async fn get_json(
+    state: &Arc<librefang_api::routes::AppState>,
+    path: &str,
+) -> (axum::http::StatusCode, Json) {
     // `MockKernelBuilder` defaults to an empty `api_key`. The auth middleware
     // still requires that origin be loopback (or `LIBREFANG_ALLOW_NO_AUTH=1`
     // be set) to grant access — without a real `oneshot` socket, no
@@ -71,7 +78,9 @@ async fn get_json(state: &Arc<librefang_api::routes::AppState>, path: &str) -> (
         ))));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Json = if bytes.is_empty() {
         Json::Null
     } else {
@@ -118,8 +127,14 @@ async fn credential_pools_endpoint_returns_configured_pools() {
     assert_eq!(creds[0]["request_count"], 0);
     // Redaction: key hint must be the last 4 chars only — never the raw key.
     let hint0 = creds[0]["key_hint"].as_str().unwrap();
-    assert!(hint0.starts_with("****"), "key_hint should be redacted: {hint0}");
-    assert!(!hint0.contains("sk-test"), "raw key must never leak: {hint0}");
+    assert!(
+        hint0.starts_with("****"),
+        "key_hint should be redacted: {hint0}"
+    );
+    assert!(
+        !hint0.contains("sk-test"),
+        "raw key must never leak: {hint0}"
+    );
     assert_eq!(hint0, "****1111");
 
     assert_eq!(creds[1]["label"], "Backup");
@@ -146,8 +161,16 @@ async fn credential_pools_response_is_sorted_by_provider_name() {
     std::env::set_var(&key_z, "sk-zzzzZZZZ");
 
     let pools = vec![
-        pool_cfg("zeta", CredentialPoolStrategy::FillFirst, &[("only", &key_z, 1)]),
-        pool_cfg("alpha", CredentialPoolStrategy::FillFirst, &[("only", &key_a, 1)]),
+        pool_cfg(
+            "zeta",
+            CredentialPoolStrategy::FillFirst,
+            &[("only", &key_z, 1)],
+        ),
+        pool_cfg(
+            "alpha",
+            CredentialPoolStrategy::FillFirst,
+            &[("only", &key_a, 1)],
+        ),
     ];
     let state = boot_with_pools(pools).await;
 
@@ -170,10 +193,72 @@ async fn credential_pools_skips_pool_with_no_resolvable_env_keys() {
     )];
     let state = boot_with_pools(pools).await;
     let (status, body) = get_json(&state, "/api/credential-pools").await;
-    assert_eq!(status, 200, "unresolved env keys should not crash the endpoint");
+    assert_eq!(
+        status, 200,
+        "unresolved env keys should not crash the endpoint"
+    );
     let arr = body.as_array().unwrap();
     assert!(
         arr.is_empty(),
         "pool with no resolvable keys should be skipped at boot"
     );
+}
+
+/// Regression for Codex PR #5260 review (P2):
+///
+/// When a configured pool has TWO keys but boot can resolve only the second
+/// one (env var for the higher-priority key is unset), the snapshot endpoint
+/// must attribute the materialized credential to the **second** configured
+/// label — never the first one's label. The previous implementation indexed
+/// `labels[0]` against `summary.credentials[0]`, shifting the first label
+/// onto the only surviving key and telling the operator the wrong credential
+/// was exhausted / valid.
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_pools_label_tracks_materialized_key_when_higher_priority_env_unset() {
+    // Use distinct env-var names so other tests cannot trip over us under
+    // nextest's threaded harness.
+    let unset_env = ev("PARTIAL_PRIMARY_UNSET");
+    let set_env = ev("PARTIAL_BACKUP_SET");
+    // Make sure the "unset" env var really is unset for this test, even if a
+    // prior leaked invocation left it populated.
+    std::env::remove_var(&unset_env);
+    std::env::set_var(&set_env, "sk-test-only-backup-9999");
+
+    // Higher priority on the UNSET entry so the historical positional bug
+    // would have moved its "Primary" label onto the surviving "Backup" key.
+    let pools = vec![pool_cfg(
+        "openai",
+        CredentialPoolStrategy::FillFirst,
+        &[
+            ("Primary", &unset_env, 10), // priority 10, but env var unset → skipped
+            ("Backup", &set_env, 5),     // priority 5, env var set → materialized
+        ],
+    )];
+    let state = boot_with_pools(pools).await;
+
+    let (status, body) = get_json(&state, "/api/credential-pools").await;
+    assert_eq!(status, 200);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "exactly one pool was configured");
+    let pool = &arr[0];
+    assert_eq!(pool["provider"], "openai");
+    assert_eq!(
+        pool["total_count"], 1,
+        "only the resolvable key materializes"
+    );
+    let creds = pool["credentials"].as_array().unwrap();
+    assert_eq!(creds.len(), 1, "snapshot exposes only the resolved key");
+
+    // The critical assertion: the surviving entry must be labelled "Backup"
+    // (the materialized key's own label), NOT "Primary" (the skipped key's
+    // label that the positional implementation would have shifted onto it).
+    assert_eq!(
+        creds[0]["label"], "Backup",
+        "label must track the materialized key, not be reassigned by positional indexing"
+    );
+    assert_eq!(creds[0]["priority"], 5);
+    assert_eq!(creds[0]["key_hint"], "****9999");
+
+    // Cleanup so the env var doesn't leak into later tests.
+    std::env::remove_var(&set_env);
 }
