@@ -1313,7 +1313,13 @@ pub async fn configure_sidecar_channel(
     //     to subtract those out: if the key is in `secrets.env` already,
     //     the env presence is our own write — not a shell shadow. Read
     //     the on-disk file once and check membership before the write.
-    let home = librefang_home();
+    //
+    //     Use the kernel's configured `home_dir` rather than recomputing
+    //     from `LIBREFANG_HOME`/`~/.librefang`: when the operator boots
+    //     with a non-default `KernelConfig.home_dir`, the recomputed
+    //     default would write to the wrong path while `reload_config()`
+    //     and `reload_channels_from_disk()` read from the kernel's path.
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
     let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
