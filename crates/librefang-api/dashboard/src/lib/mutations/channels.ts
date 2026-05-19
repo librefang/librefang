@@ -6,6 +6,7 @@ import {
   deleteChannelInstance,
   testChannel,
   reloadChannels,
+  saveSidecarConfig,
   sendCommsMessage,
   postCommsTask,
 } from "../http/client";
@@ -105,6 +106,27 @@ export function useReloadChannels() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: reloadChannels,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: channelKeys.all });
+    },
+  });
+}
+
+// Save a sidecar channel's schema-driven config (Phase 5,
+// sidecar-channel-configure). Invalidates the whole `channelKeys.all`
+// subtree because a successful save flips the channel from "discovery"
+// to "configured" — both the top-level list AND any per-channel detail
+// view need to re-fetch.
+export function useSaveSidecarConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      name,
+      values,
+    }: {
+      name: string;
+      values: Record<string, string>;
+    }) => saveSidecarConfig(name, values),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },

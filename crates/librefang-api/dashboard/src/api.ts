@@ -1728,6 +1728,27 @@ export async function configureChannel(channelName: string, config: Record<strin
   return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
 }
 
+export interface SidecarSaveResult {
+  status: "saved";
+  restart_required: boolean;
+  hot_actions_applied: string[];
+}
+
+// Sidecar channel save (Phase 5, sidecar-channel-configure). Splits values
+// across `secrets.env` (secret-typed fields) and `config.toml` (everything
+// else + the `[[sidecar_channels]]` boilerplate) on the server. Triggers
+// hot-reload of the channels registry; whether the sidecar child needs an
+// out-of-band restart is reported via `restart_required`.
+export async function saveSidecarConfig(
+  name: string,
+  values: Record<string, string>,
+): Promise<SidecarSaveResult> {
+  return post<SidecarSaveResult>(
+    `/api/channels/sidecar/${encodeURIComponent(name)}/configure`,
+    { values },
+  );
+}
+
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
