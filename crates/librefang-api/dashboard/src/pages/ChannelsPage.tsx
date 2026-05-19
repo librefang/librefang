@@ -15,6 +15,7 @@ import {
   useCreateChannelInstance,
   useDeleteChannelInstance,
   useReloadChannels,
+  useSaveSidecarConfig,
   useTestChannel,
   useUpdateChannelInstance,
 } from "../lib/mutations/channels";
@@ -329,6 +330,127 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
         <div className="p-4 border-t border-border-subtle flex justify-end">
           <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
         </div>
+    </DrawerPanel>
+  );
+}
+
+// Schema-driven save form for sidecar discovery rows
+// (`category === "sidecar"`). Sidecar adapters expose their config schema
+// via `python -m <module> --describe`; the daemon caches that schema and
+// surfaces `channel.fields[]` on `/api/channels`. Submit hits the
+// `POST /api/channels/sidecar/{name}/configure` endpoint, which splits
+// values across `secrets.env` (secret-typed fields) and `config.toml`
+// (everything else) — see `useSaveSidecarConfig` for the wire shape.
+//
+// Why not reuse `ChannelForm`? Sidecars never participate in the
+// multi-instance (`[[channels.<name>]]`) flow that `InstancesDialog`
+// drives, and their save endpoint has a different response shape
+// (`restart_required`). Keep them on a dedicated, much simpler form.
+function SidecarForm({
+  channel,
+  onClose,
+  t,
+}: {
+  channel: Channel;
+  onClose: () => void;
+  t: (key: string, opts?: { defaultValue?: string }) => string;
+}) {
+  const addToast = useUIStore((s) => s.addToast);
+  const saveMut = useSaveSidecarConfig();
+  const allFields = channel.fields ?? [];
+  const fields = allFields.filter((f) => !f.advanced);
+  const advanced = allFields.filter((f) => f.advanced);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const visible = showAdvanced ? [...fields, ...advanced] : fields;
+
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(allFields.map((f) => [f.key, ""])),
+  );
+
+  const handleSubmit = () => {
+    // Drop empty optional values; server validates required.
+    const payload: Record<string, string> = {};
+    for (const f of allFields) {
+      const v = values[f.key]?.trim();
+      if (v) payload[f.key] = v;
+    }
+    saveMut.mutate(
+      { name: channel.name, values: payload },
+      {
+        onSuccess: (res) => {
+          addToast(
+            res.restart_required
+              ? t("channels.saved_restart_required", {
+                  defaultValue: "Saved — restart daemon to apply",
+                })
+              : t("channels.saved", { defaultValue: "Saved" }),
+            "success",
+          );
+          onClose();
+        },
+        onError: (err) =>
+          addToast(toastErr(err, t("common.error", { defaultValue: "Error" })), "error"),
+      },
+    );
+  };
+
+  return (
+    <DrawerPanel isOpen onClose={onClose} size="lg" hideCloseButton>
+      <div className="h-2 bg-linear-to-r from-brand via-brand/60 to-brand/30" />
+      <div className="p-6 border-b border-border-subtle flex items-center justify-between">
+        <h2 className="text-xl font-black">{channel.display_name || channel.name}</h2>
+        <button onClick={onClose} className="p-2" aria-label={t("common.close", { defaultValue: "Close" })}>
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+      <div className="p-6 space-y-3">
+        {visible.map((f) => (
+          <div key={f.key} className="space-y-1">
+            <label className="text-xs font-bold">
+              {f.label || f.key}
+              {f.required && <span className="text-error">*</span>}
+              {f.type === "secret" && f.env_var && (
+                <span className="ml-2 font-mono text-[10px] text-text-dim/80 normal-case">
+                  {f.env_var}
+                </span>
+              )}
+            </label>
+            <Input
+              type={f.type === "secret" ? "password" : "text"}
+              value={values[f.key] ?? ""}
+              placeholder={f.placeholder ?? undefined}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, [f.key]: e.target.value }))
+              }
+            />
+          </div>
+        ))}
+        {advanced.length > 0 && (
+          <button
+            type="button"
+            className="text-xs text-text-dim underline"
+            onClick={() => setShowAdvanced((s) => !s)}
+          >
+            {showAdvanced
+              ? t("common.hide_advanced", { defaultValue: "Hide advanced" })
+              : t("common.show_advanced", { defaultValue: "Show advanced" })}
+          </button>
+        )}
+      </div>
+      <div className="p-4 border-t border-border-subtle flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={saveMut.isPending}>
+          {t("common.cancel")}
+        </Button>
+        <Button
+          variant="primary"
+          onClick={handleSubmit}
+          disabled={saveMut.isPending}
+        >
+          {saveMut.isPending
+            ? t("common.saving", { defaultValue: "Saving…" })
+            : t("common.save", { defaultValue: "Save" })}
+        </Button>
+      </div>
     </DrawerPanel>
   );
 }
@@ -967,6 +1089,7 @@ export function ChannelsPage() {
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
   const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
   const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
+  const [sidecarFormChannel, setSidecarFormChannel] = useState<Channel | null>(null);
   // The picker drawer holds the catalog of unconfigured channel types
   // (slack / discord / email / …). Default view shows only configured
   // channels so the page stays focused on what's actually wired up.
@@ -1036,11 +1159,12 @@ export function ChannelsPage() {
   };
   const handlePick = (ch: Channel) => {
     setPickerOpen(false);
-    // Sidecar discovery rows have no in-process configure endpoint
-    // (Configure would 404 against CHANNEL_REGISTRY); the details modal
-    // already renders the read-only "manage via config.toml" note for
-    // category === "sidecar" — route the pick there.
-    if (ch.category === "sidecar") setDetailsChannel(ch);
+    // Sidecar discovery rows now have a schema-driven save endpoint
+    // (`POST /api/channels/sidecar/{name}/configure`) backed by
+    // `useSaveSidecarConfig`. Route the pick to the dedicated
+    // `SidecarForm`; the legacy read-only "manage via config.toml"
+    // details modal remains available via the configured-cards path.
+    if (ch.category === "sidecar") setSidecarFormChannel(ch);
     else if (ch.setup_type === "qr") setQrLoginChannel(ch);
     else setConfiguringChannel(ch);
   };
@@ -1261,6 +1385,16 @@ export function ChannelsPage() {
         <QrLoginDialog
           channel={qrLoginChannel}
           onClose={closeQrLogin}
+          t={t}
+        />
+      )}
+
+      {/* Sidecar configure form (Phase 5, sidecar-channel-configure) —
+          schema-driven, hits the dedicated save endpoint. */}
+      {sidecarFormChannel && (
+        <SidecarForm
+          channel={sidecarFormChannel}
+          onClose={() => setSidecarFormChannel(null)}
           t={t}
         />
       )}
