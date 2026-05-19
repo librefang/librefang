@@ -1051,19 +1051,88 @@ async fn channels_list_includes_configured_sidecar_channels() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn channels_list_without_sidecar_has_no_sidecar_rows() {
-    // Negative control: with nothing configured, no synthetic sidecar
-    // rows leak in (only the in-process CHANNEL_REGISTRY).
+async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
+    // With nothing configured under [[sidecar_channels]], the first-party
+    // SDK adapters (telegram, ntfy) must still appear as unconfigured
+    // catalog rows — otherwise the Add picker has no way to surface them
+    // after the out-of-process migration (#5241 / #5224). Operators who
+    // have never touched config.toml saw telegram/ntfy vanish from the
+    // dashboard entirely before this; the discovery rows close that gap.
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
     assert_eq!(status, StatusCode::OK);
     let arr = body["items"].as_array().expect("items");
+
+    for kind in ["telegram", "ntfy"] {
+        let row = arr
+            .iter()
+            .find(|r| r["name"] == kind)
+            .unwrap_or_else(|| panic!("discovery row for sidecar `{kind}` must appear"));
+        assert_eq!(
+            row["configured"], false,
+            "discovery row must be unconfigured: {row}"
+        );
+        assert_eq!(row["category"], "sidecar");
+        assert_eq!(row["setup_type"], "sidecar");
+        assert_eq!(
+            row["fields"].as_array().map(|a| a.len()),
+            Some(0),
+            "catalog row has no editable form fields: {row}"
+        );
+        // Picker uses display_name; must be non-empty.
+        assert!(
+            row["display_name"].as_str().is_some_and(|s| !s.is_empty()),
+            "discovery row needs a display name: {row}"
+        );
+    }
+
+    // Unconfigured catalog rows must not bump the configured counter —
+    // they represent "available to set up", not "already set up".
+    let configured_count = body["configured_count"].as_u64().unwrap_or(0);
+    let sidecar_unconfigured = arr
+        .iter()
+        .filter(|r| r["category"] == "sidecar" && r["configured"] == false)
+        .count() as u64;
     assert!(
-        !arr.iter().any(|r| r["category"] == "sidecar"),
-        "no sidecar rows when none are configured"
+        configured_count + sidecar_unconfigured <= arr.len() as u64,
+        "configured_count must not include discovery rows"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_list_discovery_row_hidden_when_kind_configured() {
+    // Discovery row for `telegram` must yield to a configured
+    // `[[sidecar_channels]]` entry of the same kind — regardless of the
+    // local alias the operator picked for `name`. Otherwise the page
+    // would render both a "telegram (configured)" row and a "telegram
+    // (set me up)" row simultaneously.
+    let aliased: SidecarChannelConfig = serde_json::from_value(serde_json::json!({
+        "name": "my_alerts",
+        "command": "python3",
+        "args": ["-m", "librefang.sidecar.adapters.telegram"],
+        "channel_type": "telegram",
+    }))
+    .expect("valid SidecarChannelConfig");
+    let h = boot_with_sidecar(vec![aliased]).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["items"].as_array().expect("items");
+
+    // The aliased configured row appears under its local name.
+    assert!(
+        arr.iter()
+            .any(|r| r["name"] == "my_alerts" && r["configured"] == true),
+        "configured aliased telegram row must appear"
+    );
+    // No discovery row for telegram — it has been "covered".
     assert!(
         !arr.iter().any(|r| r["name"] == "telegram"),
-        "telegram is not in CHANNEL_REGISTRY and none configured"
+        "discovery row for `telegram` must be suppressed when channel_type=telegram is configured"
+    );
+    // ntfy discovery row is still there (independent kind, not configured).
+    assert!(
+        arr.iter()
+            .any(|r| r["name"] == "ntfy" && r["configured"] == false),
+        "ntfy discovery row remains when only telegram is configured"
     );
 }
