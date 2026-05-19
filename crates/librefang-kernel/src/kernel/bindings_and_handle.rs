@@ -107,6 +107,12 @@ impl LibreFangKernel {
                     Arc::downgrade(self) as _;
                 extractor.install_kernel_handle(weak);
             }
+            // Install the HITL operator-step bridges (#4977 step 2) onto
+            // the workflow engine now that the kernel is `Arc`-wrapped —
+            // the notifier (#5135) and timeout-resume driver (#5134) both
+            // hold an `Arc<LibreFangKernel>`. Idempotent via the engine's
+            // `OnceLock` slots.
+            self.install_operator_hooks();
         }
     }
 

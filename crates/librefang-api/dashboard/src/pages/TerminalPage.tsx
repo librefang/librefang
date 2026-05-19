@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { terminalKeys } from "../lib/queries/keys";
+import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import {
   Terminal as TerminalIcon,
   Maximize2,
@@ -138,7 +139,7 @@ export function TerminalPage() {
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [fontSize, setFontSize] = useState<number>(() => {
-    const stored = localStorage.getItem("terminal.fontSize");
+    const stored = safeStorageGet("terminal.fontSize");
     const parsed = stored ? parseInt(stored, 10) : NaN;
     return Number.isFinite(parsed) ? Math.max(10, Math.min(20, parsed)) : 13;
   });
@@ -242,8 +243,8 @@ export function TerminalPage() {
         }
       }
       const hintKey = "terminal.copyPasteHintShown";
-      if (!localStorage.getItem(hintKey)) {
-        localStorage.setItem(hintKey, "1");
+      if (!safeStorageGet(hintKey)) {
+        safeStorageSet(hintKey, "1");
         addToast(t("terminal.copy_paste_hint"), "info");
       }
     };
@@ -628,7 +629,7 @@ export function TerminalPage() {
           onClick={() => {
             const n = Math.max(10, fontSize - 1);
             setFontSize(n);
-            localStorage.setItem("terminal.fontSize", String(n));
+            safeStorageSet("terminal.fontSize", String(n));
           }}
           className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_decrease")}
@@ -637,7 +638,7 @@ export function TerminalPage() {
           onClick={() => {
             const n = Math.min(20, fontSize + 1);
             setFontSize(n);
-            localStorage.setItem("terminal.fontSize", String(n));
+            safeStorageSet("terminal.fontSize", String(n));
           }}
           className="flex items-center justify-center w-7 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_increase")}

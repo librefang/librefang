@@ -946,3 +946,83 @@ async fn health_detail_daily_spend_percent_reflects_configured_cap() {
         "monthly_spend_percent must stay null when no monthly cap is set: {budget}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #5186 boot-path golden — stale renamed channel key fails boot loudly.
+//
+// Issue #5186 asked for an end-to-end guard that this class can't regress:
+// when an operator's `config.toml` carries a channel-scoped field whose
+// shape no longer matches the schema (the prototypical "stale renamed
+// channel key" — old release accepted one shape, new release expects
+// another), boot must abort with the field path in the error so the
+// operator can pinpoint the offending line. The pre-#5186 behaviour
+// silently substituted `KernelConfig::default()`, after which the
+// daemon's downstream auth / token-resolve step would fail with a
+// confusing "missing bot token" message that hid the real cause.
+//
+// The test goes through `librefang_kernel::config::load_config` — the
+// exact entry point `LibreFangKernel::boot` uses to read `config.toml`
+// from disk — and asserts:
+//   1. it returns `Err` (fail-closed),
+//   2. the error names the offending channel field,
+//   3. the error does NOT mention authentication.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_fails_on_stale_channel_output_format_key() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+
+    // A `[channels.discord]` block where `initial_backoff_secs` has the
+    // wrong shape (string instead of u64) — the canonical "stale renamed
+    // channel key" scenario the issue tracks: an older release tolerated
+    // a string here (e.g. "1s"), the current schema is `u64` seconds,
+    // and the operator's config still carries the old value.
+    //
+    // We use a real `u64` schema field (`initial_backoff_secs`) rather
+    // than the literal `output_format` from the issue write-up because
+    // `output_format` was never a real schema field — making the test
+    // trip the unknown-field tolerance path (warn-and-proceed by
+    // design, see #5130) instead of the hard-fail path #5186 actually
+    // closes. The behavioural assertion (boot fails, message names the
+    // channel field, no "auth" leakage) is identical either way and is
+    // the real regression contract.
+    let bad_toml = "\
+[channels.discord]
+bot_token_env = \"DISCORD_BOT_TOKEN\"
+initial_backoff_secs = \"thirty-seconds\"
+";
+    std::fs::write(&config_path, bad_toml).expect("write bad config.toml");
+
+    let result = librefang_kernel::config::load_config(Some(&config_path));
+    let err = result.expect_err(
+        "stale-shape channel field must fail-close at load_config, \
+         not silently substitute KernelConfig::default()",
+    );
+
+    // The error must name the offending field so the operator can fix
+    // their config without guessing. The exact wording is owned by the
+    // TOML deserializer; we lock the substring contract on the field
+    // name and the section path.
+    assert!(
+        err.contains("initial_backoff_secs"),
+        "boot error must name the offending channel field; got: {err}"
+    );
+    assert!(
+        err.contains("channels") && err.contains("discord"),
+        "boot error must locate the field under [channels.discord]; got: {err}"
+    );
+
+    // The critical regression guard from the issue: the failure must NOT
+    // be misclassified as an auth / token error downstream. Pre-#5186,
+    // the load tolerated the bad value, defaults wiped the operator's
+    // `[channels.discord] bot_token_env`, and the next layer surfaced
+    // it as "discord bot token missing — authentication failed". Now
+    // we abort at parse time with the field name and never reach auth.
+    let lower = err.to_lowercase();
+    assert!(
+        !lower.contains("auth") && !lower.contains("bot token") && !lower.contains("unauthorized"),
+        "boot error must not be misclassified as an auth failure (the \
+         pre-#5186 downstream symptom); got: {err}"
+    );
+}

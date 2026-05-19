@@ -25,6 +25,6 @@ fallback chain, a shared rate-limit tracker, retry/backoff with
 ## Key dependencies
 
 `librefang-types`, `librefang-llm-driver`, `librefang-http`,
-`librefang-runtime-oauth`, `reqwest`, `tokio`, `serde`.
+`reqwest`, `tokio`, `serde`.
 
 See the [workspace README](../../README.md).

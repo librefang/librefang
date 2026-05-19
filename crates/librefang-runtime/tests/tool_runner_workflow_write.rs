@@ -235,10 +235,12 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
         None
     }
 
-    async fn start_workflow_async(
+    async fn start_workflow_async_tracked(
         &self,
         _workflow_id: &str,
         _input: &str,
+        _caller_agent_id: Option<&str>,
+        _caller_session_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         match &self.start_run_id {
             Some(id) => Ok(id.clone()),

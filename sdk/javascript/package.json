@@ -1,6 +1,6 @@
 {
   "name": "@bossfang/sdk",
-  "version": "2026.5.12-beta.11",
+  "version": "2026.5.17-beta.12",
   "description": "Official JavaScript/TypeScript client for the BossFang Agent OS REST API",
   "main": "index.js",
   "types": "index.d.ts",

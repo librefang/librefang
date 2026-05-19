@@ -1224,15 +1224,31 @@ impl LibreFangKernel {
                         ..Default::default()
                     };
                     match k.send_message_with_sender_context(aid, &msg, &sender).await {
-                        Ok(_) => {}
+                        Ok(_) => crate::background::TickOutcome::Ok,
                         Err(e) => {
                             // send_message already records the panic in supervisor,
                             // just log the background context here
                             warn!(agent_id = %aid, error = %e, "Background tick failed");
+                            // Classify so the background loop can stop
+                            // re-firing an agent stuck on a provider
+                            // rate-limit instead of burning quota forever
+                            // (issue #5168).
+                            crate::background::classify_tick_error(&e.to_string())
                         }
                     }
                 })
             });
+    }
+
+    /// Number of background loops currently registered with the executor.
+    ///
+    /// Exposed for observability (tests asserting loop start / stop semantics
+    /// around schedule changes — see #4984). Counts active loops only:
+    /// `ScheduleMode::Reactive` agents have no loop and are not counted, and
+    /// `ScheduleMode::Proactive` registers triggers (not a loop) so it is
+    /// also not counted.
+    pub fn background_active_count(&self) -> usize {
+        self.workflows.background.active_count()
     }
 
     /// Gracefully shutdown the kernel.

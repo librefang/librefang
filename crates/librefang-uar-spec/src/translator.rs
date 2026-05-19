@@ -181,6 +181,9 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
         mcp_disabled: false,
         compaction: None,
+        triggers: Vec::new(),
+        reconcile_orphans: librefang_types::agent::OrphanPolicy::default(),
+        async_tasks: librefang_types::agent::AsyncTasksConfig::default(),
     })
 }
 

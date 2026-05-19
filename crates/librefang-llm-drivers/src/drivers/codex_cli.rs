@@ -279,6 +279,7 @@ impl LlmDriver for CodexCliDriver {
                 output_tokens: 0,
                 ..Default::default()
             },
+            actual_provider: None,
         })
     }
 

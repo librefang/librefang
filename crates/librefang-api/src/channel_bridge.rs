@@ -254,8 +254,6 @@ use librefang_channels::signal::SignalAdapter;
 use librefang_channels::slack::SlackAdapter;
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-telegram")]
-use librefang_channels::telegram::TelegramAdapter;
 #[cfg(feature = "channel-twitch")]
 use librefang_channels::twitch::TwitchAdapter;
 #[cfg(feature = "channel-voice")]
@@ -317,8 +315,6 @@ use librefang_channels::gotify::GotifyAdapter;
 use librefang_channels::linkedin::LinkedInAdapter;
 #[cfg(feature = "channel-mumble")]
 use librefang_channels::mumble::MumbleAdapter;
-#[cfg(feature = "channel-ntfy")]
-use librefang_channels::ntfy::NtfyAdapter;
 #[cfg(feature = "channel-qq")]
 use librefang_channels::qq::QqAdapter;
 #[cfg(feature = "channel-wechat")]
@@ -334,8 +330,6 @@ use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
 use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
-#[cfg(feature = "channel-telegram")]
-use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -547,6 +541,17 @@ where
 
     tokio::spawn(async move {
         let (error_msg, status): (Option<String>, Result<(), String>) = match kernel_handle.await {
+            Err(e) if e.is_cancelled() => {
+                // Intentional: cancelled (superseded) turns report Err status so
+                // bridge consumers apply AgentPhase::Error + record_delivery(success=false).
+                // A superseded turn is one whose kernel handle was aborted because a newer
+                // message arrived for the same (agent, session) — see messaging.rs rapid-dispatch
+                // race. Treating this as a delivery failure is pre-existing behaviour; a future
+                // follow-up could teach the bridge to skip lifecycle/record_delivery on
+                // cancellation specifically.
+                warn!("Streaming kernel task was cancelled: {e}");
+                (None, Err("kernel task cancelled".to_string()))
+            }
             Err(e) => {
                 error!("Streaming kernel task panicked: {e}");
                 (
@@ -620,8 +625,16 @@ where
         }
         // Drop error_tx so rx will close once bridge_handle also finishes.
         drop(error_tx);
-        if let Err(e) = bridge_handle.await {
-            error!("Streaming bridge task panicked: {e}");
+        // Note: bridge_handle can be cancelled independently of kernel_handle
+        // (e.g. tokio runtime shutdown). In that scenario the kernel may have
+        // completed Ok, but the streaming text bridge was chopped mid-flush,
+        // potentially losing the final buffered chunk. status_tx still carries
+        // the kernel's actual result, so lifecycle/record_delivery remain correct;
+        // only the in-flight text stream may be truncated. Pre-existing behaviour.
+        match bridge_handle.await {
+            Err(e) if e.is_cancelled() => warn!("Streaming bridge task was cancelled: {e}"),
+            Err(e) => error!("Streaming bridge task panicked: {e}"),
+            Ok(()) => {}
         }
         // Report kernel terminal status to any caller that opted in. Sent
         // last so awaiters can be sure the text channel has fully drained.
@@ -1680,7 +1693,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .compact_agent_session(agent_id)
+            .compact_agent_session(agent_id, true)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1725,7 +1738,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
         self.kernel
-            .compact_agent_session_with_id(agent_id, Some(sid))
+            .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -1921,23 +1934,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            // Telegram has the `message_coalesce_window_ms` alias (#4145)
-            // that feeds into `overrides.message_debounce_ms`; resolve via
-            // `effective_overrides()` rather than cloning `overrides` raw.
-            "telegram" => {
-                let entry = if let Some(aid) = account_id {
-                    channels
-                        .telegram
-                        .iter()
-                        .find(|c| c.account_id.as_deref() == Some(aid))
-                } else {
-                    channels.telegram.first()
-                };
-                (
-                    entry.map(|c| c.effective_overrides()),
-                    entry.and_then(|c| c.default_agent.clone()),
-                )
-            }
             "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
@@ -1976,7 +1972,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "dingtalk" => find_channel_info!(dingtalk),
             "discourse" => find_channel_info!(discourse),
             "gitter" => find_channel_info!(gitter),
-            "ntfy" => find_channel_info!(ntfy),
             "gotify" => find_channel_info!(gotify),
             "webhook" => find_channel_info!(webhook),
             "voice" => find_channel_info!(voice),
@@ -2626,7 +2621,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(telegram, "channel-telegram", "Telegram");
     check_channel!(discord, "channel-discord", "Discord");
     check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
@@ -2665,7 +2659,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(qq, "channel-qq", "QQ");
     check_channel!(discourse, "channel-discourse", "Discourse");
     check_channel!(gitter, "channel-gitter", "Gitter");
-    check_channel!(ntfy, "channel-ntfy", "ntfy");
     check_channel!(gotify, "channel-gotify", "Gotify");
     check_channel!(webhook, "channel-webhook", "Webhook");
     check_channel!(voice, "channel-voice", "Voice");
@@ -2688,46 +2681,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Telegram
-    #[cfg(feature = "channel-telegram")]
-    for tg_config in config.telegram.iter() {
-        if let Some(token) = read_token(&tg_config.bot_token_env, "Telegram") {
-            let poll_interval = Duration::from_secs(tg_config.poll_interval_secs);
-            let base = TelegramAdapter::new(
-                token,
-                tg_config.allowed_users.clone(),
-                poll_interval,
-                tg_config.api_url.clone(),
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, tg_config.proxy.as_deref(), "Telegram", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(tg_config.account_id.clone())
-                    .with_thread_routes(tg_config.thread_routes.clone())
-                    .with_backoff(
-                        tg_config.initial_backoff_secs,
-                        tg_config.max_backoff_secs,
-                        tg_config.long_poll_timeout_secs,
-                    )
-                    .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
-                    .with_max_upload_bytes(
-                        usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
-                    ),
-            );
-            adapters.push((
-                adapter,
-                tg_config.default_agent.clone(),
-                tg_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Discord
     #[cfg(feature = "channel-discord")]
@@ -3677,25 +3630,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // ntfy
-    #[cfg(feature = "channel-ntfy")]
-    for nf_config in config.ntfy.iter() {
-        let token = if nf_config.token_env.is_empty() {
-            String::new()
-        } else {
-            read_token(&nf_config.token_env, "ntfy").unwrap_or_default()
-        };
-        let adapter = Arc::new(
-            NtfyAdapter::new(nf_config.server_url.clone(), nf_config.topic.clone(), token)
-                .with_account_id(nf_config.account_id.clone()),
-        );
-        adapters.push((
-            adapter,
-            nf_config.default_agent.clone(),
-            nf_config.account_id.clone(),
-        ));
-    }
-
     // Gotify
     #[cfg(feature = "channel-gotify")]
     for gf_config in config.gotify.iter() {
@@ -3781,6 +3715,19 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Sidecar channel adapters ───────────────────────────────
+    // Re-init path: this loop runs on every channel-bridge cycle, not just
+    // daemon boot. After config changes that produce `HotAction::ReloadChannels`
+    // (see `librefang_kernel::config_reload`), the dispatch in
+    // `kernel/config_reload_ops.rs::246-256` clears `mesh.channel_adapters`;
+    // the owning handler (`routes/channels.rs::configure_channel`,
+    // `configure_sidecar_channel`, `reload_channels`, … or the 30s disk
+    // watcher in `server.rs`) follows up with
+    // `channel_bridge::reload_channels_from_disk(&state)` which re-enters
+    // `start_channel_bridge_with_config` and so re-executes this loop —
+    // picking up any newly-added [[sidecar_channels]] entry. Saves without
+    // that handler-side follow-up will silently fail to spawn the sidecar
+    // (the supervisor map stays empty); audit any new save endpoint that
+    // touches `sidecar_channels` for this pattern.
     let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
@@ -3788,7 +3735,10 @@ pub async fn start_channel_bridge_with_config(
             command = %sidecar_config.command,
             "Registering sidecar channel adapter"
         );
-        let adapter = Arc::new(SidecarAdapter::new(sidecar_config));
+        let adapter = Arc::new(SidecarAdapter::new(
+            sidecar_config,
+            kernel.home_dir().to_path_buf(),
+        ));
         adapters.push((adapter, None, None));
     }
 
@@ -4024,11 +3974,28 @@ pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
     // Stop existing bridge. Swap it out atomically so concurrent readers see
-    // None immediately, then unwrap the Arc to get owned access for stop().
+    // None immediately, then tear down the old instance.
+    //
+    // #5142: `Arc::try_unwrap` only yields `&mut` when no other strong ref
+    // exists — but `routes/agents.rs::push_message` does
+    // `state.bridge_manager.load_full()` and holds the Arc across an `.await`
+    // on `push_message`, so on a busy channel `try_unwrap` returns `Err` and
+    // (pre-#5142) the graceful `stop()` was skipped entirely, leaking the old
+    // bridge's tokio tasks until the strong count happened to hit 1. We now
+    // ALWAYS call `abort()` (which only needs `&self`: fires the watch
+    // shutdown signal + aborts every tracked task handle). When we *did* get
+    // exclusive ownership we additionally run the graceful `stop()` for its
+    // clean join + per-adapter async cleanup.
     {
         let old = state.bridge_manager.swap(std::sync::Arc::new(None));
-        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
-            b.stop().await;
+        match std::sync::Arc::try_unwrap(old) {
+            Ok(Some(mut b)) => b.stop().await,
+            Ok(None) => {}
+            Err(still_shared) => {
+                if let Some(b) = still_shared.as_ref() {
+                    b.abort();
+                }
+            }
         }
     }
 
@@ -4042,7 +4009,16 @@ pub async fn reload_channels_from_disk(
 
     // Re-read config from disk
     let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = kernel_load_config(Some(&config_path));
+    let fresh_config = match kernel_load_config(Some(&config_path)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Channel hot-reload: config file cannot be loaded; keeping current channel config"
+            );
+            return Err(e);
+        }
+    };
 
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
@@ -4649,9 +4625,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stream_bridge_cancelled_reports_err_status() {
+        use librefang_types::error::LibreFangError;
+
+        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let kernel_handle = tokio::spawn(async {
+            futures::future::pending::<
+                Result<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>,
+            >()
+            .await
+        });
+        kernel_handle.abort();
+
+        let (mut rx, status_rx) =
+            start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
+
+        let mut received = String::new();
+        while let Some(chunk) = rx.recv().await {
+            received.push_str(&chunk);
+        }
+        assert!(
+            received.is_empty(),
+            "Cancelled task must not produce user-facing text, got: {received:?}"
+        );
+
+        let status = status_rx.await.expect("status oneshot dropped");
+        assert!(
+            status.is_err(),
+            "Cancelled task must report Err status, got: {status:?}"
+        );
+        assert!(
+            status.as_ref().unwrap_err().contains("cancelled"),
+            "Error string must mention cancellation, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.telegram.is_none());
         assert!(config.channels.discord.is_none());
         assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());
@@ -4690,7 +4701,6 @@ mod tests {
         assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.discourse.is_none());
         assert!(config.channels.gitter.is_none());
-        assert!(config.channels.ntfy.is_none());
         assert!(config.channels.gotify.is_none());
         assert!(config.channels.webhook.is_none());
         assert!(config.channels.linkedin.is_none());

@@ -201,14 +201,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn stop_session_run(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<bool>;
     fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()>;
     fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()>;
-    async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String>;
+    /// Compact the agent's canonical session. `force = true` bypasses the
+    /// message/token threshold gates (user-initiated `/compact`); `force =
+    /// false` applies the normal auto-compaction guard.
+    async fn compact_agent_session(&self, agent_id: AgentId, force: bool) -> KernelResult<String>;
     /// Compact a specific session id; channel `/compact` calls this with the
     /// per-channel session so it doesn't accidentally summarise the agent's
-    /// registry-pointer session (#4868).
+    /// registry-pointer session (#4868). `force = true` bypasses threshold
+    /// gates for user-initiated compaction.
     async fn compact_agent_session_with_id(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String>;
     /// Reset an agent's session(s). See [`ResetScope`] for the agent-wide vs.
     /// per-session split (#4868). Async because it acquires the same
@@ -246,6 +251,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
+    /// Update an agent's schedule mode and restart its background loop so
+    /// the change takes effect immediately, without a daemon restart.
+    /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
+    fn set_agent_schedule(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> KernelResult<()>;
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
@@ -411,6 +424,12 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         schedule: &librefang_types::agent::ScheduleMode,
     );
 
+    /// Count of currently-running background loops. Exposed for tests that
+    /// need to assert schedule changes actually start / stop the loop (the
+    /// silent-drop regression from #4984). See
+    /// [`LibreFangKernel::background_active_count`].
+    fn background_active_count(&self) -> usize;
+
     // ====================================================================
     // Additional kernel-inherent methods used by API/WS/server.rs.
     //
@@ -449,11 +468,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         model: &str,
         explicit_provider: Option<&str>,
     ) -> KernelResult<()>;
+    /// Returns a per-agent partial-failure list `(agent_name, error)`;
+    /// empty means every eligible agent migrated cleanly.
     fn sync_default_model_agents(
         &self,
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
-    );
+    ) -> Vec<(String, String)>;
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>;
     fn update_hand_agent_runtime_override(
         &self,
@@ -591,6 +612,61 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         registry: librefang_wire::PeerRegistry,
     ) -> Result<(), librefang_wire::PeerRegistry>;
     fn set_self_handle(self: Arc<Self>);
+
+    // ====================================================================
+    // Async task tracker (#4983) — exposed on KernelApi so integration
+    // tests can drive the registry through the same trait object the
+    // dashboard and route handlers use, instead of needing the
+    // concrete `LibreFangKernel`.
+    // ====================================================================
+
+    /// Register a pending async task. Returns the typed
+    /// [`librefang_types::task::TaskHandle`] the spawning agent stashes
+    /// to correlate the eventual completion event.
+    fn register_async_task(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: librefang_types::task::TaskKind,
+    ) -> librefang_types::task::TaskHandle;
+
+    /// Mark a registered async task as terminated with `status`. The
+    /// kernel removes the registry entry (delete-on-delivery) and
+    /// either injects an
+    /// [`librefang_types::tool::AgentLoopSignal::TaskCompleted`] mid-turn
+    /// or, if no agent loop is currently attached for the originating
+    /// session, spawns a fresh turn whose body is the rendered
+    /// completion text. Idempotent — a second call for the same id is
+    /// a no-op.
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> KernelResult<bool>;
+
+    /// Test introspection: number of currently-registered async tasks.
+    #[doc(hidden)]
+    fn pending_async_task_count(&self) -> usize;
+
+    /// Test introspection: borrow the per-(agent, session) injection
+    /// senders dashmap so tests can attach a synthetic receiver without
+    /// driving a full agent loop. Lives next to the async task tracker
+    /// surface because step-3 integration tests need it to assert
+    /// mid-turn delivery from the `complete_async_task` path.
+    ///
+    /// `#[doc(hidden)]` and named `_ref` so it does not appear in the
+    /// public `KernelApi` docs and production route handlers do not
+    /// reach for it. Future cleanup (#5033 review nit) should split
+    /// this into a `KernelApiTestExt` trait gated by a `test-support`
+    /// feature; kept on the main trait for now to match the existing
+    /// `set_self_handle` / `install_peer_registry_for_test` precedent.
+    #[doc(hidden)]
+    fn injection_senders_ref(
+        &self,
+    ) -> &dashmap::DashMap<
+        (AgentId, SessionId),
+        tokio::sync::mpsc::Sender<librefang_types::tool::AgentLoopSignal>,
+    >;
 }
 
 #[async_trait]
@@ -802,15 +878,16 @@ impl KernelApi for LibreFangKernel {
     fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::resume_agent(self, agent_id)
     }
-    async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        Self::compact_agent_session(self, agent_id).await
+    async fn compact_agent_session(&self, agent_id: AgentId, force: bool) -> KernelResult<String> {
+        Self::compact_agent_session(self, agent_id, force).await
     }
     async fn compact_agent_session_with_id(
         &self,
         agent_id: AgentId,
         session_id: Option<SessionId>,
+        force: bool,
     ) -> KernelResult<String> {
-        Self::compact_agent_session_with_id(self, agent_id, session_id).await
+        Self::compact_agent_session_with_id(self, agent_id, session_id, force).await
     }
     async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
         Self::reset_session(self, agent_id, scope).await
@@ -869,6 +946,13 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
+    }
+    fn set_agent_schedule(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> KernelResult<()> {
+        LibreFangKernel::set_agent_schedule(&self, agent_id, schedule)
     }
     fn set_agent_tool_filters(
         &self,
@@ -1074,6 +1158,10 @@ impl KernelApi for LibreFangKernel {
         LibreFangKernel::start_background_for_agent(&self, agent_id, name, schedule);
     }
 
+    fn background_active_count(&self) -> usize {
+        LibreFangKernel::background_active_count(self)
+    }
+
     // -- Additional inherent methods --
     fn agent_has_active_session(&self, agent_id: AgentId) -> bool {
         Self::agent_has_active_session(self, agent_id)
@@ -1126,8 +1214,8 @@ impl KernelApi for LibreFangKernel {
         &self,
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
-    ) {
-        Self::sync_default_model_agents(self, old_provider, dm);
+    ) -> Vec<(String, String)> {
+        Self::sync_default_model_agents(self, old_provider, dm)
     }
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
         <Self as crate::AgentSubsystemApi>::traces(self)
@@ -1345,5 +1433,33 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_self_handle(self: Arc<Self>) {
         LibreFangKernel::set_self_handle(&self);
+    }
+
+    // -- Async task tracker (#4983) --
+    fn register_async_task(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: librefang_types::task::TaskKind,
+    ) -> librefang_types::task::TaskHandle {
+        LibreFangKernel::register_async_task(self, agent_id, session_id, kind)
+    }
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> KernelResult<bool> {
+        LibreFangKernel::complete_async_task(self, task_id, status).await
+    }
+    fn pending_async_task_count(&self) -> usize {
+        LibreFangKernel::pending_async_task_count(self)
+    }
+    fn injection_senders_ref(
+        &self,
+    ) -> &dashmap::DashMap<
+        (AgentId, SessionId),
+        tokio::sync::mpsc::Sender<librefang_types::tool::AgentLoopSignal>,
+    > {
+        <Self as crate::EventSubsystemApi>::injection_senders_ref(self)
     }
 }

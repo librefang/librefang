@@ -15,9 +15,19 @@ const MAX_INCLUDE_DEPTH: u32 = 10;
 
 /// Load kernel configuration from a TOML file, with defaults.
 ///
+/// Returns `Err` when the config file exists but cannot be parsed as valid TOML
+/// or cannot be deserialized into `KernelConfig` — a content failure that means
+/// the operator's settings have been silently discarded. The caller must not
+/// substitute `KernelConfig::default()` on `Err`; doing so would hide the
+/// real problem and produce a misleading downstream error (see issue #5186).
+///
+/// Returns `Ok(KernelConfig::default())` when the config file is absent or
+/// unreadable due to an I/O error (file not found, permission denied), because
+/// that is a deployment-time condition where defaults are a safe starting point.
+///
 /// If the config contains an `include` field, included files are loaded
 /// and deep-merged first, then the root config overrides them.
-pub fn load_config(path: Option<&Path>) -> KernelConfig {
+pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
     let config_path = path
         .map(|p| p.to_path_buf())
         .unwrap_or_else(default_config_path);
@@ -118,10 +128,10 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                                 fields = %all_unknown.join(", "),
                                 "strict_config is enabled and config contains unknown fields, using defaults"
                             );
-                            return KernelConfig {
+                            return Ok(KernelConfig {
                                 strict_config: true,
                                 ..KernelConfig::default()
-                            };
+                            });
                         }
                         for field in &all_unknown {
                             tracing::warn!(field, "Unknown config field (ignored)");
@@ -157,23 +167,25 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                                 }
                             }
                             info!(path = %config_path.display(), "Loaded configuration");
-                            return config;
+                            return Ok(config);
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                path = %config_path.display(),
-                                "Failed to deserialize merged config, using defaults"
+                            let msg = format!(
+                                "Config file cannot be deserialized (path={}): {e}",
+                                config_path.display()
                             );
+                            eprintln!("error: {msg}");
+                            return Err(msg);
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        path = %config_path.display(),
-                        "Failed to parse config, using defaults"
+                    let msg = format!(
+                        "Config file has invalid TOML and cannot be loaded (path={}): {e}",
+                        config_path.display()
                     );
+                    eprintln!("error: {msg}");
+                    return Err(msg);
                 }
             },
             Err(e) => {
@@ -191,7 +203,7 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
         );
     }
 
-    KernelConfig::default()
+    Ok(KernelConfig::default())
 }
 
 /// Strict counterpart of [`load_config`] that returns `Err` on every failure
@@ -459,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_load_config_defaults() {
-        let config = load_config(None);
+        let config = load_config(None).unwrap();
         assert_eq!(config.log_level, "info");
     }
 
@@ -512,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_load_config_missing_file() {
-        let config = load_config(Some(Path::new("/nonexistent/config.toml")));
+        let config = load_config(Some(Path::new("/nonexistent/config.toml"))).unwrap();
         assert_eq!(config.log_level, "info");
     }
 
@@ -579,7 +591,7 @@ mod tests {
         writeln!(f, "log_level = \"warn\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root_path));
+        let config = load_config(Some(&root_path)).unwrap();
         assert_eq!(config.log_level, "warn"); // root overrides
         assert_eq!(config.api_listen, "0.0.0.0:9999"); // from base
     }
@@ -605,7 +617,7 @@ mod tests {
         writeln!(f, "log_level = \"info\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "info"); // root wins
     }
 
@@ -624,9 +636,8 @@ mod tests {
         writeln!(f, "include = [\"a.toml\"]").unwrap();
         drop(f);
 
-        // Should not panic — circular detection triggers, falls back gracefully
-        let config = load_config(Some(&a_path));
-        // Falls back to defaults due to the circular error
+        // Include errors are tolerated — the root file still loads with its own fields.
+        let config = load_config(Some(&a_path)).unwrap();
         assert!(!config.log_level.is_empty());
     }
 
@@ -639,9 +650,9 @@ mod tests {
         writeln!(f, "include = [\"../etc/passwd\"]").unwrap();
         drop(f);
 
-        // Should not panic — path traversal triggers error, falls back
-        let config = load_config(Some(&root));
-        assert_eq!(config.log_level, "info"); // defaults
+        // Include-chain security errors are tolerated; root-only config still loads.
+        let config = load_config(Some(&root)).unwrap();
+        assert_eq!(config.log_level, "info"); // defaults (root was just an include directive)
     }
 
     #[test]
@@ -662,8 +673,8 @@ mod tests {
         }
 
         let root = dir.path().join("level0.toml");
-        let config = load_config(Some(&root));
-        // Falls back due to depth limit — but should not panic
+        // Include depth overflow is tolerated; the root file still loads.
+        let config = load_config(Some(&root)).unwrap();
         assert!(!config.log_level.is_empty());
     }
 
@@ -676,7 +687,8 @@ mod tests {
         writeln!(f, "include = [\"/etc/shadow\"]").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        // Include-chain security errors are tolerated; root-only config still loads.
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "info"); // defaults
     }
 
@@ -689,7 +701,7 @@ mod tests {
         writeln!(f, "log_level = \"trace\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "trace");
     }
 
@@ -707,7 +719,7 @@ mod tests {
         drop(f);
 
         // Tolerant mode (default): should still load successfully
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "debug");
         assert!(!config.strict_config);
     }
@@ -724,7 +736,7 @@ mod tests {
         drop(f);
 
         // Strict mode: should reject and return defaults (with strict_config=true)
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         // Falls back to defaults because strict mode rejected unknown fields
         assert_eq!(config.log_level, "info"); // default, not "debug"
         assert!(config.strict_config);
@@ -741,7 +753,7 @@ mod tests {
         drop(f);
 
         // Strict mode with no unknown fields: should load normally
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "warn");
         assert!(config.strict_config);
     }
@@ -758,7 +770,7 @@ mod tests {
         drop(f);
 
         // Explicitly tolerant: should load despite unknown field
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "error");
         assert!(!config.strict_config);
     }
@@ -775,7 +787,7 @@ mod tests {
         writeln!(f, "api_listen = \"0.0.0.0:9999\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.api_key, "my-secret");
         assert_eq!(config.api_listen, "0.0.0.0:9999");
         assert_eq!(config.config_version, CONFIG_VERSION);
@@ -802,7 +814,7 @@ mod tests {
         writeln!(f, "log_level = \"debug\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.config_version, 2);
     }
@@ -824,7 +836,7 @@ mod tests {
         writeln!(f, "role = \"owner\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.users[0].name, "Alice");
         assert_eq!(config.users[0].role, "owner");
@@ -845,7 +857,7 @@ mod tests {
         writeln!(f, "telegram = \"123456\"").unwrap();
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.users[0].name, "Alice");
         assert_eq!(
@@ -869,14 +881,14 @@ mod tests {
         drop(f);
 
         // First load: triggers migration (v1 → v2), writes back
-        let config1 = load_config(Some(&root));
+        let config1 = load_config(Some(&root)).unwrap();
         assert_eq!(config1.log_level, "debug");
         assert_eq!(config1.users.len(), 1);
         assert_eq!(config1.users[0].name, "Alice");
         assert_eq!(config1.config_version, CONFIG_VERSION);
 
         // Second load: reads migrated file, no migration needed
-        let config2 = load_config(Some(&root));
+        let config2 = load_config(Some(&root)).unwrap();
         assert_eq!(config2.log_level, "debug");
         assert_eq!(config2.users.len(), 1);
         assert_eq!(config2.users[0].name, "Alice");
@@ -897,7 +909,7 @@ mod tests {
         // No [[users]] section — migration should not add users = []
         drop(f);
 
-        let _config = load_config(Some(&root));
+        let _config = load_config(Some(&root)).unwrap();
         let contents = std::fs::read_to_string(&root).unwrap();
 
         // The migrated file should not have a `users = []` line that would
@@ -911,8 +923,8 @@ mod tests {
     #[test]
     fn test_users_array_key_conflicts_with_array_of_tables() {
         // Verify that if a config has BOTH `users = []` and `[[users]]`,
-        // the TOML parser rejects it (duplicate key). The kernel should
-        // fall back to defaults gracefully rather than panic.
+        // the TOML parser rejects it (duplicate key). The kernel must surface
+        // the error rather than silently substituting defaults.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("config.toml");
 
@@ -924,10 +936,17 @@ mod tests {
         writeln!(f, "role = \"owner\"").unwrap();
         drop(f);
 
-        // Should fall back to defaults (TOML parse error: duplicate key)
-        let config = load_config(Some(&root));
-        assert_eq!(config.log_level, "info"); // default, not "warn"
-        assert!(config.users.is_empty());
+        // TOML parse error (duplicate key) → Err, not silent defaults.
+        let result = load_config(Some(&root));
+        assert!(
+            result.is_err(),
+            "duplicate TOML key must surface as Err, not silent defaults"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("invalid TOML") || msg.contains("duplicate"),
+            "error must be actionable; got: {msg}"
+        );
     }
 
     /// Regression for #3460: nested typos like `[memory] decay_ratee` were
@@ -948,7 +967,7 @@ mod tests {
         drop(f);
 
         // Tolerant: still loads with defaults for the typo'd fields.
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         assert_eq!(config.log_level, "debug");
         // Defaults preserved (the typos didn't take effect).
         assert!(
@@ -973,16 +992,17 @@ mod tests {
         writeln!(f, "max_hourly_usdd = 5.0").unwrap(); // typo
         drop(f);
 
-        let config = load_config(Some(&root));
+        let config = load_config(Some(&root)).unwrap();
         // Falls back to defaults because strict mode rejected the typo.
         assert_eq!(config.log_level, "info");
         assert!(config.strict_config);
     }
 
     #[test]
-    fn test_load_config_users_missing_name_falls_back_to_defaults() {
-        // A [[users]] block without a required `name` field should fail deserialization
-        // and fall back to defaults rather than panicking.
+    fn test_load_config_users_missing_name_fails_closed() {
+        // A [[users]] block without a required `name` field fails deserialization.
+        // The kernel must surface the error rather than silently substituting
+        // defaults (which would discard the operator's full user list).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("config.toml");
 
@@ -992,10 +1012,16 @@ mod tests {
         writeln!(f, "role = \"owner\"").unwrap(); // no name — invalid
         drop(f);
 
-        let config = load_config(Some(&root));
-        // Should fall back to defaults (users deserialization fails)
-        assert_eq!(config.log_level, "info"); // default, not "warn"
-        assert!(config.users.is_empty());
+        let result = load_config(Some(&root));
+        assert!(
+            result.is_err(),
+            "deserialization failure must surface as Err, not silent defaults"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("deserialize") || msg.contains("missing field"),
+            "error must be actionable; got: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1083,9 +1109,8 @@ mod tests {
     #[test]
     fn test_try_load_config_deserialize_shape_mismatch_is_error() {
         // TOML parses cleanly but a field has the wrong shape — `default_model`
-        // is a struct, not a scalar. Tolerant `load_config` warns and returns
-        // defaults; strict variant must refuse so the reload caller cannot
-        // accidentally apply defaults as the diff target.
+        // is a struct, not a scalar. Both `load_config` and `try_load_config`
+        // now return `Err` on a hard deserialize failure (see #5186).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("config.toml");
 
@@ -1138,5 +1163,87 @@ mod tests {
         let cfg =
             try_load_config(&root).expect("tolerant unknown fields must not fail strict load");
         assert_eq!(cfg.log_level, "warn");
+    }
+
+    // -----------------------------------------------------------------------
+    // #5186 — hard deserialize failures fail closed; unknown fields stay tolerant
+    // -----------------------------------------------------------------------
+
+    /// A config with a wrong-type field (not a structurally unknown field) must
+    /// cause `load_config` to return `Err` containing the field path, not
+    /// silently substitute `KernelConfig::default()`.
+    #[test]
+    fn test_load_config_hard_deserialize_failure_returns_err_with_field_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        // `default_model` expects a table, not a plain string.
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "default_model = \"not-a-table\"").unwrap();
+        drop(f);
+
+        let result = load_config(Some(&root));
+        assert!(
+            result.is_err(),
+            "wrong-type field must surface as Err, not silent defaults"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("deserialize")
+                || msg.contains("default_model")
+                || msg.contains("invalid type"),
+            "error must name the offending field or describe the mismatch; got: {msg}"
+        );
+    }
+
+    /// A config with TOML syntax that the parser outright rejects must cause
+    /// `load_config` to return `Err`, not silently substitute defaults.
+    #[test]
+    fn test_load_config_invalid_toml_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        // Duplicate section key — valid TOML rejects this at parse time.
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[memory]").unwrap();
+        writeln!(f, "decay_rate = 0.1").unwrap();
+        writeln!(f, "[memory]").unwrap();
+        writeln!(f, "decay_rate = 0.2").unwrap();
+        drop(f);
+
+        let result = load_config(Some(&root));
+        assert!(
+            result.is_err(),
+            "invalid TOML must surface as Err, not silent defaults"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("invalid TOML") || msg.contains("duplicate"),
+            "error must be actionable; got: {msg}"
+        );
+    }
+
+    /// Unknown/extra fields in the config must NOT cause `load_config` to fail —
+    /// the forward-compat (unknown-field tolerance) path introduced in #5130
+    /// must remain intact even after the #5186 fail-closed change.
+    #[test]
+    fn test_load_config_unknown_field_forward_compat_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        // A field that did not exist in the schema — simulates a stale key
+        // from a prior release that has since been removed or renamed.
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "api_key = \"secret\"").unwrap();
+        writeln!(f, "output_format_legacy = \"markdown\"").unwrap(); // stale field
+        drop(f);
+
+        // Must succeed: unknown fields are tolerated and warned, not fatal.
+        let config = load_config(Some(&root))
+            .expect("unknown-field forward-compat path must still load successfully");
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.api_key, "secret");
     }
 }

@@ -3,8 +3,10 @@
 //! If the primary driver fails with a non-retryable error, the fallback driver
 //! moves to the next driver in the chain.
 
+use crate::drivers::fallback_chain::{exhaustion_reason_for, exhaustion_until_for};
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
+use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,13 +22,30 @@ use tracing::{info, warn};
 /// On each request, the driver list is dynamically reordered so healthy,
 /// low-latency drivers are tried first while preserving the primary position
 /// when it is healthy.
+///
+/// Exhaustion-aware (#4807): when constructed with
+/// [`Self::with_exhaustion_store`] and per-slot provider names supplied
+/// via [`Self::with_models_and_providers`] (or registered later via
+/// [`Self::set_provider_names`]), the driver pre-skips slots that have
+/// been marked exhausted by the operator-budget gate or by a sibling
+/// chain, and marks slots itself after rate-limit / quota / auth
+/// failures. Slots with empty provider names are excluded from store
+/// participation (back-compat for tests).
 pub struct FallbackDriver {
     drivers: Vec<DriverEntry>,
+    /// Shared provider-exhaustion store (#4807). When `Some`, pre-skip
+    /// and post-failure-mark logic runs alongside the EWMA reordering;
+    /// `None` preserves the historical un-gated behaviour.
+    exhaustion_store: Option<ProviderExhaustionStore>,
 }
 
 struct DriverEntry {
     driver: Arc<dyn LlmDriver>,
     model_name: String,
+    /// Provider name used as the exhaustion-store key. Empty for slots
+    /// that were not registered against the store (legacy constructors,
+    /// tests).
+    provider_name: String,
     /// Exponentially weighted moving average latency in ms.
     ewma_latency_ms: AtomicU64,
     /// Consecutive error count. Reset to 0 on success or after the
@@ -67,11 +86,13 @@ impl FallbackDriver {
                 .map(|d| DriverEntry {
                     driver: d,
                     model_name: String::new(),
+                    provider_name: String::new(),
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
                 })
                 .collect(),
+            exhaustion_store: None,
         }
     }
 
@@ -90,11 +111,67 @@ impl FallbackDriver {
                 .map(|(d, m)| DriverEntry {
                     driver: d,
                     model_name: m,
+                    provider_name: String::new(),
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
                 })
                 .collect(),
+            exhaustion_store: None,
+        }
+    }
+
+    /// Create a new fallback driver with explicit model AND provider
+    /// names for each driver. Provider names are the keys against which
+    /// the exhaustion store records skip / mark events. Empty provider
+    /// names are accepted (the slot then never participates in the
+    /// store) for forward-compat with mixed configurations.
+    ///
+    /// # Panics
+    /// Panics if `drivers` is empty.
+    pub fn with_models_and_providers(drivers: Vec<(Arc<dyn LlmDriver>, String, String)>) -> Self {
+        assert!(
+            !drivers.is_empty(),
+            "FallbackDriver requires at least one driver"
+        );
+        Self {
+            drivers: drivers
+                .into_iter()
+                .map(|(d, model, provider)| DriverEntry {
+                    driver: d,
+                    model_name: model,
+                    provider_name: provider,
+                    ewma_latency_ms: AtomicU64::new(0),
+                    consecutive_errors: AtomicU64::new(0),
+                    last_failure_at_ms: AtomicU64::new(0),
+                })
+                .collect(),
+            exhaustion_store: None,
+        }
+    }
+
+    /// Attach a shared [`ProviderExhaustionStore`] so this driver
+    /// participates in the same budget-aware skip view as the rest of
+    /// the kernel (#4807). Slots whose `provider_name` is empty
+    /// continue to be invoked without store interaction — only slots
+    /// registered via [`Self::with_models_and_providers`] or
+    /// [`Self::set_provider_names`] are gated.
+    pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
+        self.exhaustion_store = Some(store);
+        self
+    }
+
+    /// Set provider names on slots after construction. Used by callers
+    /// that build the driver with [`Self::with_models`] and then learn
+    /// the provider name afterwards. The slice length must match the
+    /// driver count; trailing entries default to empty.
+    pub fn set_provider_names<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for (entry, name) in self.drivers.iter_mut().zip(names) {
+            entry.provider_name = name.into();
         }
     }
 
@@ -184,6 +261,37 @@ impl FallbackDriver {
     }
 }
 
+impl FallbackDriver {
+    /// Record an exhaustion-class failure against the shared store, if
+    /// any. Mirrors `FallbackChain`'s policy so both wrappers stamp
+    /// slots with consistent reason/backoff.
+    fn record_exhaustion(&self, entry: &DriverEntry, err: &LlmError) {
+        let Some(store) = &self.exhaustion_store else {
+            return;
+        };
+        if entry.provider_name.is_empty() {
+            return;
+        }
+        let reason = err.failover_reason();
+        if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
+            let until = exhaustion_until_for(err, &reason);
+            store.mark_exhausted(entry.provider_name.clone(), exhaust_reason, until);
+        }
+    }
+
+    /// Should this slot be pre-skipped? Returns `true` when an attached
+    /// store reports the slot exhausted; no-ops otherwise.
+    fn is_slot_exhausted(&self, entry: &DriverEntry) -> bool {
+        let Some(store) = &self.exhaustion_store else {
+            return false;
+        };
+        if entry.provider_name.is_empty() {
+            return false;
+        }
+        store.record_skip(&entry.provider_name).is_some()
+    }
+}
+
 #[async_trait]
 impl LlmDriver for FallbackDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -192,6 +300,12 @@ impl LlmDriver for FallbackDriver {
 
         for &i in &order {
             let entry = &self.drivers[i];
+
+            // Pre-attempt skip: store reports the slot exhausted (#4807).
+            if self.is_slot_exhausted(entry) {
+                continue;
+            }
+
             let mut req = request.clone();
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
@@ -199,7 +313,7 @@ impl LlmDriver for FallbackDriver {
 
             let start = std::time::Instant::now();
             match entry.driver.complete(req).await {
-                Ok(response) => {
+                Ok(mut response) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     let new = if prev == 0 {
@@ -209,6 +323,14 @@ impl LlmDriver for FallbackDriver {
                     };
                     entry.ewma_latency_ms.store(new, Ordering::Relaxed);
                     entry.consecutive_errors.store(0, Ordering::Relaxed);
+                    // Stamp the slot that actually served the request
+                    // (review nit 10). Only stamp when we know the
+                    // slot's provider name AND the inner driver hasn't
+                    // already stamped (preserves attribution from a
+                    // wrapped FallbackChain).
+                    if response.actual_provider.is_none() && !entry.provider_name.is_empty() {
+                        response.actual_provider = Some(entry.provider_name.clone());
+                    }
                     return Ok(response);
                 }
                 Err(e) => {
@@ -222,11 +344,13 @@ impl LlmDriver for FallbackDriver {
                         .store(prev.saturating_add(ERROR_PENALTY_MS), Ordering::Relaxed);
                     warn!(
                         driver_index = i,
+                        provider = %entry.provider_name,
                         model = %entry.model_name,
                         error = %e,
                         consecutive_errors = entry.consecutive_errors.load(Ordering::Relaxed),
                         "Fallback driver failed, trying next"
                     );
+                    self.record_exhaustion(entry, &e);
                     last_error = Some(e);
                 }
             }
@@ -249,6 +373,11 @@ impl LlmDriver for FallbackDriver {
 
         for &i in &order {
             let entry = &self.drivers[i];
+
+            if self.is_slot_exhausted(entry) {
+                continue;
+            }
+
             let mut req = request.clone();
             if !entry.model_name.is_empty() {
                 req.model = entry.model_name.clone();
@@ -256,7 +385,7 @@ impl LlmDriver for FallbackDriver {
 
             let start = std::time::Instant::now();
             match entry.driver.stream(req, tx.clone()).await {
-                Ok(response) => {
+                Ok(mut response) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     let new = if prev == 0 {
@@ -266,6 +395,9 @@ impl LlmDriver for FallbackDriver {
                     };
                     entry.ewma_latency_ms.store(new, Ordering::Relaxed);
                     entry.consecutive_errors.store(0, Ordering::Relaxed);
+                    if response.actual_provider.is_none() && !entry.provider_name.is_empty() {
+                        response.actual_provider = Some(entry.provider_name.clone());
+                    }
                     return Ok(response);
                 }
                 Err(e) => {
@@ -279,11 +411,13 @@ impl LlmDriver for FallbackDriver {
                         .store(prev.saturating_add(ERROR_PENALTY_MS), Ordering::Relaxed);
                     warn!(
                         driver_index = i,
+                        provider = %entry.provider_name,
                         model = %entry.model_name,
                         error = %e,
                         consecutive_errors = entry.consecutive_errors.load(Ordering::Relaxed),
                         "Fallback driver (stream) failed, trying next"
                     );
+                    self.record_exhaustion(entry, &e);
                     last_error = Some(e);
                 }
             }
@@ -333,6 +467,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -573,6 +708,7 @@ mod tests {
                             output_tokens: 1,
                             ..Default::default()
                         },
+                        actual_provider: None,
                     })
                 }
             }
@@ -730,5 +866,132 @@ mod tests {
 
         let ewma = driver.drivers[0].ewma_latency_ms.load(Ordering::Relaxed);
         assert_eq!(ewma, u64::MAX, "EWMA should saturate at u64::MAX");
+    }
+
+    // ── #4807 exhaustion-store integration ───────────────────────────
+
+    /// When the shared store reports a slot exhausted, that slot's
+    /// driver must NOT be invoked even though `FallbackDriver`'s health
+    /// view would otherwise prefer it.
+    #[tokio::test]
+    async fn exhausted_slot_is_skipped_via_store() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+        use std::sync::atomic::AtomicUsize;
+        use std::time::{Duration, Instant};
+
+        struct CountingFailDriver(AtomicUsize);
+
+        #[async_trait]
+        impl LlmDriver for CountingFailDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(LlmError::Api {
+                    status: 500,
+                    message: "should not be called".to_string(),
+                    code: None,
+                })
+            }
+        }
+
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::BudgetExceeded,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+
+        let p1_driver = Arc::new(CountingFailDriver(AtomicUsize::new(0)));
+        let p1_calls = Arc::clone(&p1_driver);
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                p1_driver as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(store);
+
+        let resp = fb.complete(test_request()).await.unwrap();
+        assert_eq!(resp.text(), "OK", "p2 should have served the request");
+        assert_eq!(
+            p1_calls.0.load(Ordering::SeqCst),
+            0,
+            "exhausted p1 must NOT be invoked"
+        );
+        // Nit 10: the successful slot's provider name rides along on
+        // the response so downstream billing attributes spend to p2.
+        assert_eq!(resp.actual_provider.as_deref(), Some("p2"));
+    }
+
+    /// A rate-limit / auth / credit failure must mark the slot in the
+    /// shared store so subsequent requests skip it.
+    #[tokio::test]
+    async fn rate_limit_failure_marks_slot_in_store() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+
+        struct RateLimitDriver;
+
+        #[async_trait]
+        impl LlmDriver for RateLimitDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 1,
+                    message: None,
+                })
+            }
+        }
+
+        let store = ProviderExhaustionStore::new();
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(RateLimitDriver) as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(store.clone());
+
+        let resp = fb.complete(test_request()).await.unwrap();
+        assert_eq!(resp.actual_provider.as_deref(), Some("p2"));
+
+        let rec = store.is_exhausted("p1").expect("p1 must be flagged");
+        assert_eq!(rec.reason, ExhaustionReason::RateLimited);
+    }
+
+    /// Slots without a provider name (legacy `with_models`) never
+    /// participate in the store — confirms back-compat for callers that
+    /// haven't migrated.
+    #[tokio::test]
+    async fn empty_provider_name_skips_store_interaction() {
+        use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
+
+        let store = ProviderExhaustionStore::new();
+        let fb = FallbackDriver::with_models(vec![(
+            Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+            "model".to_string(),
+        )])
+        .with_exhaustion_store(store.clone());
+
+        let resp = fb.complete(test_request()).await.unwrap();
+        // No provider name means no actual_provider stamp.
+        assert!(resp.actual_provider.is_none());
+        // And the store stays empty even after the call.
+        assert_eq!(store.live_count(), 0);
     }
 }

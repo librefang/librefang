@@ -117,25 +117,6 @@ mod tests {
     /// validate the URL here — that's the adapter's job at init.
     #[test]
     fn test_channel_proxy_roundtrips() {
-        // Telegram
-        let tg: TelegramConfig = toml::from_str(
-            r#"
-                bot_token_env = "TELEGRAM_BOT_TOKEN"
-                poll_interval_secs = 1
-                proxy = "http://proxy.local:3128"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(tg.proxy.as_deref(), Some("http://proxy.local:3128"));
-        let tg_none: TelegramConfig = toml::from_str(
-            r#"
-                bot_token_env = "TELEGRAM_BOT_TOKEN"
-                poll_interval_secs = 1
-            "#,
-        )
-        .unwrap();
-        assert!(tg_none.proxy.is_none());
-
         // Discord
         let dc: DiscordConfig = toml::from_str(
             r#"
@@ -1065,43 +1046,43 @@ admin_role = "admin"
 
     #[test]
     fn test_one_or_many_single_toml_table() {
-        // Single [channels.telegram] table should parse as OneOrMany with one element
+        // Single [channels.discord] table should parse as OneOrMany with one element
         let toml_str = r#"
-            [channels.telegram]
-            bot_token_env = "MY_TG_TOKEN"
+            [channels.discord]
+            bot_token_env = "MY_DC_TOKEN"
             account_id = "bot1"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.telegram.is_some());
-        assert_eq!(config.channels.telegram.len(), 1);
-        let tg = config.channels.telegram.first().unwrap();
-        assert_eq!(tg.bot_token_env, "MY_TG_TOKEN");
-        assert_eq!(tg.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.discord.is_some());
+        assert_eq!(config.channels.discord.len(), 1);
+        let dc = config.channels.discord.first().unwrap();
+        assert_eq!(dc.bot_token_env, "MY_DC_TOKEN");
+        assert_eq!(dc.account_id.as_deref(), Some("bot1"));
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
-        // [[channels.telegram]] should parse as OneOrMany with multiple elements
+        // [[channels.discord]] should parse as OneOrMany with multiple elements
         let toml_str = r#"
-            [[channels.telegram]]
-            bot_token_env = "TG_TOKEN_1"
+            [[channels.discord]]
+            bot_token_env = "DC_TOKEN_1"
             account_id = "bot1"
             default_agent = "assistant"
 
-            [[channels.telegram]]
-            bot_token_env = "TG_TOKEN_2"
+            [[channels.discord]]
+            bot_token_env = "DC_TOKEN_2"
             account_id = "bot2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.telegram.is_some());
-        assert_eq!(config.channels.telegram.len(), 2);
+        assert!(config.channels.discord.is_some());
+        assert_eq!(config.channels.discord.len(), 2);
 
-        let bots: Vec<_> = config.channels.telegram.iter().collect();
-        assert_eq!(bots[0].bot_token_env, "TG_TOKEN_1");
+        let bots: Vec<_> = config.channels.discord.iter().collect();
+        assert_eq!(bots[0].bot_token_env, "DC_TOKEN_1");
         assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].bot_token_env, "TG_TOKEN_2");
+        assert_eq!(bots[1].bot_token_env, "DC_TOKEN_2");
         assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
@@ -1157,27 +1138,27 @@ admin_role = "admin"
     #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
-        assert!(config.channels.telegram.is_none());
-        assert!(config.channels.telegram.is_empty());
-        assert_eq!(config.channels.telegram.len(), 0);
-        assert!(config.channels.telegram.first().is_none());
-        assert!(config.channels.telegram.as_ref().is_none());
+        assert!(config.channels.discord.is_none());
+        assert!(config.channels.discord.is_empty());
+        assert_eq!(config.channels.discord.len(), 0);
+        assert!(config.channels.discord.first().is_none());
+        assert!(config.channels.discord.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![TelegramConfig::default()]);
+        let single = OneOrMany(vec![DiscordConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<TelegramConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<DiscordConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![TelegramConfig::default(), TelegramConfig::default()]);
+        let multi = OneOrMany(vec![DiscordConfig::default(), DiscordConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<TelegramConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<DiscordConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<TelegramConfig> = OneOrMany::default();
+        let empty: OneOrMany<DiscordConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
@@ -1185,7 +1166,6 @@ admin_role = "admin"
     #[test]
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None
-        assert!(TelegramConfig::default().account_id.is_none());
         assert!(DiscordConfig::default().account_id.is_none());
         assert!(SlackConfig::default().account_id.is_none());
         assert!(WhatsAppConfig::default().account_id.is_none());
@@ -1708,5 +1688,135 @@ admin_role = "admin"
         let debug_field = back.config.get("debug").unwrap();
         assert_eq!(debug_field.field_type, PluginConfigFieldType::Boolean);
         assert_eq!(debug_field.default, Some(serde_json::Value::Bool(false)));
+    }
+
+    // ---------------------------------------------------------------
+    // #5129 — nested `serde(alias)` declarations must stay on the
+    // strict-mode allowlist. Before the fix, schemars' JSON Schema
+    // dropped `alias = "trust_proxy_headers"` on
+    // `TerminalConfig.require_proxy_headers`, so strict_config = true
+    // rejected the legacy spelling even though serde would have
+    // accepted it.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn strict_config_accepts_nested_serde_alias_5129() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            strict_config = true
+
+            [terminal]
+            trust_proxy_headers = true
+            "#,
+        )
+        .expect("toml parse");
+
+        let unknown_top = KernelConfig::detect_unknown_fields(&raw);
+        let unknown_nested = KernelConfig::detect_unknown_nested_fields(&raw);
+        assert!(
+            unknown_top.is_empty(),
+            "top-level rejected: {unknown_top:?}",
+        );
+        assert!(
+            unknown_nested.is_empty(),
+            "nested rejected: {unknown_nested:?} — `trust_proxy_headers` is a serde(alias) for `require_proxy_headers`",
+        );
+
+        // And serde itself must still honour the alias on the way into
+        // the struct — otherwise the allowlist agrees but the value
+        // never lands.
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [terminal]
+            trust_proxy_headers = true
+            "#,
+        )
+        .expect("alias must deserialise");
+        assert!(cfg.terminal.require_proxy_headers);
+    }
+
+    // ---------------------------------------------------------------
+    // #5130 — typos inside repeated tables ([[channels.discord]],
+    // [[mcp_servers]], …) used to be silently dropped because the
+    // strict-mode walker only descended into single-table paths.
+    // `deny_unknown_fields` on the per-element struct catches them at
+    // serde-deserialize time, regardless of repeated-vs-single shape.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn strict_config_rejects_typo_in_repeated_channel_table_5130() {
+        let toml_src = r#"
+            [[channels.discord]]
+            bot_token_env = "DC_TOKEN"
+            # Typo: should be `default_agent`. Before #5130, this
+            # silently deserialised into the struct's Default and the
+            # operator's intent was lost.
+            defaul_agent = "research"
+        "#;
+        let err = toml::from_str::<KernelConfig>(toml_src)
+            .expect_err("typo inside [[channels.discord]] must be rejected by deny_unknown_fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("defaul_agent") || msg.contains("unknown field"),
+            "error must mention the offending field, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn strict_config_rejects_typo_in_repeated_mcp_servers_table_5130() {
+        let toml_src = r#"
+            [[mcp_servers]]
+            name = "filesystem"
+            # Typo: should be `timeout_secs`.
+            timout_secs = 30
+        "#;
+        let err = toml::from_str::<KernelConfig>(toml_src)
+            .expect_err("typo inside [[mcp_servers]] must be rejected by deny_unknown_fields");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timout_secs") || msg.contains("unknown field"),
+            "error must mention the offending field, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn well_formed_repeated_channel_table_still_parses_5130() {
+        // Drift sentinel: deny_unknown_fields must not regress the
+        // happy path. If a future refactor renames a field on
+        // DiscordConfig / SlackConfig / WhatsAppConfig
+        // / MattermostConfig / McpServerConfigEntry without updating
+        // this fixture, the test will fail loudly.
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [[channels.discord]]
+            bot_token_env = "DISCORD_TOKEN"
+            default_agent = "research"
+
+            [[channels.slack]]
+            app_token_env = "SLACK_APP"
+            bot_token_env = "SLACK_BOT"
+
+            [[channels.whatsapp]]
+            access_token_env = "WA_TOKEN"
+            verify_token_env = "WA_VERIFY"
+            phone_number_id = "123"
+            webhook_port = 8443
+            gateway_url_env = "WA_GATEWAY"
+
+            [[channels.mattermost]]
+            server_url = "https://mm.example.com"
+            token_env = "MM_TOKEN"
+
+            [[mcp_servers]]
+            name = "filesystem"
+            timeout_secs = 30
+            "#,
+        )
+        .expect("well-formed repeated tables must still parse with deny_unknown_fields");
+        assert_eq!(cfg.channels.discord.len(), 1);
+        assert_eq!(cfg.channels.slack.len(), 1);
+        assert_eq!(cfg.channels.whatsapp.len(), 1);
+        assert_eq!(cfg.channels.mattermost.len(), 1);
+        assert_eq!(cfg.mcp_servers.len(), 1);
     }
 }

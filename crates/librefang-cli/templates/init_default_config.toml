@@ -166,10 +166,16 @@ debounce_ms = 500
 # stream_thinking = false
 
 # ── Channels (uncomment to enable) ───────────────────────────
-# [channels.telegram]
-# bot_token_env = "TELEGRAM_BOT_TOKEN"
-# default_agent = "assistant"
-# allowed_users = []
+# Telegram is provided by a Python sidecar adapter. Declare it as a
+# [[sidecar_channels]] block; the in-process channel was removed in #5241.
+# [[sidecar_channels]]
+# name = "telegram"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.telegram"]
+# channel_type = "telegram"
+# [sidecar_channels.env]
+# TELEGRAM_BOT_TOKEN = "..."
+# # ALLOWED_USERS = "111,@alice"
 
 # [channels.discord]
 # bot_token_env = "DISCORD_BOT_TOKEN"

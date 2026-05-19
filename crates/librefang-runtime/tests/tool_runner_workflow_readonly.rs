@@ -238,18 +238,19 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
 }
 
 fn sample_run() -> WorkflowRunSummary {
-    WorkflowRunSummary {
-        run_id: "11111111-1111-1111-1111-111111111111".to_string(),
-        workflow_id: "22222222-2222-2222-2222-222222222222".to_string(),
-        workflow_name: "bug-triage".to_string(),
-        state: "completed".to_string(),
-        started_at: "2026-01-01T00:00:00+00:00".to_string(),
-        completed_at: Some("2026-01-01T00:01:00+00:00".to_string()),
-        output: Some("triage complete".to_string()),
-        error: None,
-        step_count: 2,
-        last_step_name: Some("summarise".to_string()),
-    }
+    WorkflowRunSummary::new(
+        "11111111-1111-1111-1111-111111111111".to_string(),
+        "22222222-2222-2222-2222-222222222222".to_string(),
+        "bug-triage".to_string(),
+        "completed".to_string(),
+        "2026-01-01T00:00:00+00:00".to_string(),
+        Some("2026-01-01T00:01:00+00:00".to_string()),
+        Some("triage complete".to_string()),
+        None,
+        2,
+        Some("summarise".to_string()),
+        vec![],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -302,24 +303,27 @@ fn test_workflow_status_definition_schema() {
 async fn test_workflow_list_returns_sorted_by_name() {
     // Supply 3 workflows in reverse alphabetical order — output must be sorted.
     let workflows = vec![
-        WorkflowSummary {
-            id: "c".to_string(),
-            name: "zebra-review".to_string(),
-            description: "Last alphabetically".to_string(),
-            step_count: 1,
-        },
-        WorkflowSummary {
-            id: "a".to_string(),
-            name: "alpha-pipeline".to_string(),
-            description: "First alphabetically".to_string(),
-            step_count: 5,
-        },
-        WorkflowSummary {
-            id: "b".to_string(),
-            name: "middle-flow".to_string(),
-            description: "Middle".to_string(),
-            step_count: 3,
-        },
+        WorkflowSummary::new(
+            "c".to_string(),
+            "zebra-review".to_string(),
+            "Last alphabetically".to_string(),
+            1,
+            false,
+        ),
+        WorkflowSummary::new(
+            "a".to_string(),
+            "alpha-pipeline".to_string(),
+            "First alphabetically".to_string(),
+            5,
+            false,
+        ),
+        WorkflowSummary::new(
+            "b".to_string(),
+            "middle-flow".to_string(),
+            "Middle".to_string(),
+            3,
+            false,
+        ),
     ];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
     let ctx = make_ctx(&kernel);
@@ -339,12 +343,13 @@ async fn test_workflow_list_returns_sorted_by_name() {
 
 #[tokio::test]
 async fn test_workflow_list_fields_present() {
-    let workflows = vec![WorkflowSummary {
-        id: "aabbccdd-0000-0000-0000-000000000000".to_string(),
-        name: "code-review".to_string(),
-        description: "Automated code review pipeline".to_string(),
-        step_count: 4,
-    }];
+    let workflows = vec![WorkflowSummary::new(
+        "aabbccdd-0000-0000-0000-000000000000".to_string(),
+        "code-review".to_string(),
+        "Automated code review pipeline".to_string(),
+        4,
+        true,
+    )];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
     let ctx = make_ctx(&kernel);
 
@@ -379,18 +384,20 @@ async fn test_workflow_list_empty() {
 #[tokio::test]
 async fn test_workflow_list_output_is_deterministic() {
     let workflows = vec![
-        WorkflowSummary {
-            id: "1".to_string(),
-            name: "apple".to_string(),
-            description: "d1".to_string(),
-            step_count: 1,
-        },
-        WorkflowSummary {
-            id: "2".to_string(),
-            name: "banana".to_string(),
-            description: "d2".to_string(),
-            step_count: 2,
-        },
+        WorkflowSummary::new(
+            "1".to_string(),
+            "apple".to_string(),
+            "d1".to_string(),
+            1,
+            false,
+        ),
+        WorkflowSummary::new(
+            "2".to_string(),
+            "banana".to_string(),
+            "d2".to_string(),
+            2,
+            false,
+        ),
     ];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
     let ctx = make_ctx(&kernel);

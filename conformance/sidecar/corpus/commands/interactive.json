@@ -1,0 +1,15 @@
+{
+  "method": "interactive",
+  "params": {
+    "channel_id": "c1",
+    "message": {
+      "text": "pick",
+      "buttons": [
+        [
+          { "label": "Yes", "action": "y" },
+          { "label": "Docs", "action": "d", "url": "https://x" }
+        ]
+      ]
+    }
+  }
+}

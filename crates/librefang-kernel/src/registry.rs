@@ -461,6 +461,24 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's schedule mode (Reactive / Periodic / Proactive /
+    /// Continuous). Mutates the manifest only — the kernel-level wrapper
+    /// `LibreFangKernel::set_agent_schedule` is what callers should use to
+    /// also stop the prior background loop and start the new one so the
+    /// runtime actually reflects the change without a daemon restart.
+    pub fn update_schedule(
+        &self,
+        id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.schedule = schedule;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
@@ -577,6 +595,13 @@ impl AgentRegistry {
 
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
+        // #4980 nit: reject renames into the reserved `_operator:`
+        // namespace — synthetic operator-node step-result names would
+        // collide with the real agent and make run history ambiguous.
+        // `spawn_agent_inner` enforces the same rule at create time;
+        // the rename path needs its own gate because it bypasses spawn.
+        librefang_types::agent::validate_agent_name(&new_name)?;
+
         // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
         match self.name_index.entry(new_name.clone()) {
             Entry::Occupied(_) => {

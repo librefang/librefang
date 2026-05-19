@@ -1476,7 +1476,7 @@ impl ChannelBridgeHandle for EventBusHandle {
 }
 
 /// Mock adapter that overrides `notification_recipients()` to expose a
-/// configured operator user, mirroring how `TelegramAdapter` exposes its
+/// configured operator user, mirroring how a sidecar adapter exposes its
 /// `allowed_users`. Optionally carries an `account_id` so the bridge's
 /// approval scoping (#4985) can resolve the right router channel key for
 /// multi-bot configurations.
@@ -2042,10 +2042,10 @@ async fn test_approval_listener_does_not_fall_back_from_qualified_to_bare_key() 
 }
 
 /// PR #4994 follow-up: the scoping mechanism is channel-type-agnostic.
-/// Even though `TelegramAdapter` is the only adapter that overrides
-/// `account_id()` today, the listener must build the right key for any
-/// adapter that does. This test uses a mock adapter on `ChannelType::Discord`
-/// with `account_id = Some("guild-1")` and asserts the qualified key
+/// Any adapter that overrides `account_id()` must produce a qualified key;
+/// the listener must build the right key for any such adapter. This test
+/// uses a mock adapter on `ChannelType::Discord` with
+/// `account_id = Some("guild-1")` and asserts the qualified key
 /// `discord:guild-1` is the one that gates delivery.
 #[tokio::test]
 async fn test_approval_listener_scopes_to_non_telegram_multibot_adapter() {

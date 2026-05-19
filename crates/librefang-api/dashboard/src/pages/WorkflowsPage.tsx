@@ -9,6 +9,7 @@ import {
   type TemplateParameter,
   type WorkflowItem,
   type WorkflowRunItem,
+  type WorkflowRunInput,
   type WorkflowStep,
   type WorkflowStepResult,
   type WorkflowTemplate,
@@ -433,38 +434,28 @@ export function WorkflowsPage() {
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
 
-  // Build the effective input string for a run.
+  // Build the effective input for a run.
   //
-  // **Important contract caveat.** The kernel's workflow templating
-  // only substitutes `{{input}}` (the run's input field) plus the
-  // names of prior step outputs (per a step's `output_var`). It does
-  // NOT bind arbitrary `{{var}}` placeholders that this UI extracts
-  // from `prompt_template` strings — those exist only as a UX hint
-  // for the user. So the values typed into the per-parameter form
-  // fields below are NOT resolved into `{{topic}}` etc. directly;
-  // they are concatenated with the free-text textarea and the whole
-  // block is delivered to the kernel as `{{input}}`.
-  //
-  // Practical guidance for prompt-template authors using this form:
-  // reference `{{input}}` (not `{{topic}}`) in your steps and parse
-  // the labelled key/value lines yourself, or wait for #4835 (a
-  // structured run-input parameter map on the backend) to land.
-  const buildRunInput = useCallback((): string => {
+  // When the workflow declares `{{var}}` placeholders, the per-parameter
+  // form values are sent as a JSON object so the kernel's
+  // `seed_input_vars_from_json` (#4982) binds each `{{name}}` to the
+  // value the user typed — a step prompt like "Brainstorm: {{challenge}}"
+  // resolves the challenge text instead of leaving the literal
+  // placeholder. The free-text textarea (additional context) rides along
+  // under the `input` key. When there are no detected params, the plain
+  // free-text string is sent unchanged so `{{input}}` keeps its original
+  // whole-blob meaning (backward-compatible).
+  const buildRunInput = useCallback((): WorkflowRunInput => {
     const hasParams = detectedParams.length > 0 &&
       Object.values(paramValues).some((v) => v.trim() !== "");
     if (!hasParams) return runInput;
-    // Labelled `key: value` lines are easier for an LLM to parse out
-    // of the resulting `{{input}}` block than a JSON.stringify dump,
-    // which often gets confused with code in the prompt context.
-    const lines: string[] = [];
+    const obj: Record<string, string> = {};
     for (const p of detectedParams) {
       const val = paramValues[p.name]?.trim() ?? "";
-      if (val) lines.push(`${p.name}: ${val}`);
+      if (val) obj[p.name] = val;
     }
-    const parts: string[] = [];
-    if (lines.length > 0) parts.push(lines.join("\n"));
-    if (runInput.trim()) parts.push(runInput.trim());
-    return parts.join("\n\n");
+    if (runInput.trim()) obj.input = runInput.trim();
+    return obj;
   }, [detectedParams, paramValues, runInput]);
 
   const handleRun = async () => {

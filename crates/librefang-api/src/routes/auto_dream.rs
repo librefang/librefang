@@ -91,6 +91,7 @@ pub async fn auto_dream_abort(
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetEnabledRequest {
     pub enabled: bool,
 }

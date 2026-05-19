@@ -153,6 +153,7 @@ pub async fn pairing_request(
 /// is rejected up front rather than silently degraded to an empty string
 /// that the kernel pairing manager has to re-validate.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairingCompleteRequest {
     pub token: String,
     #[serde(default = "default_unknown")]

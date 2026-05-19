@@ -798,7 +798,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 }
             };
         }
-        ch!(telegram);
         ch!(discord);
         ch!(slack);
         ch!(whatsapp);
@@ -835,7 +834,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(qq);
         ch!(discourse);
         ch!(gitter);
-        ch!(ntfy);
         ch!(gotify);
         ch!(webhook);
         ch!(linkedin);
@@ -2176,12 +2174,15 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         // ── Newly exposed collection-typed sections (#4678) ──
         {"key": "taint_rules", "struct_field": "taint_rules"},
         {"key": "fallback_providers", "struct_field": "fallback_providers"},
+        {"key": "credential_pools", "struct_field": "credential_pools"},
         {"key": "sidecar_channels", "struct_field": "sidecar_channels"},
         {"key": "provider_urls", "struct_field": "provider_urls"},
         {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
         {"key": "provider_regions", "struct_field": "provider_regions"},
         {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
-        {"key": "tool_timeouts", "struct_field": "tool_timeouts"}
+        {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
+        // Background autonomous-loop executor knobs (#5168).
+        {"key": "background", "struct_field": "background"}
     ])
 }
 
@@ -2697,8 +2698,13 @@ fn is_writable_config_path(path: &str) -> bool {
         // fallback_providers, taint_rules) are intentionally NOT here:
         // their items have nested fields (e.g. SidecarChannel.env) that
         // SCRUB_SUFFIXES — which only inspects the dotted path string —
-        // cannot police inside a wholesale JSON payload. Those sections
-        // remain edit-on-disk for now (round-4 review of #4678).
+        // cannot police inside a wholesale JSON payload.
+        // `sidecar_channels` writes go through the dedicated
+        // `POST /api/channels/sidecar/{name}/configure` endpoint, which
+        // validates against the cached `--describe` schema and splits
+        // secrets vs non-secrets across `secrets.env` and `config.toml`.
+        // `fallback_providers` / `taint_rules` remain edit-on-disk for
+        // now (round-4 review of #4678).
         "provider_urls",
         "provider_regions",
         "provider_proxy_urls",
@@ -3452,6 +3458,9 @@ url = "https://search.example.com"
         // fallback_providers, taint_rules) reject whole-blob writes:
         // their items have nested fields (env maps, api_key_env) that
         // SCRUB can't police inside a wholesale JSON payload.
+        // `sidecar_channels` has its own typed write endpoint
+        // (`POST /api/channels/sidecar/{name}/configure`); the bare
+        // path stays closed here.
         assert!(super::is_writable_config_path("provider_urls"));
         assert!(super::is_writable_config_path("provider_regions"));
         assert!(super::is_writable_config_path(

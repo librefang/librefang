@@ -697,6 +697,21 @@ trusted_manifest_signers   = []
 
 ---
 
+### Background autonomous-loop executor
+
+Tunes the rate-limit circuit breaker that stops a continuous / periodic background loop from re-firing forever when the LLM provider is rate-limited or quota-exhausted (issue #5168). A single non-rate-limited tick resets the counter, so transient blips never permanently park a healthy agent.
+
+```toml
+[background]
+max_consecutive_rate_limits = 5
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_consecutive_rate_limits` | u32 | `5` | Consecutive rate-limited ticks before the loop self-terminates. `0` disables the breaker entirely (loop re-fires forever — only safe against a provider with no quota). |
+
+---
+
 ### Dashboard authentication (top-level)
 
 Reach the dashboard from a non-loopback address? Set a username/password and BossFang will hash the password to Argon2id automatically on first boot.

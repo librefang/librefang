@@ -757,6 +757,7 @@ impl QwenCodeDriver {
                     output_tokens: usage.output_tokens,
                     ..Default::default()
                 },
+                actual_provider: None,
             });
         }
 
@@ -773,6 +774,7 @@ impl QwenCodeDriver {
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage,
+            actual_provider: None,
         })
     }
 
@@ -988,6 +990,7 @@ impl QwenCodeDriver {
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage: final_usage,
+            actual_provider: None,
         })
     }
 }
