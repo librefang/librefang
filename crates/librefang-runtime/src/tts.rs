@@ -181,7 +181,13 @@ impl TtsEngine {
             std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
 
         let voice_id = voice_override.unwrap_or(&self.config.elevenlabs.voice_id);
-        let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}", voice_id);
+        // `output_format` is config-driven (default `opus_48000_32`). Required
+        // for WhatsApp voice-note compatibility — see TtsElevenLabsConfig docs.
+        let output_format = self.config.elevenlabs.output_format.as_str();
+        let url = format!(
+            "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format={}",
+            voice_id, output_format,
+        );
 
         let body = serde_json::json!({
             "text": text,
@@ -235,9 +241,17 @@ impl TtsEngine {
         let word_count = text.split_whitespace().count();
         let duration_ms = (word_count as u64 * 400).max(500);
 
+        // Derive container/codec label from the ElevenLabs output_format prefix
+        // (e.g. `opus_48000_32` → "opus", `mp3_44100_128` → "mp3", `pcm_16000` → "pcm").
+        let format = output_format
+            .split('_')
+            .next()
+            .unwrap_or("opus")
+            .to_string();
+
         Ok(TtsResult {
             audio_data: audio_data.to_vec(),
-            format: "mp3".to_string(),
+            format,
             provider: "elevenlabs".to_string(),
             duration_estimate_ms: duration_ms,
         })
@@ -316,6 +330,7 @@ mod tests {
         assert_eq!(config.openai.speed, 1.0);
         assert_eq!(config.elevenlabs.voice_id, "21m00Tcm4TlvDq8ikWAM");
         assert_eq!(config.elevenlabs.model_id, "eleven_monolingual_v1");
+        assert_eq!(config.elevenlabs.output_format, "opus_48000_32");
         assert_eq!(config.google.voice, "en-US-Standard-F");
         assert_eq!(config.google.language_code, "en-US");
         assert_eq!(config.google.speaking_rate, 1.0);

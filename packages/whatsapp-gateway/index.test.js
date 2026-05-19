@@ -14,6 +14,7 @@ const MOCK_LIBREFANG_PORT = 24547;
 process.env.LIBREFANG_URL = `http://127.0.0.1:${MOCK_LIBREFANG_PORT}`;
 
 const {
+  detectAudioMime,
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
@@ -1538,5 +1539,49 @@ describe('ownerIntentsRelay', () => {
     assert.equal(re.test('Sag mir was du denkst'), false);
     assert.equal(re.test('sag mir bitte'), false);
     assert.equal(re.test('sage uns die Wahrheit'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectAudioMime — magic-byte sniff for sendAudio buffers.
+// Guards against "Unsupported content type in Web mode" on Beeper/mautrix-whatsapp
+// caused by MP3 bytes labelled `audio/ogg; codecs=opus`.
+// ---------------------------------------------------------------------------
+describe('detectAudioMime', () => {
+  const mk = (head, tailLen = 0) => Buffer.concat([Buffer.from(head, 'binary'), Buffer.alloc(tailLen)]);
+
+  it('identifies Ogg/Opus by "OggS" magic', () => {
+    assert.equal(detectAudioMime(mk('OggS', 100)), 'audio/ogg; codecs=opus');
+  });
+
+  it('identifies MP3 by ID3 tag', () => {
+    assert.equal(detectAudioMime(mk('ID3\x04\x00', 100)), 'audio/mpeg');
+  });
+
+  it('identifies MP3 by MPEG frame sync (0xFF 0xFB ...)', () => {
+    const buf = Buffer.from([0xff, 0xfb, 0x90, 0x44, 0x00, 0x00]);
+    assert.equal(detectAudioMime(buf), 'audio/mpeg');
+  });
+
+  it('identifies WAV by "RIFF"', () => {
+    assert.equal(detectAudioMime(mk('RIFF\x00\x00\x00\x00WAVE', 100)), 'audio/wav');
+  });
+
+  it('identifies FLAC by "fLaC"', () => {
+    assert.equal(detectAudioMime(mk('fLaC', 100)), 'audio/flac');
+  });
+
+  it('identifies MP4/M4A by "ftyp" at offset 4', () => {
+    const buf = Buffer.concat([Buffer.from([0,0,0,32]), Buffer.from('ftypM4A ', 'ascii'), Buffer.alloc(100)]);
+    assert.equal(detectAudioMime(buf), 'audio/mp4');
+  });
+
+  it('returns octet-stream for unknown bytes', () => {
+    assert.equal(detectAudioMime(Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00])), 'application/octet-stream');
+  });
+
+  it('returns octet-stream for non-Buffer or undersized input', () => {
+    assert.equal(detectAudioMime(null), 'application/octet-stream');
+    assert.equal(detectAudioMime(Buffer.from([1, 2])), 'application/octet-stream');
   });
 });
