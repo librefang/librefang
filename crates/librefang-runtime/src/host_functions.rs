@@ -803,9 +803,11 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             json!({"ok": val})
         }
         Ok(None) => {
-            // Upgrade-compat fallback: pre-#5070 WASM rows were stored as
-            // (shared_uuid, "{agent_id}:{key}") with manual key prefixing.
-            // Retry the old format in the shared namespace.
+            // TODO(#5070-cleanup): On legacy fallback hit, migrate the row to
+            // the agent-scoped namespace (re-store via
+            // memory_store(key, val, Some(agent_id), None)) and delete the
+            // legacy shared-namespace row. Currently the old row is left in
+            // place, so repeated fallbacks keep hitting it.
             let legacy_key = format!("{}:{key}", state.agent_id);
             match kernel.memory_recall(&legacy_key, None, None) {
                 Ok(Some(val)) => {

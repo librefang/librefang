@@ -1404,15 +1404,23 @@ impl LibreFangKernel {
         use librefang_types::approval::ApprovalDecision;
         use librefang_types::tool::{ToolExecutionStatus, ToolResult};
 
-        let agent_id = match uuid::Uuid::parse_str(&deferred.agent_id) {
-            Ok(u) => AgentId(u),
-            Err(e) => {
+        let agent_id = match deferred.agent_id.as_str() {
+            "" => {
                 warn!(
-                    "handle_approval_resolution: invalid agent_id '{}': {e}, falling back to shared_memory_agent_id",
-                    deferred.agent_id
+                    "handle_approval_resolution: empty agent_id in deferred tool '{}', skipping resolution",
+                    deferred.tool_name
                 );
-                shared_memory_agent_id()
+                return;
             }
+            s => match uuid::Uuid::parse_str(s) {
+                Ok(u) => AgentId(u),
+                Err(e) => {
+                    warn!(
+                        "handle_approval_resolution: invalid agent_id '{s}': {e}, skipping resolution"
+                    );
+                    return;
+                }
+            },
         };
 
         let result = match &decision {
@@ -1473,9 +1481,13 @@ impl LibreFangKernel {
             // Deferred resume path has no live agent-loop context, so the
             // lazy-load meta-tools fall back to the builtin catalog.
             available_tools: None,
-            caller_agent_id: uuid::Uuid::parse_str(&deferred.agent_id)
-                .ok()
-                .map(|_| deferred.agent_id.as_str()),
+            caller_agent_id: if deferred.agent_id.is_empty() {
+                None
+            } else {
+                uuid::Uuid::parse_str(&deferred.agent_id)
+                    .ok()
+                    .map(|_| deferred.agent_id.as_str())
+            },
             skill_registry: Some(skill_snapshot),
             // Deferred tools have already passed the approval gate; skill
             // allowlist is not available here so we skip the check (None).

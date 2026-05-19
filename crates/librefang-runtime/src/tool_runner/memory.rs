@@ -7,15 +7,13 @@ use std::sync::Arc;
 pub(super) fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    // #5139: enforce the per-user write ACL BEFORE touching the substrate.
-    // `peer_id` is the attributed sender, also used as the channel-derived
-    // platform id for the ACL resolver.
     enforce_memory_acl(
         kernel,
         peer_id,
@@ -23,7 +21,7 @@ pub(super) fn tool_memory_store(
         MemoryAclOp::Write,
         &kv_acl_namespace(peer_id),
     )?;
-    kh.memory_store(key, value.clone(), None, peer_id)
+    kh.memory_store(key, value.clone(), caller_agent_id, peer_id)
         .map_err(|e| e.to_string())?;
     Ok(format!("Stored value under key '{key}'."))
 }
@@ -31,12 +29,12 @@ pub(super) fn tool_memory_store(
 pub(super) fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    // #5139: enforce the per-user read ACL before recall.
     enforce_memory_acl(
         kernel,
         peer_id,
@@ -45,7 +43,7 @@ pub(super) fn tool_memory_recall(
         &kv_acl_namespace(peer_id),
     )?;
     match kh
-        .memory_recall(key, None, peer_id)
+        .memory_recall(key, caller_agent_id, peer_id)
         .map_err(|e| e.to_string())?
     {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
@@ -55,12 +53,11 @@ pub(super) fn tool_memory_recall(
 
 pub(super) fn tool_memory_list(
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
     peer_id: Option<&str>,
     channel: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    // #5139: enumerating a namespace's keys is a read; gate it the same way
-    // as recall so a restricted user cannot probe another scope's key set.
     enforce_memory_acl(
         kernel,
         peer_id,
@@ -68,9 +65,11 @@ pub(super) fn tool_memory_list(
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
     )?;
-    let keys = kh.memory_list(None, peer_id).map_err(|e| e.to_string())?;
+    let keys = kh
+        .memory_list(caller_agent_id, peer_id)
+        .map_err(|e| e.to_string())?;
     if keys.is_empty() {
-        return Ok("No entries found in shared memory.".to_string());
+        return Ok("No entries found in this agent's memory.".to_string());
     }
     Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
 }
