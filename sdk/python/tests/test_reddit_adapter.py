@@ -413,18 +413,54 @@ def test_post_comment_basic_shape(monkeypatch):
 def test_post_comment_chunks_join_with_separator(monkeypatch):
     """Reddit only allows one reply per parent — chunks join with
     CHUNK_JOIN rather than being posted as multiple comments
-    (matches Rust adapter)."""
+    (matches Rust adapter). Text is shaped so the natural newline
+    split lands well within the truncation window, so the separator
+    survives the post-join MAX_MESSAGE_LEN cap."""
     a = _adapter()
     a._cached_token = ("tok", ra.time.monotonic() + 600)
     fake = _FakeUrlopen([
         (200, {"json": {"errors": [], "data": {"things": []}}}),
     ])
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
-    long_text = ("x" * ra.MAX_MESSAGE_LEN) + "\n" + ("y" * 100)
+    # 1000 a's + \n + 10000 b's → splits at the newline (offset 1000)
+    # so the separator lands at index 1000 in the joined body, well
+    # inside the 9985-char keep window after the post-join truncate.
+    long_text = ("a" * 1000) + "\n" + ("b" * ra.MAX_MESSAGE_LEN)
     a._post_comment("t1_xyz", long_text)
     assert len(fake.calls) == 1, "must be one POST regardless of chunk count"
     form = _form(fake.calls[0]["body_raw"])
-    assert ra.CHUNK_JOIN in form["text"]
+    assert ra.CHUNK_JOIN in form["text"], (
+        "chunked text must keep the visual separator between chunks"
+    )
+    assert len(form["text"]) <= ra.MAX_MESSAGE_LEN, (
+        "post-join body must still fit Reddit's hard cap"
+    )
+
+
+def test_post_comment_truncates_to_max_when_joined_overflows(monkeypatch):
+    """Reddit rejects > MAX_MESSAGE_LEN comments with a 400. After
+    joining chunks with CHUNK_JOIN the body can overflow even when
+    each individual chunk was under the cap — the Rust adapter
+    historically posted without the post-join cap and 400'd on any
+    text > ~MAX_MESSAGE_LEN. The sidecar truncates with a visible
+    marker so the operator notices in the posted comment."""
+    a = _adapter()
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (200, {"json": {"errors": [], "data": {"things": []}}}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    # Two full chunks: 2 * MAX_MESSAGE_LEN + CHUNK_JOIN ≫ MAX_MESSAGE_LEN.
+    overflowing = ("a" * ra.MAX_MESSAGE_LEN) + "\n" + ("b" * ra.MAX_MESSAGE_LEN)
+    a._post_comment("t1_xyz", overflowing)
+    form = _form(fake.calls[0]["body_raw"])
+    assert len(form["text"]) <= ra.MAX_MESSAGE_LEN, (
+        f"final body must fit in Reddit cap; got {len(form['text'])}"
+    )
+    assert form["text"].endswith(ra.TRUNCATION_MARKER.lstrip("\n")) or \
+        form["text"].endswith(ra.TRUNCATION_MARKER), (
+        "truncation marker must be present so the operator notices"
+    )
 
 
 def test_post_comment_missing_fullname_raises():

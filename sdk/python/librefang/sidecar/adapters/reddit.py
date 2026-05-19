@@ -101,6 +101,10 @@ SEEN_COMMENTS_EVICT = 5000
 # one comment per parent, so multiple chunks become one comment with
 # clear visual separators.
 CHUNK_JOIN = "\n\n---\n\n"
+# Marker appended when a reply is truncated to fit Reddit's 10 000-char
+# comment cap. Visible to the operator in the posted comment so an
+# overlong agent response is obvious rather than silently mangled.
+TRUNCATION_MARKER = "\n\n[…truncated]"
 # Reddit requires a unique, descriptive UA per its API guidelines.
 DEFAULT_USER_AGENT = "librefang:sidecar (by /u/librefang-bot)"
 
@@ -495,8 +499,11 @@ class RedditAdapter(SidecarAdapter):
 
     def _post_comment(self, parent_fullname: str, text: str) -> None:
         """Post a single comment reply. Chunks are joined with
-        ``CHUNK_JOIN`` because Reddit only allows one reply per parent
-        (mirrors the Rust adapter)."""
+        ``CHUNK_JOIN`` because Reddit only allows one reply per parent;
+        the final joined body is hard-capped at ``MAX_MESSAGE_LEN`` so
+        a long agent response can't 400 the API. The Rust adapter
+        joined without the post-join cap and would 400 on any text
+        longer than ~10 000 chars."""
         if not parent_fullname:
             raise RuntimeError(
                 "reddit on_send: missing parent fullname "
@@ -505,6 +512,9 @@ class RedditAdapter(SidecarAdapter):
             )
         chunks = _split_message(text, MAX_MESSAGE_LEN)
         full_text = CHUNK_JOIN.join(chunks)
+        if len(full_text) > MAX_MESSAGE_LEN:
+            keep = MAX_MESSAGE_LEN - len(TRUNCATION_MARKER)
+            full_text = full_text[:keep].rstrip() + TRUNCATION_MARKER
         token = self._get_token()
         url = f"{self.api_base}/api/comment"
         body = urllib.parse.urlencode({
