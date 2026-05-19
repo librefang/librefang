@@ -23,7 +23,6 @@
 bluesky
 dingtalk
 discord
-discourse
 email
 feishu
 flock
@@ -33,15 +32,10 @@ guilded
 irc
 keybase
 line
-linkedin
-mastodon
 matrix
 mattermost
-messenger
-mqtt
 mumble
 nextcloud
-nostr
 pumble
 qq
 reddit
@@ -54,7 +48,6 @@ teams
 threema
 twist
 twitch
-viber
 voice
 webex
 webhook

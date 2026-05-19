@@ -1115,38 +1115,6 @@ webhook_port = 8450
 | `webhook_port` | u16 | `8450` | 入站 Webhook 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-webhook_port = 8451
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | 存放 Viber Bot 认证令牌的环境变量。 |
-| `webhook_url` | string | `""` | Viber Webhook 端点的公网 URL。 |
-| `webhook_port` | u16 | `8451` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-webhook_port = 8452
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | 存放 Facebook 页面访问令牌的环境变量。 |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `webhook_port` | u16 | `8452` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.reddit]`
 
 ```toml
@@ -1167,19 +1135,24 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon 已迁移为 sidecar 专用，原 `[channels.mastodon]` 配置块不再被接受。请以 `[[sidecar_channels]]` 形式声明：
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
+# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `instance_url` | string | `""` | Mastodon 实例 URL（例如 `"https://mastodon.social"`）。 |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | 存放 Mastodon 访问令牌的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`MASTODON_ACCESS_TOKEN`（OAuth bearer）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Mastodon 表单时会自动写入。
 
 #### `[channels.bluesky]`
 
@@ -1287,20 +1260,6 @@ webhook_port = 8454
 | `threema_id` | string | `""` | Threema Gateway ID。 |
 | `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
 | `webhook_port` | u16 | `8454` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | 存放 Nostr 私钥（nsec 或十六进制格式）的环境变量。 |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | 要连接的 Nostr 中继 WebSocket URL 列表。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.webex]`
@@ -1411,24 +1370,6 @@ webhook_port = 8457
 | `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `base_url` | string | `""` | Discourse 论坛基础 URL。 |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | 存放 Discourse API Key 的环境变量。 |
-| `api_username` | string | `"system"` | Discourse API 用户名。 |
-| `categories` | list of strings | `[]` | 要监控的分类标识（slug）。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.gitter]`
 
 ```toml
@@ -1490,20 +1431,6 @@ listen_port = 8460
 | `secret_env` | string | `"WEBHOOK_SECRET"` | 存放用于验证入站 Webhook 的 HMAC 签名密钥的环境变量。 |
 | `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
 | `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | 存放 LinkedIn OAuth2 访问令牌的环境变量。 |
-| `organization_id` | string | `""` | LinkedIn 组织 ID，用于消息收发。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.qq]`
@@ -2880,9 +2807,6 @@ max_versions_per_agent = 50
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
 | `LINE_CHANNEL_SECRET` | LINE | LINE Channel Secret。 |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE Channel Access Token。 |
-| `VIBER_AUTH_TOKEN` | Viber | Viber Bot 认证令牌。 |
-| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook 页面访问令牌。 |
-| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook 验证令牌。 |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit 应用客户端密钥。 |
 | `REDDIT_PASSWORD` | Reddit | Reddit Bot 账号密码。 |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon 访问令牌。 |
@@ -2893,7 +2817,6 @@ max_versions_per_agent = 50
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded Bot 令牌。 |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase 纸钥匙。 |
 | `THREEMA_SECRET` | Threema | Threema Gateway API 密钥。 |
-| `NOSTR_PRIVATE_KEY` | Nostr | Nostr 私钥（nsec 或十六进制格式）。 |
 | `WEBEX_BOT_TOKEN` | Webex | Webex Bot 令牌。 |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble Bot 令牌。 |
 | `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
@@ -2903,13 +2826,11 @@ max_versions_per_agent = 50
 | `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（stream 模式）。 |
 | `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌（webhook 模式）。 |
 | `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥（webhook 模式）。 |
-| `DISCOURSE_API_KEY` | Discourse | Discourse API Key。 |
 | `GITTER_TOKEN` | Gitter | Gitter 认证令牌。 |
 | `NTFY_TOKEN` | ntfy | ntfy 认证令牌（公共主题可选）。 |
 | `GOTIFY_APP_TOKEN` | Gotify | Gotify 应用令牌（发送）。 |
 | `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify 客户端令牌（接收）。 |
 | `WEBHOOK_SECRET` | Webhook | 用于 Webhook 验证的 HMAC 签名密钥。 |
-| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 访问令牌。 |
 
 ---
 
@@ -2937,8 +2858,6 @@ max_versions_per_agent = 50
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | LINE | `access_token_env` |
-| Viber | `auth_token_env` |
-| Messenger | `page_token_env` |
 | Reddit | `client_secret_env` |
 | Mastodon | `access_token_env` |
 | Bluesky | `app_password_env` |
@@ -2948,19 +2867,16 @@ max_versions_per_agent = 50
 | Guilded | `bot_token_env` |
 | Keybase | `paperkey_env` |
 | Threema | `secret_env` |
-| Nostr | `private_key_env` |
 | Webex | `bot_token_env` |
 | Pumble | `bot_token_env` |
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
 | DingTalk | `app_key_env`（stream）或 `access_token_env`（webhook） |
-| Discourse | `api_key_env` |
 | Gitter | `token_env` |
 | ntfy | `token_env`（仅当 `token_env` 非空时；公共主题无需认证） |
 | Gotify | `app_token_env` |
 | Webhook | `secret_env` |
-| LinkedIn | `access_token_env` |
 
 对于**网页搜索提供商**，校验器检查：
 

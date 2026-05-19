@@ -776,43 +776,6 @@
       }
     },
     {
-      "id": "discourse",
-      "name": "Discourse",
-      "description": "Discourse forum adapter for posting topics and replies via the Discourse API",
-      "category": "developer",
-      "icon": "lucide:message-circle",
-      "i18n": {
-        "zh": {
-          "name": "Discourse",
-          "description": "Discourse 论坛适配器，通过 Discourse API 发布主题和回复"
-        },
-        "zh-TW": {
-          "name": "Discourse",
-          "description": "Discourse 論壇適配器，透過 Discourse API 發布主題和回覆"
-        },
-        "ja": {
-          "name": "Discourse",
-          "description": "Discourseフォーラムアダプター、Discourse APIを介したトピックと返信の投稿"
-        },
-        "ko": {
-          "name": "Discourse",
-          "description": "Discourse 포럼 어댑터, Discourse API를 통한 주제 및 답글 게시"
-        },
-        "de": {
-          "name": "Discourse",
-          "description": "Discourse-Forum-Adapter zum Posten von Themen und Antworten über die Discourse-API"
-        },
-        "es": {
-          "name": "Discourse",
-          "description": "Adaptador de foro Discourse para publicar temas y respuestas a través de la API de Discourse"
-        },
-        "fr": {
-          "name": "Discourse",
-          "description": "Adaptateur de forum Discourse — publie sujets et réponses via l'API Discourse."
-        }
-      }
-    },
-    {
       "id": "email",
       "name": "Email",
       "description": "Email adapter for sending and receiving messages via SMTP and IMAP protocols",
@@ -1186,43 +1149,6 @@
       }
     },
     {
-      "id": "linkedin",
-      "name": "LinkedIn",
-      "description": "LinkedIn adapter for posting updates and messages via the LinkedIn API",
-      "category": "social",
-      "icon": "lucide:briefcase",
-      "i18n": {
-        "zh": {
-          "name": "LinkedIn",
-          "description": "LinkedIn 适配器，通过 LinkedIn API 发布动态和消息"
-        },
-        "zh-TW": {
-          "name": "LinkedIn",
-          "description": "LinkedIn 適配器，透過 LinkedIn API 發布動態和訊息"
-        },
-        "ja": {
-          "name": "LinkedIn",
-          "description": "LinkedInアダプター、LinkedIn APIを介した投稿とメッセージの送信"
-        },
-        "ko": {
-          "name": "LinkedIn",
-          "description": "LinkedIn 어댑터, LinkedIn API를 통한 게시물 및 메시지 전송"
-        },
-        "de": {
-          "name": "LinkedIn",
-          "description": "LinkedIn-Adapter zum Posten von Updates und Nachrichten über die LinkedIn-API"
-        },
-        "es": {
-          "name": "LinkedIn",
-          "description": "Adaptador de LinkedIn para publicar actualizaciones y mensajes a través de la API de LinkedIn"
-        },
-        "fr": {
-          "name": "LinkedIn",
-          "description": "Adaptateur LinkedIn — publication de posts et messages via l'API LinkedIn."
-        }
-      }
-    },
-    {
       "id": "mastodon",
       "name": "Mastodon",
       "description": "Mastodon adapter for posting toots and reading timelines on Mastodon instances",
@@ -1337,80 +1263,6 @@
       }
     },
     {
-      "id": "messenger",
-      "name": "Messenger",
-      "description": "Facebook Messenger adapter for sending and receiving messages via the Messenger Platform",
-      "category": "messaging",
-      "icon": "lucide:message-circle",
-      "i18n": {
-        "zh": {
-          "name": "Messenger",
-          "description": "Facebook Messenger 适配器，通过 Messenger 平台收发消息"
-        },
-        "zh-TW": {
-          "name": "Messenger",
-          "description": "Facebook Messenger 適配器，透過 Messenger 平台收發訊息"
-        },
-        "ja": {
-          "name": "Messenger",
-          "description": "Facebook Messengerアダプター、Messengerプラットフォームを介したメッセージの送受信"
-        },
-        "ko": {
-          "name": "Messenger",
-          "description": "Facebook Messenger 어댑터, Messenger 플랫폼을 통한 메시지 송수신"
-        },
-        "de": {
-          "name": "Messenger",
-          "description": "Facebook Messenger-Adapter zum Senden und Empfangen von Nachrichten über die Messenger-Plattform"
-        },
-        "es": {
-          "name": "Messenger",
-          "description": "Adaptador de Facebook Messenger para enviar y recibir mensajes a través de la plataforma Messenger"
-        },
-        "fr": {
-          "name": "Messenger",
-          "description": "Adaptateur Facebook Messenger — envoie et reçoit des messages via Messenger Platform."
-        }
-      }
-    },
-    {
-      "id": "mqtt",
-      "name": "MQTT",
-      "description": "MQTT adapter for publishing and subscribing to messages on MQTT brokers",
-      "category": "iot",
-      "icon": "lucide:signal",
-      "i18n": {
-        "zh": {
-          "name": "MQTT",
-          "description": "MQTT 适配器，在 MQTT 代理上发布和订阅消息"
-        },
-        "zh-TW": {
-          "name": "MQTT",
-          "description": "MQTT 適配器，在 MQTT 代理上發布和訂閱訊息"
-        },
-        "ja": {
-          "name": "MQTT",
-          "description": "MQTTアダプター、MQTTブローカーでのメッセージのパブリッシュとサブスクライブ"
-        },
-        "ko": {
-          "name": "MQTT",
-          "description": "MQTT 어댑터, MQTT 브로커에서 메시지 발행 및 구독"
-        },
-        "de": {
-          "name": "MQTT",
-          "description": "MQTT-Adapter zum Veröffentlichen und Abonnieren von Nachrichten auf MQTT-Brokern"
-        },
-        "es": {
-          "name": "MQTT",
-          "description": "Adaptador MQTT para publicar y suscribirse a mensajes en brokers MQTT"
-        },
-        "fr": {
-          "name": "MQTT",
-          "description": "Adaptateur MQTT — publication et abonnement aux messages sur les brokers MQTT."
-        }
-      }
-    },
-    {
       "id": "mumble",
       "name": "Mumble",
       "description": "Mumble adapter for text messaging in Mumble voice communication servers",
@@ -1481,43 +1333,6 @@
         "fr": {
           "name": "Nextcloud",
           "description": "Adaptateur Nextcloud Talk — messagerie au sein des instances Nextcloud auto-hébergées."
-        }
-      }
-    },
-    {
-      "id": "nostr",
-      "name": "Nostr",
-      "description": "Nostr adapter for publishing and reading events on the Nostr decentralized protocol",
-      "category": "messaging",
-      "icon": "lucide:circle",
-      "i18n": {
-        "zh": {
-          "name": "Nostr",
-          "description": "Nostr 适配器，在 Nostr 去中心化协议上发布和读取事件"
-        },
-        "zh-TW": {
-          "name": "Nostr",
-          "description": "Nostr 適配器，在 Nostr 去中心化協議上發布和讀取事件"
-        },
-        "ja": {
-          "name": "Nostr",
-          "description": "Nostrアダプター、Nostr分散型プロトコルでのイベントの公開と読み取り"
-        },
-        "ko": {
-          "name": "Nostr",
-          "description": "Nostr 어댑터, Nostr 탈중앙화 프로토콜에서 이벤트 발행 및 읽기"
-        },
-        "de": {
-          "name": "Nostr",
-          "description": "Nostr-Adapter zum Veröffentlichen und Lesen von Ereignissen im dezentralen Nostr-Protokoll"
-        },
-        "es": {
-          "name": "Nostr",
-          "description": "Adaptador de Nostr para publicar y leer eventos en el protocolo descentralizado Nostr"
-        },
-        "fr": {
-          "name": "Nostr",
-          "description": "Adaptateur Nostr — publication et lecture d'événements sur le protocole décentralisé Nostr."
         }
       }
     },
@@ -2011,43 +1826,6 @@
         "fr": {
           "name": "Twitch",
           "description": "Adaptateur Twitch — lecture et envoi de messages dans les chats de stream Twitch."
-        }
-      }
-    },
-    {
-      "id": "viber",
-      "name": "Viber",
-      "description": "Viber bot adapter for sending and receiving messages via the Viber Bot API",
-      "category": "messaging",
-      "icon": "lucide:heart",
-      "i18n": {
-        "zh": {
-          "name": "Viber",
-          "description": "Viber 机器人适配器，通过 Viber Bot API 收发消息"
-        },
-        "zh-TW": {
-          "name": "Viber",
-          "description": "Viber 機器人適配器，透過 Viber Bot API 收發訊息"
-        },
-        "ja": {
-          "name": "Viber",
-          "description": "Viberボットアダプター、Viber Bot APIを介したメッセージの送受信"
-        },
-        "ko": {
-          "name": "Viber",
-          "description": "Viber 봇 어댑터, Viber Bot API를 통한 메시지 송수신"
-        },
-        "de": {
-          "name": "Viber",
-          "description": "Viber-Bot-Adapter zum Senden und Empfangen von Nachrichten über die Viber Bot API"
-        },
-        "es": {
-          "name": "Viber",
-          "description": "Adaptador de bot Viber para enviar y recibir mensajes a través de la API de bot Viber"
-        },
-        "fr": {
-          "name": "Viber",
-          "description": "Adaptateur bot Viber — envoie et reçoit des messages via l'API Viber Bot."
         }
       }
     },

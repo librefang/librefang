@@ -211,7 +211,6 @@ aes = "0.9"
 cbc = "0.2"
 hmac = "0.12"
 hex = "0.4"
-k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -274,9 +273,6 @@ mailparse = "0.16"
 # Internationalization (i18n)
 fluent = "0.17"
 unic-langid = "0.9"
-
-# MQTT client
-rumqttc = "0.25"
 
 # Sync HTTP client (for registry sync without async runtime)
 ureq = "3"

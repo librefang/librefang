@@ -2721,6 +2721,11 @@ pub async fn install_hand_deps(
 
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
+        // `kill_on_drop(true)` so a timeout / dropped Future SIGKILLs the
+        // child instead of orphaning it. Same defect class as codex fix
+        // #3 on the sidecar describe subprocess: a 300s `tokio::time::timeout`
+        // without `kill_on_drop` leaves the install command running in the
+        // background after the timeout fires.
         let output = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
             tokio::process::Command::new(program)
@@ -2728,6 +2733,7 @@ pub async fn install_hand_deps(
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
                 .output(),
         )
         .await
