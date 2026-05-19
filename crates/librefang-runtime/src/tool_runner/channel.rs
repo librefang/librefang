@@ -162,28 +162,16 @@ pub(super) async fn tool_channel_send(
         return Err("Recipient cannot be empty".to_string());
     }
 
-    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19).
-    //
-    // When the MCP bridge populated the turn's peer scope (sender_id +
-    // channel via the `X-LibreFang-Current-Peer-Jid` and
-    // `X-LibreFang-Current-Channel` headers the `claude-code` driver
-    // writes into the per-invocation mcp_config), refuse `channel_send`
+    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19): when
+    // the MCP bridge populates the turn's peer scope (via the
+    // `X-LibreFang-Current-Peer-Jid` / `X-LibreFang-Current-Channel`
+    // headers the `claude-code` driver writes per invocation), reject
     // dispatches that target a different recipient on the **same**
-    // channel — the model is attempting to relay outside the turn's
-    // peer scope, typically because of sticky context from a prior
-    // stranger turn or an outright hallucinated JID.
-    //
-    // Different-channel dispatches (e.g. an email reply composed during
-    // a WhatsApp turn, or a Telegram heads-up while answering an SMS)
-    // stay allowed — only intra-channel re-targeting is the cross-chat
-    // leak pattern. Cross-chat *escalation* must go through
-    // `notify_owner`, which is kernel-mediated and not subject to this
-    // guard.
-    //
-    // The guard is opt-in by construction: out-of-band callers (no
-    // peer scope, e.g. external MCP clients, cron, automation
-    // triggers) populate `sender_id` / `sender_channel` with `None` and
-    // the guard is skipped.
+    // channel — the model is relaying outside the turn's peer scope.
+    // Different-channel dispatches stay allowed; cross-chat escalation
+    // must go through `notify_owner`. Out-of-band callers (no peer
+    // scope: external MCP, cron, automation triggers) pass `None` and
+    // skip the guard.
     if let (Some(expected_peer), Some(turn_channel)) = (sender_id, sender_channel) {
         if !expected_peer.is_empty()
             && !turn_channel.is_empty()

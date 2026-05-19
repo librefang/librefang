@@ -363,29 +363,19 @@ impl ClaudeCodeDriver {
                 headers.insert("X-LibreFang-Agent-Id".to_string(), serde_json::json!(id));
             }
         }
-        // Peer scope of the *current* turn — forwarded by `/mcp` into
-        // `ToolExecContext::sender_id` / `channel`. `channel_send` uses
-        // them to reject same-channel recipient mismatches (cross-chat
-        // audio leak 2026-05-19). The driver writes a fresh mcp_config
-        // for every `complete()` / `stream()` invocation, so these
-        // headers are tied to the inbound peer of that one turn and do
-        // not stale across turns.
-        if let Some(jid) = peer_jid {
-            if !jid.is_empty() {
-                headers.insert(
-                    "X-LibreFang-Current-Peer-Jid".to_string(),
-                    serde_json::json!(jid),
-                );
+        // Peer scope of the current turn — `/mcp` translates these into
+        // `ToolExecContext::sender_id` / `channel` so `channel_send` can
+        // reject same-channel recipient mismatches (cross-chat audio
+        // leak 2026-05-19). The driver writes a fresh mcp_config per
+        // `complete()` / `stream()` invocation, so these headers track
+        // the inbound peer of that one turn and never stale.
+        let mut insert_nonempty = |key: &str, val: Option<&str>| {
+            if let Some(v) = val.filter(|s| !s.is_empty()) {
+                headers.insert(key.to_string(), serde_json::json!(v));
             }
-        }
-        if let Some(ch) = channel {
-            if !ch.is_empty() {
-                headers.insert(
-                    "X-LibreFang-Current-Channel".to_string(),
-                    serde_json::json!(ch),
-                );
-            }
-        }
+        };
+        insert_nonempty("X-LibreFang-Current-Peer-Jid", peer_jid);
+        insert_nonempty("X-LibreFang-Current-Channel", channel);
 
         let mut server = serde_json::json!({
             "type": "http",

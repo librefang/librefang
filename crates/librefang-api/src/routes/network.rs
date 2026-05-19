@@ -1419,13 +1419,10 @@ pub async fn mcp_http(
         .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
         .and_then(|id| state.kernel.agent_registry().get(id));
 
-    // Peer scope of the current turn — forwarded by the `claude-code`
-    // driver (and any future subprocess driver) so the bridge can wire
-    // `ToolExecContext::sender_id` / `channel`, which `channel_send`
-    // uses to reject same-channel recipient mismatches (cross-chat
-    // audio leak 2026-05-19). External MCP clients that don't set
-    // these headers continue to run with `None` — the cross-chat guard
-    // simply doesn't fire for them.
+    // Peer scope of the current turn — forwarded by subprocess drivers
+    // (e.g. `claude-code`) so `channel_send` can reject same-channel
+    // recipient mismatches (cross-chat audio leak 2026-05-19). External
+    // MCP clients without these headers run unguarded.
     let current_peer_jid = headers
         .get("x-librefang-current-peer-jid")
         .and_then(|v| v.to_str().ok())
