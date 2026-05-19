@@ -4079,6 +4079,88 @@
         }
       }
     },
+    "/api/channels/sidecar/{name}/configure": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "`POST /api/channels/sidecar/{name}/configure` — save schema-driven\nsidecar form values, splitting the payload across `secrets.env` and\n`config.toml`, then trigger a hot-reload so the kernel picks up the\nnew `[[sidecar_channels]]` block without a restart. `name` is the\n`SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).",
+        "operationId": "configure_sidecar_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sidecar catalog name (e.g. telegram, ntfy)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureSidecarBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; reload plan returned. Body fields: `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), `shadowed_secrets` ([String]) — secret field keys whose value is already present in the daemon's process environment (e.g. exported by the launching shell). Those values will out-rank the freshly-written secrets.env entry until the operator unsets them and restarts the daemon.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required field or invalid value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown catalog name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Schema not cached — SDK module may be missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/channels/wechat/qr/start": {
       "post": {
         "tags": [
@@ -10454,6 +10536,24 @@
         },
         "additionalProperties": false
       },
+      "ConfigureSidecarBody": {
+        "type": "object",
+        "description": "Request body for `POST /api/channels/sidecar/{name}/configure`.\n\n`values` is a flat `key → string` map where each key matches a\n`SidecarSchemaField.key` returned by the sidecar's `--describe`.\nThe endpoint splits the map by `field_type`: `secret` fields are\nwritten line-by-line to `~/.librefang/secrets.env`, every other\nfield is written under `[sidecar_channels.env]` in\n`~/.librefang/config.toml`. All current first-party sidecar field\ntypes (text, secret, list, bool, select) are stringly representable,\nso a flat `HashMap<String, String>` is sufficient — payload-typed\nfields (numbers etc.) would need a richer shape.",
+        "required": [
+          "values"
+        ],
+        "properties": {
+          "values": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ExtensionInstallRequest": {
         "type": "object",
         "description": "Request to install an extension (integration).",
@@ -11007,6 +11107,69 @@
           }
         },
         "additionalProperties": false
+      },
+      "SidecarSchema": {
+        "type": "object",
+        "required": [
+          "name",
+          "display_name",
+          "description",
+          "fields"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SidecarSchemaField"
+            }
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SidecarSchemaField": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "type"
+        ],
+        "properties": {
+          "advanced": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "options": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
       },
       "SkillInstallRequest": {
         "type": "object",

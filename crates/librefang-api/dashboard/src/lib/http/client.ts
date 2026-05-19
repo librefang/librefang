@@ -161,6 +161,7 @@ export type {
   ListSessionsResult,
   ChannelInstance,
   ChannelInstancesResponse,
+  SidecarSaveResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,7 @@ export {
   deleteChannelInstance,
   testChannel,
   reloadChannels,
+  saveSidecarConfig,
   sendCommsMessage,
   postCommsTask,
   // attachments

@@ -13,6 +13,7 @@ use chrono::Utc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -369,6 +370,11 @@ struct SpawnCtx {
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
+    /// Kernel home directory — used to locate `secrets.env` so that
+    /// secrets saved by the dashboard after boot are visible to the
+    /// spawned child (the boot-time `load_dotenv` Once-loader does not
+    /// re-fire after a hot save).
+    home_dir: PathBuf,
     channel_type: ChannelType,
     name: String,
     stdin_tx: StdinHandle,
@@ -380,6 +386,68 @@ struct SpawnCtx {
     tx: mpsc::Sender<ChannelMessage>,
     shutdown_rx: watch::Receiver<bool>,
     sup: SupCfg,
+}
+
+/// Parse `secrets.env` at `path` into key/value pairs (best-effort).
+///
+/// Returns an empty `Vec` if the file is absent / unreadable — secrets.env
+/// is an optional convenience file, and a missing file is not an error.
+/// Format mirrors `librefang_extensions::dotenv`: `KEY=VAL` per line,
+/// comments (`#`) and blank lines ignored, no quoting / escapes.
+fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(eq) = trimmed.find('=') {
+            let k = trimmed[..eq].trim();
+            let v = trimmed[eq + 1..].trim();
+            if !k.is_empty() {
+                out.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Build the final environment for the child by layering, in order:
+///   1. `secrets.env` from `home_dir` — lowest priority. Each entry is
+///      applied only when the parent process env does NOT already have
+///      that key, matching the dotenv loader's "system env wins"
+///      precedence (`librefang_extensions::dotenv`). The child inherits
+///      the parent env by default, so we must avoid overwriting it.
+///   2. `ctx_env` — explicit `[sidecar_channels.env]` from config.toml.
+///      Wins over `secrets.env` (operator-explicit overrides), matching
+///      the dotenv loader's precedence where explicit values dominate
+///      the file-loaded fallback.
+///
+/// Returned list is the set of `(key, value)` pairs to apply via
+/// `Command::env`, with both layers merged. The parent env is NOT
+/// returned here — the spawned child already inherits it via
+/// `Command::env_clear` not being called.
+fn build_spawn_env(
+    home_dir: &Path,
+    ctx_env: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut merged: HashMap<String, String> = HashMap::new();
+    let secrets_path = home_dir.join("secrets.env");
+    for (k, v) in parse_secrets_env(&secrets_path) {
+        // Parent process env wins (dotenv precedence).
+        if std::env::var(&k).is_err() {
+            merged.insert(k, v);
+        }
+    }
+    // Explicit config.toml [sidecar_channels.env] wins over secrets.env.
+    for (k, v) in ctx_env {
+        merged.insert(k.clone(), v.clone());
+    }
+    merged.into_iter().collect()
 }
 
 /// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
@@ -405,9 +473,18 @@ async fn spawn_once(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let mut cmd = Command::new(&ctx.command);
-    cmd.args(&ctx.args)
-        .envs(&ctx.env)
-        .stdin(std::process::Stdio::piped())
+    cmd.args(&ctx.args);
+    // Merge `secrets.env` (low precedence) and `ctx.env`
+    // ([sidecar_channels.env] from config.toml, high precedence) so
+    // secrets saved after boot — past the one-shot `load_dotenv`
+    // loader — still reach the child without a daemon restart. The
+    // parent process env is the highest precedence and the child
+    // already inherits it via the default `Command` setup.
+    let merged_env = build_spawn_env(&ctx.home_dir, &ctx.env);
+    for (k, v) in &merged_env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -767,6 +844,12 @@ pub struct SidecarAdapter {
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
+    /// Kernel home directory — propagated into `SpawnCtx` so each
+    /// (re)spawn can read `secrets.env` from the kernel's configured
+    /// path. Must come from `KernelApi::home_dir` rather than a
+    /// recomputed `LIBREFANG_HOME`/`~/.librefang` to honour custom
+    /// `KernelConfig.home_dir` (see #5249's sidecar configure fix).
+    home_dir: PathBuf,
     channel_type: ChannelType,
     /// Shared handle to the child's stdin for sending commands.
     stdin_tx: StdinHandle,
@@ -799,7 +882,16 @@ pub struct SidecarAdapter {
 
 impl SidecarAdapter {
     /// Create a new sidecar adapter from a config entry.
-    pub fn new(config: &librefang_types::config::SidecarChannelConfig) -> Self {
+    ///
+    /// `home_dir` MUST be the kernel's configured home directory
+    /// (`KernelApi::home_dir`) so `secrets.env` resolution at spawn time
+    /// matches the path the API layer writes to. Recomputing from
+    /// `LIBREFANG_HOME`/`~/.librefang` here would silently diverge when
+    /// the operator overrides `KernelConfig.home_dir`.
+    pub fn new(
+        config: &librefang_types::config::SidecarChannelConfig,
+        home_dir: PathBuf,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let channel_type = config
             .channel_type
@@ -813,6 +905,7 @@ impl SidecarAdapter {
             command: config.command.clone(),
             args: config.args.clone(),
             env: config.env.clone(),
+            home_dir,
             channel_type,
             stdin_tx: Arc::new(Mutex::new(None)),
             child: Arc::new(Mutex::new(None)),
@@ -871,6 +964,7 @@ impl ChannelAdapter for SidecarAdapter {
             command: self.command.clone(),
             args: self.args.clone(),
             env: self.env.clone(),
+            home_dir: self.home_dir.clone(),
             channel_type: self.channel_type.clone(),
             name: self.name.clone(),
             stdin_tx: self.stdin_tx.clone(),
@@ -1858,7 +1952,7 @@ mod tests {
     }
 
     fn dummy_adapter() -> SidecarAdapter {
-        SidecarAdapter::new(&cfg("dummy", "true", vec![]))
+        SidecarAdapter::new(&cfg("dummy", "true", vec![]), std::env::temp_dir())
     }
 
     /// Build a config with all P3 supervision fields at their serde
@@ -1985,7 +2079,7 @@ mod tests {
             vec!["-u".to_string(), adapter_path.to_string_lossy().to_string()],
         );
 
-        let adapter = SidecarAdapter::new(&config);
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
         let mut stream = adapter.start().await.unwrap();
 
         use futures::StreamExt;
@@ -2055,7 +2149,7 @@ mod tests {
             &python,
             vec!["-u".to_string(), "-c".to_string(), script.to_string()],
         );
-        let adapter = SidecarAdapter::new(&config);
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
         let mut stream = adapter.start().await.unwrap();
         use futures::StreamExt;
 
@@ -2099,7 +2193,7 @@ mod tests {
             &python,
             vec!["-u".to_string(), "-c".to_string(), script.to_string()],
         );
-        let adapter = SidecarAdapter::new(&config);
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
         let mut stream = adapter.start().await.unwrap();
         use futures::StreamExt;
         let msg = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
@@ -2116,6 +2210,115 @@ mod tests {
             "the dead `username` key must not be written"
         );
         adapter.stop().await.unwrap();
+    }
+
+    // ── build_spawn_env precedence tests ───────────────────────────
+    //
+    // Sequential because they touch the *process* environment via
+    // `std::env::set_var` / `remove_var`, which is global. Each test
+    // uses a unique key prefix (`LIBREFANG_TEST_<TESTNAME>_*`) to avoid
+    // accidentally aliasing keys an unrelated parallel test might also
+    // touch — but the *parent-env-wins* assertion still needs the test
+    // to set a key in `std::env`, observe `build_spawn_env` honouring
+    // it, and clean up. We intentionally do not gate this on a mutex:
+    // unique key prefixes are enough for correctness, the env var is
+    // private to LibreFang test scope, and the assertions are about
+    // presence/absence of *that key alone*.
+
+    #[test]
+    fn build_spawn_env_secrets_env_visible_to_child() {
+        // secrets.env is the only source of a key — it must appear.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "LIBREFANG_TEST_BSE_SECRETS_ONLY=from_file\n",
+        )
+        .unwrap();
+        // Make sure the parent env does not already define it.
+        // SAFETY: test-local key prefix; nothing else races on it.
+        unsafe {
+            std::env::remove_var("LIBREFANG_TEST_BSE_SECRETS_ONLY");
+        }
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        assert_eq!(
+            got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY").map(|s| s.as_str()),
+            Some("from_file"),
+        );
+    }
+
+    #[test]
+    fn build_spawn_env_parent_env_beats_secrets() {
+        // dotenv precedence: shell-exported value beats secrets.env.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "LIBREFANG_TEST_BSE_PARENT_WINS=from_file\n",
+        )
+        .unwrap();
+        // SAFETY: test-local key prefix; we clean up at the end.
+        unsafe {
+            std::env::set_var("LIBREFANG_TEST_BSE_PARENT_WINS", "from_parent");
+        }
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        // The merge skipped the secrets.env entry because the parent
+        // env already had the key; the child still inherits the parent
+        // env (we don't call env_clear), so the *effective* value is
+        // "from_parent" without us needing to re-emit it.
+        assert!(
+            !got.contains_key("LIBREFANG_TEST_BSE_PARENT_WINS"),
+            "build_spawn_env must NOT shadow a parent-env key with a secrets.env value"
+        );
+
+        // SAFETY: cleanup of the key we just set.
+        unsafe {
+            std::env::remove_var("LIBREFANG_TEST_BSE_PARENT_WINS");
+        }
+    }
+
+    #[test]
+    fn build_spawn_env_ctx_env_beats_secrets() {
+        // config.toml [sidecar_channels.env] explicit overrides win
+        // over secrets.env (operator-explicit > file-loaded fallback).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "LIBREFANG_TEST_BSE_CTX_WINS=from_file\n",
+        )
+        .unwrap();
+        // SAFETY: test-local key prefix.
+        unsafe {
+            std::env::remove_var("LIBREFANG_TEST_BSE_CTX_WINS");
+        }
+
+        let mut ctx_env: HashMap<String, String> = HashMap::new();
+        ctx_env.insert(
+            "LIBREFANG_TEST_BSE_CTX_WINS".to_string(),
+            "from_config".to_string(),
+        );
+        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        assert_eq!(
+            got.get("LIBREFANG_TEST_BSE_CTX_WINS").map(|s| s.as_str()),
+            Some("from_config"),
+            "ctx_env must override secrets.env"
+        );
+    }
+
+    #[test]
+    fn build_spawn_env_missing_file_is_not_an_error() {
+        // secrets.env does not exist → empty contribution, ctx_env passes through.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx_env: HashMap<String, String> = HashMap::new();
+        ctx_env.insert("FOO".to_string(), "bar".to_string());
+        let merged = build_spawn_env(tmp.path(), &ctx_env);
+        let got: HashMap<_, _> = merged.into_iter().collect();
+        assert_eq!(got.get("FOO").map(|s| s.as_str()), Some("bar"));
     }
 
     /// Find python3 or python on PATH.
