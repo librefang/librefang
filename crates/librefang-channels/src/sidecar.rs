@@ -2057,6 +2057,30 @@ mod tests {
         .expect("SidecarChannelConfig from minimal json")
     }
 
+    /// #5294 — `default_agent` is `None` when absent and round-trips
+    /// when explicitly set. The field exists so the router-population
+    /// loop in `channel_bridge.rs` can seed `AgentRouter.channel_defaults`
+    /// for sidecar adapters; missing it caused inbound traffic on sidecar
+    /// channels to fall through to the non-deterministic
+    /// "first available agent" branch.
+    #[test]
+    fn sidecar_default_agent_roundtrip_5294() {
+        // Absent → None (no-op for deployments that don't need routing pin).
+        let minimal = cfg("telegram", "python3", vec![]);
+        assert!(minimal.default_agent.is_none());
+
+        // Explicit value round-trips so channel_bridge.rs can seed the router.
+        let c: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "telegram",
+                "command": "python3",
+                "args": ["-m", "librefang.sidecar.adapters.telegram"],
+                "default_agent": "fandangorodelo",
+            }))
+            .unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+    }
+
     #[test]
     fn test_supcfg_defaults_and_overflow_parsing() {
         // Minimal config -> every supervision field at its serde default.

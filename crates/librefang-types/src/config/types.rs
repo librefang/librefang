@@ -2166,6 +2166,18 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Default agent name for incoming messages on this sidecar channel.
+    ///
+    /// When set, seeds the `AgentRouter.channel_defaults` map at boot so
+    /// inbound messages with no explicit binding route to this agent. This
+    /// mirrors the `default_agent` field that lived on the per-channel
+    /// in-process configs (`TelegramConfig`, `DiscordConfig`, …) before the
+    /// sidecar migration (#5241 / #5294). Without this, the resolver falls
+    /// through to the non-deterministic "first available agent" branch in
+    /// `resolve_or_fallback`, which silently routes traffic to a different
+    /// agent whenever a new agent is spawned.
+    #[serde(default)]
+    pub default_agent: Option<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
     #[serde(default = "default_sidecar_restart")]
     pub restart: bool,

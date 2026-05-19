@@ -3282,7 +3282,13 @@ pub async fn start_channel_bridge_with_config(
             sidecar_config,
             kernel.home_dir().to_path_buf(),
         ));
-        adapters.push((adapter, None, None));
+        // #5294 — propagate `default_agent` from the sidecar config so the
+        // router-population loop below seeds `AgentRouter.channel_defaults`
+        // for this channel. Without this, sidecar adapters fall through to
+        // the non-deterministic "first available agent" branch in
+        // `resolve_or_fallback`, silently routing traffic to whichever agent
+        // happens to be first in the registry iteration order.
+        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
     }
 
     if adapters.is_empty() {
