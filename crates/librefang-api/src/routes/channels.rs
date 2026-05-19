@@ -1488,6 +1488,20 @@ pub async fn configure_sidecar_channel(
         // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
         //    Idempotent: a second POST with the same name replaces the
         //    block in-place, preserving formatting of every other section.
+        //    `managed_env_keys` is the form's set of NON-SECRET schema
+        //    fields — i.e. the keys the configure form is the source of
+        //    truth for. Every OTHER env key already in the block (operator
+        //    hand-edits such as `PYTHONPATH`, `HTTP_PROXY`, locale vars,
+        //    or even a hand-edited `TELEGRAM_BOT_TOKEN` inline) is
+        //    preserved untouched. Secret schema fields never appear in
+        //    config.toml at all — they live in `secrets.env` — so they
+        //    are intentionally excluded from this set.
+        let managed_env_keys: Vec<&str> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type != "secret")
+            .map(|f| f.key.as_str())
+            .collect();
         super::sidecar_toml::upsert_sidecar_block(
             &config_path,
             entry.name,
@@ -1495,6 +1509,7 @@ pub async fn configure_sidecar_channel(
             entry.command,
             entry.args,
             &nonsecret_env,
+            &managed_env_keys,
         )
         .map_err(|e| {
             ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
