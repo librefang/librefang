@@ -708,7 +708,15 @@ export interface CronJobItem {
   id?: string;
   enabled?: boolean;
   name?: string;
-  schedule?: string;
+  /**
+   * Cron schedule descriptor. The backend serializes
+   * `librefang_types::scheduler::CronSchedule` as a tagged object
+   * (`{ kind: "cron" | "every" | "at", … }`), so consumers must narrow
+   * before reading fields. Older code paths sometimes received a
+   * pre-rendered string; keep the union for back-compat (see
+   * `HandsPage.tsx::resolveCronSchedule` for an example consumer).
+   */
+  schedule?: string | CronScheduleSpec;
   [key: string]: unknown;
 }
 
@@ -1407,10 +1415,24 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
   }
 }
 
+/**
+ * Schedule-mode payload accepted by `PATCH /api/agents/{id}`.
+ *
+ * Mirrors the Rust `librefang_types::agent::ScheduleMode` enum which is
+ * `#[serde(rename_all = "snake_case")]` (externally tagged). The unit
+ * variant (`reactive`) is the bare string `"reactive"`; the
+ * fielded variants are wrapped objects (`{ continuous: { … } }`).
+ */
+export type AgentSchedulePatch =
+  | "reactive"
+  | { periodic: { cron: string } }
+  | { proactive: { conditions: string[] } }
+  | { continuous: { check_interval_secs: number } };
+
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
- * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
+ * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
@@ -2379,6 +2401,90 @@ export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
   const url = agentId ? `/api/cron/jobs?agent_id=${encodeURIComponent(agentId)}` : "/api/cron/jobs";
   const data = await get<{ jobs?: CronJobItem[]; total?: number }>(url);
   return data.jobs ?? [];
+}
+
+/**
+ * Cron schedule discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronSchedule` enum which is
+ * `#[serde(tag = "kind", rename_all = "snake_case")]`.
+ */
+export type CronScheduleSpec =
+  | { kind: "at"; at: string }
+  | { kind: "every"; every_secs: number }
+  | { kind: "cron"; expr: string; tz?: string | null };
+
+/**
+ * Cron action discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronAction` enum.
+ *
+ * The dashboard exposes only `agent_turn` for the agent-detail Schedule
+ * tab (the most common case). `system_event` / `workflow` exist on the
+ * backend; consumers needing those should extend this type.
+ */
+export type CronActionSpec =
+  | { kind: "agent_turn"; message: string; model_override?: string | null; timeout_secs?: number | null }
+  | { kind: "system_event"; text: string }
+  | { kind: "workflow"; workflow_id: string; input?: string | null; timeout_secs?: number | null };
+
+/**
+ * Cron delivery (single legacy destination) — mirrors the Rust
+ * `librefang_types::scheduler::CronDelivery` enum.
+ */
+export type CronDeliverySpec =
+  | { kind: "none" }
+  | { kind: "last_channel" }
+  | { kind: "channel"; channel: string; to: string }
+  | { kind: "webhook"; url: string };
+
+export interface CreateCronJobPayload {
+  agent_id: string;
+  name: string;
+  schedule: CronScheduleSpec;
+  action: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  /** Multi-destination fan-out. Optional; omit for single-target delivery. */
+  delivery_targets?: CronDeliveryTarget[];
+  /** Per-job session-mode override. `undefined` → use agent default. */
+  session_mode?: "persistent" | "new";
+  /** Optional peer/user ID used as SenderContext.user_id when the job fires. */
+  peer_id?: string;
+  /** Auto-delete after first fire; defaults to true for `at` schedules. */
+  one_shot?: boolean;
+}
+
+export interface UpdateCronJobPayload {
+  name?: string;
+  enabled?: boolean;
+  schedule?: CronScheduleSpec;
+  action?: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  delivery_targets?: CronDeliveryTarget[];
+  session_mode?: "persistent" | "new" | null;
+  peer_id?: string | null;
+}
+
+export async function createCronJob(
+  payload: CreateCronJobPayload,
+): Promise<{ job_id?: string; status?: string }> {
+  return post<{ job_id?: string; status?: string }>("/api/cron/jobs", payload);
+}
+
+export async function updateCronJob(
+  jobId: string,
+  payload: UpdateCronJobPayload,
+): Promise<CronJobItem> {
+  return put<CronJobItem>(`/api/cron/jobs/${encodeURIComponent(jobId)}`, payload);
+}
+
+export async function deleteCronJob(jobId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/cron/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function toggleCronJob(jobId: string, enabled: boolean): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/cron/jobs/${encodeURIComponent(jobId)}/enable`,
+    { enabled },
+  );
 }
 
 export async function getVersionInfo(): Promise<VersionResponse> {
