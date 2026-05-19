@@ -315,7 +315,22 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
         MEMORY_RECALL_LIMIT
     };
     let mut memories = if let Some(engine) = ctx.context_engine {
-        recall_or_default(
+        // The context engine's `ingest` uses its own (typically small,
+        // default 5) recall budget and is unaware of `chat_scope`. When
+        // a chat scope is active, its top-N can be dominated by
+        // OTHER-chat memories that the post-filter at the end of this
+        // function will drop, leaving zero results for the active chat
+        // even though same-scope rows existed just below the engine's
+        // cut-off (P2, #5227 second-pass review).
+        //
+        // Mitigation: after the engine call, run a supplemental
+        // substrate recall with the widened `recall_fetch_limit` and
+        // merge the new rows (by id) into the engine's result. The
+        // post-filter then runs over the union, so same-scope rows that
+        // the engine missed get a chance to land in the prompt. Engines
+        // that already scope-filter internally will return the same
+        // top-N as the supplemental fetch and the merge becomes a no-op.
+        let mut engine_mem = recall_or_default(
             engine
                 .ingest(ctx.session.agent_id, ctx.user_message, ctx.sender_user_id)
                 .await
@@ -325,7 +340,70 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             } else {
                 "Context engine ingest failed; continuing without recalled memories"
             },
-        )
+        );
+        if chat_scope_active && !ctx.stable_prefix_mode {
+            let extra = if let Some(emb) = ctx.embedding_driver {
+                match emb.embed_one(ctx.user_message).await {
+                    Ok(qv) => recall_or_default(
+                        ctx.memory
+                            .recall_with_embedding_async(
+                                ctx.user_message,
+                                recall_fetch_limit,
+                                Some(MemoryFilter {
+                                    agent_id: Some(ctx.session.agent_id),
+                                    peer_id: ctx.sender_user_id.map(str::to_owned),
+                                    ..Default::default()
+                                }),
+                                Some(&qv),
+                            )
+                            .await,
+                        "Supplemental vector recall failed alongside context engine; \
+                         continuing with engine-only results",
+                    ),
+                    Err(_) => recall_or_default(
+                        ctx.memory
+                            .recall(
+                                ctx.user_message,
+                                recall_fetch_limit,
+                                Some(MemoryFilter {
+                                    agent_id: Some(ctx.session.agent_id),
+                                    peer_id: ctx.sender_user_id.map(str::to_owned),
+                                    ..Default::default()
+                                }),
+                            )
+                            .await,
+                        "Supplemental text recall failed alongside context engine; \
+                         continuing with engine-only results",
+                    ),
+                }
+            } else {
+                recall_or_default(
+                    ctx.memory
+                        .recall(
+                            ctx.user_message,
+                            recall_fetch_limit,
+                            Some(MemoryFilter {
+                                agent_id: Some(ctx.session.agent_id),
+                                peer_id: ctx.sender_user_id.map(str::to_owned),
+                                ..Default::default()
+                            }),
+                        )
+                        .await,
+                    "Supplemental text recall failed alongside context engine; \
+                     continuing with engine-only results",
+                )
+            };
+            // Merge by stable id — keep engine ordering first (it has
+            // local re-ranking signals we should preserve), then append
+            // substrate rows not already present.
+            let seen: std::collections::HashSet<_> = engine_mem.iter().map(|f| f.id.0).collect();
+            for frag in extra {
+                if !seen.contains(&frag.id.0) {
+                    engine_mem.push(frag);
+                }
+            }
+        }
+        engine_mem
     } else if ctx.stable_prefix_mode {
         Vec::new()
     } else if let Some(emb) = ctx.embedding_driver {
@@ -679,4 +757,148 @@ pub(super) fn log_repair_stats(
         positional_synthetic = stats.positional_synthetic_inserted,
         "Session repair applied fixes before LLM call"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_engine::{ContextEngineConfig, DefaultContextEngine};
+    use librefang_memory::MemorySubstrate;
+    use librefang_types::agent::{AgentId, SessionId};
+    use librefang_types::memory::{MemorySource, CHAT_SCOPE_METADATA_KEY};
+
+    fn empty_session(agent_id: AgentId) -> Session {
+        Session {
+            id: SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        }
+    }
+
+    /// #5227 P2 (second-pass review) — when a `ContextEngine` is wired
+    /// in, `engine.ingest` uses its OWN small recall budget (default 5)
+    /// and is unaware of `chat_scope`. If the substrate has many memories
+    /// for the same `(agent, peer)` pair spread across multiple chats,
+    /// the engine can return five OTHER-chat rows that get filtered out
+    /// of the prompt by the cross-scope filter, leaving zero
+    /// same-chat results — even though same-chat rows existed just below
+    /// the engine's cut-off.
+    ///
+    /// The fix is a supplemental substrate recall with the widened
+    /// `recall_fetch_limit` after `engine.ingest`, merged by id, so the
+    /// post-filter sees the union and same-scope rows have a fair shot
+    /// at landing in the prompt.
+    ///
+    /// Repro: populate `(peer, group_scope)` with 5 distinct memories
+    /// and `(peer, dm_scope)` with 3 distinct memories, all matching the
+    /// recall query. The engine alone returns 5 group-scope rows. The
+    /// post-filter against `dm_scope` previously dropped all 5, leaving
+    /// the prompt empty. Post-fix the supplemental fetch (limit
+    /// 5 × 4 = 20, floor 50) pulls in the dm rows too and the recall
+    /// surfaces all 3.
+    #[tokio::test]
+    async fn engine_recall_widens_fetch_to_avoid_chat_scope_starvation_5227() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        let dm_scope = "telegram:dm-2227";
+        let group_scope = "telegram:group--999";
+
+        // Seed via the substrate's public `remember_with_embedding` (no
+        // peer scoping — the recall context below also passes
+        // `sender_user_id: None`, so the substrate's `peer_id` filter is
+        // a no-op and every row participates). The chat-scope filter
+        // at the end of `setup_recalled_memories` is what we're
+        // exercising here, not peer isolation.
+        let write_scoped = |content: &str, scope: &str| {
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                CHAT_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+            substrate
+                .remember_with_embedding(
+                    agent_id,
+                    content,
+                    MemorySource::Conversation,
+                    librefang_types::memory::MemoryLevel::Session.scope_str(),
+                    meta,
+                    None,
+                )
+                .unwrap();
+        };
+
+        // 5 group-scope rows (will dominate any small-limit recall).
+        for i in 0..5 {
+            write_scoped(&format!("project Atlas group note {i}"), group_scope);
+        }
+        // 3 dm-scope rows (the ones we MUST surface in a DM recall).
+        for i in 0..3 {
+            write_scoped(&format!("project Atlas dm reminder {i}"), dm_scope);
+        }
+
+        // Engine with the production default `max_recall_results = 5`.
+        let engine_cfg = ContextEngineConfig {
+            max_recall_results: 5,
+            ..Default::default()
+        };
+        let engine = DefaultContextEngine::new(engine_cfg, Arc::clone(&substrate), None);
+
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+        let setup = setup_recalled_memories(RecallSetupContext {
+            session: &session,
+            user_message: "project Atlas",
+            memory: substrate.as_ref(),
+            embedding_driver: None,
+            proactive_memory: None,
+            context_engine: Some(&engine),
+            sender_user_id: None,
+            sender_channel: Some("telegram"),
+            sender_chat_scope: Some(dm_scope),
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts: &opts,
+        })
+        .await;
+
+        // All 3 dm-scope memories must surface. Pre-fix: the engine's
+        // top-5 returned only group rows, the filter dropped all of them,
+        // and `setup.memories` was empty even though `dm_scope` rows
+        // existed in the substrate.
+        let dm_hits: Vec<_> = setup
+            .memories
+            .iter()
+            .filter(|f| f.content.contains("dm reminder"))
+            .collect();
+        assert_eq!(
+            dm_hits.len(),
+            3,
+            "engine-path recall must surface all 3 dm-scope memories \
+             after the supplemental fetch fills in candidates the engine \
+             missed; got {} dm hits, total memories = {:?}",
+            dm_hits.len(),
+            setup
+                .memories
+                .iter()
+                .map(|f| &f.content)
+                .collect::<Vec<_>>()
+        );
+
+        // And no group-scope row may leak into the DM prompt — the
+        // post-filter is still doing its job.
+        for f in &setup.memories {
+            assert!(
+                !f.content.contains("group note"),
+                "regression: group-scope memory leaked into dm recall via \
+                 engine path: {:?}",
+                f.content
+            );
+        }
+    }
 }

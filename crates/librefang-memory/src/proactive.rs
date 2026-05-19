@@ -699,6 +699,7 @@ impl ProactiveMemoryStore {
         agent_id: AgentId,
         item: &MemoryItem,
         peer_id: Option<&str>,
+        chat_scope: Option<&str>,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
         // Generate embedding for the new memory (if driver available)
         let query_embedding = if let Some(ref emb) = self.embedding {
@@ -707,24 +708,73 @@ impl ProactiveMemoryStore {
             None
         };
 
-        // Search for similar existing memories (top 5 candidates).
-        // Use vector search if embedding available, otherwise keyword LIKE.
+        // Search for similar existing memories. The substrate filter is still
+        // `(agent_id, peer_id)`-scoped because the storage layer's `recall`
+        // API doesn't filter on `chat_scope` metadata directly; we
+        // post-filter below to mirror the read-side semantics from
+        // `auto_retrieve`. The candidate fetch is widened from 5 → 20 when
+        // a `chat_scope` is active so the post-filter has enough headroom
+        // to keep ~5 same-scope (or chat-agnostic) candidates after pruning
+        // — mirrors the 4× inflation used by `auto_retrieve` /
+        // `setup_recalled_memories` for the same reason.
+        //
+        // #5227 follow-up (P1, second pass): without the post-filter, the
+        // extractor saw memories tagged for ANOTHER chat as dedupe
+        // candidates and could NOOP against them — making the new
+        // `chat_scope`-stamped row never be written. The subsequent
+        // `auto_retrieve` (which DOES filter by scope) would then return
+        // nothing for the active chat, silently losing the fact. Or worse,
+        // an UPDATE decision would mutate the OTHER chat's memory with the
+        // current chat's content.
+        let chat_scope_active = chat_scope.map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let fetch_limit = if chat_scope_active { 20 } else { 5 };
         let filter = Some({
             let mut f = MemoryFilter::agent(agent_id);
             f.peer_id = peer_id.map(String::from);
             f
         });
-        let existing = if let Some(ref qe) = query_embedding {
-            self.semantic
-                .recall_with_embedding(&item.content, 5, filter.clone(), Some(qe))?
+        let mut existing = if let Some(ref qe) = query_embedding {
+            self.semantic.recall_with_embedding(
+                &item.content,
+                fetch_limit,
+                filter.clone(),
+                Some(qe),
+            )?
         } else {
             let search_query = extract_search_keywords(&item.content);
-            let mut results = self.semantic.recall(&search_query, 5, filter.clone())?;
+            let mut results = self
+                .semantic
+                .recall(&search_query, fetch_limit, filter.clone())?;
             if results.is_empty() {
-                results = self.semantic.recall(&item.content, 5, filter)?;
+                results = self.semantic.recall(&item.content, fetch_limit, filter)?;
             }
             results
         };
+
+        // Apply the cross-chat isolation filter to the candidate set
+        // BEFORE the extractor decides ADD/UPDATE/NOOP. Three classes pass
+        // through (same predicate used by `auto_retrieve`):
+        //   1. `MemoryLevel::User` rows — explicitly cross-chat stable
+        //      facts. The new item being a session-level extraction is
+        //      still allowed to dedupe against a user-level memory of the
+        //      same content (UPDATE-in-place keeps the more durable level).
+        //   2. Memories with no `chat_scope` tag — legacy / chat-agnostic.
+        //   3. Memories whose stamped `chat_scope` matches the active one.
+        // Anything else is a foreign-chat memory; ignoring it here lets the
+        // extractor see an empty/smaller candidate list and pick ADD, so a
+        // dedicated row lands for the current chat.
+        //
+        // When the new item itself is `MemoryLevel::User`, the filter is
+        // intentionally skipped — user-level facts are global and SHOULD
+        // dedupe against any prior copy regardless of which chat first
+        // produced them.
+        if chat_scope_active && item.level != MemoryLevel::User {
+            let want = chat_scope.unwrap();
+            existing.retain(|frag| memory_scope_allows_recall(&frag.scope, &frag.metadata, want));
+        }
+        // Truncate back to the extractor's expected window so we don't
+        // hand it 20 candidates when it was tuned for 5.
+        existing.truncate(5);
 
         // Stash the query embedding in a temporary metadata key so the
         // default decide_action heuristic can use vector cosine similarity
@@ -1851,7 +1901,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Step 2-4: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
-            let result = self.add_with_decision(agent_id, item, None).await?;
+            let result = self.add_with_decision(agent_id, item, None, None).await?;
             if let Some(r) = result {
                 results.push(r.item);
             }
@@ -2331,7 +2381,10 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 }
             }
 
-            match self.add_with_decision(agent_id, &enriched, peer_id).await {
+            match self
+                .add_with_decision(agent_id, &enriched, peer_id, chat_scope)
+                .await
+            {
                 Ok(Some(result)) => {
                     if let Some(conflict) = result.conflict {
                         conflicts.push(conflict);
@@ -2971,6 +3024,174 @@ mod tests {
              memory; got {:?}",
             group_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
         );
+    }
+
+    /// #5227 P1 (second-pass review) — the write-side dedupe in
+    /// `add_with_decision` must also honour `chat_scope`, not just the
+    /// read-side filter in `auto_retrieve`.
+    ///
+    /// Repro: the same peer states the same Session-level fact in two
+    /// distinct chats (DM and group). Before this fix the second
+    /// extraction reached `add_with_decision`, whose dedupe candidates
+    /// were `(agent_id, peer_id)`-only — so the extractor saw the first
+    /// chat's memory as a duplicate and NOOPed against it. The later
+    /// `auto_retrieve(chat=second)` then filtered the first chat's row
+    /// out, and the fact silently disappeared from the second chat.
+    ///
+    /// Expected post-fix behaviour: BOTH chats end up with their own
+    /// Session-level row stamped for their respective scope, and both
+    /// scope-matching recalls surface the fact.
+    #[tokio::test]
+    async fn test_add_with_decision_scopes_dedupe_by_chat_5227() {
+        use librefang_types::agent::compose_sender_scope;
+        use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let peer = "tg-user-7777";
+
+        let dm_scope =
+            compose_sender_scope("telegram", Some("dm-7777")).expect("non-empty channel");
+        let group_scope =
+            compose_sender_scope("telegram", Some("group--999")).expect("non-empty channel");
+        assert_ne!(dm_scope, group_scope);
+
+        // Build a `MemoryLevel::Session` extraction matching the bug
+        // scenario. We drive `add_with_decision` directly because the
+        // rule-based `DefaultMemoryExtractor` always promotes
+        // preference-style content to `MemoryLevel::User`, which is
+        // exempt from the cross-chat filter; production uses an LLM
+        // extractor that lands the same fact at `Session`.
+        let make_item = |content: &str, scope: &str| {
+            let mut item = MemoryItem::new(content.to_string(), MemoryLevel::Session);
+            item.metadata.insert(
+                CHAT_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+            item
+        };
+
+        // 1) First chat (DM): write the fact. Empty substrate → ADD.
+        let dm_item = make_item("My deadline is Friday", &dm_scope);
+        let dm_result = store
+            .add_with_decision(agent_id, &dm_item, Some(peer), Some(&dm_scope))
+            .await
+            .unwrap();
+        assert!(dm_result.is_some(), "first write must ADD");
+
+        // 2) Second chat (group): same peer, same content. Pre-fix this
+        //    saw the DM row as a duplicate and NOOPed → no row landed for
+        //    the group. Post-fix the foreign-chat candidate is ignored
+        //    and the extractor picks ADD again.
+        let group_item = make_item("My deadline is Friday", &group_scope);
+        let group_result = store
+            .add_with_decision(agent_id, &group_item, Some(peer), Some(&group_scope))
+            .await
+            .unwrap();
+        assert!(
+            group_result.is_some(),
+            "second write in a DIFFERENT chat must ADD (not NOOP against the \
+             first chat's memory); got NOOP — regression"
+        );
+
+        // 3) Both scope-matching recalls must surface the fact for their
+        //    chat.
+        let dm_hits = store
+            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&dm_scope))
+            .await
+            .unwrap();
+        assert!(
+            dm_hits.iter().any(|m| m.content.contains("Friday")),
+            "DM recall must see the DM memory after the second write; got {:?}",
+            dm_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+        let group_hits = store
+            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&group_scope))
+            .await
+            .unwrap();
+        assert!(
+            group_hits.iter().any(|m| m.content.contains("Friday")),
+            "group recall must see its own memory (would be empty pre-fix \
+             because the second write NOOPed); got {:?}",
+            group_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+
+        // 4) Same-chat repeat — second write in the SAME chat with same
+        //    content MUST still dedupe (NOOP or UPDATE). This guards
+        //    against the filter accidentally letting through duplicates
+        //    inside one chat.
+        let same_chat_dupe = make_item("My deadline is Friday", &dm_scope);
+        let dupe_result = store
+            .add_with_decision(agent_id, &same_chat_dupe, Some(peer), Some(&dm_scope))
+            .await
+            .unwrap();
+        // The DefaultMemoryExtractor decides NOOP for an exact-content
+        // duplicate; we accept any non-ADD outcome (NOOP or UPDATE) to
+        // stay decoupled from the heuristic.
+        if let Some(r) = &dupe_result {
+            assert_ne!(
+                r.action,
+                MemoryAction::Add,
+                "same-chat exact duplicate must dedupe within the chat \
+                 (NOOP or UPDATE), not ADD a third row"
+            );
+        }
+    }
+
+    /// #5227 P1 follow-up — User-level extractions are global and MUST
+    /// dedupe across chats (level-User memories cross chats by design,
+    /// so a second copy in a different chat is genuine duplication).
+    /// The write-side scope filter has to skip when the new item is
+    /// `MemoryLevel::User`.
+    #[tokio::test]
+    async fn test_add_with_decision_user_level_dedupes_across_chats_5227() {
+        use librefang_types::agent::compose_sender_scope;
+        use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new();
+        let peer = "tg-user-8888";
+
+        let dm_scope = compose_sender_scope("telegram", Some("dm-8888")).unwrap();
+        let group_scope = compose_sender_scope("telegram", Some("group--1234")).unwrap();
+
+        let make_user_item = |content: &str, scope: &str| {
+            let mut item = MemoryItem::new(content.to_string(), MemoryLevel::User);
+            item.metadata.insert(
+                CHAT_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+            item
+        };
+
+        // First write: ADD.
+        let first = make_user_item("User's name is John Doe", &dm_scope);
+        let r1 = store
+            .add_with_decision(agent_id, &first, Some(peer), Some(&dm_scope))
+            .await
+            .unwrap();
+        assert!(r1.is_some(), "first user-level write must ADD");
+
+        // Second write in a different chat, same content. Because both
+        // sides are user-level (global), this MUST dedupe — not produce
+        // a second physical row.
+        let second = make_user_item("User's name is John Doe", &group_scope);
+        let r2 = store
+            .add_with_decision(agent_id, &second, Some(peer), Some(&group_scope))
+            .await
+            .unwrap();
+        if let Some(r) = &r2 {
+            assert_ne!(
+                r.action,
+                MemoryAction::Add,
+                "user-level extractions must dedupe globally regardless of \
+                 chat_scope; got ADD which would create cross-chat duplicate \
+                 user facts"
+            );
+        }
     }
 
     #[tokio::test]
