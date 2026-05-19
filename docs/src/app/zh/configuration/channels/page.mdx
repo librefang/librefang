@@ -324,38 +324,6 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `webhook_port` | u16 | `8450` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-# webhook_port = 8451  # 已弃用：Webhook 现共享 API 端口
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | 存放 Viber Bot 认证令牌的环境变量。 |
-| `webhook_url` | string | `""` | Viber Webhook 端点的公网 URL。 |
-| `webhook_port` | u16 | `8451` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-# webhook_port = 8452  # 已弃用：Webhook 现共享 API 端口
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | 存放 Facebook 页面访问令牌的环境变量。 |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `webhook_port` | u16 | `8452` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.reddit]`
 
 ```toml
@@ -376,19 +344,24 @@ subreddits = []
 | `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.mastodon]`
+#### Mastodon
+
+Mastodon 由 Python sidecar 适配器 (`librefang.sidecar.adapters.mastodon`) 提供。原 `[channels.mastodon]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
+# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `instance_url` | string | `""` | Mastodon 实例 URL（例如 `"https://mastodon.social"`）。 |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | 存放 Mastodon 访问令牌的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`MASTODON_ACCESS_TOKEN`（OAuth bearer）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Mastodon 表单时会自动写入。sidecar 继承了原适配器的 SSE 主路径 + REST 轮询回退语义。
 
 #### `[channels.bluesky]`
 
@@ -496,20 +469,6 @@ secret_env = "THREEMA_SECRET"
 | `threema_id` | string | `""` | Threema Gateway ID。 |
 | `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
 | `webhook_port` | u16 | `8454` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | 存放 Nostr 私钥（nsec 或十六进制格式）的环境变量。 |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | 要连接的 Nostr 中继 WebSocket URL 列表。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.webex]`
@@ -620,24 +579,6 @@ secret_env = "DINGTALK_SECRET"
 | `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `base_url` | string | `""` | Discourse 论坛基础 URL。 |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | 存放 Discourse API Key 的环境变量。 |
-| `api_username` | string | `"system"` | Discourse API 用户名。 |
-| `categories` | list of strings | `[]` | 要监控的分类标识（slug）。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.gitter]`
 
 ```toml
@@ -723,20 +664,6 @@ tts_voice = "alloy"
 | `tts_voice` | string | `"alloy"` | TTS 语音名称。可选：`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`。 |
 | `buffer_threshold` | usize | `32768` | 触发 STT 的音频缓冲区大小（字节）。 |
 | `default_agent` | string 或 null | `null` | 语音消息路由到的默认 Agent 名称。 |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | 存放 LinkedIn OAuth2 访问令牌的环境变量。 |
-| `organization_id` | string | `""` | LinkedIn 组织 ID，用于消息收发。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.qq]`
 

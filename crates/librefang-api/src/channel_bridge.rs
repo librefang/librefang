@@ -273,16 +273,10 @@ use librefang_channels::bluesky::BlueskyAdapter;
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
-#[cfg(feature = "channel-mastodon")]
-use librefang_channels::mastodon::MastodonAdapter;
-#[cfg(feature = "channel-messenger")]
-use librefang_channels::messenger::MessengerAdapter;
 #[cfg(feature = "channel-reddit")]
 use librefang_channels::reddit::RedditAdapter;
 #[cfg(feature = "channel-revolt")]
 use librefang_channels::revolt::RevoltAdapter;
-#[cfg(feature = "channel-viber")]
-use librefang_channels::viber::ViberAdapter;
 // Wave 4
 #[cfg(feature = "channel-flock")]
 use librefang_channels::flock::FlockAdapter;
@@ -292,8 +286,6 @@ use librefang_channels::guilded::GuildedAdapter;
 use librefang_channels::keybase::KeybaseAdapter;
 #[cfg(feature = "channel-nextcloud")]
 use librefang_channels::nextcloud::NextcloudAdapter;
-#[cfg(feature = "channel-nostr")]
-use librefang_channels::nostr::NostrAdapter;
 #[cfg(feature = "channel-pumble")]
 use librefang_channels::pumble::PumbleAdapter;
 #[cfg(feature = "channel-threema")]
@@ -305,12 +297,8 @@ use librefang_channels::webex::WebexAdapter;
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
-#[cfg(feature = "channel-discourse")]
-use librefang_channels::discourse::DiscourseAdapter;
 #[cfg(feature = "channel-gitter")]
 use librefang_channels::gitter::GitterAdapter;
-#[cfg(feature = "channel-linkedin")]
-use librefang_channels::linkedin::LinkedInAdapter;
 #[cfg(feature = "channel-mumble")]
 use librefang_channels::mumble::MumbleAdapter;
 #[cfg(feature = "channel-qq")]
@@ -1948,10 +1936,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "xmpp" => find_channel_info!(xmpp),
             // Wave 3
             "line" => find_channel_info!(line),
-            "viber" => find_channel_info!(viber),
-            "messenger" => find_channel_info!(messenger),
             "reddit" => find_channel_info!(reddit),
-            "mastodon" => find_channel_info!(mastodon),
             "bluesky" => find_channel_info!(bluesky),
             "feishu" => find_channel_info!(feishu),
             "revolt" => find_channel_info!(revolt),
@@ -1960,7 +1945,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "guilded" => find_channel_info!(guilded),
             "keybase" => find_channel_info!(keybase),
             "threema" => find_channel_info!(threema),
-            "nostr" => find_channel_info!(nostr),
             "webex" => find_channel_info!(webex),
             "pumble" => find_channel_info!(pumble),
             "flock" => find_channel_info!(flock),
@@ -1968,11 +1952,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // Wave 5
             "mumble" => find_channel_info!(mumble),
             "dingtalk" => find_channel_info!(dingtalk),
-            "discourse" => find_channel_info!(discourse),
             "gitter" => find_channel_info!(gitter),
             "webhook" => find_channel_info!(webhook),
             "voice" => find_channel_info!(voice),
-            "linkedin" => find_channel_info!(linkedin),
             "wechat" => find_channel_info!(wechat),
             "wecom" => find_channel_info!(wecom),
             _ => (None, None),
@@ -2633,10 +2615,7 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(zulip, "channel-zulip", "Zulip");
     check_channel!(xmpp, "channel-xmpp", "XMPP");
     check_channel!(line, "channel-line", "LINE");
-    check_channel!(viber, "channel-viber", "Viber");
-    check_channel!(messenger, "channel-messenger", "Messenger");
     check_channel!(reddit, "channel-reddit", "Reddit");
-    check_channel!(mastodon, "channel-mastodon", "Mastodon");
     check_channel!(bluesky, "channel-bluesky", "Bluesky");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(revolt, "channel-revolt", "Revolt");
@@ -2646,7 +2625,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(guilded, "channel-guilded", "Guilded");
     check_channel!(keybase, "channel-keybase", "Keybase");
     check_channel!(threema, "channel-threema", "Threema");
-    check_channel!(nostr, "channel-nostr", "Nostr");
     check_channel!(webex, "channel-webex", "Webex");
     check_channel!(pumble, "channel-pumble", "Pumble");
     check_channel!(flock, "channel-flock", "Flock");
@@ -2654,11 +2632,9 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(mumble, "channel-mumble", "Mumble");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
-    check_channel!(discourse, "channel-discourse", "Discourse");
     check_channel!(gitter, "channel-gitter", "Gitter");
     check_channel!(webhook, "channel-webhook", "Webhook");
     check_channel!(voice, "channel-voice", "Voice");
-    check_channel!(linkedin, "channel-linkedin", "LinkedIn");
 
     // Sidecar channels (always available, not feature-gated)
     if !kernel.config_ref().sidecar_channels.is_empty() {
@@ -3115,42 +3091,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Viber
-    #[cfg(feature = "channel-viber")]
-    for vb_config in config.viber.iter() {
-        if let Some(token) = read_token(&vb_config.auth_token_env, "Viber") {
-            let adapter = Arc::new(
-                ViberAdapter::new(token, vb_config.webhook_url.clone(), vb_config.webhook_port)
-                    .with_account_id(vb_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                vb_config.default_agent.clone(),
-                vb_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Facebook Messenger
-    #[cfg(feature = "channel-messenger")]
-    for ms_config in config.messenger.iter() {
-        if let Some(page_token) = read_token(&ms_config.page_token_env, "Messenger (page)") {
-            let verify_token =
-                read_token(&ms_config.verify_token_env, "Messenger (verify)").unwrap_or_default();
-            let app_secret =
-                read_token(&ms_config.app_secret_env, "Messenger (app_secret)").unwrap_or_default();
-            let adapter = Arc::new(
-                MessengerAdapter::new(page_token, verify_token, app_secret, ms_config.webhook_port)
-                    .with_account_id(ms_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                ms_config.default_agent.clone(),
-                ms_config.account_id.clone(),
-            ));
-        }
-    }
-
     // Reddit
     #[cfg(feature = "channel-reddit")]
     for rd_config in config.reddit.iter() {
@@ -3172,22 +3112,6 @@ pub async fn start_channel_bridge_with_config(
                     rd_config.account_id.clone(),
                 ));
             }
-        }
-    }
-
-    // Mastodon
-    #[cfg(feature = "channel-mastodon")]
-    for md_config in config.mastodon.iter() {
-        if let Some(token) = read_token(&md_config.access_token_env, "Mastodon") {
-            let adapter = Arc::new(
-                MastodonAdapter::new(md_config.instance_url.clone(), token)
-                    .with_account_id(md_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                md_config.default_agent.clone(),
-                md_config.account_id.clone(),
-            ));
         }
     }
 
@@ -3400,22 +3324,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Nostr
-    #[cfg(feature = "channel-nostr")]
-    for ns_config in config.nostr.iter() {
-        if let Some(key) = read_token(&ns_config.private_key_env, "Nostr") {
-            let adapter = Arc::new(
-                NostrAdapter::new(key, ns_config.relays.clone())
-                    .with_account_id(ns_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                ns_config.default_agent.clone(),
-                ns_config.account_id.clone(),
-            ));
-        }
-    }
-
     // Webex
     #[cfg(feature = "channel-webex")]
     for wx_config in config.webex.iter() {
@@ -3589,27 +3497,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Discourse
-    #[cfg(feature = "channel-discourse")]
-    for dc_config in config.discourse.iter() {
-        if let Some(api_key) = read_token(&dc_config.api_key_env, "Discourse") {
-            let adapter = Arc::new(
-                DiscourseAdapter::new(
-                    dc_config.base_url.clone(),
-                    api_key,
-                    dc_config.api_username.clone(),
-                    dc_config.categories.clone(),
-                )
-                .with_account_id(dc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                dc_config.default_agent.clone(),
-                dc_config.account_id.clone(),
-            ));
-        }
-    }
-
     // Gitter
     #[cfg(feature = "channel-gitter")]
     for gt_config in config.gitter.iter() {
@@ -3672,22 +3559,6 @@ pub async fn start_channel_bridge_with_config(
                 adapter,
                 voice_config.default_agent.clone(),
                 voice_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // LinkedIn
-    #[cfg(feature = "channel-linkedin")]
-    for li_config in config.linkedin.iter() {
-        if let Some(token) = read_token(&li_config.access_token_env, "LinkedIn") {
-            let adapter = Arc::new(
-                LinkedInAdapter::new(token, li_config.organization_id.clone())
-                    .with_account_id(li_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                li_config.default_agent.clone(),
-                li_config.account_id.clone(),
             ));
         }
     }
@@ -4657,10 +4528,7 @@ mod tests {
         assert!(config.channels.xmpp.is_none());
         // Wave 3
         assert!(config.channels.line.is_none());
-        assert!(config.channels.viber.is_none());
-        assert!(config.channels.messenger.is_none());
         assert!(config.channels.reddit.is_none());
-        assert!(config.channels.mastodon.is_none());
         assert!(config.channels.bluesky.is_none());
         assert!(config.channels.feishu.is_none());
         assert!(config.channels.revolt.is_none());
@@ -4669,7 +4537,6 @@ mod tests {
         assert!(config.channels.guilded.is_none());
         assert!(config.channels.keybase.is_none());
         assert!(config.channels.threema.is_none());
-        assert!(config.channels.nostr.is_none());
         assert!(config.channels.webex.is_none());
         assert!(config.channels.pumble.is_none());
         assert!(config.channels.flock.is_none());
@@ -4677,10 +4544,8 @@ mod tests {
         // Wave 5
         assert!(config.channels.mumble.is_none());
         assert!(config.channels.dingtalk.is_none());
-        assert!(config.channels.discourse.is_none());
         assert!(config.channels.gitter.is_none());
         assert!(config.channels.webhook.is_none());
-        assert!(config.channels.linkedin.is_none());
     }
 
     #[test]

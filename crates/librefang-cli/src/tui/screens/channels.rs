@@ -90,20 +90,6 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         description: "LINE Messaging API adapter",
     },
     ChannelDef {
-        name: "viber",
-        display_name: "Viber",
-        category: "Messaging",
-        env_vars: &["VIBER_AUTH_TOKEN"],
-        description: "Viber Bot API adapter",
-    },
-    ChannelDef {
-        name: "messenger",
-        display_name: "Messenger",
-        category: "Messaging",
-        env_vars: &["MESSENGER_PAGE_TOKEN", "MESSENGER_VERIFY_TOKEN"],
-        description: "Facebook Messenger adapter",
-    },
-    ChannelDef {
         name: "threema",
         display_name: "Threema",
         category: "Messaging",
@@ -125,33 +111,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["REDDIT_CLIENT_SECRET", "REDDIT_PASSWORD"],
         description: "Reddit API bot adapter",
     },
-    ChannelDef {
-        name: "mastodon",
-        display_name: "Mastodon",
-        category: "Social",
-        env_vars: &["MASTODON_ACCESS_TOKEN"],
-        description: "Mastodon Streaming API adapter",
-    },
+    // mastodon migrated to a sidecar adapter
     ChannelDef {
         name: "bluesky",
         display_name: "Bluesky",
         category: "Social",
         env_vars: &["BLUESKY_APP_PASSWORD"],
         description: "Bluesky/AT Protocol adapter",
-    },
-    ChannelDef {
-        name: "linkedin",
-        display_name: "LinkedIn",
-        category: "Social",
-        env_vars: &["LINKEDIN_ACCESS_TOKEN"],
-        description: "LinkedIn Messaging API adapter",
-    },
-    ChannelDef {
-        name: "nostr",
-        display_name: "Nostr",
-        category: "Social",
-        env_vars: &["NOSTR_PRIVATE_KEY"],
-        description: "Nostr relay protocol adapter",
     },
     // ── Enterprise (10)
     ChannelDef {
@@ -250,13 +216,6 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         category: "Developer",
         env_vars: &["GITTER_TOKEN"],
         description: "Gitter Streaming API adapter",
-    },
-    ChannelDef {
-        name: "discourse",
-        display_name: "Discourse",
-        category: "Developer",
-        env_vars: &["DISCOURSE_API_KEY"],
-        description: "Discourse forum API adapter",
     },
     ChannelDef {
         name: "revolt",
