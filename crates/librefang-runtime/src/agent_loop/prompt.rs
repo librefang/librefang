@@ -185,7 +185,21 @@ pub(super) struct RecallSetupContext<'a> {
     pub(super) proactive_memory: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
     pub(super) context_engine: Option<&'a dyn ContextEngine>,
     pub(super) sender_user_id: Option<&'a str>,
+    /// Bare channel type (`"telegram"`, `"slack"`, `"whatsapp"`, …) used
+    /// for ACL resolution (`KernelHandle::memory_acl_for_sender`) and
+    /// kernel-internal sentinel matching (`cron`, `autonomous`, `webui`).
+    /// MUST stay bare — `memory_acl_for_sender` looks the channel up in
+    /// `format!("{ch}:{sid}")` form, and a chat-suffixed channel would
+    /// miss the ACL index.
     pub(super) sender_channel: Option<&'a str>,
+    /// Chat-qualified scope (`"telegram:<chatId>"`, `"slack:<channelId>"`,
+    /// `"whatsapp:<jid>"`, …) used for the #5227 cross-chat memory-bleed
+    /// filter. Produced by `compose_sender_scope(channel, chat_id)` at
+    /// the kernel inject site so it matches the formula
+    /// `SessionId::for_sender_scope` uses. `None` for non-channel callers
+    /// (dashboard, direct API, CLI) — the filter then degrades to a
+    /// no-op, preserving legacy recall behaviour.
+    pub(super) sender_chat_scope: Option<&'a str>,
     /// Optional kernel handle used to resolve the per-user memory ACL
     /// (RBAC M3, #3054). When `None` the auto-retrieve path runs without
     /// a guard — preserving pre-M3 single-user behaviour.
@@ -284,8 +298,15 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
     // all stamped for the *other* chat would leave zero results after
     // filtering. Matches the inflation factor used by `auto_retrieve`.
     const MEMORY_RECALL_LIMIT: usize = 5;
+    // Use the chat-qualified scope (`"telegram:<chatId>"`) for the
+    // #5227 filter, not the bare `sender_channel` (`"telegram"`). On
+    // Telegram / Slack / Discord native bridges the latter is identical
+    // across DM and group of the same peer, which would make the filter
+    // a no-op (#5227 follow-up). The kernel inject sites stamp both
+    // keys — see `messaging.rs::send_message_full_inner` and
+    // `agent_execution.rs::execute_llm_agent`.
     let chat_scope_active = ctx
-        .sender_channel
+        .sender_chat_scope
         .map(str::trim)
         .is_some_and(|s| !s.is_empty());
     let recall_fetch_limit = if chat_scope_active {
@@ -387,9 +408,9 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
     // `MemoryLevel::User` and untagged legacy rows pass through. The
     // context-engine `ingest` path also funnels here so its results get
     // filtered too — engines that perform their own scope filtering can
-    // pass `chat_scope` upstream and this becomes a no-op for them.
+    // pass `sender_chat_scope` upstream and this becomes a no-op for them.
     if chat_scope_active {
-        let want = ctx.sender_channel.unwrap();
+        let want = ctx.sender_chat_scope.unwrap();
         memories.retain(|frag| {
             librefang_types::memory::memory_scope_allows_recall(&frag.scope, &frag.metadata, want)
         });
@@ -423,7 +444,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                                 &user_id,
                                 ctx.user_message,
                                 ctx.sender_user_id,
-                                ctx.sender_channel,
+                                ctx.sender_chat_scope,
                             )
                             .await;
                         if let Ok(ref mut its) = items {
@@ -442,7 +463,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                             &user_id,
                             ctx.user_message,
                             ctx.sender_user_id,
-                            ctx.sender_channel,
+                            ctx.sender_chat_scope,
                         )
                         .await
                 }

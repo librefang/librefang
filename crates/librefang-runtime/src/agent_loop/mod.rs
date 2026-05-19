@@ -433,6 +433,20 @@ pub async fn run_agent_loop(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // #5227: chat-qualified scope stamped by the kernel alongside
+    // `sender_channel`. Fall back to `sender_channel` for backward
+    // compatibility with any caller still synthesizing manifests
+    // without going through the kernel inject sites (tests, fuzzers,
+    // hot-path bypasses) — that fallback keeps the bare-channel
+    // behaviour the original #5227 fix already shipped, so the
+    // post-filter still applies on those paths even if it can't
+    // disambiguate group vs DM.
+    let sender_chat_scope: Option<String> = manifest
+        .metadata
+        .get("sender_chat_scope")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| sender_channel.clone());
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -448,6 +462,7 @@ pub async fn run_agent_loop(
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
+        sender_chat_scope: sender_chat_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
@@ -1269,7 +1284,7 @@ pub async fn run_agent_loop(
                         user_message,
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
-                        sender_channel: sender_channel.as_deref(),
+                        sender_chat_scope: sender_chat_scope.as_deref(),
                         streaming: false,
                         opts,
                     },

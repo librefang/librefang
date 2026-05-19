@@ -234,3 +234,87 @@ async fn unscoped_caller_preserves_legacy_recall_5227() {
         unscoped.iter().map(|m| &m.content).collect::<Vec<_>>()
     );
 }
+
+/// #5227 follow-up — verify the chat-scope composition formula is
+/// shared between `SessionId::for_sender_scope` (kernel-side session
+/// isolation) and `compose_sender_scope` (memory-side `chat_scope`
+/// stamp). If the two ever drift, a memory written under one chat
+/// would leak into the SessionId-isolated history of the OTHER chat —
+/// which is exactly the regression #5227 set out to close, but for
+/// adapters that split `channel` from `chat_id` (Telegram / Slack /
+/// Discord) instead of pre-qualifying like the WhatsApp gateway.
+#[test]
+fn compose_sender_scope_matches_for_sender_scope_formula_5227() {
+    use librefang_types::agent::{compose_sender_scope, AgentId, SessionId};
+
+    let agent = AgentId::new();
+
+    // 1) WhatsApp-gateway shape — channel pre-qualified, chat_id None.
+    //    Bug-for-bug compatible with the original PR test.
+    {
+        let dm_channel = "whatsapp:+15551234567@s.whatsapp.net";
+        let scope = compose_sender_scope(dm_channel, None).expect("non-empty channel");
+        assert_eq!(scope, dm_channel);
+        let sid = SessionId::for_sender_scope(agent, dm_channel, None);
+        assert_eq!(sid, SessionId::for_channel(agent, &scope));
+    }
+
+    // 2) Telegram / Slack / Discord shape — bare channel + chat_id.
+    //    The formula MUST compose `"<channel>:<chat_id>"` so DM and
+    //    group of the same user (which share `channel = "telegram"`
+    //    but differ on chat_id) get distinct scopes.
+    {
+        let dm_scope = compose_sender_scope("telegram", Some("user-123")).unwrap();
+        let group_scope = compose_sender_scope("telegram", Some("group-456")).unwrap();
+        assert_ne!(
+            dm_scope, group_scope,
+            "Telegram DM and group of same channel must compose to distinct scopes"
+        );
+        assert_eq!(dm_scope, "telegram:user-123");
+        assert_eq!(group_scope, "telegram:group-456");
+
+        // SessionId derived from the same inputs must collapse to
+        // for_channel(agent, scope) — proving the two consumers of
+        // the formula agree.
+        assert_eq!(
+            SessionId::for_sender_scope(agent, "telegram", Some("user-123")),
+            SessionId::for_channel(agent, &dm_scope),
+        );
+        assert_eq!(
+            SessionId::for_sender_scope(agent, "telegram", Some("group-456")),
+            SessionId::for_channel(agent, &group_scope),
+        );
+        assert_ne!(
+            SessionId::for_sender_scope(agent, "telegram", Some("user-123")),
+            SessionId::for_sender_scope(agent, "telegram", Some("group-456")),
+            "kernel session isolation must distinguish telegram DM vs group of same user"
+        );
+    }
+
+    // 3) Empty chat_id collapses to bare channel (matches the
+    //    historical for_channel-only behaviour for adapters that
+    //    don't populate chat_id at all).
+    {
+        let scope = compose_sender_scope("slack", Some("")).unwrap();
+        assert_eq!(scope, "slack");
+        assert_eq!(
+            SessionId::for_sender_scope(agent, "slack", Some("")),
+            SessionId::for_channel(agent, "slack"),
+        );
+    }
+
+    // 4) Empty channel is `None` — the caller has no scope to compose
+    //    and the kernel inject sites must not stamp `sender_chat_scope`.
+    assert!(compose_sender_scope("", None).is_none());
+    assert!(compose_sender_scope("", Some("anything")).is_none());
+}
+
+// The Session-level cross-chat-isolation behaviour for the
+// Telegram-shape (bare channel + chat_id) lives in
+// `librefang-memory::proactive::tests::
+// test_auto_retrieve_cross_chat_isolation_telegram_shape_5227`
+// — see that test for the end-to-end recall-side filter assertion.
+// We can't run it from this crate without exposing the substrate's
+// per-peer write API publicly (the proactive store's `semantic` is
+// `pub(crate)`), so the unit-test above plus the in-memory crate-
+// local regression keep the formula and the filter pinned together.

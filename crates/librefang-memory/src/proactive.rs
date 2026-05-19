@@ -2865,6 +2865,114 @@ mod tests {
         assert!(memory_chat_scope_allows(&m, "dm"));
     }
 
+    /// #5227 follow-up — Telegram/Slack/Discord shape regression.
+    /// The original PR worked for the WhatsApp gateway because its
+    /// `channel` string already embedded the chat
+    /// (`"whatsapp:<jid>"`). For native channel adapters where the
+    /// chat lives in `SenderContext.chat_id` and `channel` is just
+    /// `"telegram"` / `"slack"` / `"discord"`, the kernel inject
+    /// site must now compose `"<channel>:<chat_id>"` via
+    /// `librefang_types::agent::compose_sender_scope` so DM and group
+    /// of the same user get distinct chat scopes. This test pins the
+    /// recall-side filter behaviour for that shape.
+    ///
+    /// Writes via `semantic.remember_with_embedding_and_peer` to keep
+    /// the test independent of the rule-based extractor (which would
+    /// over-promote preferences to `MemoryLevel::User` and bypass the
+    /// filter; production uses an LLM extractor that defaults to
+    /// `MemoryLevel::Session`, matching what this test stamps).
+    #[tokio::test]
+    async fn test_auto_retrieve_cross_chat_isolation_telegram_shape_5227() {
+        use librefang_types::agent::compose_sender_scope;
+        use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let peer = "tg-user-7777";
+
+        // Compose chat scopes via the canonical helper — same formula
+        // `SessionId::for_sender_scope` uses. The DM and group MUST
+        // collapse to distinct strings.
+        let dm_scope =
+            compose_sender_scope("telegram", Some("dm-7777")).expect("non-empty channel");
+        let group_scope =
+            compose_sender_scope("telegram", Some("group--999")).expect("non-empty channel");
+        assert_ne!(
+            dm_scope, group_scope,
+            "precondition: helper must yield distinct scopes for DM vs group"
+        );
+        // Bare `sender_channel` value would collapse them — proves
+        // why this follow-up is necessary: the pre-follow-up filter
+        // used bare channel and was a no-op on Telegram.
+        assert_eq!(
+            compose_sender_scope("telegram", None).unwrap(),
+            "telegram",
+            "bare channel (no chat_id) must remain just 'telegram' — \
+             which is exactly why the bare key can't disambiguate"
+        );
+
+        let write_scoped = |content: &str, scope: &str| {
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                CHAT_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+            store
+                .semantic
+                .remember_with_embedding_and_peer(
+                    agent_id,
+                    content,
+                    MemorySource::Conversation,
+                    MemoryLevel::Session.scope_str(),
+                    meta,
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                    Some(peer),
+                )
+                .unwrap();
+        };
+
+        write_scoped(
+            "Discussed shipping project Atlas by Friday in the Telegram group",
+            &group_scope,
+        );
+
+        // DM-scope recall must NOT see the group memory.
+        let dm_hits = store
+            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(&dm_scope))
+            .await
+            .unwrap();
+        for content in dm_hits.iter().map(|m| m.content.as_str()) {
+            assert!(
+                !content.contains("Atlas"),
+                "regression: telegram group-scoped memory leaked into DM \
+                 recall: {content:?} (dm={dm_scope}, group={group_scope})"
+            );
+        }
+
+        // Group-scope recall MUST see the group memory (filter must
+        // not over-prune the matching chat).
+        let group_hits = store
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(&group_scope),
+            )
+            .await
+            .unwrap();
+        assert!(
+            group_hits.iter().any(|m| m.content.contains("Atlas")),
+            "scope-matching telegram-group recall must surface the group \
+             memory; got {:?}",
+            group_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn test_delete_memory() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();

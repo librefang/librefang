@@ -21,14 +21,18 @@ pub(super) struct FinalizeEndTurnContext<'a> {
     pub(super) user_message: &'a str,
     pub(super) messages: &'a [Message],
     pub(super) sender_user_id: Option<&'a str>,
-    /// `(channel, chat)` scope of the inbound that triggered this turn.
-    /// Threaded down so `auto_memorize` can stamp extracted memories with
-    /// their originating chat — preventing them from being recalled into
-    /// a DIFFERENT chat with the same (agent, peer) on a later turn
-    /// (#5227). `None` when the turn was kicked off without channel
-    /// context (direct API, dashboard); in that case memories remain
-    /// chat-agnostic, matching legacy behaviour.
-    pub(super) sender_channel: Option<&'a str>,
+    /// Chat-qualified `(channel, chat)` scope of the inbound that
+    /// triggered this turn (e.g. `"telegram:<chatId>"`,
+    /// `"whatsapp:<jid>"`). Threaded down so `auto_memorize` can stamp
+    /// extracted memories with their originating chat — preventing them
+    /// from being recalled into a DIFFERENT chat with the same
+    /// (agent, peer) on a later turn (#5227). `None` when the turn was
+    /// kicked off without channel context (direct API, dashboard); in
+    /// that case memories remain chat-agnostic, matching legacy
+    /// behaviour. Composed at the kernel inject site via
+    /// `librefang_types::agent::compose_sender_scope` so the formula
+    /// matches `SessionId::for_sender_scope`'s scope-string composition.
+    pub(super) sender_chat_scope: Option<&'a str>,
     pub(super) streaming: bool,
     pub(super) opts: &'a LoopOptions,
 }
@@ -308,7 +312,7 @@ pub(super) async fn finalize_successful_end_turn(
                     &user_id,
                     &messages_json,
                     ctx.sender_user_id,
-                    ctx.sender_channel,
+                    ctx.sender_chat_scope,
                 )
                 .await
             {
