@@ -54,11 +54,14 @@ app_id_env = "TEAMS_APP_ID"
 app_secret_env = "TEAMS_APP_SECRET"
 default_agent = "ops"
 
-# Social example
-[channels.mastodon]
-token_env = "MASTODON_TOKEN"
-instance = "https://mastodon.social"
-default_agent = "social-media"
+# Social example (Mastodon — sidecar)
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 # IoT/MQTT example (requires all-channels feature flag)
 [channels.mqtt]

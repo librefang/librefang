@@ -34,7 +34,6 @@ all-channels = [
     "channel-keybase",
     "channel-line",
     "channel-linkedin",
-    "channel-mastodon",
     "channel-matrix",
     "channel-mattermost",
     "channel-messenger",
@@ -83,7 +82,6 @@ channel-xmpp = []
 channel-bluesky = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []
-channel-mastodon = []
 channel-messenger = []
 channel-reddit = []
 channel-revolt = []

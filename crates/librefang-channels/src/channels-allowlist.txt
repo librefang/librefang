@@ -34,7 +34,6 @@ irc
 keybase
 line
 linkedin
-mastodon
 matrix
 mattermost
 messenger

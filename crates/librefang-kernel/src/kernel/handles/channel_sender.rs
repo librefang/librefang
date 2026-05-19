@@ -40,7 +40,6 @@ macro_rules! for_each_channel_field {
         $mac!(keybase, "keybase");
         $mac!(line, "line");
         $mac!(linkedin, "linkedin");
-        $mac!(mastodon, "mastodon");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
         $mac!(messenger, "messenger");
@@ -473,7 +472,6 @@ mod tests {
             "keybase",
             "line",
             "linkedin",
-            "mastodon",
             "matrix",
             "mattermost",
             "messenger",

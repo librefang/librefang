@@ -338,20 +338,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
         config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "mastodon", display_name: "Mastodon", icon: "MA",
-        description: "Mastodon Streaming API adapter",
-        category: "social", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your access token from Settings > Development",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("MASTODON_ACCESS_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "instance_url", label: "Instance URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://mastodon.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > Development on your instance", "Create an app and copy the token", "Paste it below"],
-        config_template: "[channels.mastodon]\ninstance_url = \"https://mastodon.social\"\naccess_token_env = \"MASTODON_ACCESS_TOKEN\"",
-    },
+    // mastodon migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.mastodon in the SDK package); no
+    // longer an in-process channel.
     ChannelMeta {
         name: "bluesky", display_name: "Bluesky", icon: "BS",
         description: "Bluesky/AT Protocol adapter",
@@ -804,7 +793,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "threema" => config.threema.is_some(),
         "keybase" => config.keybase.is_some(),
         "reddit" => config.reddit.is_some(),
-        "mastodon" => config.mastodon.is_some(),
         "bluesky" => config.bluesky.is_some(),
         "linkedin" => config.linkedin.is_some(),
         "nostr" => config.nostr.is_some(),
@@ -1071,6 +1059,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Gotify push notifications (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.gotify"],
+    },
+    SidecarCatalogEntry {
+        name: "mastodon",
+        display_name: "Mastodon",
+        description: "Mastodon Streaming API (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.mastodon"],
     },
 ];
 
@@ -1614,10 +1609,6 @@ fn channel_config_values(
             .reddit
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "mastodon" => config
-            .mastodon
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "bluesky" => config
             .bluesky
             .as_ref()
@@ -1730,7 +1721,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "threema" => config.threema.len(),
         "keybase" => config.keybase.len(),
         "reddit" => config.reddit.len(),
-        "mastodon" => config.mastodon.len(),
         "bluesky" => config.bluesky.len(),
         "linkedin" => config.linkedin.len(),
         "nostr" => config.nostr.len(),
@@ -1794,7 +1784,6 @@ fn channel_instances_serialized(
         "threema" => ser(&config.threema),
         "keybase" => ser(&config.keybase),
         "reddit" => ser(&config.reddit),
-        "mastodon" => ser(&config.mastodon),
         "bluesky" => ser(&config.bluesky),
         "linkedin" => ser(&config.linkedin),
         "nostr" => ser(&config.nostr),

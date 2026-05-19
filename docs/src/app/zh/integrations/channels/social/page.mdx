@@ -53,36 +53,33 @@ Reddit 适配器使用 script 类型凭证通过 OAuth2 认证，按配置的间
 - 任意实例上的 Mastodon 账户
 - 应用访问令牌（从实例的 **Preferences > Development** 页面生成，参见 [Mastodon API 文档](https://docs.joinmastodon.org/api/)）
 
+Mastodon 以 Python sidecar (`librefang.sidecar.adapters.mastodon`, 随 `librefang-sdk` 发布) 形式运行。
+
 ### 设置步骤
 
 1. 在 Mastodon 实例上，前往 **Preferences > Development > New Application**。
 2. 授予 `read` 和 `write` 作用域。
-3. 复制访问令牌。
-4. 设置环境变量：
-
-```bash
-export MASTODON_INSTANCE_URL=https://mastodon.social  # 环境变量
-export MASTODON_ACCESS_TOKEN=your-access-token
-librefang vault set MASTODON_INSTANCE_URL     # 加密金库（推荐）
-librefang vault set MASTODON_ACCESS_TOKEN
-librefang config set-key mastodon             # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-5. 添加到配置文件：
+3. 复制访问令牌（即 `MASTODON_ACCESS_TOKEN`）。
+4. 在仪表盘 Channels 页面选择 Mastodon，填入实例 URL 与访问令牌——`MASTODON_ACCESS_TOKEN` 会写到 `~/.librefang/secrets.env`，`MASTODON_INSTANCE_URL` 写到 `~/.librefang/config.toml` 的 `[sidecar_channels.env]`。等价的手工配置：
 
 ```toml
-[channels.mastodon]
-instance_env = "MASTODON_INSTANCE_URL"
-token_env = "MASTODON_ACCESS_TOKEN"
-default_agent = "social-media"
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
+# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由
 ```
 
-6. 重启守护进程。
+5. 守护进程通过热加载自动起停 sidecar，无需手动重启。
 
 ### 工作原理
 
-Mastodon 适配器通过 Server-Sent Events (SSE) 连接到实例的流式 API，实时接收通知（提及、私信）。响应通过 Mastodon REST API 以嘟文或私信形式发布。
+Mastodon sidecar 通过 Server-Sent Events (SSE) 连接到实例的用户流式 API 实时接收提及通知；SSE 失败时自动回退为 REST 轮询 `/api/v1/notifications`。出站回复通过 `POST /api/v1/statuses` 带 `in_reply_to_id` 链式发布，保证分片回复在客户端仍然是同一线程。
 
 ---
 
