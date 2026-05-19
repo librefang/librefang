@@ -16,6 +16,78 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+// ---------------------------------------------------------------------------
+// Baileys `fetchProps` non-blocking patch
+// ---------------------------------------------------------------------------
+// Baileys 6.7.21 (and recent 6.x) issues `Promise.all([fetchProps,
+// fetchBlocklist, fetchPrivacySettings])` during the initial post-auth
+// handshake (`executeInitQueries` in
+// `node_modules/@whiskeysockets/baileys/lib/Socket/chats.js`). WhatsApp's
+// server protocol drifted recently so `fetchProps` returns a 408 Request
+// Time-Out after 60s; with `Promise.all` the timeout reject takes the whole
+// init-queries flow down, which keeps the gateway in a reconnect loop and
+// silently swallows inbound messages — the user-visible symptom is "Ambrogio
+// doesn't reply on WhatsApp anymore" with no error surfaced.
+//
+// Patch swaps `Promise.all` for `Promise.allSettled`: the gateway tolerates
+// the `fetchProps` timeout (chat list / props are not required for
+// receive/send), init queries complete, and message handling resumes.
+// Idempotent: silently skips when the patched call site already contains
+// `allSettled`. Runs on every `npm install` so a reinstall (Docker image
+// rebuild, lpk recreate) does not regress the gateway back to the broken
+// `Promise.all` form.
+//
+// This is a stop-gap until the upstream `whatsapp-gateway` migrates to
+// Baileys 7.x (where `fetchProps` is rewritten and the timeout no longer
+// blocks the init flow). The patch is a no-op against 7.x because the
+// `Promise.all(... fetchProps()...)` call site is gone.
+function patchBaileysInitQueries() {
+  const chatsJs = path.join(
+    __dirname,
+    '..',
+    'node_modules',
+    '@whiskeysockets',
+    'baileys',
+    'lib',
+    'Socket',
+    'chats.js',
+  );
+  if (!fs.existsSync(chatsJs)) {
+    // Baileys not installed (dev `--no-save` install) or 7.x path layout —
+    // nothing to patch.
+    return;
+  }
+  const src = fs.readFileSync(chatsJs, 'utf8');
+  if (
+    src.includes(
+      'Promise.allSettled([fetchProps(), fetchBlocklist(), fetchPrivacySettings()])',
+    )
+  ) {
+    return; // already patched
+  }
+  if (
+    !src.includes(
+      'Promise.all([fetchProps(), fetchBlocklist(), fetchPrivacySettings()])',
+    )
+  ) {
+    return; // Baileys version doesn't expose this call shape (e.g. 7.x)
+  }
+  const patched = src.replace(
+    'Promise.all([fetchProps(), fetchBlocklist(), fetchPrivacySettings()])',
+    'Promise.allSettled([fetchProps(), fetchBlocklist(), fetchPrivacySettings()])',
+  );
+  fs.writeFileSync(chatsJs, patched, 'utf8');
+  console.log(
+    '[postinstall] Patched Baileys executeInitQueries: Promise.all -> Promise.allSettled',
+  );
+}
+
+try {
+  patchBaileysInitQueries();
+} catch (err) {
+  console.warn('[postinstall] Baileys patch skipped:', err.message);
+}
+
 // Detect Termux/Android: Node on Termux reports os.platform() as 'android',
 // or the kernel version contains 'android', or the Termux prefix exists.
 function isTermux() {
