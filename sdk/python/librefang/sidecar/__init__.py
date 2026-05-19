@@ -29,10 +29,12 @@ from . import logging, protocol
 from .protocol import (
     Command,
     Content,
+    Field,
     Heartbeat,
     Interactive,
     ReadyAck,
     Reaction,
+    Schema,
     Send,
     Shutdown,
     StreamDelta,
@@ -45,18 +47,24 @@ from .protocol import (
 from .runtime import (
     ProducerCrashed,
     SidecarAdapter,
+    describe_main,
     run,
     run_stdio,
+    run_stdio_main,
     with_backoff,
 )
 
 __all__ = [
     "ProducerCrashed",
     "SidecarAdapter",
+    "describe_main",
     "run",
     "run_stdio",
+    "run_stdio_main",
     "with_backoff",
     "Content",
+    "Field",
+    "Schema",
     "protocol",
     "logging",
     "parse_command",

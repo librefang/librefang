@@ -158,6 +158,8 @@
     "on": "ON",
     "expand": "Expand",
     "collapse": "Collapse",
+    "show_advanced": "Show advanced",
+    "hide_advanced": "Hide advanced",
     "add": "Add",
     "remove": "Remove",
     "discard": "Discard",
@@ -378,6 +380,8 @@
       "skills_search_placeholder": "Search installed skills…",
       "mcp_servers": "MCP Servers",
       "mcp_servers_placeholder": "Empty = all connected servers",
+      "mcp_servers_hint": "Empty = all configured MCP servers available.",
+      "mcp_servers_search_placeholder": "Search MCP servers…",
       "live_toml": "Live TOML Preview",
       "preview_toml": "TOML",
       "preview_markdown": "Markdown",
@@ -873,7 +877,10 @@
     "empty_title": "No channels yet",
     "empty_body": "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
     "connect_first": "Connect a channel",
-    "picker_title": "Add channel"
+    "picker_title": "Add channel",
+    "saved": "Saved",
+    "saved_restart_required": "Saved — restart daemon to apply",
+    "shadowed_secrets_warning": "Warning: these tokens are shadowed by shell environment variables and won't take effect until you unset them and restart: {{keys}}"
   },
   "skills": {
     "title": "Skills",

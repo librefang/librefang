@@ -189,6 +189,7 @@ use crate::types;
         // ── Channels ──
         routes::list_channels,
         routes::configure_channel,
+        routes::configure_sidecar_channel,
         routes::remove_channel,
         routes::test_channel,
         routes::reload_channels,
@@ -411,6 +412,9 @@ use crate::types;
         routes::users::BulkImportResult,
         routes::users::BulkImportRow,
         routes::users::RotateKeyResponse,
+        routes::channels::ConfigureSidecarBody,
+        routes::sidecar_describe::SidecarSchema,
+        routes::sidecar_describe::SidecarSchemaField,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),

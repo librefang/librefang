@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from librefang.sidecar import SidecarAdapter, protocol, run_stdio
+from librefang.sidecar import Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 
 LONGPOLL_SERVER_SECS = 30
@@ -781,6 +781,22 @@ def _multipart(url: str, fields: dict, file_field: str, filename: str,
 
 class TelegramAdapter(SidecarAdapter):
     capabilities = ["typing", "reaction", "interactive", "thread", "streaming"]
+
+    SCHEMA = Schema(
+        name="telegram",
+        display_name="Telegram",
+        description="Telegram Bot API adapter (out-of-process sidecar)",
+        fields=[
+            Field("TELEGRAM_BOT_TOKEN", "Bot Token", "secret",
+                  required=True,
+                  placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"),
+            Field("ALLOWED_USERS", "Allowed User IDs", "list",
+                  placeholder="123456789, 987654321",
+                  advanced=True),
+            Field("TELEGRAM_CLEAR_DONE_REACTION", "Clear done reaction",
+                  "bool", advanced=True),
+        ],
+    )
 
     def __init__(self) -> None:
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -1545,4 +1561,4 @@ class TelegramAdapter(SidecarAdapter):
 
 
 if __name__ == "__main__":
-    run_stdio(TelegramAdapter())
+    run_stdio_main(TelegramAdapter)
