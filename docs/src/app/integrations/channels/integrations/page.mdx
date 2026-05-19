@@ -482,38 +482,34 @@ The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Even
 
 ## Gotify
 
+Gotify runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.gotify`, ships in `librefang-sdk`).
+
 ### Prerequisites
 
-- A Gotify server instance and an application token (see [Gotify docs](https://gotify.net/docs/))
+- A Gotify server instance.
+- An **application** token (used to publish) and a **client** token (used to subscribe via WebSocket) — both created in the Gotify web UI.
 
 ### Setup
 
-1. In the Gotify web UI, create a new application and copy the token.
-2. Set environment variables:
-
-```bash
-export GOTIFY_URL=https://gotify.example.com  # Environment variable
-export GOTIFY_TOKEN=your-application-token
-librefang vault set GOTIFY_URL                # Encrypted vault (recommended)
-librefang vault set GOTIFY_TOKEN
-librefang config set-key gotify               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-3. Add to config:
+1. In the Gotify web UI, create an Application and copy its token (this becomes `GOTIFY_APP_TOKEN`); create a Client and copy its token (this becomes `GOTIFY_CLIENT_TOKEN`).
+2. Open the dashboard Channels page, pick Gotify, and fill in the server URL and both tokens — the dashboard writes `GOTIFY_APP_TOKEN` / `GOTIFY_CLIENT_TOKEN` to `~/.librefang/secrets.env` and `GOTIFY_SERVER_URL` to the `[sidecar_channels.env]` table in `~/.librefang/config.toml`. Equivalent manual config:
 
 ```toml
-[channels.gotify]
-url_env = "GOTIFY_URL"
-token_env = "GOTIFY_TOKEN"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # optional, multi-bot routing key
 ```
 
-4. Restart the daemon.
+3. The daemon supervises the sidecar — no manual restart is needed; the kernel's hot-reload spawns or replaces the subprocess on config change.
 
 ### How It Works
 
-The Gotify adapter connects to the Gotify server via WebSocket to receive messages in real time. Responses are sent back through the Gotify REST API's message endpoint.
+The Gotify sidecar connects to `wss://{server}/stream?token={client_token}` to receive Gotify push messages in real time and POSTs back to `{server}/message?token={app_token}` to publish. The WebSocket client is a stdlib-only RFC 6455 reader on `socket` + `ssl` (no third-party dependency).
 
 ---
 

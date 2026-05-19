@@ -680,24 +680,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
     },
     // ── Notifications (3) ───────────────────────────────────────────
-    // ntfy migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.ntfy in the SDK package); no longer
-    // an in-process channel.
-    ChannelMeta {
-        name: "gotify", display_name: "Gotify", icon: "GF",
-        description: "Gotify WebSocket notification adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your server URL and tokens",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://gotify.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_token_env", label: "App Token (send)", field_type: FieldType::Secret, env_var: Some("GOTIFY_APP_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "client_token_env", label: "Client Token (receive)", field_type: FieldType::Secret, env_var: Some("GOTIFY_CLIENT_TOKEN"), required: true, placeholder: "def456...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an app and a client in Gotify", "Copy both tokens", "Enter URL and tokens below"],
-        config_template: "[channels.gotify]\nserver_url = \"\"\napp_token_env = \"GOTIFY_APP_TOKEN\"\nclient_token_env = \"GOTIFY_CLIENT_TOKEN\"",
-    },
+    // ntfy and gotify migrated to out-of-process sidecar adapters
+    // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
+    // in the SDK package); no longer in-process channels.
     ChannelMeta {
         name: "webhook", display_name: "Webhook", icon: "WH",
         description: "Generic HMAC-signed webhook adapter",
@@ -835,7 +820,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
         "twitch" => config.twitch.is_some(),
-        "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
         "voice" => config.voice.is_some(),
         "mumble" => config.mumble.is_some(),
@@ -1073,6 +1057,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.ntfy"],
+    },
+    SidecarCatalogEntry {
+        name: "gotify",
+        display_name: "Gotify",
+        description: "Gotify push notifications (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.gotify"],
     },
 ];
 
@@ -1710,10 +1701,6 @@ fn channel_config_values(
             .gitter
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "gotify" => config
-            .gotify
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
             .as_ref()
@@ -1785,7 +1772,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
         "twitch" => config.twitch.len(),
-        "gotify" => config.gotify.len(),
         "webhook" => config.webhook.len(),
         "voice" => config.voice.len(),
         "mumble" => config.mumble.len(),
@@ -1850,7 +1836,6 @@ fn channel_instances_serialized(
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
         "twitch" => ser(&config.twitch),
-        "gotify" => ser(&config.gotify),
         "webhook" => ser(&config.webhook),
         "voice" => ser(&config.voice),
         "mumble" => ser(&config.mumble),
