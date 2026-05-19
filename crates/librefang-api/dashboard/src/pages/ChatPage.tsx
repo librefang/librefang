@@ -364,7 +364,23 @@ const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
+function useChatMessages(
+  agentId: string | null,
+  agents: AgentItem[] = [],
+  sessionVersion = 0,
+  onModelSwitch?: () => void,
+  onClearError?: (message: string) => void,
+  sessionId: string | null = null,
+  onNewSession?: (sessionId: string) => void,
+  // Issue #5199-B: distinct from `onNewSession`. Fired when the server
+  // reports a session_id for a previously-unpinned connection (first
+  // message of a bare `?agentId=` chat) so the URL can be pinned WITHOUT
+  // wiping the just-rendered response. `onNewSession` semantically means
+  // "start over" (used by /new) and bumps sessionVersion to force a
+  // reload; auto-pin must NOT — it's the same session continuing, only
+  // the URL needs to catch up.
+  onAutoPinSession?: (sessionId: string) => void,
+) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const sendAgentMessageMutation = useSendAgentMessage();
@@ -1072,7 +1088,13 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               if (tRaf !== undefined) cancelAnimationFrame(tRaf);
               thinkingBufferRef.current.delete(botMsg.id);
               thinkingRafHandleRef.current.delete(botMsg.id);
-              updateAgentMessages(sendAgentId, prev => prev.map(m =>
+              // Reify the response patch as a pure mapper so the same
+              // transform feeds both the live React state update and the
+              // pre-navigation cache seed (issue #5199-B). Without a
+              // shared mapper the cache snapshot would diverge from what
+              // setMessages enqueues, since messagesRef hasn't picked up
+              // the update yet at this point in the event-loop tick.
+              const applyResponsePatch = (msgs: ChatMessage[]) => msgs.map(m =>
                 m.id === botMsg.id
                   ? {
                       ...m, content: data.content || m.content, isStreaming: false,
@@ -1084,14 +1106,38 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                       thinkingCollapsed: m.thinkingCollapsed ?? true,
                     }
                   : m
-              ));
-              // When the connection was not pinned to a specific session
-              // (?sessionId= absent), the server includes the resolved
-              // session id in the response so the URL can be updated.
-              // Pinning makes the chat bookmarkable and ensures a daemon
-              // restart does not silently switch context.
+              );
+              updateAgentMessages(sendAgentId, applyResponsePatch);
+              // Issue #5199-B: when the connection was not pinned to a
+              // specific session (?sessionId= absent), the server includes
+              // the resolved session id in the response so the URL can be
+              // updated. Pinning makes the chat bookmarkable and ensures
+              // a daemon restart does not silently switch context.
+              //
+              // Before navigating, copy the just-patched messages into
+              // the cache under the NEW (agent, sessionId) key so the
+              // post-nav load effect takes a cache hit instead of wiping
+              // the response and refetching from the server.  Without
+              // this seed, the URL change cascades into:
+              //   urlSessionId(null→new) → useChatMessages.sessionId
+              //   change → load effect re-runs with sessionVersion=0,
+              //   sees no cached entry for the new key, setMessages([])
+              //   then refetches — visible flicker.
               if (!sessionId && typeof data.session_id === "string" && data.session_id) {
-                onNewSession?.(data.session_id);
+                const newSid = data.session_id;
+                // Skip the auto-pin if the user has already switched to a
+                // different agent — navigating now would rewrite the URL
+                // off the agent they're currently viewing. The cache seed
+                // is also pointless in that case (we'd write to a bucket
+                // nothing reads). The off-screen agent's URL stays
+                // unpinned; the next time the user navigates back, the
+                // existing bare-`agentId` heuristics will still resolve to
+                // this session via the canonical pointer.
+                if (sendAgentId === currentAgentRef.current) {
+                  const nextMessages = applyResponsePatch(messagesRef.current);
+                  cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
+                  onAutoPinSession?.(newSid);
+                }
               }
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
@@ -2433,8 +2479,19 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               <Clock className="h-3 w-3" />
               <span className="hidden sm:inline truncate max-w-[100px]">
                 {(() => {
+                  // Issue #5199-C: `activeSessionId` is undefined when the
+                  // URL is unpinned (`?agentId=` only). In that case the
+                  // connection rides the canonical pointer; we cannot
+                  // know which session row matches it before the first
+                  // response, so showing one as "active" would mislead.
+                  // Show an explicit "unpinned" hint instead of the
+                  // generic "Session" placeholder so users see the
+                  // ambiguity rather than mistake it for selection state.
+                  if (!activeSessionId) {
+                    return t("chat.session_unpinned", { defaultValue: "Unpinned" });
+                  }
                   const active = sessions.find(s => s.session_id === activeSessionId);
-                  return active?.label || activeSessionId?.slice(0, 8) || t("chat.session");
+                  return active?.label || activeSessionId.slice(0, 8) || t("chat.session");
                 })()}
               </span>
               <ChevronDown className={`h-3 w-3 transition-transform ${sessionOpen ? "rotate-180" : ""}`} />
@@ -2804,6 +2861,25 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
+  // Issue #5199-B: auto-pin URL after the first message of an unpinned
+  // (`?agentId=` only) chat.  Distinct from `handleBackendNewSession`:
+  //   - replaces history (no Back-button trail through bare-agent URLs)
+  //   - does NOT bump sessionVersion — the messages we just rendered
+  //     belong to this very session; bumping would wipe and refetch.
+  //     The WS response handler seeds the cache under the new key
+  //     before this fires, so the load effect takes a cache hit.
+  //   - still invalidates the sessions list so a brand-new session
+  //     surfaces in the dropdown immediately.
+  const handleAutoPinSession = useCallback((newSessionId: string) => {
+    if (!selectedAgentId) return;
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId: newSessionId },
+      replace: true,
+    });
+    void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
+  }, [selectedAgentId, navigate, queryClient]);
+
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce, compactedSummary, isCompacting } = useChatMessages(
     selectedAgentId || null,
     agents,
@@ -2812,6 +2888,7 @@ export function ChatPage() {
     (message) => addToast(message, "error"),
     urlSessionId,
     handleBackendNewSession,
+    handleAutoPinSession,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final

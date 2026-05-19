@@ -2436,6 +2436,7 @@
     "generating": "Generating...",
     "clear_chat": "Clear Chat",
     "session": "Session",
+    "session_unpinned": "Unpinned",
     "sessions_title": "Sessions",
     "send_hint": "Enter to send, Cmd+Enter for newline",
     "stop_hint": "Stop generating",

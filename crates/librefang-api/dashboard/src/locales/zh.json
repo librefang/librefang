@@ -2393,6 +2393,7 @@
     "generating": "生成中...",
     "clear_chat": "清空对话",
     "session": "会话",
+    "session_unpinned": "未固定",
     "sessions_title": "会话列表",
     "send_hint": "Enter 发送 · ⌘+↵ 换行",
     "stop_hint": "停止生成",
