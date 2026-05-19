@@ -42,11 +42,17 @@ pub async fn describe_sidecar(
     let mut full_args: Vec<String> = args.to_vec();
     full_args.push("--describe".into());
 
+    // `kill_on_drop(true)`: when the 5s timeout fires, the future is
+    // dropped and we want the spawned child reaped with it. Without
+    // this flag a hanging adapter would leak after `--describe` returns
+    // — the timeout returns to the caller but the child keeps running
+    // until it crashes on its own.
     let fut = Command::new(command)
         .args(&full_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .output();
 
     let out = tokio::time::timeout(Duration::from_secs(5), fut)
