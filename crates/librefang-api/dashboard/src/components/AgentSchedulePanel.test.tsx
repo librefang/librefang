@@ -271,6 +271,105 @@ describe("AgentSchedulePanel — trigger pattern preset wire shape", () => {
   });
 });
 
+// Regression — round-2 review on PR #5256.
+//
+// Round-1 left an open concern: the cron edit form's only schedule input
+// is a single cron-expression field. If the user clicks the pencil on an
+// `every` or `at` cron job, the form opens with that field cleared and a
+// submit would silently rewrite the schedule to a `{kind: "cron"}` shape.
+// The simplest fix is to refuse to open the edit form for non-cron
+// schedule kinds. The button still renders (so the row layout is stable)
+// but is disabled with a tooltip pointing the user at agent.toml.
+describe("AgentSchedulePanel — non-cron schedule kinds are not editable in the UI", () => {
+  beforeEach(() => {
+    vi.mocked(http.listTriggers).mockResolvedValue([]);
+  });
+
+  it("disables the pencil button for `every` cron jobs", async () => {
+    const job: CronJobItem = {
+      id: "job-every-1",
+      name: "ping-loop",
+      enabled: true,
+      agent_id: agent.id,
+      schedule: { kind: "every", every_secs: 60 },
+      action: { kind: "agent_turn", message: "tick" },
+    };
+    vi.mocked(http.listCronJobs).mockResolvedValue([job]);
+
+    withQueryClient(<AgentSchedulePanel agent={agent} />);
+    expect(await screen.findByText("ping-loop")).toBeInTheDocument();
+    // The row renders three icon-only buttons (toggle is the badge, then
+    // pencil, then trash). The pencil for an `every` schedule must be
+    // disabled to prevent the silent kind conversion described above.
+    const row = (await screen.findByText("ping-loop")).closest("div.flex");
+    // Walk up to the row container.
+    const card = row?.parentElement?.parentElement;
+    expect(card).toBeTruthy();
+    const buttons = card!.querySelectorAll("button");
+    // Find the disabled pencil — it carries the tooltip with the
+    // user-visible reason. Asserting on `title` keeps the test resilient
+    // if the SVG icon mapping changes.
+    const pencil = Array.from(buttons).find(
+      (b) =>
+        (b as HTMLButtonElement).title?.includes("every") ||
+        (b as HTMLButtonElement).title?.includes("at"),
+    ) as HTMLButtonElement | undefined;
+    expect(pencil, "pencil button with non-cron tooltip not found").toBeTruthy();
+    expect(pencil!.disabled).toBe(true);
+  });
+
+  it("disables the pencil button for `at` cron jobs", async () => {
+    const job: CronJobItem = {
+      id: "job-at-1",
+      name: "one-shot",
+      enabled: true,
+      agent_id: agent.id,
+      schedule: { kind: "at", at: "2030-01-01T00:00:00Z" },
+      action: { kind: "agent_turn", message: "fire once" },
+    };
+    vi.mocked(http.listCronJobs).mockResolvedValue([job]);
+
+    withQueryClient(<AgentSchedulePanel agent={agent} />);
+    expect(await screen.findByText("one-shot")).toBeInTheDocument();
+    const card = (await screen.findByText("one-shot")).closest("div.flex")
+      ?.parentElement?.parentElement;
+    const buttons = card!.querySelectorAll("button");
+    const pencil = Array.from(buttons).find(
+      (b) =>
+        (b as HTMLButtonElement).title?.includes("every") ||
+        (b as HTMLButtonElement).title?.includes("at"),
+    ) as HTMLButtonElement | undefined;
+    expect(pencil, "pencil button with non-cron tooltip not found").toBeTruthy();
+    expect(pencil!.disabled).toBe(true);
+  });
+
+  it("keeps the pencil button enabled for `cron` cron jobs", async () => {
+    const job: CronJobItem = {
+      id: "job-cron-1",
+      name: "daily-summary",
+      enabled: true,
+      agent_id: agent.id,
+      schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
+      action: { kind: "agent_turn", message: "morning" },
+    };
+    vi.mocked(http.listCronJobs).mockResolvedValue([job]);
+
+    withQueryClient(<AgentSchedulePanel agent={agent} />);
+    expect(await screen.findByText("daily-summary")).toBeInTheDocument();
+    const card = (await screen.findByText("daily-summary")).closest("div.flex")
+      ?.parentElement?.parentElement;
+    const buttons = card!.querySelectorAll("button");
+    // The pencil for a `cron` row must NOT carry the non-cron tooltip
+    // and must NOT be disabled.
+    const disabledPencil = Array.from(buttons).find(
+      (b) =>
+        (b as HTMLButtonElement).title?.includes("every") ||
+        (b as HTMLButtonElement).title?.includes("at"),
+    );
+    expect(disabledPencil).toBeFalsy();
+  });
+});
+
 // Drawer-form CRUD (cron / trigger create + edit) is not exercised here.
 // `DrawerPanel` pushes its body into a global drawer slot owned by
 // `<PushDrawer>` rather than rendering into the local subtree, so the

@@ -771,7 +771,8 @@
         "created": "Cron job created",
         "updated": "Cron job updated",
         "deleted": "Cron job deleted",
-        "no_id": "Cron job has no id"
+        "no_id": "Cron job has no id",
+        "edit_disabled_non_cron": "This schedule uses 'every' or 'at' — edit it from agent.toml to avoid silent conversion to a cron expression."
       },
       "trigger": {
         "pattern": "Event pattern",

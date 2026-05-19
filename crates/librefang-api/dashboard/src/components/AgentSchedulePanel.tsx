@@ -112,6 +112,23 @@ function readActionMessage(action: unknown): string {
   return "";
 }
 
+/** True when the cron job's `schedule.kind` is `"cron"`.
+ *
+ * The simplified edit form only exposes a cron-expression input; `every`
+ * and `at` schedules round-trip through the same field would either need
+ * a structured editor (out of scope) or be silently rewritten to a cron
+ * expression on save. We hard-disable the pencil for those rows so the
+ * user can't accidentally convert their schedule kind — they can still
+ * toggle / delete via the always-visible buttons.
+ */
+function isCronKindCron(schedule: unknown): boolean {
+  return (
+    !!schedule &&
+    typeof schedule === "object" &&
+    (schedule as Record<string, unknown>).kind === "cron"
+  );
+}
+
 /** Parse the human-readable schedule summary the backend puts on
  * `AgentDetail.schedule` (rendered by `format_schedule_mode` in
  * `routes/agents.rs`) into a discriminated mode tag.
@@ -221,24 +238,24 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   };
 
   const openEditCron = (job: CronJobItem) => {
-    setCronName(typeof job.name === "string" ? job.name : "");
-    const sched = job.schedule as unknown;
-    if (sched && typeof sched === "object") {
-      const obj = sched as Record<string, unknown>;
-      if (obj.kind === "cron" && typeof obj.expr === "string") {
-        setCronExpr(obj.expr);
-        setCronTz(typeof obj.tz === "string" ? obj.tz : "");
-      } else {
-        // `every` / `at` are not editable through this simplified form —
-        // we surface the existing expression slot empty so the user
-        // either provides one or cancels.
-        setCronExpr("");
-        setCronTz("");
-      }
-    } else {
-      setCronExpr("");
-      setCronTz("");
+    // Defense in depth — the pencil button is already disabled for
+    // non-cron schedule kinds (`every` / `at`). If a future refactor
+    // exposes another call site, refuse to open the modal here too so
+    // the simplified form can't silently rewrite the schedule.
+    if (!isCronKindCron(job.schedule)) {
+      addToast(
+        t("agents.detail.cron.edit_disabled_non_cron", {
+          defaultValue:
+            "This schedule uses 'every' or 'at' — edit it from agent.toml to avoid silent conversion to a cron expression.",
+        }),
+        "error",
+      );
+      return;
     }
+    setCronName(typeof job.name === "string" ? job.name : "");
+    const sched = job.schedule as Record<string, unknown>;
+    setCronExpr(typeof sched.expr === "string" ? sched.expr : "");
+    setCronTz(typeof sched.tz === "string" ? sched.tz : "");
     setCronMessage(readActionMessage(job.action));
     setCronEnabled(job.enabled !== false);
     setCronModal({ mode: "edit", job });
@@ -673,6 +690,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             const id = typeof c.id === "string" ? c.id : "";
             const enabled = c.enabled !== false;
             const isConfirming = pendingDelete?.kind === "cron" && pendingDelete.id === id;
+            const editable = isCronKindCron(c.schedule);
             return (
               <div
                 key={id || JSON.stringify(c)}
@@ -717,7 +735,15 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
                   variant="ghost"
                   size="sm"
                   onClick={() => openEditCron(c)}
-                  disabled={!id}
+                  disabled={!id || !editable}
+                  title={
+                    !editable
+                      ? t("agents.detail.cron.edit_disabled_non_cron", {
+                          defaultValue:
+                            "This schedule uses 'every' or 'at' — edit it from agent.toml to avoid silent conversion to a cron expression.",
+                        })
+                      : undefined
+                  }
                 >
                   <Pencil className="w-3.5 h-3.5" />
                 </Button>

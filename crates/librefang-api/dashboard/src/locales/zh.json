@@ -771,7 +771,8 @@
         "created": "定时任务已创建",
         "updated": "定时任务已更新",
         "deleted": "定时任务已删除",
-        "no_id": "定时任务缺少 ID"
+        "no_id": "定时任务缺少 ID",
+        "edit_disabled_non_cron": "此调度使用 'every' 或 'at' — 请通过 agent.toml 编辑，避免被静默改写为 cron 表达式。"
       },
       "trigger": {
         "pattern": "事件模式",
