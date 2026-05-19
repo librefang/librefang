@@ -12,7 +12,7 @@ Adapters are gated behind cargo features (`channel-xxx`).
 
 `default = []`. Every workspace consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets `default-features = false` and forwards an explicit subset.
 
-- `all-channels` — every adapter (matrix, IMAP, MQTT, Bluesky, Nostr, …). Used by release CI.
+- `all-channels` — every adapter (matrix, IMAP, Bluesky, …). Used by release CI.
 - Per-adapter: `channel-discord`, `channel-slack`, `channel-webhook`, etc. (ntfy and telegram migrated to sidecars — see `librefang.sidecar.adapters.ntfy` / `librefang.sidecar.adapters.telegram` in the SDK.)
 
 See `Cargo.toml` for the full feature matrix.
@@ -29,11 +29,10 @@ The trait + dispatch glue compiles unconditionally. Only adapters are feature-ga
 
 ## Webhook security (mandatory)
 
-HMAC verification is **mandatory** for Messenger, LINE, Teams, Viber, DingTalk. Missing signature → 400. Mismatch → 401. Don't silently bypass.
+HMAC verification is **mandatory** for LINE, Teams, DingTalk. Missing signature → 400. Mismatch → 401. Don't silently bypass.
 
-- Messenger: `MESSENGER_APP_SECRET` (Facebook App Secret). New `app_secret_env` in `[channels.messenger]`.
 - Teams: `TEAMS_SECURITY_TOKEN` (base64 outgoing-webhook security token). New `security_token_env` in `[channels.teams]`.
-- LINE / Viber / DingTalk: platform-specific signature header.
+- LINE / DingTalk: platform-specific signature header.
 
 Probes without the platform's signature header (curl, monitoring health checks) now return 4xx rather than 200. That's intended.
 

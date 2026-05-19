@@ -63,24 +63,17 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::types::ApiErrorResponse;
 
-/// Resolve the LibreFang home directory without depending on the kernel crate.
-///
-/// Mirrors `librefang_kernel::config::librefang_home`:
-/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
-/// (falling back to the system temp dir if no home directory is available).
-fn librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
-}
+// All channel handlers below resolve the LibreFang home directory via
+// `state.kernel.home_dir()` so they honour the kernel's authoritative
+// `KernelConfig.home_dir` setting (which itself respects `LIBREFANG_HOME`
+// and falls back to `~/.librefang`). The previously-local
+// `librefang_home()` helper was removed because it bypassed kernel config
+// overrides — see codex review fix #1 and its generalization in fix #7.
+
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -261,36 +254,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
     },
     ChannelMeta {
-        name: "viber", display_name: "Viber", icon: "VB",
-        description: "Viber Bot API adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your auth token from partners.viber.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "auth_token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("VIBER_AUTH_TOKEN"), required: true, placeholder: "4dc...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_url", label: "Webhook URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://your-domain.com/viber", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8451", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot at partners.viber.com", "Copy the auth token", "Paste it below"],
-        config_template: "[channels.viber]\nauth_token_env = \"VIBER_AUTH_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "messenger", display_name: "Messenger", icon: "FB",
-        description: "Facebook Messenger Platform adapter",
-        category: "messaging", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Paste your Page Access Token from developers.facebook.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "page_token_env", label: "Page Access Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_PAGE_TOKEN"), required: true, placeholder: "EAAx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8452", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Facebook App and add Messenger", "Generate a Page Access Token", "Paste it below"],
-        config_template: "[channels.messenger]\npage_token_env = \"MESSENGER_PAGE_TOKEN\"",
-    },
-    ChannelMeta {
         name: "threema", display_name: "Threema", icon: "3M",
         description: "Threema Gateway adapter",
         category: "messaging", difficulty: "Easy", setup_time: "~3 min",
@@ -338,20 +301,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
         config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "mastodon", display_name: "Mastodon", icon: "MA",
-        description: "Mastodon Streaming API adapter",
-        category: "social", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your access token from Settings > Development",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("MASTODON_ACCESS_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "instance_url", label: "Instance URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://mastodon.social", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Settings > Development on your instance", "Create an app and copy the token", "Paste it below"],
-        config_template: "[channels.mastodon]\ninstance_url = \"https://mastodon.social\"\naccess_token_env = \"MASTODON_ACCESS_TOKEN\"",
-    },
+    // mastodon migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.mastodon in the SDK package); no
+    // longer an in-process channel.
     ChannelMeta {
         name: "bluesky", display_name: "Bluesky", icon: "BS",
         description: "Bluesky/AT Protocol adapter",
@@ -366,34 +318,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         ],
         setup_steps: &["Go to Settings > App Passwords in Bluesky", "Create an app password", "Enter handle and password below"],
         config_template: "[channels.bluesky]\nidentifier = \"\"\napp_password_env = \"BLUESKY_APP_PASSWORD\"",
-    },
-    ChannelMeta {
-        name: "linkedin", display_name: "LinkedIn", icon: "LI",
-        description: "LinkedIn Messaging API adapter",
-        category: "social", difficulty: "Hard", setup_time: "~15 min",
-        quick_setup: "Paste your OAuth2 access token and Organization ID",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("LINKEDIN_ACCESS_TOKEN"), required: true, placeholder: "AQV...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "organization_id", label: "Organization ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "12345678", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a LinkedIn App at linkedin.com/developers", "Generate an OAuth2 token", "Enter token and org ID below"],
-        config_template: "[channels.linkedin]\naccess_token_env = \"LINKEDIN_ACCESS_TOKEN\"\norganization_id = \"\"",
-    },
-    ChannelMeta {
-        name: "nostr", display_name: "Nostr", icon: "NS",
-        description: "Nostr relay protocol adapter",
-        category: "social", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your private key (nsec or hex)",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "private_key_env", label: "Private Key", field_type: FieldType::Secret, env_var: Some("NOSTR_PRIVATE_KEY"), required: true, placeholder: "nsec1...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "relays", label: "Relay URLs", field_type: FieldType::List, env_var: None, required: false, placeholder: "wss://relay.damus.io", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Generate or use an existing Nostr keypair", "Paste your private key below"],
-        config_template: "[channels.nostr]\nprivate_key_env = \"NOSTR_PRIVATE_KEY\"",
     },
     // ── Enterprise (10) ─────────────────────────────────────────────
     ChannelMeta {
@@ -597,22 +521,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.gitter]\ntoken_env = \"GITTER_TOKEN\"\nroom_id = \"\"",
     },
     ChannelMeta {
-        name: "discourse", display_name: "Discourse", icon: "DS",
-        description: "Discourse forum API adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API key and forum URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "base_url", label: "Forum URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://forum.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_key_env", label: "API Key", field_type: FieldType::Secret, env_var: Some("DISCOURSE_API_KEY"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_username", label: "API Username", field_type: FieldType::Text, env_var: None, required: false, placeholder: "system", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "categories", label: "Categories", field_type: FieldType::List, env_var: None, required: false, placeholder: "general, support", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to Admin > API > Keys", "Generate an API key", "Enter forum URL and key below"],
-        config_template: "[channels.discourse]\nbase_url = \"\"\napi_key_env = \"DISCOURSE_API_KEY\"",
-    },
-    ChannelMeta {
         name: "revolt", display_name: "Revolt", icon: "RV",
         description: "Revolt bot adapter",
         category: "developer", difficulty: "Easy", setup_time: "~1 min",
@@ -799,15 +707,10 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "line" => config.line.is_some(),
-        "viber" => config.viber.is_some(),
-        "messenger" => config.messenger.is_some(),
         "threema" => config.threema.is_some(),
         "keybase" => config.keybase.is_some(),
         "reddit" => config.reddit.is_some(),
-        "mastodon" => config.mastodon.is_some(),
         "bluesky" => config.bluesky.is_some(),
-        "linkedin" => config.linkedin.is_some(),
-        "nostr" => config.nostr.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
@@ -821,7 +724,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "irc" => config.irc.is_some(),
         "xmpp" => config.xmpp.is_some(),
         "gitter" => config.gitter.is_some(),
-        "discourse" => config.discourse.is_some(),
         "revolt" => config.revolt.is_some(),
         "guilded" => config.guilded.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
@@ -930,7 +832,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "messenger" | "viber" | "google_chat"
+        "feishu" | "teams" | "dingtalk" | "line" | "google_chat"
         | "flock" | "pumble" | "threema" | "webhook" | "wecom" => Some("/webhook"),
         "voice" => Some("/ws"),
         _ => None,
@@ -1071,6 +973,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Gotify push notifications (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.gotify"],
+    },
+    SidecarCatalogEntry {
+        name: "mastodon",
+        display_name: "Mastodon",
+        description: "Mastodon Streaming API (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.mastodon"],
     },
 ];
 
@@ -1418,6 +1327,17 @@ pub async fn configure_sidecar_channel(
         //     those out by reading the on-disk `secrets.env` once: a
         //     key already in `secrets.env` means the env presence is
         //     our own boot-time write, not a shell shadow.
+        // KEY-only extraction: this set is used purely for membership
+        // checks against the schema's secret field names (i.e. "is
+        // TELEGRAM_BOT_TOKEN listed in secrets.env?"). Quotes never
+        // appear inside dotenv KEYS, so the parser here intentionally
+        // mirrors `librefang_channels::sidecar::parse_secrets_env`'s
+        // key-extraction path but skips the value-side quote-stripping
+        // that `parse_secrets_env` performs. If a future change starts
+        // comparing VALUES here, switch to invoking the channels-crate
+        // helper directly so quote/whitespace handling stays consistent
+        // with how the sidecar actually inherits env vars at spawn time
+        // (codex review fix #9).
         let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
             &secrets_path,
         )
@@ -1479,6 +1399,20 @@ pub async fn configure_sidecar_channel(
         // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
         //    Idempotent: a second POST with the same name replaces the
         //    block in-place, preserving formatting of every other section.
+        //    `managed_env_keys` is the form's set of NON-SECRET schema
+        //    fields — i.e. the keys the configure form is the source of
+        //    truth for. Every OTHER env key already in the block (operator
+        //    hand-edits such as `PYTHONPATH`, `HTTP_PROXY`, locale vars,
+        //    or even a hand-edited `TELEGRAM_BOT_TOKEN` inline) is
+        //    preserved untouched. Secret schema fields never appear in
+        //    config.toml at all — they live in `secrets.env` — so they
+        //    are intentionally excluded from this set.
+        let managed_env_keys: Vec<&str> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type != "secret")
+            .map(|f| f.key.as_str())
+            .collect();
         super::sidecar_toml::upsert_sidecar_block(
             &config_path,
             entry.name,
@@ -1486,6 +1420,7 @@ pub async fn configure_sidecar_channel(
             entry.command,
             entry.args,
             &nonsecret_env,
+            &managed_env_keys,
         )
         .map_err(|e| {
             ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
@@ -1602,20 +1537,8 @@ fn channel_config_values(
             .line
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "viber" => config
-            .viber
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "messenger" => config
-            .messenger
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "reddit" => config
             .reddit
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "mastodon" => config
-            .mastodon
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "bluesky" => config
@@ -1646,10 +1569,6 @@ fn channel_config_values(
             .threema
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "nostr" => config
-            .nostr
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
             .as_ref()
@@ -1674,10 +1593,6 @@ fn channel_config_values(
             .dingtalk
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "discourse" => config
-            .discourse
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "gitter" => config
             .gitter
             .as_ref()
@@ -1688,10 +1603,6 @@ fn channel_config_values(
             .and_then(|c| serde_json::to_value(c).ok()),
         "voice" => config
             .voice
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "linkedin" => config
-            .linkedin
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "wechat" => config
@@ -1725,15 +1636,10 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "line" => config.line.len(),
-        "viber" => config.viber.len(),
-        "messenger" => config.messenger.len(),
         "threema" => config.threema.len(),
         "keybase" => config.keybase.len(),
         "reddit" => config.reddit.len(),
-        "mastodon" => config.mastodon.len(),
         "bluesky" => config.bluesky.len(),
-        "linkedin" => config.linkedin.len(),
-        "nostr" => config.nostr.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
@@ -1747,7 +1653,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "irc" => config.irc.len(),
         "xmpp" => config.xmpp.len(),
         "gitter" => config.gitter.len(),
-        "discourse" => config.discourse.len(),
         "revolt" => config.revolt.len(),
         "guilded" => config.guilded.len(),
         "nextcloud" => config.nextcloud.len(),
@@ -1789,15 +1694,10 @@ fn channel_instances_serialized(
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "line" => ser(&config.line),
-        "viber" => ser(&config.viber),
-        "messenger" => ser(&config.messenger),
         "threema" => ser(&config.threema),
         "keybase" => ser(&config.keybase),
         "reddit" => ser(&config.reddit),
-        "mastodon" => ser(&config.mastodon),
         "bluesky" => ser(&config.bluesky),
-        "linkedin" => ser(&config.linkedin),
-        "nostr" => ser(&config.nostr),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
@@ -1811,7 +1711,6 @@ fn channel_instances_serialized(
         "irc" => ser(&config.irc),
         "xmpp" => ser(&config.xmpp),
         "gitter" => ser(&config.gitter),
-        "discourse" => ser(&config.discourse),
         "revolt" => ser(&config.revolt),
         "guilded" => ser(&config.guilded),
         "nextcloud" => ser(&config.nextcloud),
@@ -2099,7 +1998,7 @@ pub async fn configure_channel(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
     let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
@@ -2218,7 +2117,7 @@ pub async fn remove_channel(
         None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2678,7 +2577,7 @@ pub async fn create_channel_instance(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -2817,7 +2716,7 @@ pub async fn update_channel_instance_handler(
         })
         .unwrap_or_default();
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
@@ -3002,7 +2901,7 @@ pub async fn delete_channel_instance(
         }
     };
 
-    let home = librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let config_path = home.join("config.toml");
 
     {
