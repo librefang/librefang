@@ -39,6 +39,14 @@ interface AgentManifestFormProps {
    * affordance for the "Tool ID Allowlist" capability field.
    */
   toolCatalog?: ManifestCatalogEntry[];
+  /**
+   * Configured MCP servers catalog from `GET /api/mcp/servers`. When
+   * present, the "MCP Servers" field renders a multi-select dropdown
+   * seeded with these names (#5246); when absent the field falls back
+   * to the plain tag input so callers without a catalog still work and
+   * users can reference servers the dashboard doesn't know about yet.
+   */
+  mcpCatalog?: ManifestCatalogEntry[];
 }
 
 export function AgentManifestForm({
@@ -50,6 +58,7 @@ export function AgentManifestForm({
   extras,
   skillCatalog,
   toolCatalog,
+  mcpCatalog,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -85,6 +94,10 @@ export function AgentManifestForm({
   const toolFinder = useMemo(
     () => mergeCatalog(toolCatalog, value.capabilities.tools),
     [toolCatalog, value.capabilities.tools],
+  );
+  const mcpFinder = useMemo(
+    () => mergeCatalog(mcpCatalog, value.mcp_servers),
+    [mcpCatalog, value.mcp_servers],
   );
 
   const jsonSchemaFormat =
@@ -454,12 +467,29 @@ export function AgentManifestForm({
             />
           )}
         </Field>
-        <Field label={t("agents.form.mcp_servers")}>
-          <TagInput
-            value={value.mcp_servers}
-            onChange={(next) => update({ mcp_servers: next })}
-            placeholder={t("agents.form.mcp_servers_placeholder")}
-          />
+        <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
+          {mcpFinder ? (
+            <MultiSelectCmdk
+              options={mcpFinder.options}
+              optionMeta={mcpFinder.meta}
+              value={value.mcp_servers}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.mcp_servers) : next;
+                update({ mcp_servers: nextValue });
+              }}
+              placeholder={t("agents.form.mcp_servers_search_placeholder", {
+                defaultValue: "Search MCP servers…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.mcp_servers}
+              onChange={(next) => update({ mcp_servers: next })}
+              placeholder={t("agents.form.mcp_servers_placeholder")}
+            />
+          )}
         </Field>
       </Section>
 
@@ -1109,11 +1139,20 @@ function Field({
   invalid?: boolean;
   children: React.ReactNode;
 }) {
-  // Wrap children inside the <label> rather than relying on htmlFor —
-  // implicit association works without each child needing an id, and
-  // clicking the label text focuses the input as users expect.
+  // Use a <div> wrapper rather than a <label> (#5246). A <label>
+  // forwards every click within its bounds to its first labelable form
+  // control, which silently steals clicks on composite widgets like
+  // MultiSelectCmdk (cmdk dropdown options): the click that lights up
+  // an item was being redirected to the search input, so picking a
+  // skill / tool from the catalog never reached the option's
+  // onSelect handler and the chip was never added. Switching to <div>
+  // makes each interactive child (input, button, option) receive its
+  // own click as the user intends. The trade-off is that the label
+  // text no longer focuses the input on click — which is a non-issue
+  // here because every field already gets focus via direct click on
+  // its visible control.
   return (
-    <label className="block">
+    <div className="block">
       {label && (
         <span
           className={`text-[10px] font-bold uppercase block ${
@@ -1126,7 +1165,7 @@ function Field({
       )}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {hint && <span className="mt-1 text-[10px] text-text-dim/70 block">{hint}</span>}
-    </label>
+    </div>
   );
 }
 

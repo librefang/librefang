@@ -378,6 +378,8 @@
       "skills_search_placeholder": "搜索已安装的技能…",
       "mcp_servers": "MCP 服务器",
       "mcp_servers_placeholder": "留空=可用全部已连接服务器",
+      "mcp_servers_hint": "留空=可使用全部已配置 MCP 服务器。",
+      "mcp_servers_search_placeholder": "搜索 MCP 服务器…",
       "live_toml": "TOML 实时预览",
       "preview_toml": "TOML",
       "preview_markdown": "Markdown",
