@@ -34,35 +34,42 @@ use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Serialises every test in this binary that touches `LIBREFANG_HOME`.
-/// The handlers added in #4865 read `[channels]` from disk under the
-/// `config_write_lock`, so any test that needs to drive that path must
-/// own the env var for its full duration. Tests that don't read disk
-/// run in parallel as before — they're insensitive to whatever
-/// `LIBREFANG_HOME` happens to point at because they fail-fast at
-/// validation before reaching the disk read. (#4865)
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Serialises tests that touch the process-static sidecar schema cache
-/// (`SIDECAR_SCHEMA_CACHE` in `routes::channels`). Without this, the
-/// seeded-cache test races the empty-cache discovery tests and one of
-/// them sees `fields[]` from the other. Hold the lock for the entire
-/// test body when either seeding the cache or asserting an empty cache.
-static SIDECAR_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Single test-wide serialisation lock for anything that touches
+/// process-global state used by the `/api/channels/*` handlers:
+///   1. `LIBREFANG_HOME` (via `std::env::set_var` — process-global) —
+///      consumed by handlers added in #4865 that read `[channels]` from
+///      disk under the `config_write_lock`, and by the sidecar
+///      `/configure` flow which writes to `secrets.env` / `config.toml`.
+///   2. The process-static sidecar schema cache (`SIDECAR_SCHEMA_CACHE`
+///      in `routes::channels`) — the seeded-cache test would otherwise
+///      race the empty-cache discovery tests and one would see the
+///      other's `fields[]`.
+///
+/// Originally split as two mutexes (`ENV_LOCK` + `SIDECAR_CACHE_LOCK`),
+/// which raced because both protected the same `LIBREFANG_HOME` env var
+/// from different test paths (`DiskHomeGuard` vs `boot_with_temp_home`).
+/// Consolidated into one lock so the invariant — "tests mutating
+/// process-wide state run serially" — is enforced once at the source.
+///
+/// Tests that only exercise validation paths (unknown channel, missing
+/// field) fail-fast before reaching `librefang_home()` and don't need
+/// to hold this; they can run in parallel as before.
+static CHANNELS_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Drop guard that points `LIBREFANG_HOME` at a tempdir for the
 /// duration of a test and restores the previous value on drop. Must be
-/// constructed only while `ENV_LOCK` is held.
+/// constructed only while `CHANNELS_PROCESS_LOCK` is held.
 ///
 /// **Footgun for future tests:** `std::env::set_var` is process-global.
 /// Any new test in this binary that boots a server exercising a
 /// disk-touching handler (anything reaching `librefang_home()` — i.e.
 /// any of the `/configure`, `/instances`, or QR flow handlers) MUST
-/// acquire `ENV_LOCK` before constructing this guard, otherwise it will
-/// race with the disk-roundtrip tests below and see the tempdir's
-/// `config.toml` instead of `~/.librefang`. Tests that only exercise
-/// validation paths (unknown channel, missing field) fail-fast before
-/// reaching `librefang_home()` and are safe without the lock.
+/// acquire `CHANNELS_PROCESS_LOCK` before constructing this guard,
+/// otherwise it will race with the disk-roundtrip tests below and see
+/// the tempdir's `config.toml` instead of `~/.librefang`. Tests that
+/// only exercise validation paths (unknown channel, missing field)
+/// fail-fast before reaching `librefang_home()` and are safe without
+/// the lock.
 struct DiskHomeGuard {
     tmp: tempfile::TempDir,
     prev: Option<String>,
@@ -72,7 +79,7 @@ impl DiskHomeGuard {
     fn new() -> Self {
         let prev = std::env::var("LIBREFANG_HOME").ok();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: serialised via `ENV_LOCK`. Caller holds the lock.
+        // SAFETY: serialised via `CHANNELS_PROCESS_LOCK`. Caller holds the lock.
         unsafe {
             std::env::set_var("LIBREFANG_HOME", tmp.path());
         }
@@ -139,7 +146,7 @@ async fn boot_with_channels(channels: ChannelsConfig) -> Harness {
 /// pointing the env var at the kernel's own tempdir keeps the two paths
 /// in sync so the write and the subsequent reload see the same file.
 ///
-/// Callers MUST hold `SIDECAR_CACHE_LOCK` for the lifetime of the
+/// Callers MUST hold `CHANNELS_PROCESS_LOCK` for the lifetime of the
 /// returned `TempHomeHarness` because `std::env::set_var` is
 /// process-global and the schema-cache seed is process-static.
 struct TempHomeHarness {
@@ -156,7 +163,7 @@ impl TempHomeHarness {
 
 impl Drop for TempHomeHarness {
     fn drop(&mut self) {
-        // SAFETY: serialised via `SIDECAR_CACHE_LOCK` held by the caller.
+        // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller.
         unsafe {
             match &self.prev {
                 Some(v) => std::env::set_var("LIBREFANG_HOME", v),
@@ -181,7 +188,7 @@ async fn boot_with_temp_home() -> TempHomeHarness {
         .nest("/api", routes::channels::router())
         .with_state(state.clone());
     let prev = std::env::var("LIBREFANG_HOME").ok();
-    // SAFETY: serialised via `SIDECAR_CACHE_LOCK` held by the caller.
+    // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller.
     unsafe {
         std::env::set_var("LIBREFANG_HOME", &home);
     }
@@ -717,7 +724,7 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 // Per-instance CAS round-trip (#4865)
 // ---------------------------------------------------------------------------
 //
-// These tests own `LIBREFANG_HOME` (via `ENV_LOCK` + `DiskHomeGuard`) so
+// These tests own `LIBREFANG_HOME` (via `CHANNELS_PROCESS_LOCK` + `DiskHomeGuard`) so
 // they can seed an actual `config.toml` and drive the post-#4865 handler
 // flow that re-reads disk under the `config_write_lock`. Cheaper unit-
 // level coverage of the same primitives lives next to the helpers in
@@ -726,7 +733,7 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_signature_mismatch_returns_409() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_A"]);
 
@@ -769,7 +776,7 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_delete_instance_signature_mismatch_returns_409() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
 
@@ -816,7 +823,7 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_round_trips_real_signature() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_D"]);
 
@@ -869,7 +876,7 @@ async fn channels_update_instance_round_trips_real_signature() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_LONELY"]);
     // Prime `secrets.env` with the env var the instance is pointing at,
@@ -924,7 +931,7 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     // Two instances, BOTH pointing at the same env var (a possible
     // user setup if they hand-edited secrets.env). Clearing one
@@ -1129,7 +1136,7 @@ async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
     // after the out-of-process migration (#5241 / #5224). Operators who
     // have never touched config.toml saw telegram/ntfy vanish from the
     // dashboard entirely before this; the discovery rows close that gap.
-    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
@@ -1177,7 +1184,7 @@ async fn channels_list_discovery_rows_carry_form_fields_when_schema_cached() {
     // Pre-populate the schema cache with a synthetic telegram schema so the
     // test runs deterministically without depending on `pip install -e
     // sdk/python` on every CI box.
-    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
         "telegram",
         librefang_api::routes::sidecar_describe::SidecarSchema {
@@ -1293,7 +1300,7 @@ fn telegram_schema_with_required_secret() -> librefang_api::routes::sidecar_desc
 
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
-    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
         "telegram",
         telegram_schema_with_required_secret(),
@@ -1315,6 +1322,19 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
     .await;
     assert_eq!(status, StatusCode::OK, "response: {resp}");
     assert_eq!(resp["status"], "saved");
+
+    // Plan Risk #3 regression — the success response must NEVER echo the
+    // secret value or contain a `values` key. Any future refactor that
+    // re-includes the request payload in the response will trip these.
+    let resp_str = resp.to_string();
+    assert!(
+        !resp_str.contains("secret-123"),
+        "response must not echo the secret value: {resp_str}"
+    );
+    assert!(
+        resp.get("values").is_none(),
+        "response must not include a `values` field: {resp_str}"
+    );
 
     // Verify side effects on disk.
     let home = h.home_dir();
@@ -1393,7 +1413,7 @@ async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_sidecar_missing_required_returns_400() {
-    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
         "telegram",
         telegram_schema_with_required_secret(),
@@ -1428,7 +1448,7 @@ async fn configure_sidecar_missing_required_returns_400() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_sidecar_unknown_name_returns_404() {
-    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 
     let h = boot_with_temp_home().await;
