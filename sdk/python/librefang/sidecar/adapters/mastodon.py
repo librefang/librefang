@@ -339,10 +339,33 @@ class MastodonAdapter(SidecarAdapter):
         return newest or since_id
 
     def _producer_blocking(self, emit) -> None:
-        """Run the SSE-with-polling-fallback loop in a thread. Falls
-        back to polling on persistent SSE failure, retries SSE on each
-        outer iteration so an instance that temporarily rejected the
-        stream recovers without restarting the sidecar."""
+        """Run verify-then-(SSE-with-polling-fallback) loop in a thread.
+        Mirrors the Rust adapter's `validate()`-then-stream pattern:
+        `verify_credentials` must succeed before any events are emitted
+        so `own_account_id` is populated and the self-mention guard in
+        `_parse_notification` works. Retries verify with exponential
+        backoff on transient failure rather than terminating the
+        sidecar — the supervisor can still kill us, and a temporary
+        500 from the instance shouldn't take the process down."""
+        verify_backoff = 1.0
+        while True:
+            try:
+                username = self._verify_credentials()
+                log.info(
+                    "mastodon authenticated",
+                    username=username,
+                    account_id=self.own_account_id,
+                )
+                break
+            except Exception as e:  # noqa: BLE001
+                log.warn(
+                    "mastodon verify_credentials failed; will retry",
+                    error=str(e),
+                    delay=verify_backoff,
+                )
+                time.sleep(verify_backoff)
+                verify_backoff = min(verify_backoff * 2, MAX_BACKOFF_SECS)
+
         backoff = 1.0
         last_notif_id: str | None = None
         use_streaming = True

@@ -381,3 +381,75 @@ def test_no_account_id_when_unset():
     a = _adapter(MASTODON_ACCOUNT_ID="")
     p = a.ready_event()["params"]
     assert p.get("account_id") in (None, )
+
+
+# ---- _verify_credentials: discovers own_account_id ----------------
+
+
+def _verify_resp(status=200, body=None):
+    payload = json.dumps(body or {"id": "own-1", "username": "bot"}).encode("utf-8")
+    return _FakeResp(status, payload)
+
+
+def test_verify_credentials_sets_own_account_id(monkeypatch):
+    """The Rust adapter calls /api/v1/accounts/verify_credentials at
+    start to validate the token AND discover the bot's own account id.
+    Without this, the self-mention guard in `_parse_notification` is
+    silently disabled. Lock in that we (a) hit the right endpoint with
+    Bearer auth, (b) populate own_account_id from the response."""
+    a = _adapter()
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = dict(req.header_items()).get("Authorization")
+        return _verify_resp(body={"id": "bot-9001", "username": "myhandle"})
+
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake_urlopen)
+    username = a._verify_credentials()
+    assert username == "myhandle"
+    assert a.own_account_id == "bot-9001"
+    assert captured["url"] == (
+        "https://mastodon.example.com/api/v1/accounts/verify_credentials"
+    )
+    assert captured["auth"] == "Bearer tk_test"
+
+
+def test_verify_credentials_raises_on_bad_token(monkeypatch):
+    a = _adapter()
+
+    class _HTTPError(ma.urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("u", 401, "Unauthorized", {},
+                             io.BytesIO(b'{"error":"invalid token"}'))
+
+    def _bad(req, timeout=None):
+        raise _HTTPError()
+
+    monkeypatch.setattr(ma.urllib.request, "urlopen", _bad)
+    with pytest.raises(ma.urllib.error.HTTPError):
+        a._verify_credentials()
+    # On failure the field stays None so the self-mention guard never
+    # short-circuits with a stale id.
+    assert a.own_account_id is None
+
+
+def test_self_mention_skipped_only_after_verify():
+    """Belt-and-braces: confirm the parse path's guard depends on
+    own_account_id being set. Before verify, a self-mention DOES come
+    through (own_account_id None → guard disabled), so verify MUST be
+    called to gate that. After verify, the same notification is
+    silenced."""
+    a = _adapter()
+    assert a.own_account_id is None
+    notif, _ = _notif_fixture(sender_id="own-1")
+    # Pre-verify: the guard is `if self.own_account_id and …`, so when
+    # own_account_id is None/falsy the self-mention is NOT filtered.
+    # That's exactly the latent bug pattern — fixed by always calling
+    # verify before _producer_blocking enters its SSE/poll loop.
+    pre = a._parse_notification(notif)
+    assert pre is not None, "pre-verify the guard is disabled — known latent shape"
+    # After verify (simulated by setting the field), the same payload
+    # is silenced.
+    a.own_account_id = "own-1"
+    assert a._parse_notification(notif) is None
