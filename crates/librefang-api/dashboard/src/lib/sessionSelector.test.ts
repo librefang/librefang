@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { pickLatestSessionId, deriveDropdownActiveSessionId } from "./sessionSelector";
+import {
+  pickLatestSessionId,
+  deriveDropdownActiveSessionId,
+  pickSessionDropdownLabel,
+} from "./sessionSelector";
 import { useAgentSessions } from "./queries/agents";
 import * as httpClient from "./http/client";
 import { createQueryClientWrapper } from "./test/query-client";
@@ -62,6 +66,51 @@ describe("deriveDropdownActiveSessionId", () => {
   it("returns the value as-is — callers are responsible for not passing empty strings", () => {
     // The function passes through whatever the URL param contains.
     expect(deriveDropdownActiveSessionId("some-id")).toBe("some-id");
+  });
+});
+
+describe("pickSessionDropdownLabel (issue #5199-C)", () => {
+  const sessions: SessionListItem[] = [
+    { session_id: "abcd1234ef56", agent_id: "a", label: "My Session" },
+    { session_id: "deadbeefcafe", agent_id: "a" },
+  ];
+
+  it("returns null when the active session is undefined (unpinned)", () => {
+    // The caller is responsible for rendering the localized "Unpinned"
+    // hint string — keeping i18n out of this pure helper.
+    expect(pickSessionDropdownLabel(undefined, sessions)).toBeNull();
+  });
+
+  it("returns the session's label when one exists in the list", () => {
+    expect(pickSessionDropdownLabel("abcd1234ef56", sessions)).toBe("My Session");
+  });
+
+  it("falls back to the first 8 chars of the id when the session has no label", () => {
+    expect(pickSessionDropdownLabel("deadbeefcafe", sessions)).toBe("deadbeef");
+  });
+
+  it("returns the short id prefix even when the session list does not contain a match", () => {
+    // Active session may not have surfaced in the per-agent list yet
+    // (just-created, server reload pending). Show what we know rather
+    // than nothing.
+    expect(pickSessionDropdownLabel("12345678abcd", [])).toBe("12345678");
+    expect(pickSessionDropdownLabel("12345678abcd", undefined)).toBe("12345678");
+  });
+
+  it("prefers a non-empty label even if it would be longer than 8 chars", () => {
+    // Sanity check that we're not accidentally truncating user-visible
+    // labels — that's a different bug than the original placeholder fix.
+    const long = [
+      { session_id: "x", agent_id: "a", label: "A very long human-friendly label" },
+    ];
+    expect(pickSessionDropdownLabel("x", long)).toBe("A very long human-friendly label");
+  });
+
+  it("returns null when the id is somehow empty (defensive — caller hides spinner)", () => {
+    // deriveDropdownActiveSessionId already guards against this on the
+    // URL path; the test pins the contract so a future refactor does
+    // not silently render an empty <span>.
+    expect(pickSessionDropdownLabel("", sessions)).toBeNull();
   });
 });
 

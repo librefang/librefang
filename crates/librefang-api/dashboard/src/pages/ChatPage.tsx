@@ -19,7 +19,7 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
-import { deriveDropdownActiveSessionId } from "../lib/sessionSelector";
+import { deriveDropdownActiveSessionId, pickSessionDropdownLabel } from "../lib/sessionSelector";
 import {
   chatSessionCacheKey,
   deleteCachedChatMessages,
@@ -1133,7 +1133,22 @@ function useChatMessages(
                 // unpinned; the next time the user navigates back, the
                 // existing bare-`agentId` heuristics will still resolve to
                 // this session via the canonical pointer.
-                if (sendAgentId === currentAgentRef.current) {
+                //
+                // Also skip if the user has manually pinned a session in
+                // the meantime — e.g. clicked another row in the sessions
+                // dropdown between send and response. The close path on
+                // the WS swap-out usually drops in-flight responses, but
+                // a frame already queued in the browser can still reach
+                // the (about-to-detach) listener before close() takes
+                // effect. Overwriting the user's deliberate pin would be
+                // a worse regression than the unpinned-URL bug we are
+                // fixing. `currentSessionRef.current` mirrors the live
+                // hook-prop sessionId; a non-null value means someone has
+                // pinned since the send started.
+                if (
+                  sendAgentId === currentAgentRef.current
+                  && currentSessionRef.current === null
+                ) {
                   const nextMessages = applyResponsePatch(messagesRef.current);
                   cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
                   onAutoPinSession?.(newSid);
@@ -2487,11 +2502,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   // Show an explicit "unpinned" hint instead of the
                   // generic "Session" placeholder so users see the
                   // ambiguity rather than mistake it for selection state.
+                  //
+                  // The label-picking branch (active session resolved) is
+                  // factored out into `pickSessionDropdownLabel` so the
+                  // contract (active row label > short id prefix > null)
+                  // is unit-testable next to deriveDropdownActiveSessionId.
                   if (!activeSessionId) {
                     return t("chat.session_unpinned", { defaultValue: "Unpinned" });
                   }
-                  const active = sessions.find(s => s.session_id === activeSessionId);
-                  return active?.label || activeSessionId.slice(0, 8) || t("chat.session");
+                  return pickSessionDropdownLabel(activeSessionId, sessions) ?? t("chat.session");
                 })()}
               </span>
               <ChevronDown className={`h-3 w-3 transition-transform ${sessionOpen ? "rotate-180" : ""}`} />

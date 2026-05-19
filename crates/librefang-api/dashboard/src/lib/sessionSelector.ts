@@ -47,3 +47,26 @@ export function deriveDropdownActiveSessionId(
 ): string | undefined {
   return urlSessionId ?? undefined;
 }
+
+/**
+ * Pick the dropdown's truncated label given the resolved active session id and
+ * the per-agent session list. Pure function so the contract is unit-testable
+ * (the dropdown body is otherwise buried in a large JSX block).
+ *
+ * Returns `null` for the unpinned case so the caller can render the localized
+ * "Unpinned" hint string — keeping i18n at the call site rather than baking
+ * English into the selector. When the active session id is present but no
+ * matching row is found in `sessions`, falls back to the short 8-char prefix
+ * of the id; if even that is empty, returns `null` so the caller can render
+ * its own generic placeholder. Issue #5199-C.
+ */
+export function pickSessionDropdownLabel(
+  activeSessionId: string | undefined,
+  sessions: ReadonlyArray<{ session_id?: string; label?: string | null }> | undefined,
+): string | null {
+  if (!activeSessionId) return null;
+  const active = sessions?.find((s) => s.session_id === activeSessionId);
+  if (active?.label) return active.label;
+  const short = activeSessionId.slice(0, 8);
+  return short.length > 0 ? short : null;
+}
