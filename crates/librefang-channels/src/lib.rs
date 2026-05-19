@@ -91,8 +91,6 @@ pub mod signal;
 pub mod slack;
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-telegram")]
-pub mod telegram;
 #[cfg(feature = "channel-threema")]
 pub mod threema;
 #[cfg(feature = "channel-twist")]
