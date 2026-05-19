@@ -259,17 +259,6 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for tg in self.channels.telegram.iter() {
-            if std::env::var(&tg.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Telegram configured but {} is not set",
-                    tg.bot_token_env
-                ));
-            }
-        }
         for dc in self.channels.discord.iter() {
             if std::env::var(&dc.bot_token_env)
                 .unwrap_or_default()

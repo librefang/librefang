@@ -39,14 +39,7 @@ struct ChannelDef {
 }
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
-    // ── Messaging (12)
-    ChannelDef {
-        name: "telegram",
-        display_name: "Telegram",
-        category: "Messaging",
-        env_vars: &["TELEGRAM_BOT_TOKEN"],
-        description: "Telegram Bot API adapter",
-    },
+    // ── Messaging (11)
     ChannelDef {
         name: "discord",
         display_name: "Discord",
