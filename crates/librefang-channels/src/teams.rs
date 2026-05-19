@@ -539,8 +539,8 @@ mod tests {
     // Uses `wiremock` to stand up a local HTTP server. The adapter is pointed at
     // the mock via `with_oauth_token_url()` (so the client-credentials token
     // fetch goes to wiremock) and `with_service_url()` (so the Bot Framework
-    // activities POST goes to wiremock). This mirrors the pattern used for the
-    // gotify slice (PR #4447) and the slack slice (PR #4545).
+    // activities POST goes to wiremock). This mirrors the wiremock pattern
+    // (PR #4447 / #4545) shared across the in-process channel adapters.
 
     use wiremock::matchers::{body_json, body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
