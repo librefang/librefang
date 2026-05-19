@@ -35,7 +35,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
   Settings, AlertCircle, CheckSquare, Square, Plus, Trash2, Pencil, ArrowLeft,
-  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
+  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe
 } from "lucide-react";
 
 const channelIcons: Record<string, React.ReactNode> = {
@@ -48,7 +48,6 @@ const channelIcons: Record<string, React.ReactNode> = {
   webhook: <Link2 className="w-5 h-5" />,
   http: <Globe className="w-5 h-5" />,
   websocket: <Radio className="w-5 h-5" />,
-  mqtt: <Wifi className="w-5 h-5" />,
   slack_events: <Bell className="w-5 h-5" />,
   teams: <MessageCircle className="w-5 h-5" />,
 };

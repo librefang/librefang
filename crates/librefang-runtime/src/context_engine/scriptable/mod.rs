@@ -301,8 +301,8 @@ pub struct ScriptableContextEngine {
     otel_endpoint: Option<String>,
     /// Canonical plugin name — used as the `plugin` column when writing to trace_store.
     plugin_name: String,
-    /// Persistent SQLite trace store (None if it could not be opened at construction time).
-    trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
+    /// Persistent trace backend (injected via `with_trace_backend`; None if not provided).
+    trace_store: Option<std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
     /// Tracks all spawned after_turn background tasks for graceful shutdown.
     after_turn_tasks: std::sync::Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
     /// Memory substrate for after_turn hook memory injection.
@@ -473,16 +473,22 @@ impl ScriptableContextEngine {
             );
         }
 
-        // Open the persistent trace store. Failure is non-fatal — traces will
-        // still land in the in-memory ring buffer even if SQLite is unavailable.
-        self.trace_store = crate::plugin_manager::open_trace_store()
-            .map(std::sync::Arc::new)
-            .map_err(|e| {
-                warn!(plugin = name, error = %e, "Could not open hook trace store; SQLite persistence disabled");
-            })
-            .ok();
+        self
+    }
 
-        // Restore circuit breaker state from SQLite so tripped circuits survive daemon restarts.
+    /// Inject a trace backend for hook-trace persistence across daemon restarts.
+    ///
+    /// When `surreal-backend` is active, the kernel passes its `SurrealTraceBackend`
+    /// here instead of opening a per-plugin SQLite file. Restoring circuit-breaker
+    /// state lives here (not in `with_plugin_name`) because the backend is only
+    /// available once injected — callers invoke `with_plugin_name` first.
+    pub fn with_trace_backend(
+        mut self,
+        backend: std::sync::Arc<dyn crate::storage_backends::TraceBackend>,
+    ) -> Self {
+        self.trace_store = Some(backend);
+
+        // Restore circuit breaker state from the trace backend so tripped circuits survive daemon restarts.
         if let Some(ref store) = self.trace_store {
             if let Ok(saved) = store.load_circuit_states() {
                 if let Ok(mut guard) = self.circuit_breakers.lock() {
@@ -705,10 +711,10 @@ impl ScriptableContextEngine {
     fn push_trace(
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         trace: HookTrace,
-        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        trace_store: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
         plugin_name: &str,
     ) {
-        // Persist to SQLite first (borrows trace by ref).
+        // Persist to trace backend first (borrows trace by ref).
         if let Some(store) = trace_store {
             store.insert(plugin_name, &trace);
         }
@@ -1100,7 +1106,6 @@ impl ScriptableContextEngine {
                     let substrate = std::sync::Arc::clone(substrate);
                     let agent_id_owned = agent_id.to_string();
                     tokio::spawn(async move {
-                        use librefang_types::memory::Memory as _;
                         let parsed_id = uuid::Uuid::parse_str(&agent_id_owned)
                             .map(librefang_types::agent::AgentId)
                             .unwrap_or_else(|_| librefang_types::agent::AgentId::new());
@@ -1109,8 +1114,8 @@ impl ScriptableContextEngine {
                         } else {
                             tags.join(",")
                         };
-                        if let Err(e) = substrate
-                            .remember(
+                        if let Err(e) = librefang_types::memory::Memory::remember(
+                                &*substrate,
                                 parsed_id,
                                 &content,
                                 librefang_types::memory::MemorySource::System,
@@ -1245,7 +1250,7 @@ impl ScriptableContextEngine {
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
         shared_state_path: Option<&std::path::Path>,
-        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        trace_store: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
         plugin_name: &str,
         correlation_id: &str,
         output_schema_strict: bool,

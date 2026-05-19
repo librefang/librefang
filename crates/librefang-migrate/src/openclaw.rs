@@ -1892,52 +1892,25 @@ fn migrate_channels_from_json(
     }
 
     // --- IRC ---
+    //
+    // IRC was removed as an in-process adapter — users migrating from
+    // OpenClaw can ship a sidecar adapter
+    // (`sdk/python/librefang/sidecar/adapters/`) if they still need IRC.
+    // We still detect the legacy block so the operator gets a clear
+    // signal instead of silent data loss.
     if let Some(ref irc) = oc_channels.irc {
         if irc.enabled.unwrap_or(true) {
-            if let Some(ref pw) = irc.password {
-                emit_secret(&secrets_path, dry_run, "IRC_PASSWORD", pw, report);
-            }
-            let mut fields: Vec<(&str, toml::Value)> = Vec::new();
-            if let Some(ref host) = irc.host {
-                fields.push(("server", toml::Value::String(host.clone())));
-            }
-            if let Some(port) = irc.port {
-                fields.push(("port", toml::Value::Integer(port as i64)));
-            }
-            if let Some(ref nick) = irc.nick {
-                fields.push(("nick", toml::Value::String(nick.clone())));
-            }
-            if let Some(tls) = irc.tls {
-                fields.push(("use_tls", toml::Value::Boolean(tls)));
-            }
-            if irc.password.is_some() {
-                fields.push(("password_env", toml::Value::String("IRC_PASSWORD".into())));
-            }
-            if let Some(ref chans_val) = irc.channels {
-                let chans = extract_string_list(chans_val);
-                if !chans.is_empty() {
-                    let arr: Vec<toml::Value> = chans
-                        .iter()
-                        .map(|c| toml::Value::String(c.clone()))
-                        .collect();
-                    fields.push(("channels", toml::Value::Array(arr)));
-                }
-            }
-            if allow_from_to_toml_array(irc.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "IRC: OpenClaw 'allow_from' could not be auto-mapped — \
-                     IrcConfig has no per-user allowlist field."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "irc".to_string(),
-                build_channel_table(fields, irc.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "IRC in-process adapter was removed in v2026.5. \
+                          Your OpenClaw IRC block was NOT migrated — ship an \
+                          IRC sidecar adapter (see \
+                          docs/architecture/sidecar-channels.md) or pin a \
+                          pre-removal LibreFang release."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "irc".to_string(),
-                destination: "config.toml [channels.irc]".to_string(),
+                reason,
             });
         }
     }
@@ -3008,15 +2981,18 @@ fn parse_legacy_channels(
                 });
             }
             "irc" => {
-                let mut fields: Vec<(&str, toml::Value)> = Vec::new();
-                if let Some(ref tok) = ch.bot_token_env {
-                    fields.push(("password_env", toml::Value::String(tok.clone())));
-                }
-                channels_table.insert("irc".to_string(), build_channel_table(fields, None, None));
-                report.imported.push(MigrateItem {
+                // IRC was removed as an in-process adapter; surface a
+                // warning instead of writing a [channels.irc] block the
+                // kernel would refuse to deserialize. Users who still
+                // need IRC should ship a sidecar adapter.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "irc".to_string(),
-                    destination: "config.toml [channels.irc]".to_string(),
+                    reason: "IRC in-process adapter was removed in v2026.5. \
+                             Ship an IRC sidecar adapter (see \
+                             docs/architecture/sidecar-channels.md) or pin a \
+                             pre-removal LibreFang release."
+                        .to_string(),
                 });
             }
             "mattermost" => {
@@ -3716,9 +3692,10 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 - imessage - bluebubbles - telegram (telegram migrated to a
-        // sidecar adapter: token → secrets.env, reported as skipped).
-        assert_eq!(channel_items.len(), 10);
+        // 13 - imessage - bluebubbles - telegram - irc (telegram migrated
+        // to a sidecar adapter, irc removed entirely in v2026.5: both are
+        // reported as skipped, not imported).
+        assert_eq!(channel_items.len(), 9);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3734,7 +3711,17 @@ mod tests {
         assert!(config_toml.contains("[channels.whatsapp]"));
         assert!(config_toml.contains("[channels.signal]"));
         assert!(config_toml.contains("[channels.matrix]"));
-        assert!(config_toml.contains("[channels.irc]"));
+        // IRC adapter was removed in v2026.5; the migrator now emits a
+        // skipped entry instead of a [channels.irc] block (which the
+        // kernel would refuse to deserialize).
+        assert!(
+            !config_toml.contains("[channels.irc]"),
+            "IRC is no longer an in-process adapter; the migrator must not \
+             emit a [channels.irc] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "irc"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.mattermost]"));
         assert!(config_toml.contains("[channels.feishu]"));
         assert!(config_toml.contains("[channels.teams]"));
@@ -3761,7 +3748,9 @@ mod tests {
         assert!(secrets.contains("DISCORD_BOT_TOKEN=discord-token-here"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
         assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
-        assert!(secrets.contains("IRC_PASSWORD=irc-secret-pw"));
+        // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted to
+        // secrets.env; the migrator now skips IRC entirely with a warning.
+        assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
         assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
@@ -3948,8 +3937,7 @@ mod tests {
         assert_eq!(dc.overrides.group_policy, GroupPolicy::All);
 
         // 7. Per-struct field-name corrections.
-        let irc = cfg.channels.irc.iter().next().expect("irc configured");
-        assert_eq!(irc.nick, "bot"); // was "nickname" before the fix
+        // IRC removed in v2026.5 — used to check `irc.nick == "bot"` here.
         let mm = cfg
             .channels
             .mattermost
@@ -4807,7 +4795,8 @@ mod tests {
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
         assert!(secrets.contains("SLACK_APP_TOKEN=xapp-slack"));
         assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
-        assert!(secrets.contains("IRC_PASSWORD=irc-secret-pw"));
+        // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted.
+        assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
         assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
@@ -4820,7 +4809,6 @@ mod tests {
             "xoxb-slack",
             "xapp-slack",
             "syt_matrix_token_xyz",
-            "irc-secret-pw",
             "mm-token-abc",
             "feishu-secret-xyz",
             "teams-pw-secret",
@@ -4831,15 +4819,16 @@ mod tests {
             );
         }
 
-        // Secret items in report
+        // Secret items in report (was >=9 before IRC removal in v2026.5
+        // dropped IRC_PASSWORD; 8 is the post-removal floor).
         let secret_count = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Secret)
             .count();
         assert!(
-            secret_count >= 9,
-            "expected >=9 Secret items, got {secret_count}"
+            secret_count >= 8,
+            "expected >=8 Secret items, got {secret_count}"
         );
     }
 

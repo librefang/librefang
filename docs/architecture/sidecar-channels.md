@@ -150,11 +150,16 @@ block is re-declared as a `[[sidecar_channels]]` running
 ntfy proved the pipeline but also showed that fully removing one
 in-process channel's config type has a wide, kernel-touching,
 **breaking** blast radius (config schema, api routes/features, kernel
-`channel_sender` registry, cli TUI, validation, golden). Remaining
-candidates (genuinely text-only / low-traffic, e.g. `gitter`,
-`gotify`) should migrate **opportunistically** — when someone next
-touches one, or on explicit maintainer decision — not as a batch
-rewrite. New channels are sidecar by policy, so the in-process set
-only shrinks over time without a forced campaign. Each migration is a
-breaking change for that channel's `[channels.<x>]` config and must be
-called out in `CHANGELOG.md` under `### Changed`.
+`channel_sender` registry, cli TUI, validation, golden). Subsequent
+migrations have followed the same pattern: telegram (#5241) and now
+gotify both with hand-rolled stdlib-only transports (longpoll for
+telegram, WebSocket for gotify; the SDK has zero runtime
+dependencies). The in-process set only shrinks over time: subsequent
+cleanups have dropped 12 unmaintained adapters outright (gitter,
+keybase, flock, pumble, revolt, guilded, mumble, xmpp, irc, threema,
+twist, voice) rather than migrating them. Anyone who still needs one
+of those should ship a sidecar adapter (the same shape as the existing
+SDK examples). New channels are sidecar by policy, so the in-process
+set has no forced campaign — it only shrinks. Each removal or
+migration is a breaking change for that channel's `[channels.<x>]`
+config and must be called out in `CHANGELOG.md` under `### Changed`.

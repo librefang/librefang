@@ -12,7 +12,7 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import {
   Radio, Activity, Zap, Clock, CheckCircle2, XCircle, MessageSquare, Send,
-  Mail, Phone, Link2, Wifi, Globe, ChevronRight, Search, X,
+  Mail, Phone, Link2, Globe, ChevronRight, Search, X,
   ArrowsUpFromLine, Users
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
@@ -28,7 +28,6 @@ const channelIcons: Record<string, React.ReactNode> = {
   webhook: <Link2 className="w-5 h-5" />,
   http: <Globe className="w-5 h-5" />,
   websocket: <Radio className="w-5 h-5" />,
-  mqtt: <Wifi className="w-5 h-5" />,
   slack_events: <Activity className="w-5 h-5" />,
   teams: <MessageSquare className="w-5 h-5" />,
 };
