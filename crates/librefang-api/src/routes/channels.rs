@@ -52,6 +52,7 @@ use super::skills::{
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
     CHANNEL_AOT_CONFLICT_PREFIX,
 };
+use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -59,7 +60,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::types::ApiErrorResponse;
 
@@ -1043,7 +1044,13 @@ struct SidecarCatalogEntry {
     name: &'static str,
     display_name: &'static str,
     description: &'static str,
-    config_template: &'static str,
+    /// Executable spawned by `populate_sidecar_schema_cache()` with `--describe`
+    /// to retrieve the field schema. Also the value the operator would write
+    /// to `[[sidecar_channels]].command` if configuring by hand.
+    command: &'static str,
+    /// Module / script arguments passed to `command`. `--describe` is appended
+    /// by `describe_sidecar()` at probe time.
+    args: &'static [&'static str],
 }
 
 /// First-party sidecar adapters shipped under
@@ -1060,33 +1067,75 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         name: "telegram",
         display_name: "Telegram",
         description: "Telegram Bot API adapter (out-of-process sidecar)",
-        config_template: "\
-[[sidecar_channels]]
-name = \"telegram\"
-channel_type = \"telegram\"
-command = \"python3\"
-args = [\"-m\", \"librefang.sidecar.adapters.telegram\"]
-
-[sidecar_channels.env]
-TELEGRAM_BOT_TOKEN = \"...\"
-",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.telegram"],
     },
     SidecarCatalogEntry {
         name: "ntfy",
         display_name: "ntfy",
         description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
-        config_template: "\
-[[sidecar_channels]]
-name = \"ntfy\"
-channel_type = \"ntfy\"
-command = \"python3\"
-args = [\"-m\", \"librefang.sidecar.adapters.ntfy\"]
-
-[sidecar_channels.env]
-NTFY_TOPIC = \"...\"
-",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.ntfy"],
     },
 ];
+
+/// Process-wide cache of sidecar `--describe` schemas, keyed by
+/// `SidecarCatalogEntry::name`. Populated once at daemon boot by
+/// [`populate_sidecar_schema_cache`]; consumed on every `GET /api/channels`
+/// to emit `fields[]` for unconfigured discovery rows. A `RwLock` is used
+/// so the in-test seeder ([`__test_seed_sidecar_schema_cache`]) can replace
+/// entries deterministically between tests without rebuilding the daemon.
+static SIDECAR_SCHEMA_CACHE: OnceLock<RwLock<HashMap<&'static str, SidecarSchema>>> =
+    OnceLock::new();
+
+fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
+    SIDECAR_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Spawn `<command> <args> --describe` for every catalog entry and cache
+/// the resulting schemas. Called once at daemon boot from
+/// `server::build_router`. Failures (SDK not installed, describe crashed)
+/// are logged at WARN and the row falls back to an empty `fields[]` — the
+/// operator then sees the description + setup-steps text but no form.
+/// This keeps daemon boot resilient in dev environments that have not
+/// run `pip install -e sdk/python`.
+pub async fn populate_sidecar_schema_cache() {
+    for entry in SIDECAR_CATALOG {
+        let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
+        match describe_sidecar(entry.command, &args).await {
+            Ok(schema) => {
+                tracing::info!(
+                    adapter = entry.name,
+                    fields = schema.fields.len(),
+                    "sidecar schema cached"
+                );
+                schema_cache().write().unwrap().insert(entry.name, schema);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    "sidecar --describe failed; discovery card will have no form fields"
+                );
+            }
+        }
+    }
+}
+
+/// Test-only seeder for the sidecar schema cache. Wipes any existing
+/// entries and replaces them with the supplied pairs so integration tests
+/// can assert deterministic `fields[]` payloads without depending on a
+/// working Python SDK installation. `#[doc(hidden)]` because no production
+/// caller should ever reach for this — the public path is
+/// [`populate_sidecar_schema_cache`] at boot.
+#[doc(hidden)]
+pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
+    let mut guard = schema_cache().write().unwrap();
+    guard.clear();
+    for (k, v) in entries {
+        guard.insert(*k, v.clone());
+    }
+}
 
 /// Synthesize **unconfigured** dashboard rows for catalog sidecar
 /// adapters (`telegram`, `ntfy`) so they remain discoverable in the
@@ -1107,6 +1156,8 @@ fn sidecar_discovery_rows(
         covered.insert(kind);
         covered.insert(sc.name.as_str());
     }
+
+    let cache_guard = schema_cache().read().unwrap();
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
         // Guard against a future where the same name appears both
@@ -1114,6 +1165,26 @@ fn sidecar_discovery_rows(
         if registry.contains(entry.name) || covered.contains(entry.name) {
             continue;
         }
+        let fields: Vec<serde_json::Value> = cache_guard
+            .get(entry.name)
+            .map(|s| {
+                s.fields
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "key": f.key,
+                            "label": f.label,
+                            "type": f.field_type,
+                            "required": f.required,
+                            "placeholder": f.placeholder,
+                            "advanced": f.advanced,
+                            "options": f.options,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         rows.push(serde_json::json!({
             "name": entry.name,
             "display_name": entry.display_name,
@@ -1127,13 +1198,12 @@ fn sidecar_discovery_rows(
             "configured": false,
             "instance_count": 0,
             "has_token": false,
-            "fields": Vec::<serde_json::Value>::new(),
+            "fields": fields,
             "setup_steps": [
                 "Runs as an out-of-process sidecar adapter",
-                "Add a [[sidecar_channels]] entry in config.toml \
-                 (Config \u{2192} Sidecar Channels) using the template below",
+                "Fill the form to save credentials to ~/.librefang/secrets.env \
+                 (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
-            "config_template": entry.config_template,
         }));
     }
     rows

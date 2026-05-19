@@ -43,6 +43,13 @@ use tower::ServiceExt;
 /// validation before reaching the disk read. (#4865)
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Serialises tests that touch the process-static sidecar schema cache
+/// (`SIDECAR_SCHEMA_CACHE` in `routes::channels`). Without this, the
+/// seeded-cache test races the empty-cache discovery tests and one of
+/// them sees `fields[]` from the other. Hold the lock for the entire
+/// test body when either seeding the cache or asserting an empty cache.
+static SIDECAR_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Drop guard that points `LIBREFANG_HOME` at a tempdir for the
 /// duration of a test and restores the previous value on drop. Must be
 /// constructed only while `ENV_LOCK` is held.
@@ -1058,6 +1065,8 @@ async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
     // after the out-of-process migration (#5241 / #5224). Operators who
     // have never touched config.toml saw telegram/ntfy vanish from the
     // dashboard entirely before this; the discovery rows close that gap.
+    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1097,6 +1106,51 @@ async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
         configured_count + sidecar_unconfigured <= arr.len() as u64,
         "configured_count must not include discovery rows"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_list_discovery_rows_carry_form_fields_when_schema_cached() {
+    // Pre-populate the schema cache with a synthetic telegram schema so the
+    // test runs deterministically without depending on `pip install -e
+    // sdk/python` on every CI box.
+    let _g = SIDECAR_CACHE_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        librefang_api::routes::sidecar_describe::SidecarSchema {
+            name: "telegram".into(),
+            display_name: "Telegram".into(),
+            description: "Telegram Bot API adapter".into(),
+            fields: vec![librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "TELEGRAM_BOT_TOKEN".into(),
+                label: "Bot Token".into(),
+                field_type: "secret".into(),
+                required: true,
+                placeholder: "123:ABC".into(),
+                advanced: false,
+                options: None,
+            }],
+        },
+    )]);
+
+    let h = boot().await;
+    let (_status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    let arr = body["items"].as_array().expect("items");
+    let tg = arr
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("telegram row");
+    let fields = tg["fields"].as_array().expect("fields[]");
+    assert!(
+        !fields.is_empty(),
+        "discovery row must carry fields when cached: {tg}"
+    );
+    assert_eq!(fields[0]["key"], "TELEGRAM_BOT_TOKEN");
+    assert_eq!(fields[0]["type"], "secret");
+    assert_eq!(fields[0]["required"], true);
+
+    // Clear the cache so sibling tests asserting empty fields are not
+    // polluted by this seed (the cache is process-static).
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
