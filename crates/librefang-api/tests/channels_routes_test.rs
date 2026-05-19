@@ -1613,3 +1613,56 @@ async fn configure_sidecar_refuses_when_include_owns_sidecars() {
 
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }
+
+/// `included_files_with_sidecars` uses a substring match for
+/// `[[sidecar_channels]]` rather than parsing the included file's TOML.
+/// That conservative heuristic deliberately produces false positives —
+/// an included file that only MENTIONS the string in a comment will
+/// still trigger 409. This test documents that limitation: the
+/// alternative (full TOML parse of every included file) trades a
+/// minor operator surprise for a meaningful complexity / correctness
+/// cliff (the include resolver would need to mirror the kernel's
+/// recursive include + cycle-detection logic). 409 with the include
+/// path in the error message is a recoverable state — the operator
+/// either removes the comment or edits the included file directly,
+/// as the 409 message instructs.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_refuses_even_on_commented_sidecar_string() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let home = h.home_dir();
+    std::fs::write(home.join("config.toml"), "include = [\"docs.toml\"]\n").unwrap();
+    // The included file is otherwise empty — only a comment mentions
+    // the array header string.
+    std::fs::write(
+        home.join("docs.toml"),
+        "# example: [[sidecar_channels]] should look like this\n",
+    )
+    .unwrap();
+
+    let body = serde_json::json!({ "values": { "TELEGRAM_BOT_TOKEN": "x" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    // Conservative: substring match triggers 409 even on a comment.
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "documented limitation: comment-mention triggers 409: {resp}"
+    );
+    assert!(
+        resp.to_string().contains("include"),
+        "error must mention the include shadow: {resp}"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
