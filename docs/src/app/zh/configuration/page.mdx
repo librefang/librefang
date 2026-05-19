@@ -989,28 +989,6 @@ allowed_channels = []
 | `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.irc]`
-
-```toml
-[channels.irc]
-server = "irc.libera.chat"
-port = 6667
-nick = "librefang"
-# password_env = "IRC_PASSWORD"
-channels = ["#librefang"]
-use_tls = false
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server` | string | `"irc.libera.chat"` | IRC 服务器主机名。 |
-| `port` | u16 | `6667` | IRC 服务器端口。 |
-| `nick` | string | `"librefang"` | Bot 昵称。 |
-| `password_env` | string 或 null | `null` | 存放服务器密码的环境变量（可选）。 |
-| `channels` | list of strings | `[]` | 要加入的 IRC 频道（例如 `["#librefang", "#general"]`）。 |
-| `use_tls` | bool | `false` | 是否使用 TLS 连接。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.google_chat]`
 
 ```toml
@@ -1077,26 +1055,6 @@ streams = []
 | `bot_email` | string | `""` | 在 Zulip 中注册的 Bot 邮箱地址。 |
 | `api_key_env` | string | `"ZULIP_API_KEY"` | 存放 Zulip API Key 的环境变量。 |
 | `streams` | list of strings | `[]` | 监听的 Stream 名称列表。空列表 = 所有 Stream。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.xmpp]`
-
-```toml
-[channels.xmpp]
-jid = "bot@jabber.org"
-password_env = "XMPP_PASSWORD"
-server = ""
-port = 5222
-rooms = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `jid` | string | `""` | XMPP JID（例如 `"bot@jabber.org"`）。 |
-| `password_env` | string | `"XMPP_PASSWORD"` | 存放 XMPP 密码的环境变量。 |
-| `server` | string | `""` | XMPP 服务器主机名。为空时默认使用 JID 的域名。 |
-| `port` | u16 | `5222` | XMPP 服务器端口。 |
-| `rooms` | list of strings | `[]` | 要加入的 MUC（多人聊天）房间。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.line]`
@@ -1186,20 +1144,6 @@ webhook_port = 8453
 | `webhook_port` | u16 | `8453` | 入站 Webhook 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.revolt]`
-
-```toml
-[channels.revolt]
-bot_token_env = "REVOLT_BOT_TOKEN"
-api_url = "https://api.revolt.chat"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | 存放 Revolt Bot 令牌的环境变量。 |
-| `api_url` | string | `"https://api.revolt.chat"` | Revolt API 基础 URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.nextcloud]`
 
 ```toml
@@ -1216,52 +1160,6 @@ allowed_rooms = []
 | `allowed_rooms` | list of strings | `[]` | 监听的房间令牌列表。空列表 = 所有房间。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.guilded]`
-
-```toml
-[channels.guilded]
-bot_token_env = "GUILDED_BOT_TOKEN"
-server_ids = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | 存放 Guilded Bot 令牌的环境变量。 |
-| `server_ids` | list of strings | `[]` | 监听的服务器 ID 列表。空列表 = 所有服务器。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.keybase]`
-
-```toml
-[channels.keybase]
-username = ""
-paperkey_env = "KEYBASE_PAPERKEY"
-allowed_teams = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `username` | string | `""` | Keybase 用户名。 |
-| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | 存放 Keybase 纸钥匙的环境变量。 |
-| `allowed_teams` | list of strings | `[]` | 监听的团队名称列表。空列表 = 仅私聊。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.threema]`
-
-```toml
-[channels.threema]
-threema_id = ""
-secret_env = "THREEMA_SECRET"
-webhook_port = 8454
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `threema_id` | string | `""` | Threema Gateway ID。 |
-| `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
-| `webhook_port` | u16 | `8454` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.webex]`
 
 ```toml
@@ -1274,70 +1172,6 @@ allowed_rooms = []
 |------|------|--------|------|
 | `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | 存放 Webex Bot 令牌的环境变量。 |
 | `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有房间。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.pumble]`
-
-```toml
-[channels.pumble]
-bot_token_env = "PUMBLE_BOT_TOKEN"
-webhook_port = 8455
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | 存放 Pumble Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8455` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.flock]`
-
-```toml
-[channels.flock]
-bot_token_env = "FLOCK_BOT_TOKEN"
-webhook_port = 8456
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | 存放 Flock Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8456` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.twist]`
-
-```toml
-[channels.twist]
-token_env = "TWIST_TOKEN"
-workspace_id = ""
-allowed_channels = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `token_env` | string | `"TWIST_TOKEN"` | 存放 Twist API 令牌的环境变量。 |
-| `workspace_id` | string | `""` | Twist 工作区 ID。 |
-| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.mumble]`
-
-```toml
-[channels.mumble]
-host = "mumble.example.com"
-port = 64738
-username = "librefang"
-password_env = "MUMBLE_PASSWORD"
-channel = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `host` | string | `""` | Mumble 服务器主机名。 |
-| `port` | u16 | `64738` | Mumble 服务器端口。 |
-| `username` | string | `"librefang"` | Bot 在 Mumble 中的用户名。 |
-| `password_env` | string | `"MUMBLE_PASSWORD"` | 存放 Mumble 服务器密码的环境变量。 |
-| `channel` | string | `""` | 要加入的 Mumble 频道。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.dingtalk]`
@@ -1368,20 +1202,6 @@ webhook_port = 8457
 | `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量（webhook 模式）。 |
 | `webhook_port` | u16 | `8457` | 入站 Webhook 端口（仅 webhook 模式）。 |
 | `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.gitter]`
-
-```toml
-[channels.gitter]
-token_env = "GITTER_TOKEN"
-room_id = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `token_env` | string | `"GITTER_TOKEN"` | 存放 Gitter 认证令牌的环境变量。 |
-| `room_id` | string | `""` | 监听的 Gitter 房间 ID。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.ntfy]`
