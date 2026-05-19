@@ -544,12 +544,33 @@ pub(super) async fn tool_text_to_speech(
                 (None, None, None, None)
             };
 
+        // Per-provider config-default voice + format — applied as *fallbacks*
+        // when the LLM omits the `voice` / `format` arguments. Required so a
+        // bare `text_to_speech(text=...)` call respects [tts.<provider>] from
+        // config.toml instead of silently using each provider's API default
+        // (ElevenLabs API default = Rachel + mp3_44100_128, not the configured
+        // voice + Opus).
+        let (config_default_voice, config_default_format) =
+            tts_engine.map_or((None, None), |engine| match resolved_provider {
+                Some("elevenlabs") => {
+                    let cfg = &engine.tts_config().elevenlabs;
+                    (Some(cfg.voice_id.clone()), Some(cfg.output_format.clone()))
+                }
+                Some("openai") => {
+                    let cfg = &engine.tts_config().openai;
+                    (Some(cfg.voice.clone()), Some(cfg.format.clone()))
+                }
+                _ => (None, None),
+            });
+
         let request = librefang_types::media::MediaTtsRequest {
             text: text.to_string(),
             provider: resolved_provider.map(String::from),
             model: input["model"].as_str().map(String::from),
-            voice: effective_voice.or_else(|| voice.map(String::from)),
-            format: format.map(String::from),
+            voice: effective_voice
+                .or_else(|| voice.map(String::from))
+                .or(config_default_voice),
+            format: format.map(String::from).or(config_default_format),
             speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
             language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
             pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),
