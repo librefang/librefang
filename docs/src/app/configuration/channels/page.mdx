@@ -352,40 +352,6 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.viber]`
-
-```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-# webhook_port = 8451  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. **Required** — also used as the HMAC-SHA256 key to verify every inbound `X-Viber-Content-Signature`; missing → 400, mismatched → 401. |
-| `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
-| `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.messenger]`
-
-```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-app_secret_env = "MESSENGER_APP_SECRET"
-# webhook_port = 8452  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
-| `app_secret_env` | string | `"MESSENGER_APP_SECRET"` | Env var holding the **Facebook App Secret**. Used for HMAC-SHA1 verification of every inbound `X-Hub-Signature` header. If unset, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
-| `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.reddit]`
 
 ```toml
@@ -533,20 +499,6 @@ secret_env = "THREEMA_SECRET"
 | `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | Env var holding the Nostr private key (nsec or hex format). |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | Nostr relay WebSocket URLs to connect to. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.webex]`
 
 ```toml
@@ -655,24 +607,6 @@ secret_env = "DINGTALK_SECRET"
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `base_url` | string | `""` | Discourse forum base URL. |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | Env var holding the Discourse API key. |
-| `api_username` | string | `"system"` | Discourse API username. |
-| `categories` | list of strings | `[]` | Category slugs to monitor. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
 #### `[channels.gitter]`
 
 ```toml
@@ -758,20 +692,6 @@ tts_voice = "alloy"
 | `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
 | `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
 | `default_agent` | string or null | `null` | Agent name to route voice messages to. |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | Env var holding the LinkedIn OAuth2 access token. |
-| `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.qq]`
 
