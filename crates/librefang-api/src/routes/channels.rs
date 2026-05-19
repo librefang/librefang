@@ -1420,6 +1420,17 @@ pub async fn configure_sidecar_channel(
         //     those out by reading the on-disk `secrets.env` once: a
         //     key already in `secrets.env` means the env presence is
         //     our own boot-time write, not a shell shadow.
+        // KEY-only extraction: this set is used purely for membership
+        // checks against the schema's secret field names (i.e. "is
+        // TELEGRAM_BOT_TOKEN listed in secrets.env?"). Quotes never
+        // appear inside dotenv KEYS, so the parser here intentionally
+        // mirrors `librefang_channels::sidecar::parse_secrets_env`'s
+        // key-extraction path but skips the value-side quote-stripping
+        // that `parse_secrets_env` performs. If a future change starts
+        // comparing VALUES here, switch to invoking the channels-crate
+        // helper directly so quote/whitespace handling stays consistent
+        // with how the sidecar actually inherits env vars at spawn time
+        // (codex review fix #9).
         let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
             &secrets_path,
         )
