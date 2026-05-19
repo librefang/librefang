@@ -45,6 +45,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/registry",
             axum::routing::get(list_channel_registry),
         )
+        .route(
+            "/channels/sidecar/{name}/configure",
+            axum::routing::post(configure_sidecar_channel),
+        )
 }
 
 use super::skills::{
@@ -52,6 +56,7 @@ use super::skills::{
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
     CHANNEL_AOT_CONFLICT_PREFIX,
 };
+use super::sidecar_describe::{describe_sidecar, SidecarSchema};
 use super::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -59,7 +64,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::types::ApiErrorResponse;
 
@@ -1043,7 +1048,13 @@ struct SidecarCatalogEntry {
     name: &'static str,
     display_name: &'static str,
     description: &'static str,
-    config_template: &'static str,
+    /// Executable spawned by `populate_sidecar_schema_cache()` with `--describe`
+    /// to retrieve the field schema. Also the value the operator would write
+    /// to `[[sidecar_channels]].command` if configuring by hand.
+    command: &'static str,
+    /// Module / script arguments passed to `command`. `--describe` is appended
+    /// by `describe_sidecar()` at probe time.
+    args: &'static [&'static str],
 }
 
 /// First-party sidecar adapters shipped under
@@ -1060,33 +1071,75 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         name: "telegram",
         display_name: "Telegram",
         description: "Telegram Bot API adapter (out-of-process sidecar)",
-        config_template: "\
-[[sidecar_channels]]
-name = \"telegram\"
-channel_type = \"telegram\"
-command = \"python3\"
-args = [\"-m\", \"librefang.sidecar.adapters.telegram\"]
-
-[sidecar_channels.env]
-TELEGRAM_BOT_TOKEN = \"...\"
-",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.telegram"],
     },
     SidecarCatalogEntry {
         name: "ntfy",
         display_name: "ntfy",
         description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
-        config_template: "\
-[[sidecar_channels]]
-name = \"ntfy\"
-channel_type = \"ntfy\"
-command = \"python3\"
-args = [\"-m\", \"librefang.sidecar.adapters.ntfy\"]
-
-[sidecar_channels.env]
-NTFY_TOPIC = \"...\"
-",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.ntfy"],
     },
 ];
+
+/// Process-wide cache of sidecar `--describe` schemas, keyed by
+/// `SidecarCatalogEntry::name`. Populated once at daemon boot by
+/// [`populate_sidecar_schema_cache`]; consumed on every `GET /api/channels`
+/// to emit `fields[]` for unconfigured discovery rows. A `RwLock` is used
+/// so the in-test seeder ([`__test_seed_sidecar_schema_cache`]) can replace
+/// entries deterministically between tests without rebuilding the daemon.
+static SIDECAR_SCHEMA_CACHE: OnceLock<RwLock<HashMap<&'static str, SidecarSchema>>> =
+    OnceLock::new();
+
+fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
+    SIDECAR_SCHEMA_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Spawn `<command> <args> --describe` for every catalog entry and cache
+/// the resulting schemas. Called once at daemon boot from
+/// `server::build_router`. Failures (SDK not installed, describe crashed)
+/// are logged at WARN and the row falls back to an empty `fields[]` — the
+/// operator then sees the description + setup-steps text but no form.
+/// This keeps daemon boot resilient in dev environments that have not
+/// run `pip install -e sdk/python`.
+pub async fn populate_sidecar_schema_cache() {
+    for entry in SIDECAR_CATALOG {
+        let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
+        match describe_sidecar(entry.command, &args).await {
+            Ok(schema) => {
+                tracing::info!(
+                    adapter = entry.name,
+                    fields = schema.fields.len(),
+                    "sidecar schema cached"
+                );
+                schema_cache().write().unwrap().insert(entry.name, schema);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    "sidecar --describe failed; discovery card will have no form fields"
+                );
+            }
+        }
+    }
+}
+
+/// Test-only seeder for the sidecar schema cache. Wipes any existing
+/// entries and replaces them with the supplied pairs so integration tests
+/// can assert deterministic `fields[]` payloads without depending on a
+/// working Python SDK installation. `#[doc(hidden)]` because no production
+/// caller should ever reach for this — the public path is
+/// [`populate_sidecar_schema_cache`] at boot.
+#[doc(hidden)]
+pub fn __test_seed_sidecar_schema_cache(entries: &[(&'static str, SidecarSchema)]) {
+    let mut guard = schema_cache().write().unwrap();
+    guard.clear();
+    for (k, v) in entries {
+        guard.insert(*k, v.clone());
+    }
+}
 
 /// Synthesize **unconfigured** dashboard rows for catalog sidecar
 /// adapters (`telegram`, `ntfy`) so they remain discoverable in the
@@ -1107,6 +1160,8 @@ fn sidecar_discovery_rows(
         covered.insert(kind);
         covered.insert(sc.name.as_str());
     }
+
+    let cache_guard = schema_cache().read().unwrap();
     let mut rows = Vec::new();
     for entry in SIDECAR_CATALOG {
         // Guard against a future where the same name appears both
@@ -1114,6 +1169,26 @@ fn sidecar_discovery_rows(
         if registry.contains(entry.name) || covered.contains(entry.name) {
             continue;
         }
+        let fields: Vec<serde_json::Value> = cache_guard
+            .get(entry.name)
+            .map(|s| {
+                s.fields
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "key": f.key,
+                            "label": f.label,
+                            "type": f.field_type,
+                            "required": f.required,
+                            "placeholder": f.placeholder,
+                            "advanced": f.advanced,
+                            "options": f.options,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         rows.push(serde_json::json!({
             "name": entry.name,
             "display_name": entry.display_name,
@@ -1127,16 +1202,347 @@ fn sidecar_discovery_rows(
             "configured": false,
             "instance_count": 0,
             "has_token": false,
-            "fields": Vec::<serde_json::Value>::new(),
+            "fields": fields,
             "setup_steps": [
                 "Runs as an out-of-process sidecar adapter",
-                "Add a [[sidecar_channels]] entry in config.toml \
-                 (Config \u{2192} Sidecar Channels) using the template below",
+                "Fill the form to save credentials to ~/.librefang/secrets.env \
+                 (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
-            "config_template": entry.config_template,
         }));
     }
     rows
+}
+
+/// Request body for `POST /api/channels/sidecar/{name}/configure`.
+///
+/// `values` is a flat `key → string` map where each key matches a
+/// `SidecarSchemaField.key` returned by the sidecar's `--describe`.
+/// The endpoint splits the map by `field_type`: `secret` fields are
+/// written line-by-line to `~/.librefang/secrets.env`, every other
+/// field is written under `[sidecar_channels.env]` in
+/// `~/.librefang/config.toml`. All current first-party sidecar field
+/// types (text, secret, list, bool, select) are stringly representable,
+/// so a flat `HashMap<String, String>` is sufficient — payload-typed
+/// fields (numbers etc.) would need a richer shape.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ConfigureSidecarBody {
+    pub values: HashMap<String, String>,
+}
+
+/// Detect `[[sidecar_channels]]` entries in files referenced from the root
+/// config's `include = [...]` directive.
+///
+/// Background: librefang merges every file in `include` into the runtime
+/// config (`librefang_kernel::config::load_config`). The merge concatenates
+/// arrays-of-tables — so if an included file declares `[[sidecar_channels]]`
+/// and we write a fresh root-level `[[sidecar_channels]]` here, the live
+/// config will contain BOTH entries. The freshly-written root entry will
+/// silently shadow the included one on dashboard / configure paths
+/// (the kernel reads them in include-first order, but the dashboard
+/// configure flow expects to be editing the canonical entry).
+///
+/// Cheap heuristic: substring-match `[[sidecar_channels]]` in each included
+/// file. False positives on a comment containing that exact string are
+/// acceptable — the operator can either remove the comment or edit the
+/// included file directly as the 409 message recommends. Returns the list
+/// of include paths that contain at least one `[[sidecar_channels]]`
+/// header. Empty list = safe to write to root.
+fn included_files_with_sidecars(config_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let doc: toml_edit::DocumentMut = match content.parse() {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    // `include` may be a string array at the document root.
+    let include_arr = match doc.get("include").and_then(|i| i.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let parent = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut hits = Vec::new();
+    for entry in include_arr.iter() {
+        let raw = match entry.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let path = if std::path::Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            parent.join(raw)
+        };
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if body.contains("[[sidecar_channels]]") {
+                hits.push(path);
+            }
+        }
+    }
+    hits
+}
+
+/// `POST /api/channels/sidecar/{name}/configure` — save schema-driven
+/// sidecar form values, splitting the payload across `secrets.env` and
+/// `config.toml`, then trigger a hot-reload so the kernel picks up the
+/// new `[[sidecar_channels]]` block without a restart. `name` is the
+/// `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).
+#[utoipa::path(
+    post,
+    path = "/api/channels/sidecar/{name}/configure",
+    tag = "channels",
+    request_body = ConfigureSidecarBody,
+    params(
+        ("name" = String, Path, description = "Sidecar catalog name (e.g. telegram, ntfy)")
+    ),
+    responses(
+        (status = 200, description = "Saved; reload plan returned. Body fields: \
+            `status` (\"saved\"), `hot_actions_applied` ([String]), `restart_required` (bool), \
+            `shadowed_secrets` ([String]) — secret field keys whose value is already \
+            present in the daemon's process environment (e.g. exported by the launching \
+            shell). Those values will out-rank the freshly-written secrets.env entry \
+            until the operator unsets them and restarts the daemon.", body = crate::types::JsonObject),
+        (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
+        (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
+        (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
+    )
+)]
+pub async fn configure_sidecar_channel(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigureSidecarBody>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // 1. Catalog lookup — only first-party adapters listed in
+    //    SIDECAR_CATALOG can be configured through this endpoint.
+    let entry = SIDECAR_CATALOG
+        .iter()
+        .find(|e| e.name == name)
+        .ok_or_else(|| {
+            ApiErrorResponse::not_found(format!("no sidecar adapter named `{name}`"))
+                .into_json_tuple()
+        })?;
+
+    // 2. Pull the cached `--describe` schema. Without it we can't
+    //    validate required fields or split secret-vs-nonsecret.
+    let schema = schema_cache()
+        .read()
+        .unwrap()
+        .get(entry.name)
+        .cloned()
+        .ok_or_else(|| {
+            ApiErrorResponse::internal(format!(
+                "schema for `{name}` not cached — SDK module may be missing or `--describe` failed at boot"
+            ))
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .into_json_tuple()
+        })?;
+
+    // 3. Validate required fields: present in payload AND non-empty after trim.
+    for f in &schema.fields {
+        if f.required {
+            let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
+            if v.is_empty() {
+                return Err(ApiErrorResponse::bad_request(format!(
+                    "required field `{}` is missing or empty",
+                    f.key
+                ))
+                .into_json_tuple());
+            }
+        }
+    }
+
+    // 3b. Resolve `~/.librefang` paths from the kernel's configured
+    //     `home_dir` rather than recomputing from `LIBREFANG_HOME` /
+    //     `~/.librefang`: when the operator boots with a non-default
+    //     `KernelConfig.home_dir`, the recomputed default would write
+    //     to the wrong path while `reload_config()` and
+    //     `reload_channels_from_disk()` read from the kernel's path.
+    //     (Shell-shadow detection for secret fields now lives under
+    //     the config_write_lock in step 4a below.)
+    let home = state.kernel.home_dir().to_path_buf();
+    let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
+
+    // 3c. Refuse to save when an `include`d file already owns the
+    //     `[[sidecar_channels]]` array. Writing a root-level entry on
+    //     top of that would silently shadow the included one after the
+    //     kernel merges them — the operator's intent (edit *that*
+    //     entry) and our behaviour (append a fresh root entry) would
+    //     diverge without warning. The dashboard / docs steer the
+    //     operator to the file that owns the existing block.
+    let shadowing = included_files_with_sidecars(&config_path);
+    if !shadowing.is_empty() {
+        let files = shadowing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiErrorResponse::conflict(format!(
+            "config.toml uses `include` directive and existing `[[sidecar_channels]]` entries live in {files}. Edit that file directly to avoid silently shadowing the included sidecars."
+        ))
+        .into_json_tuple());
+    }
+
+    // 4. Split payload: secrets go to secrets.env, everything else
+    //    accumulates into the [sidecar_channels.env] table.
+    //
+    //    Both the secrets.env upserts and the config.toml upsert below
+    //    run inside `state.config_write_lock`. That mutex also gates
+    //    `POST /api/config/set` and the legacy `configure_channel`
+    //    handler (issue #3183), so two concurrent
+    //    `POST /api/channels/sidecar/{a,b}/configure` calls — or one of
+    //    those interleaved with `config_set` — cannot lost-update on
+    //    `~/.librefang/config.toml` or on `~/.librefang/secrets.env`.
+    //    The guard is dropped before `reload_config().await` so the
+    //    hot-reload step does not gate other config-writing handlers.
+    //
+    //    The `secrets.env` membership read (for shell-shadow detection)
+    //    also lives inside the guard so two concurrent saves on
+    //    different keys cannot each see the pre-write file state and
+    //    falsely report shadows on keys the other handler is about to
+    //    write — a cosmetic-only TOCTOU but trivially closed by reading
+    //    under the same lock that gates the write.
+    let mut nonsecret_env: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let shadowed_secrets: Vec<String>;
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        // 4a. Detect shell-environment shadowing of `secret` fields,
+        //     under the lock. The dotenv loader's priority is system env
+        //     > vault > .env > secrets.env (see
+        //     `librefang_extensions::dotenv`). If the operator exported
+        //     `TELEGRAM_BOT_TOKEN` before launching the daemon,
+        //     `std::env::var` returns that exported value and the
+        //     sidecar child inherits it — not whatever we write to
+        //     `secrets.env`. The save still succeeds mechanically, but
+        //     the new value never takes effect. Warn before the operator
+        //     chases this for an hour.
+        //
+        //     `std::env::var` also returns true for keys we loaded from
+        //     `secrets.env` into the process env at boot, so subtract
+        //     those out by reading the on-disk `secrets.env` once: a
+        //     key already in `secrets.env` means the env presence is
+        //     our own boot-time write, not a shell shadow.
+        let secrets_env_keys: std::collections::HashSet<String> = std::fs::read_to_string(
+            &secrets_path,
+        )
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        return None;
+                    }
+                    let eq = line.find('=')?;
+                    let k = line[..eq].trim();
+                    if k.is_empty() {
+                        None
+                    } else {
+                        Some(k.to_string())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        let mut shadowed: Vec<String> = schema
+            .fields
+            .iter()
+            .filter(|f| f.field_type == "secret")
+            .filter(|f| {
+                body.values
+                    .get(&f.key)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .filter(|f| std::env::var(&f.key).is_ok() && !secrets_env_keys.contains(&f.key))
+            .map(|f| f.key.clone())
+            .collect();
+        shadowed.sort();
+        shadowed_secrets = shadowed;
+
+        for f in &schema.fields {
+            let Some(raw) = body.values.get(&f.key) else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if f.field_type == "secret" {
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(
+                    |e| {
+                        ApiErrorResponse::internal(format!("failed to write secret: {e}"))
+                            .into_json_tuple()
+                    },
+                )?;
+            } else {
+                nonsecret_env.insert(f.key.clone(), trimmed.to_string());
+            }
+        }
+
+        // 5. Upsert the [[sidecar_channels]] block keyed by adapter name.
+        //    Idempotent: a second POST with the same name replaces the
+        //    block in-place, preserving formatting of every other section.
+        super::sidecar_toml::upsert_sidecar_block(
+            &config_path,
+            entry.name,
+            entry.name, // channel_type defaults to the catalog name
+            entry.command,
+            entry.args,
+            &nonsecret_env,
+        )
+        .map_err(|e| {
+            ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
+                .into_json_tuple()
+        })?;
+    }
+
+    // 6. Trigger hot-reload. The kernel diffs the on-disk config
+    //    against the live snapshot and returns the resulting plan;
+    //    the dashboard surfaces `restart_required` so the operator
+    //    knows whether further action is needed.
+    let plan = state.kernel.reload_config().await.map_err(|e| {
+        ApiErrorResponse::internal(format!("config reload failed: {e}")).into_json_tuple()
+    })?;
+
+    // 7. When the plan emits `ReloadChannels`, the kernel has already
+    //    cleared `mesh.channel_adapters` — but the supervisor map is
+    //    only re-populated by re-entering `start_channel_bridge_with_config`
+    //    via `channel_bridge::reload_channels_from_disk`. Without this
+    //    follow-up the [[sidecar_channels]] entry we just wrote stays
+    //    on disk only and no sidecar process is spawned until daemon
+    //    restart — silently breaking the operator's expectation that
+    //    `hot_actions_applied: [ReloadChannels]` means a new sidecar
+    //    is live. Mirrors `routes/config.rs::config_reload` and
+    //    `routes/channels.rs::configure_channel`.
+    if plan
+        .hot_actions
+        .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+    {
+        if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
+            tracing::error!("sidecar configure: bridge restart failed: {e}");
+            return Err(ApiErrorResponse::internal(format!(
+                "saved config.toml but bridge restart failed: {e}"
+            ))
+            .into_json_tuple());
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "saved",
+        "hot_actions_applied": plan
+            .hot_actions
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>(),
+        "restart_required": plan.restart_required,
+        "shadowed_secrets": shadowed_secrets,
+    })))
 }
 
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.

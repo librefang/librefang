@@ -36,7 +36,7 @@ import time
 import urllib.error
 import urllib.request
 
-from librefang.sidecar import Content, SidecarAdapter, protocol, run_stdio
+from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 
 MAX_MESSAGE_LEN = 4096
@@ -67,6 +67,22 @@ class NtfyAdapter(SidecarAdapter):
     # ntfy has no typing/reaction/interactive/thread/streaming concept
     # — declare nothing, so LibreFang routes plain text only.
     capabilities: list = []
+
+    SCHEMA = Schema(
+        name="ntfy",
+        display_name="ntfy",
+        description="ntfy.sh pub/sub notifications (out-of-process sidecar)",
+        fields=[
+            Field("NTFY_TOPIC", "Topic", "text",
+                  required=True, placeholder="my-topic"),
+            Field("NTFY_SERVER_URL", "Server URL", "text",
+                  placeholder="https://ntfy.sh", advanced=True),
+            Field("NTFY_TOKEN", "Auth Token", "secret",
+                  placeholder="tk_...", advanced=True),
+            Field("NTFY_ACCOUNT_ID", "Account ID (multi-bot)", "text",
+                  placeholder="topic-42", advanced=True),
+        ],
+    )
 
     def __init__(self) -> None:
         server = os.environ.get("NTFY_SERVER_URL", "").strip()
@@ -200,4 +216,4 @@ class NtfyAdapter(SidecarAdapter):
 
 
 if __name__ == "__main__":
-    run_stdio(NtfyAdapter())
+    run_stdio_main(NtfyAdapter)

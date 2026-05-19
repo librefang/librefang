@@ -383,3 +383,73 @@ def parse_command(line: str) -> Command:
     if method == "heartbeat":
         return Heartbeat()
     return UnknownCommand(method or "", obj)
+
+
+# ---------------------------------------------------------------------------
+# Self-description schema — emitted by `python -m <adapter> --describe`.
+# Mirrors the FieldType enum in librefang-api's CHANNEL_REGISTRY so the
+# dashboard can render either kind of channel with one form component.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_FIELD_TYPES = {"text", "secret", "number", "list", "bool", "select"}
+
+
+class Field:
+    """One configurable field for a sidecar adapter.
+
+    `type=secret` is routed to ~/.librefang/secrets.env on save (never
+    written to config.toml). Every other type is stored in the
+    [sidecar_channels.env] table of config.toml — these are the env
+    vars the child process reads via os.environ on startup.
+    """
+
+    __slots__ = ("key", "label", "type", "required", "placeholder",
+                 "advanced", "options")
+
+    def __init__(self, key, label, type, *, required=False,
+                 placeholder="", advanced=False, options=None):
+        if type not in _ALLOWED_FIELD_TYPES:
+            raise ValueError(
+                f"unknown field type {type!r}; "
+                f"allowed: {sorted(_ALLOWED_FIELD_TYPES)}"
+            )
+        self.key = key
+        self.label = label
+        self.type = type
+        self.required = required
+        self.placeholder = placeholder
+        self.advanced = advanced
+        self.options = options  # for type=select
+
+    def to_dict(self):
+        d = {
+            "key": self.key,
+            "label": self.label,
+            "type": self.type,
+            "required": self.required,
+            "placeholder": self.placeholder,
+            "advanced": self.advanced,
+        }
+        if self.options is not None:
+            d["options"] = list(self.options)
+        return d
+
+
+class Schema:
+    """Self-description payload emitted by `<adapter> --describe`."""
+
+    __slots__ = ("name", "display_name", "description", "fields")
+
+    def __init__(self, name, display_name, description, fields):
+        self.name = name
+        self.display_name = display_name
+        self.description = description
+        self.fields = list(fields)
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "display_name": self.display_name,
+            "description": self.description,
+            "fields": [f.to_dict() for f in self.fields],
+        }

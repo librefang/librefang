@@ -34,28 +34,42 @@ use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Serialises every test in this binary that touches `LIBREFANG_HOME`.
-/// The handlers added in #4865 read `[channels]` from disk under the
-/// `config_write_lock`, so any test that needs to drive that path must
-/// own the env var for its full duration. Tests that don't read disk
-/// run in parallel as before — they're insensitive to whatever
-/// `LIBREFANG_HOME` happens to point at because they fail-fast at
-/// validation before reaching the disk read. (#4865)
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Single test-wide serialisation lock for anything that touches
+/// process-global state used by the `/api/channels/*` handlers:
+///   1. `LIBREFANG_HOME` (via `std::env::set_var` — process-global) —
+///      consumed by handlers added in #4865 that read `[channels]` from
+///      disk under the `config_write_lock`, and by the sidecar
+///      `/configure` flow which writes to `secrets.env` / `config.toml`.
+///   2. The process-static sidecar schema cache (`SIDECAR_SCHEMA_CACHE`
+///      in `routes::channels`) — the seeded-cache test would otherwise
+///      race the empty-cache discovery tests and one would see the
+///      other's `fields[]`.
+///
+/// Originally split as two mutexes (`ENV_LOCK` + `SIDECAR_CACHE_LOCK`),
+/// which raced because both protected the same `LIBREFANG_HOME` env var
+/// from different test paths (`DiskHomeGuard` vs `boot_with_temp_home`).
+/// Consolidated into one lock so the invariant — "tests mutating
+/// process-wide state run serially" — is enforced once at the source.
+///
+/// Tests that only exercise validation paths (unknown channel, missing
+/// field) fail-fast before reaching `librefang_home()` and don't need
+/// to hold this; they can run in parallel as before.
+static CHANNELS_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Drop guard that points `LIBREFANG_HOME` at a tempdir for the
 /// duration of a test and restores the previous value on drop. Must be
-/// constructed only while `ENV_LOCK` is held.
+/// constructed only while `CHANNELS_PROCESS_LOCK` is held.
 ///
 /// **Footgun for future tests:** `std::env::set_var` is process-global.
 /// Any new test in this binary that boots a server exercising a
 /// disk-touching handler (anything reaching `librefang_home()` — i.e.
 /// any of the `/configure`, `/instances`, or QR flow handlers) MUST
-/// acquire `ENV_LOCK` before constructing this guard, otherwise it will
-/// race with the disk-roundtrip tests below and see the tempdir's
-/// `config.toml` instead of `~/.librefang`. Tests that only exercise
-/// validation paths (unknown channel, missing field) fail-fast before
-/// reaching `librefang_home()` and are safe without the lock.
+/// acquire `CHANNELS_PROCESS_LOCK` before constructing this guard,
+/// otherwise it will race with the disk-roundtrip tests below and see
+/// the tempdir's `config.toml` instead of `~/.librefang`. Tests that
+/// only exercise validation paths (unknown channel, missing field)
+/// fail-fast before reaching `librefang_home()` and are safe without
+/// the lock.
 struct DiskHomeGuard {
     tmp: tempfile::TempDir,
     prev: Option<String>,
@@ -65,7 +79,7 @@ impl DiskHomeGuard {
     fn new() -> Self {
         let prev = std::env::var("LIBREFANG_HOME").ok();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: serialised via `ENV_LOCK`. Caller holds the lock.
+        // SAFETY: serialised via `CHANNELS_PROCESS_LOCK`. Caller holds the lock.
         unsafe {
             std::env::set_var("LIBREFANG_HOME", tmp.path());
         }
@@ -122,6 +136,70 @@ async fn boot_with_channels(channels: ChannelsConfig) -> Harness {
         app,
         _state: state,
         _test: test,
+    }
+}
+
+/// Harness + a `LIBREFANG_HOME` drop-guard wired to the same tempdir the
+/// MockKernel uses as `home_dir_boot`. The sidecar-configure handler reads
+/// `LIBREFANG_HOME` to resolve `secrets.env` / `config.toml`, and the
+/// kernel's `reload_config()` reads `home_dir_boot.join("config.toml")` —
+/// pointing the env var at the kernel's own tempdir keeps the two paths
+/// in sync so the write and the subsequent reload see the same file.
+///
+/// Callers MUST hold `CHANNELS_PROCESS_LOCK` for the lifetime of the
+/// returned `TempHomeHarness` because `std::env::set_var` is
+/// process-global and the schema-cache seed is process-static.
+struct TempHomeHarness {
+    h: Harness,
+    home: std::path::PathBuf,
+    prev: Option<String>,
+}
+
+impl TempHomeHarness {
+    fn home_dir(&self) -> &Path {
+        &self.home
+    }
+}
+
+impl Drop for TempHomeHarness {
+    fn drop(&mut self) {
+        // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for TempHomeHarness {
+    type Target = Harness;
+    fn deref(&self) -> &Harness {
+        &self.h
+    }
+}
+
+async fn boot_with_temp_home() -> TempHomeHarness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let home = test.tmp_path().to_path_buf();
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::channels::router())
+        .with_state(state.clone());
+    let prev = std::env::var("LIBREFANG_HOME").ok();
+    // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller.
+    unsafe {
+        std::env::set_var("LIBREFANG_HOME", &home);
+    }
+    TempHomeHarness {
+        h: Harness {
+            app,
+            _state: state,
+            _test: test,
+        },
+        home,
+        prev,
     }
 }
 
@@ -646,7 +724,7 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 // Per-instance CAS round-trip (#4865)
 // ---------------------------------------------------------------------------
 //
-// These tests own `LIBREFANG_HOME` (via `ENV_LOCK` + `DiskHomeGuard`) so
+// These tests own `LIBREFANG_HOME` (via `CHANNELS_PROCESS_LOCK` + `DiskHomeGuard`) so
 // they can seed an actual `config.toml` and drive the post-#4865 handler
 // flow that re-reads disk under the `config_write_lock`. Cheaper unit-
 // level coverage of the same primitives lives next to the helpers in
@@ -655,7 +733,7 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_signature_mismatch_returns_409() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_A"]);
 
@@ -698,7 +776,7 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_delete_instance_signature_mismatch_returns_409() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
 
@@ -745,7 +823,7 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_round_trips_real_signature() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_DISK_D"]);
 
@@ -798,7 +876,7 @@ async fn channels_update_instance_round_trips_real_signature() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     write_discord_instances(guard.home(), &["TG_LONELY"]);
     // Prime `secrets.env` with the env var the instance is pointing at,
@@ -853,7 +931,7 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
-    let _lock = ENV_LOCK.lock().await;
+    let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
     // Two instances, BOTH pointing at the same env var (a possible
     // user setup if they hand-edited secrets.env). Clearing one
@@ -1058,6 +1136,8 @@ async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
     // after the out-of-process migration (#5241 / #5224). Operators who
     // have never touched config.toml saw telegram/ntfy vanish from the
     // dashboard entirely before this; the discovery rows close that gap.
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1100,6 +1180,51 @@ async fn channels_list_without_sidecar_surfaces_discovery_catalog() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn channels_list_discovery_rows_carry_form_fields_when_schema_cached() {
+    // Pre-populate the schema cache with a synthetic telegram schema so the
+    // test runs deterministically without depending on `pip install -e
+    // sdk/python` on every CI box.
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        librefang_api::routes::sidecar_describe::SidecarSchema {
+            name: "telegram".into(),
+            display_name: "Telegram".into(),
+            description: "Telegram Bot API adapter".into(),
+            fields: vec![librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "TELEGRAM_BOT_TOKEN".into(),
+                label: "Bot Token".into(),
+                field_type: "secret".into(),
+                required: true,
+                placeholder: "123:ABC".into(),
+                advanced: false,
+                options: None,
+            }],
+        },
+    )]);
+
+    let h = boot().await;
+    let (_status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    let arr = body["items"].as_array().expect("items");
+    let tg = arr
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("telegram row");
+    let fields = tg["fields"].as_array().expect("fields[]");
+    assert!(
+        !fields.is_empty(),
+        "discovery row must carry fields when cached: {tg}"
+    );
+    assert_eq!(fields[0]["key"], "TELEGRAM_BOT_TOKEN");
+    assert_eq!(fields[0]["type"], "secret");
+    assert_eq!(fields[0]["required"], true);
+
+    // Clear the cache so sibling tests asserting empty fields are not
+    // polluted by this seed (the cache is process-static).
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn channels_list_discovery_row_hidden_when_kind_configured() {
     // Discovery row for `telegram` must yield to a configured
     // `[[sidecar_channels]]` entry of the same kind — regardless of the
@@ -1135,4 +1260,326 @@ async fn channels_list_discovery_row_hidden_when_kind_configured() {
             .any(|r| r["name"] == "ntfy" && r["configured"] == false),
         "ntfy discovery row remains when only telegram is configured"
     );
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/channels/sidecar/{name}/configure
+// ---------------------------------------------------------------------------
+
+/// Build a synthetic telegram schema with one required secret + one
+/// optional list field. Used by the configure-sidecar tests below so they
+/// don't depend on `pip install -e sdk/python` being available on CI.
+fn telegram_schema_with_required_secret() -> librefang_api::routes::sidecar_describe::SidecarSchema
+{
+    librefang_api::routes::sidecar_describe::SidecarSchema {
+        name: "telegram".into(),
+        display_name: "Telegram".into(),
+        description: "Telegram Bot API adapter".into(),
+        fields: vec![
+            librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "TELEGRAM_BOT_TOKEN".into(),
+                label: "Bot Token".into(),
+                field_type: "secret".into(),
+                required: true,
+                placeholder: "".into(),
+                advanced: false,
+                options: None,
+            },
+            librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                key: "ALLOWED_USERS".into(),
+                label: "Allowed Users".into(),
+                field_type: "list".into(),
+                required: false,
+                placeholder: "".into(),
+                advanced: false,
+                options: None,
+            },
+        ],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_writes_secret_to_env_and_nonsecret_to_toml() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({
+        "values": {
+            "TELEGRAM_BOT_TOKEN": "secret-123",
+            "ALLOWED_USERS": "1,2,3",
+        }
+    });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {resp}");
+    assert_eq!(resp["status"], "saved");
+
+    // Plan Risk #3 regression — the success response must NEVER echo the
+    // secret value or contain a `values` key. Any future refactor that
+    // re-includes the request payload in the response will trip these.
+    let resp_str = resp.to_string();
+    assert!(
+        !resp_str.contains("secret-123"),
+        "response must not echo the secret value: {resp_str}"
+    );
+    assert!(
+        resp.get("values").is_none(),
+        "response must not include a `values` field: {resp_str}"
+    );
+
+    // Verify side effects on disk.
+    let home = h.home_dir();
+    let secrets = std::fs::read_to_string(home.join("secrets.env")).expect("secrets.env exists");
+    assert!(
+        secrets.contains("TELEGRAM_BOT_TOKEN=secret-123"),
+        "secret must land in secrets.env: {secrets}"
+    );
+    assert!(
+        !secrets.contains("ALLOWED_USERS"),
+        "non-secret fields must NOT land in secrets.env: {secrets}"
+    );
+
+    let toml = std::fs::read_to_string(home.join("config.toml")).expect("config.toml exists");
+    assert!(toml.contains("[[sidecar_channels]]"), "toml: {toml}");
+    assert!(toml.contains("name = \"telegram\""), "toml: {toml}");
+    assert!(
+        toml.contains("ALLOWED_USERS = \"1,2,3\""),
+        "non-secret must land under [sidecar_channels.env]: {toml}"
+    );
+    assert!(
+        !toml.contains("TELEGRAM_BOT_TOKEN"),
+        "secrets must NOT leak into config.toml: {toml}"
+    );
+
+    // T4.1: sidecar_channels diff must emit ReloadChannels so the bridge
+    // re-inits without a daemon restart.
+    assert!(
+        resp["hot_actions_applied"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == "ReloadChannels")),
+        "expected ReloadChannels in hot_actions_applied: {resp}"
+    );
+
+    // Plan Risk #5: with no shell-env shadow set, `shadowed_secrets`
+    // must be present and empty. (The field is always emitted, even on
+    // the happy path — the dashboard relies on that to short-circuit
+    // its warning toast.)
+    let shadowed = resp["shadowed_secrets"]
+        .as_array()
+        .expect("shadowed_secrets must be an array: {resp}");
+    assert!(
+        shadowed.is_empty(),
+        "no shell-env shadow expected here, but got: {resp}"
+    );
+
+    // T4.2: prove the bridge actually re-spawned, not just that the kernel's
+    // in-memory config was reloaded. `reload_config()` clears
+    // `mesh.channel_adapters` (see `config_reload_ops.rs::246-256`), and only
+    // the handler-side follow-up `channel_bridge::reload_channels_from_disk`
+    // re-populates it by re-entering `start_channel_bridge_with_config`. So
+    // the presence of a telegram entry in `channel_adapters_ref()` after the
+    // save returns is a direct regression test for the broken-chain bug:
+    // without (A) the map stays empty and this assertion fires.
+    //
+    // (Asserting `configured: true` via GET /api/channels would not catch
+    // this: that flag reads `kernel.config_ref().sidecar_channels`, which
+    // `reload_config()` updates on its own — independent of bridge spawn.)
+    let adapters = h._state.kernel.channel_adapters_ref();
+    assert!(
+        adapters.contains_key("telegram"),
+        "telegram adapter must be registered in channel_adapters after sidecar configure; \
+         saw keys: {:?}",
+        adapters.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
+    );
+
+    // Cross-check the operator-facing view: GET /api/channels must also
+    // surface the row as configured (this passes once `reload_config()`
+    // ran, regardless of bridge spawn — included as a defence-in-depth
+    // check that the kernel's in-memory config matches what's on disk).
+    let (list_status, list_body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(list_status, StatusCode::OK, "list response: {list_body}");
+    let items = list_body["items"]
+        .as_array()
+        .expect("items must be an array");
+    let telegram = items
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("telegram row must appear after configure");
+    assert_eq!(
+        telegram["configured"], true,
+        "telegram must be configured=true after sidecar save: {telegram}"
+    );
+
+    // Clear cache so sibling tests are not polluted by this seed.
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+// Plan Risk #5 regression. If the operator already exported the secret
+// key in their shell before launching the daemon, the dotenv loader's
+// priority order (system env > vault > .env > secrets.env) means the
+// shell value out-ranks whatever we write to `~/.librefang/secrets.env`.
+// The save mechanically succeeds, but the new value never reaches the
+// sidecar child. We surface this condition via `shadowed_secrets` so the
+// dashboard can warn the operator before they spend an hour chasing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_warns_on_shell_env_shadow() {
+    // Hold the channels-process lock so no other test mutates `LIBREFANG_HOME`
+    // or the process env while we toggle TELEGRAM_BOT_TOKEN.
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    // SAFETY: serialised via `CHANNELS_PROCESS_LOCK` held by the caller —
+    // no other test reads or mutates env vars concurrently.
+    unsafe { std::env::set_var("TELEGRAM_BOT_TOKEN", "shell-set-val") };
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({
+        "values": {
+            "TELEGRAM_BOT_TOKEN": "form-val",
+            "ALLOWED_USERS": "1",
+        }
+    });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    // The save itself must still succeed — shadowing is advisory.
+    assert_eq!(status, StatusCode::OK, "response: {resp}");
+    assert_eq!(resp["status"], "saved");
+
+    let shadowed = resp["shadowed_secrets"]
+        .as_array()
+        .expect("shadowed_secrets must be an array");
+    assert!(
+        shadowed.iter().any(|v| v == "TELEGRAM_BOT_TOKEN"),
+        "shadowed_secrets must include TELEGRAM_BOT_TOKEN: {resp}"
+    );
+
+    // SAFETY: same lock guarantees as the set above.
+    unsafe { std::env::remove_var("TELEGRAM_BOT_TOKEN") };
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_missing_required_returns_400() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({ "values": { "ALLOWED_USERS": "1" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {resp}");
+    assert!(
+        resp.to_string().contains("TELEGRAM_BOT_TOKEN"),
+        "error body must name the missing field: {resp}"
+    );
+    // No disk side effect when validation rejects.
+    assert!(
+        !h.home_dir().join("secrets.env").exists(),
+        "secrets.env must not be created on validation failure"
+    );
+    assert!(
+        !h.home_dir().join("config.toml").exists(),
+        "config.toml must not be created on validation failure"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_unknown_name_returns_404() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+
+    let h = boot_with_temp_home().await;
+    let body = serde_json::json!({ "values": {} });
+    let (status, _resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/nonexistent/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// When a deployment keeps `[[sidecar_channels]]` in a file referenced
+/// from `include = [...]`, this endpoint must NOT write a fresh
+/// root-level array that would silently shadow the included one after
+/// the kernel merges them. The save is refused with 409 and an error
+/// message pointing the operator at the file that owns the existing
+/// block.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_refuses_when_include_owns_sidecars() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let home = h.home_dir();
+    std::fs::write(home.join("config.toml"), "include = [\"sidecars.toml\"]\n").unwrap();
+    std::fs::write(
+        home.join("sidecars.toml"),
+        "[[sidecar_channels]]\nname=\"ntfy\"\ncommand=\"python3\"\nargs=[\"-m\",\"librefang.sidecar.adapters.ntfy\"]\n",
+    )
+    .unwrap();
+    let body = serde_json::json!({ "values": { "TELEGRAM_BOT_TOKEN": "x" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "response: {resp}");
+    let body = resp.to_string();
+    assert!(
+        body.contains("include"),
+        "error must mention the include shadow: {body}"
+    );
+    assert!(
+        body.contains("sidecars.toml"),
+        "error must name the included file owning the existing array: {body}"
+    );
+
+    // No side effects: the configure handler must NOT have written a root-level
+    // `[[sidecar_channels]]` block onto the include-only config.toml.
+    let after = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(
+        !after.contains("[[sidecar_channels]]"),
+        "config.toml must remain include-only on 409: {after}"
+    );
+    // secrets.env must NOT have been written either — we refuse the entire op.
+    assert!(
+        !home.join("secrets.env").exists(),
+        "secrets.env must not be created when the save is refused with 409"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
 }
