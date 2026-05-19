@@ -154,3 +154,87 @@ fn preserves_operator_tuned_fields_on_replace() {
     );
     assert!(content.contains("ALLOWED_USERS = \"1\""));
 }
+
+#[test]
+fn preserves_operator_custom_command_and_args_on_replace() {
+    // Operators sometimes hand-edit `command` to a venv-pinned interpreter
+    // (`/opt/venv/bin/python`) or add extra `args` (`--debug`). Saving from
+    // the dashboard sends the static SIDECAR_CATALOG defaults (`python3` +
+    // module-load args); without this guard those defaults would silently
+    // overwrite the operator's edits on every save. INSERT path still
+    // writes the catalog defaults — only UPDATE preserves.
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         command = \"/opt/venv/bin/python\"\n\
+         args = [\"-m\",\"librefang.sidecar.adapters.telegram\",\"--debug\"]\n\
+         \n\
+         [sidecar_channels.env]\n\
+         OLD = \"x\"\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3", // catalog default — must NOT overwrite the venv path
+        &["-m", "librefang.sidecar.adapters.telegram"], // catalog default — must NOT drop --debug
+        &pairs(&[("ALLOWED_USERS", "1")]),
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("/opt/venv/bin/python"),
+        "operator's custom command path preserved: {content}"
+    );
+    assert!(
+        content.contains("--debug"),
+        "operator's extra args preserved: {content}"
+    );
+    // env is still wholesale-replaced (form is source of truth).
+    assert!(!content.contains("OLD"));
+    assert!(content.contains("ALLOWED_USERS = \"1\""));
+}
+
+#[test]
+fn backfills_command_and_args_when_existing_block_is_a_stub() {
+    // An existing block that lacks `command` / `args` entirely
+    // (hand-written stub, partial migration, …) should be backfilled
+    // with the catalog defaults on the next save — otherwise the kernel
+    // would refuse to spawn the sidecar at all.
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         \n\
+         [sidecar_channels.env]\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[("ALLOWED_USERS", "1")]),
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("command = \"python3\""),
+        "stub block missing command was backfilled: {content}"
+    );
+    assert!(
+        content.contains("librefang.sidecar.adapters.telegram"),
+        "stub block missing args was backfilled: {content}"
+    );
+}
