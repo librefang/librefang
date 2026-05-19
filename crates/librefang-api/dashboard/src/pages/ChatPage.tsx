@@ -19,7 +19,11 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
-import { deriveDropdownActiveSessionId, pickSessionDropdownLabel } from "../lib/sessionSelector";
+import {
+  deriveDropdownActiveSessionId,
+  pickSessionDropdownLabel,
+  shouldAutoPinResolvedSession,
+} from "../lib/sessionSelector";
 import {
   chatSessionCacheKey,
   deleteCachedChatMessages,
@@ -881,7 +885,12 @@ function useChatMessages(
           },
         });
         const fullContent = response.response || "";
-        updateAgentMessages(sendAgentId, prev => prev.map(m =>
+        // Reify the response patch as a pure mapper so the cache seed
+        // below sees the same fields the live state update enqueues.
+        // Same pattern as the WS `response` handler (issue #5199-B);
+        // without it the post-nav load effect would refetch from the
+        // server instead of taking the just-rendered cache hit.
+        const applyResponsePatch = (msgs: ChatMessage[]) => msgs.map(m =>
           m.id === botMsg.id
             ? {
                 ...m, content: fullContent, isStreaming: false,
@@ -893,12 +902,36 @@ function useChatMessages(
                 thinkingCollapsed: m.thinkingCollapsed ?? true,
               }
             : m
-        ));
+        );
+        updateAgentMessages(sendAgentId, applyResponsePatch);
         if (response.memories_saved?.length) {
           const agentName = agents.find(a => a.id === sendAgentId)?.name;
           response.memories_saved.forEach((mem: string) => {
             addSkillOutput({ skillName: "memory", agentId: sendAgentId, agentName, content: mem });
           });
+        }
+        // Issue #5199 — HTTP fallback parity with the WS `response` path.
+        // The server returns `session_id` in the body only when the
+        // request omitted `session_id` (mirrors ws.rs's
+        // `explicit_session.is_none()` branch). Without this branch a
+        // first send before WS connects — or any send that takes the
+        // WS-drop fallback timer — would leave the URL on bare
+        // `?agentId=` even though the kernel persisted to a concrete
+        // session, leaving the chat bookmarkable into a different
+        // canonical session after a daemon restart. See the matching
+        // comment block in the WS handler for the cache-seed rationale.
+        const autoPinArgs = {
+          sendAgentId,
+          currentAgentId: currentAgentRef.current,
+          currentSessionId: currentSessionRef.current,
+          urlSessionId: sessionId,
+          resolvedSessionId: response.session_id,
+        };
+        if (shouldAutoPinResolvedSession(autoPinArgs)) {
+          const newSid = autoPinArgs.resolvedSessionId;
+          const nextMessages = applyResponsePatch(messagesRef.current);
+          cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
+          onAutoPinSession?.(newSid);
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error";
@@ -1123,36 +1156,22 @@ function useChatMessages(
               //   change → load effect re-runs with sessionVersion=0,
               //   sees no cached entry for the new key, setMessages([])
               //   then refetches — visible flicker.
-              if (!sessionId && typeof data.session_id === "string" && data.session_id) {
-                const newSid = data.session_id;
-                // Skip the auto-pin if the user has already switched to a
-                // different agent — navigating now would rewrite the URL
-                // off the agent they're currently viewing. The cache seed
-                // is also pointless in that case (we'd write to a bucket
-                // nothing reads). The off-screen agent's URL stays
-                // unpinned; the next time the user navigates back, the
-                // existing bare-`agentId` heuristics will still resolve to
-                // this session via the canonical pointer.
-                //
-                // Also skip if the user has manually pinned a session in
-                // the meantime — e.g. clicked another row in the sessions
-                // dropdown between send and response. The close path on
-                // the WS swap-out usually drops in-flight responses, but
-                // a frame already queued in the browser can still reach
-                // the (about-to-detach) listener before close() takes
-                // effect. Overwriting the user's deliberate pin would be
-                // a worse regression than the unpinned-URL bug we are
-                // fixing. `currentSessionRef.current` mirrors the live
-                // hook-prop sessionId; a non-null value means someone has
-                // pinned since the send started.
-                if (
-                  sendAgentId === currentAgentRef.current
-                  && currentSessionRef.current === null
-                ) {
-                  const nextMessages = applyResponsePatch(messagesRef.current);
-                  cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
-                  onAutoPinSession?.(newSid);
-                }
+              // Auto-pin gate is shared with the HTTP fallback path so
+              // a future refactor cannot drift the two transports apart;
+              // see `shouldAutoPinResolvedSession` for the full guard
+              // breakdown (issue #5199 — Codex round-2 review).
+              const autoPinArgs = {
+                sendAgentId,
+                currentAgentId: currentAgentRef.current,
+                currentSessionId: currentSessionRef.current,
+                urlSessionId: sessionId,
+                resolvedSessionId: data.session_id,
+              };
+              if (shouldAutoPinResolvedSession(autoPinArgs)) {
+                const newSid = autoPinArgs.resolvedSessionId;
+                const nextMessages = applyResponsePatch(messagesRef.current);
+                cacheSet(cacheKey(sendAgentId, newSid), nextMessages);
+                onAutoPinSession?.(newSid);
               }
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();

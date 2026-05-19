@@ -10781,6 +10781,13 @@
           "response": {
             "type": "string"
           },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #5199 — session id the kernel actually used for this turn.\n\nSet ONLY when the caller did not pin a session in the request\n(`session_id` body field absent / null), mirroring the WS handler's\n`explicit_session.is_none()` branch in `ws.rs`. The dashboard's\nchat HTTP fallback path reads this back so it can auto-pin\n`?sessionId=` in the URL — without it, a bare `?agentId=` chat\nthat took the HTTP fallback (WS down or first send before WS\nconnected) stays unpinned even though the kernel persisted the\nturn to a concrete session, leaving the user bookmarkable into\na different canonical session after a daemon restart.\n\nOmitted when the caller passed an explicit `session_id` —\nechoing it back would be redundant and risk implying a server\nauto-resolution that did not happen."
+          },
           "thinking": {
             "type": [
               "string",

@@ -526,6 +526,15 @@ export interface AgentMessageResponse {
   memories_saved?: string[];
   memories_used?: string[];
   thinking?: string;
+  /**
+   * Issue #5199 — session id the server actually used for this turn.
+   * Populated only when the request omitted `session_id`, so the
+   * dashboard's HTTP fallback path can auto-pin `?sessionId=` in the
+   * URL exactly like the WS `response` path does. Mirrors the WS
+   * handler's `explicit_session.is_none()` branch in `ws.rs`. Absent
+   * when the caller pinned an explicit session in the request.
+   */
+  session_id?: string;
 }
 
 export interface SendAgentMessageOptions {

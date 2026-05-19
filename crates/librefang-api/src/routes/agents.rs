@@ -1878,6 +1878,23 @@ pub async fn send_message(
             } else {
                 cleaned
             };
+            // Issue #5199: surface the resolved session id in the response
+            // body when the caller did NOT pin an explicit session in the
+            // request. This mirrors the WS handler's `explicit_session.is_none()`
+            // branch in `ws.rs` — without it the dashboard's HTTP fallback
+            // (first send before WS connects, or WS drop mid-turn) cannot
+            // auto-pin `?sessionId=` in the URL, and a bare `?agentId=`
+            // chat stays bookmarkable into a different canonical session
+            // after a daemon restart.
+            //
+            // Skipped when the caller already pinned a session, both to
+            // mirror WS semantics and to avoid implying a server-side
+            // auto-resolution that did not happen.
+            let body_session_id = if session_id_override.is_none() {
+                resolved_session_id.map(|sid| sid.to_string())
+            } else {
+                None
+            };
             let body = (
                 StatusCode::OK,
                 Json(serde_json::json!(MessageResponse {
@@ -1892,6 +1909,7 @@ pub async fn send_message(
                     memory_conflicts: result.memory_conflicts,
                     thinking: thinking_trace,
                     owner_notice: result.owner_notice,
+                    session_id: body_session_id,
                 })),
             );
             match resolved_session_id {
