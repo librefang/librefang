@@ -5657,10 +5657,13 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-/// Default initial backoff in seconds for channels using exponential backoff (1s).
-fn default_channel_initial_backoff_secs() -> u64 {
-    1
-}
+// `default_channel_initial_backoff_secs` (1s) was removed alongside
+// the Signal sidecar migration and the Matrix in-process → sidecar
+// migration (#5368): the in-process Matrix adapter was the last
+// remaining consumer, and the sidecar version controls its own
+// backoff via env vars. Remaining channel adapters that still need
+// `serde(default = ...)` for backoff fields use
+// `default_channel_initial_backoff_2s` below.
 
 /// Default maximum backoff in seconds for channels using exponential backoff (60s).
 fn default_channel_max_backoff_secs() -> u64 {
