@@ -137,6 +137,15 @@ pub async fn run_agent_loop_streaming(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // #5227: see `run_agent_loop` for the rationale; same fallback to
+    // `sender_channel` keeps non-kernel callers behaving as they did
+    // before the chat-scope helper landed.
+    let sender_chat_scope: Option<String> = manifest
+        .metadata
+        .get("sender_chat_scope")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| sender_channel.clone());
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -152,6 +161,7 @@ pub async fn run_agent_loop_streaming(
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
+        sender_chat_scope: sender_chat_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: true,
@@ -1027,6 +1037,7 @@ pub async fn run_agent_loop_streaming(
                         user_message,
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
+                        sender_chat_scope: sender_chat_scope.as_deref(),
                         streaming: true,
                         opts,
                     },

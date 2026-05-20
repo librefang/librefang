@@ -998,10 +998,21 @@ pub async fn execute_tool_raw(
         "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
         "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
-        // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
-        "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
-        "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
+        // Cron scheduling tools — first slice of the #3576 typed-error
+        // migration. The submodule now returns `Result<String, ToolError>`;
+        // the dispatch arm narrows it to `Result<String, String>` here at
+        // the boundary so the broader dispatch table stays uniform until
+        // every submodule has migrated. Follow-up PRs will lift the dispatch
+        // return type itself; until then this is the bridge.
+        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "cron_list" => tool_cron_list(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => {

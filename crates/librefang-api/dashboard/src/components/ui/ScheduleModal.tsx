@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
-import { DrawerPanel } from "./DrawerPanel";
+import { Modal } from "./Modal";
 
 type ScheduleType = "interval_min" | "interval_hour" | "daily" | "weekday" | "weekly" | "monthly" | "custom";
 
@@ -212,10 +212,32 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
     [t],
   );
 
+  // Use Modal (fixed overlay) rather than DrawerPanel (global push-slot)
+  // so the picker can safely appear over another DrawerPanel without
+  // competing for the single shared slot. The cron picker is opened
+  // from inside other drawers — SchedulerPage's create-schedule form,
+  // HandsPage's hand-detail panel, WorkflowsPage's per-row Schedule
+  // button — and a nested DrawerPanel inside another DrawerPanel's
+  // body cannot survive: as soon as the inner DrawerPanel pushes its
+  // body into the slot, PushDrawer stops rendering the outer body,
+  // which unmounts the inner DrawerPanel and tears the slot back down.
+  // Fixed-overlay Modal sidesteps that entirely. Bug fix: #5247.
+  //
+  // `variant="panel-right"` reproduces the right-docked, dim-backdrop
+  // shape the picker had as a DrawerPanel ("xl" size). The header is
+  // still rendered inline so the optional subtitle can sit beneath the
+  // title — Modal's built-in title bar only takes a string.
+  //
+  // zIndex=70 is needed because on <lg viewports PushDrawer renders the
+  // hosting drawer as a `fixed inset-0 z-[55]` mobile overlay, and
+  // Modal's default z-index of 50 would put this picker BEHIND that
+  // drawer overlay — invisible to phone users. 70 sits above the
+  // mobile drawer (55) and the OfflineBanner (60), and below the
+  // notification dropdowns (z-[90]/z-[100]) and ConfirmDialog (z-[150])
+  // so global dismissal flows still win. On lg+ the host drawer is a
+  // flex `<aside>` (no fixed positioning), so any z-index ≥ 50 works.
   return (
-    <DrawerPanel isOpen={isOpen} onClose={onClose} size="xl" hideCloseButton>
-      {/* Header — kept inline so the optional subtitle line renders below
-          the title; Modal's built-in title bar only takes a string. */}
+    <Modal isOpen={isOpen} onClose={onClose} size="3xl" hideCloseButton variant="panel-right" zIndex={70}>
       <div className="p-5 pb-3 border-b border-border-subtle">
         <h3 id="schedule-modal-title" className="text-base font-black">{title}</h3>
           {subtitle && <p className="text-[11px] text-text-dim mt-0.5 truncate">{subtitle}</p>}
@@ -336,6 +358,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
           <Button variant="primary" className="flex-1" onClick={() => onSave(previewCron, timezone)} disabled={!cronValid}>{t("common.save")}</Button>
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
-    </DrawerPanel>
+    </Modal>
   );
 }

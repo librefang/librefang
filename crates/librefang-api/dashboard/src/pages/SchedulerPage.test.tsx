@@ -6,9 +6,11 @@
 // and wires user interactions to the right mutations.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SchedulerPage } from "./SchedulerPage";
+import { PushDrawer } from "../components/ui/PushDrawer";
+import { useDrawerStore } from "../lib/drawerStore";
 import { useAgents } from "../lib/queries/agents";
 import { useWorkflows } from "../lib/queries/workflows";
 import { useSchedules, useTriggers } from "../lib/queries/schedules";
@@ -126,13 +128,18 @@ function makeMutation(extra: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+function renderPage(opts: { withPushDrawer?: boolean } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
+  // PushDrawer is App.tsx's global slot host. Tests that exercise the
+  // create-form body or the cron-picker MUST include it, otherwise the
+  // DrawerPanel.body is pushed into the store but never mounted to the
+  // DOM (and the test can't reach any input inside it).
   return render(
     <QueryClientProvider client={queryClient}>
       <SchedulerPage />
+      {opts.withPushDrawer && <PushDrawer />}
     </QueryClientProvider>,
   );
 }
@@ -169,6 +176,10 @@ const TRIGGER: import("../api").TriggerItem = {
 describe("SchedulerPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The push-drawer slot is a process-singleton — reset between tests
+    // so a leftover drawer from a prior test can't satisfy a getByText
+    // assertion in the next one.
+    useDrawerStore.setState({ isOpen: false, content: null });
     useAgentsMock.mockReturnValue(makeQuery(AGENTS));
     useWorkflowsMock.mockReturnValue(makeQuery([]));
     useSchedulesMock.mockReturnValue(makeQuery([SCHEDULE]));
@@ -312,5 +323,88 @@ describe("SchedulerPage", () => {
     // common.active still appears for the trigger row, but not for the
     // schedule row — sanity check by counting.
     expect(screen.getAllByText("common.active").length).toBe(1);
+  });
+
+  // Regression test for #5247 — clicking the cron-expression chip
+  // inside the Create-schedule form opens the ScheduleModal picker
+  // without tearing the surrounding create-form drawer down.
+  //
+  // Root cause: the picker was a DrawerPanel nested inside the
+  // create-form's DrawerPanel body. Both push to the single global
+  // push-slot. As soon as the inner DrawerPanel claimed the slot,
+  // PushDrawer stopped rendering the outer body — which unmounted
+  // the inner one — and the slot collapsed back to the empty state.
+  // The visible symptom matched the issue text exactly: "while trying
+  // to click on Cron Expression the window closed automatically and
+  // no option to pick expression".
+  //
+  // Fix: ScheduleModal now uses Modal (fixed overlay), not DrawerPanel.
+  // The picker no longer competes for the push-slot, and it survives
+  // independently of whichever DrawerPanel hosted the button that
+  // opened it.
+  it("opens the cron-picker without closing the create-schedule form (#5247)", () => {
+    renderPage({ withPushDrawer: true });
+
+    // 1. Open the create-job drawer. The header button is the only
+    //    one labelled scheduler.create_job at this point.
+    fireEvent.click(screen.getByText("scheduler.create_job"));
+
+    // 2. The create form mounted inside the drawer body, including
+    //    the cron-expression chip button. The cron text appears in
+    //    both the existing schedule row AND the picker chip inside
+    //    the drawer — find the chip specifically (it's the only one
+    //    whose closest button is also the picker chip).
+    const cronTextNodes = screen.getAllByText("0 9 * * *");
+    const cronChip = cronTextNodes
+      .map((n) => n.closest("button"))
+      .find((b) => b !== null) as HTMLButtonElement | undefined;
+    expect(cronChip).toBeDefined();
+
+    // 3. Click the chip — this used to collapse the entire create
+    //    drawer (#5247). With the fix, the create form remains
+    //    visible AND the picker appears.
+    act(() => {
+      fireEvent.click(cronChip!);
+    });
+
+    // 4. The picker's signature element — the timezone field label —
+    //    must be in the DOM. (The picker emits its own
+    //    scheduler.timezone label with the "Timezone" defaultValue.)
+    //    Modal's AnimatePresence may double-mount during the test's
+    //    fake animation lifecycle in jsdom, so accept ≥1.
+    expect(screen.getAllByText("Timezone").length).toBeGreaterThanOrEqual(1);
+
+    // 5. Crucially, the create drawer's body must STILL be visible.
+    //    Before the fix, the inner DrawerPanel claimed the global
+    //    push-slot, PushDrawer stopped rendering the outer body, and
+    //    the chip we clicked vanished from the DOM.
+    //
+    //    The Mode tab labels live ONLY in the create drawer body —
+    //    if the drawer collapsed, the create-form's copy of this
+    //    label disappears and we drop from 2 occurrences (page-level
+    //    section header + create-form Mode tab) to 1.
+    expect(screen.getAllByText("scheduler.event_triggers").length).toBeGreaterThanOrEqual(2);
+    // Two occurrences of the cron text now expected: the schedule
+    // list row AND the create-form chip we just clicked.
+    expect(screen.getAllByText("0 9 * * *").length).toBeGreaterThanOrEqual(2);
+
+    // 6. Lock the z-index so the picker stays above PushDrawer's mobile
+    //    overlay (z-[55]). The Modal's containerClass is `fixed inset-0
+    //    ... bg-black/40 backdrop-blur-sm` and the inline style controls
+    //    z-index. On <lg viewports PushDrawer hosts its content as a
+    //    `fixed inset-0 z-[55]` overlay; if Modal kept its default
+    //    z-index of 50 the picker would render BEHIND that overlay and
+    //    phone users could not see or interact with it. Find the
+    //    Modal's outer wrapper via aria-modal and assert z >= 56.
+    const modalRoot = document.querySelector(
+      "[role='dialog'][aria-modal='true']",
+    );
+    expect(modalRoot).not.toBeNull();
+    // Walk up to the Modal's outer container (which carries the style
+    // attribute with the z-index) — motion mounts the container as the
+    // dialog's parent.
+    const overlay = modalRoot!.parentElement as HTMLElement;
+    const z = Number.parseInt(overlay.style.zIndex || "0", 10);
+    expect(z).toBeGreaterThanOrEqual(56);
   });
 });

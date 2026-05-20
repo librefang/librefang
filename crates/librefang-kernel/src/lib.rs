@@ -55,9 +55,10 @@ pub use kernel_api::KernelApi;
 // entire `KernelApi` surface, and so the upcoming method-body
 // migration can move callers off `LibreFangKernel` inherent forwards.
 pub use kernel::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
-    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
-    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    AgentSubsystemApi, CredentialPoolSummary, EventSubsystemApi, GovernanceSubsystemApi,
+    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi,
+    MeteringSubsystemApi, ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi,
+    WorkflowSubsystemApi,
 };
 
 // ---------------------------------------------------------------------------

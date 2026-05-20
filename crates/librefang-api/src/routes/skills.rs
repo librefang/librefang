@@ -3662,6 +3662,10 @@ pub async fn hand_send_message(
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
                     owner_notice: result.owner_notice,
+                    // Hands do not surface an auto-pinnable session id via
+                    // this body (#5199 is dashboard-chat-only). Field
+                    // omitted when None via `skip_serializing_if`.
+                    session_id: None,
                 })),
             )
         }

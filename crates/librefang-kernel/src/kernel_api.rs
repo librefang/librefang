@@ -136,6 +136,15 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry>;
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry>;
 
+    /// Per-provider credential-pool snapshots, sorted by provider name.
+    ///
+    /// Backs the `GET /api/credential-pools` HTTP endpoint and the
+    /// `librefang auth pool list` CLI command. The returned snapshots are
+    /// redacted (no raw API keys). See issue #4965.
+    fn credential_pool_summaries(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::kernel::subsystems::llm::CredentialPoolSummary>;
+
     // ====================================================================
     // Config / lifecycle
     // ====================================================================
@@ -797,6 +806,13 @@ impl KernelApi for LibreFangKernel {
     }
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
         <Self as crate::SkillsSubsystemApi>::skill_registry_ref(self)
+    }
+
+    fn credential_pool_summaries(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::kernel::subsystems::llm::CredentialPoolSummary>
+    {
+        <Self as crate::LlmSubsystemApi>::credential_pool_summaries(self)
     }
 
     // -- Config / lifecycle --

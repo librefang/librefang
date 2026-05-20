@@ -663,6 +663,28 @@ async fn spawn_once(
                                         "Received message from sidecar"
                                     );
                                     let mut metadata = params.metadata;
+                                    // #5227 follow-up — sidecar protocol
+                                    // splits `user_id` (the human sender)
+                                    // and `channel_id` (the chat the
+                                    // message belongs to). The bridge's
+                                    // `build_sender_context` derives
+                                    // `chat_id` from `sender.platform_id`
+                                    // (see `bridge.rs` near
+                                    // `build_sender_context`) and reads
+                                    // the human sender from
+                                    // `metadata[SENDER_USER_ID_KEY]`
+                                    // (falling back to `platform_id`). For
+                                    // the in-process Discord adapter
+                                    // `platform_id` is already the chat
+                                    // id; sidecar adapters must mirror
+                                    // that shape so the cross-chat scope
+                                    // composition (`compose_sender_scope`)
+                                    // sees a DM and a group of the same
+                                    // user as DISTINCT chats. Without
+                                    // this swap a Telegram-sidecar group
+                                    // and DM for the same user collapse
+                                    // to one scope (#5227 P3).
+                                    let raw_chat_id = params.channel_id.clone();
                                     if let Some(ch) = params.channel_id {
                                         metadata.insert(
                                             "channel_id".to_string(),
@@ -713,6 +735,23 @@ async fn spawn_once(
                                                 params.text.unwrap_or_default(),
                                             )
                                         });
+                                    let (platform_id, sender_user_id_meta) =
+                                        derive_sidecar_sender_identity(
+                                            &params.user_id,
+                                            raw_chat_id.as_deref(),
+                                        );
+                                    if let Some(uid) = sender_user_id_meta {
+                                        // Only stamp if the upstream sidecar
+                                        // hasn't already populated this key
+                                        // (the Telegram poll-answer path
+                                        // does — see `_poll_answer_to_event`
+                                        // in `telegram.py`).
+                                        metadata
+                                            .entry(
+                                                crate::bridge::SENDER_USER_ID_KEY.to_string(),
+                                            )
+                                            .or_insert(serde_json::Value::String(uid));
+                                    }
                                     let msg = ChannelMessage {
                                         channel: channel_type.clone(),
                                         platform_message_id: params
@@ -722,7 +761,7 @@ async fn spawn_once(
                                                     .to_string()
                                             }),
                                         sender: ChannelUser {
-                                            platform_id: params.user_id,
+                                            platform_id,
                                             display_name: params.user_name,
                                             librefang_user: params.librefang_user,
                                         },
@@ -1418,12 +1457,91 @@ impl ChannelAdapter for SidecarAdapter {
     }
 }
 
+/// Decide how to populate `sender.platform_id` and the optional
+/// `SENDER_USER_ID_KEY` metadata entry for an inbound sidecar message.
+///
+/// **The bridge convention** (`bridge.rs::build_sender_context`) is:
+/// - `sender.platform_id` carries the *chat* id (group id for groups,
+///   user id for DMs — same as the in-process Discord/Slack adapters).
+/// - The actual sender's user id lives in
+///   `metadata[SENDER_USER_ID_KEY]`, with a fallback to `platform_id`
+///   when the key is absent (DM case).
+///
+/// **The sidecar protocol** (Python adapters, see `protocol.message`)
+/// splits the two as `user_id` (the human sender) and `channel_id`
+/// (the chat). Naively copying `user_id` into `platform_id` would
+/// collapse a Telegram-sidecar group and DM for the same user into one
+/// chat scope — re-introducing the #5227 cross-chat bleed via a
+/// different path.
+///
+/// Rule:
+/// - Sidecar supplied a `channel_id` distinct from `user_id` → use
+///   `channel_id` as `platform_id`, return `user_id` for the metadata
+///   stamp.
+/// - Sidecar supplied no `channel_id` (notifications: ntfy / gotify)
+///   or chat == user (Telegram poll-answer DM where the adapter
+///   pre-sets both fields, or any single-actor adapter) → keep the
+///   pre-#5227 behaviour: `platform_id = user_id`, no metadata stamp.
+///
+/// Pure function so the chat-vs-user split has a unit-test
+/// surface that doesn't require spinning up a sidecar process.
+fn derive_sidecar_sender_identity(
+    user_id: &str,
+    channel_id: Option<&str>,
+) -> (String, Option<String>) {
+    match channel_id {
+        Some(ch) if ch != user_id => (ch.to_string(), Some(user_id.to_string())),
+        _ => (user_id.to_string(), None),
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    /// #5227 follow-up — chat-vs-user identity split for sidecar
+    /// messages. Telegram-sidecar group: distinct chat_id and user_id
+    /// → swap so `platform_id` becomes the chat and the user_id is
+    /// stamped under `SENDER_USER_ID_KEY`.
+    #[test]
+    fn derive_sidecar_sender_identity_group_swaps_chat_into_platform_id_5227() {
+        let (platform_id, sender_meta) =
+            derive_sidecar_sender_identity("alice-42", Some("-100123"));
+        assert_eq!(
+            platform_id, "-100123",
+            "group chat id must become platform_id so build_sender_context \
+             derives the right chat_id"
+        );
+        assert_eq!(
+            sender_meta.as_deref(),
+            Some("alice-42"),
+            "actual sender user id must be returned for SENDER_USER_ID_KEY stamp"
+        );
+    }
+
+    /// #5227 follow-up — DM where the upstream sidecar already set
+    /// chat_id == user_id (Telegram poll-answer case). Must collapse to
+    /// the pre-fix behaviour: no swap, no extra stamp.
+    #[test]
+    fn derive_sidecar_sender_identity_dm_collapses_5227() {
+        let (platform_id, sender_meta) =
+            derive_sidecar_sender_identity("alice-42", Some("alice-42"));
+        assert_eq!(platform_id, "alice-42");
+        assert!(sender_meta.is_none());
+    }
+
+    /// #5227 follow-up — adapters without a chat concept (ntfy /
+    /// gotify notifications, custom single-actor sidecars). channel_id
+    /// is None → keep the legacy behaviour, no swap.
+    #[test]
+    fn derive_sidecar_sender_identity_no_chat_id_legacy_5227() {
+        let (platform_id, sender_meta) = derive_sidecar_sender_identity("topic-x", None);
+        assert_eq!(platform_id, "topic-x");
+        assert!(sender_meta.is_none());
+    }
 
     // ── parse_secrets_env tolerance for hand-edited dotenv conventions ──
 
@@ -2055,6 +2173,30 @@ mod tests {
             "args": args,
         }))
         .expect("SidecarChannelConfig from minimal json")
+    }
+
+    /// #5294 — `default_agent` is `None` when absent and round-trips
+    /// when explicitly set. The field exists so the router-population
+    /// loop in `channel_bridge.rs` can seed `AgentRouter.channel_defaults`
+    /// for sidecar adapters; missing it caused inbound traffic on sidecar
+    /// channels to fall through to the non-deterministic
+    /// "first available agent" branch.
+    #[test]
+    fn sidecar_default_agent_roundtrip_5294() {
+        // Absent → None (no-op for deployments that don't need routing pin).
+        let minimal = cfg("telegram", "python3", vec![]);
+        assert!(minimal.default_agent.is_none());
+
+        // Explicit value round-trips so channel_bridge.rs can seed the router.
+        let c: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "telegram",
+                "command": "python3",
+                "args": ["-m", "librefang.sidecar.adapters.telegram"],
+                "default_agent": "fandangorodelo",
+            }))
+            .unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
     }
 
     #[test]

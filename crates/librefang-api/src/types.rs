@@ -476,6 +476,23 @@ pub struct MessageResponse {
     /// (BC-01 — Telegram/Discord/Slack continue to function unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_notice: Option<String>,
+    /// Issue #5199 — session id the kernel actually used for this turn.
+    ///
+    /// Set ONLY when the caller did not pin a session in the request
+    /// (`session_id` body field absent / null), mirroring the WS handler's
+    /// `explicit_session.is_none()` branch in `ws.rs`. The dashboard's
+    /// chat HTTP fallback path reads this back so it can auto-pin
+    /// `?sessionId=` in the URL — without it, a bare `?agentId=` chat
+    /// that took the HTTP fallback (WS down or first send before WS
+    /// connected) stays unpinned even though the kernel persisted the
+    /// turn to a concrete session, leaving the user bookmarkable into
+    /// a different canonical session after a daemon restart.
+    ///
+    /// Omitted when the caller passed an explicit `session_id` —
+    /// echoing it back would be redundant and risk implying a server
+    /// auto-resolution that did not happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).
@@ -998,5 +1015,61 @@ mod tests {
         assert_eq!(json["total"], 3);
         assert_eq!(json["offset"], 0);
         assert!(json["limit"].is_null());
+    }
+
+    // ---------------------------------------------------------------------
+    // MessageResponse.session_id — issue #5199 HTTP fallback auto-pin.
+    // Locks the wire contract the dashboard chat handler reads back: the
+    // field is present (string) on a successful turn that the kernel
+    // auto-resolved, and entirely absent otherwise. The HTTP fallback in
+    // `ChatPage.tsx::sendViaHttp` reads `response.session_id` to call
+    // `onAutoPinSession`, so a regression that flips this to `null` or
+    // an empty string would silently break URL pinning on the fallback
+    // path (Codex review P2 on PR #5253).
+    // ---------------------------------------------------------------------
+
+    fn sample_message_response() -> MessageResponse {
+        MessageResponse {
+            response: "hi".into(),
+            input_tokens: 1,
+            output_tokens: 2,
+            iterations: 1,
+            cost_usd: None,
+            decision_traces: vec![],
+            memories_saved: vec![],
+            memories_used: vec![],
+            memory_conflicts: vec![],
+            thinking: None,
+            owner_notice: None,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn message_response_omits_session_id_when_none() {
+        let resp = sample_message_response();
+        let json = serde_json::to_value(&resp).unwrap();
+        let obj = json.as_object().expect("response must serialize as object");
+        assert!(
+            !obj.contains_key("session_id"),
+            "session_id MUST be omitted (skip_serializing_if) — the HTTP \
+             fallback uses `typeof === 'string'` to decide whether to \
+             auto-pin; a `null` would still pass `typeof` and a misleading \
+             auto-pin would land on the kernel-resolved session even when \
+             the client explicitly pinned. Got: {obj:?}"
+        );
+    }
+
+    #[test]
+    fn message_response_emits_session_id_string_when_present() {
+        let mut resp = sample_message_response();
+        resp.session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json["session_id"],
+            serde_json::json!("11111111-2222-3333-4444-555555555555"),
+            "session_id must serialize as a bare string (no wrapping object) \
+             — the dashboard reads `response.session_id` directly. Got: {json}"
+        );
     }
 }
