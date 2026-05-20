@@ -12,9 +12,15 @@ file/line citation against ``crates/librefang-channels/src/line.rs``
 on the pre-migration tree):
 
 * **Inbound HTTP webhook server**. ``BaseHTTPRequestHandler`` over a
-  ``ThreadingHTTPServer`` accepts POST requests on a configurable
-  path (``LINE_WEBHOOK_PATH``, default ``/webhook``) on a configurable
-  port (``LINE_WEBHOOK_PORT``, default ``9090``). The Rust adapter
+  ``socketserver.ThreadingTCPServer`` accepts POST requests on a
+  configurable path (``LINE_WEBHOOK_PATH``, default ``/webhook``) on a
+  configurable port (``LINE_WEBHOOK_PORT``, default ``9090``). We
+  subclass ``ThreadingTCPServer`` rather than
+  ``http.server.ThreadingHTTPServer`` to skip the latter's
+  ``socket.getfqdn()`` call in ``server_bind()`` (slow DNS lookup on
+  startup); ``BaseHTTPRequestHandler`` works against any TCP-style
+  server and our overridden ``log_message`` never reads
+  ``server_name`` / ``server_port``. The Rust adapter
   mounted ``/channels/line/webhook`` on LibreFang's shared axum
   server (``line.rs:378-432``); the sidecar runs its own listener, so
   the public URL operators register at the LINE Developers console
@@ -86,8 +92,12 @@ Improvements over the Rust adapter
    call so a misbehaving endpoint trips an explicit error.
 
 Stdlib-only: HTTPS via ``urllib.request``; HTTP webhook server via
-``http.server.ThreadingHTTPServer`` (same pattern as the generic
-webhook sidecar).
+``socketserver.ThreadingTCPServer`` with
+``http.server.BaseHTTPRequestHandler``. The generic ``webhook``
+sidecar uses the single-threaded ``http.server.HTTPServer``; LINE
+upgrades to threading because the platform can fan out multiple
+webhook deliveries concurrently and a single-threaded loop would
+serialise them.
 
 Configure via ``[[sidecar_channels]]``::
 
@@ -560,7 +570,7 @@ class LineAdapter(SidecarAdapter):
     ) -> int:
         """Verify + parse one webhook POST body. Returns the HTTP
         status code to send back. Extracted so tests can drive it
-        without spinning up a real ``ThreadingHTTPServer``."""
+        without spinning up a real ``ThreadingTCPServer``."""
         if not verify_line_signature(self._secret_bytes, body, signature):
             log.warn("line: invalid webhook signature")
             return 401
