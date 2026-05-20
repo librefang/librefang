@@ -139,7 +139,6 @@ from librefang.sidecar.common import (
     SeenSet as _SeenSet,
     http_request as _http_request,
     parse_retry_after as _parse_retry_after_impl,
-    split_csv as _split_csv,
     split_message as _split_message,
 )
 
