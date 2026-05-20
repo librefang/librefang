@@ -73,4 +73,4 @@ api-error-rate-limited = Limite de requetes depassee. Veuillez reessayer plus ta
 # Used by 41+ HTTP 500 handlers as a stopgap until each route is moved to a
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
-api-error-generic = Erreur: { $error }
+api-error-generic = Erreur : { $error }
