@@ -773,10 +773,7 @@ class NextcloudAdapter(SidecarAdapter):
                     room_token=room_token, retry_after_secs=wait,
                 )
                 time.sleep(wait)
-                raise RuntimeError(
-                    f"nextcloud chat POST 429 — rate-limited "
-                    f"(retry-after={wait:.0f}s)"
-                )
+                raise RuntimeError("nextcloud 429 — rate-limited")
             if status >= 300:
                 snippet = raw[:200].decode("utf-8", "replace")
                 raise RuntimeError(
