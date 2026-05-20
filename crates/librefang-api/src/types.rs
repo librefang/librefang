@@ -701,11 +701,14 @@ impl PaginationQuery {
     /// server actually applied, so clients can tell from the response
     /// envelope whether the cap kicked in.
     pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
+        // Audit: agent-list-limit-none-unbounded. Previously `offset =
+        // None && limit = None` meant "return the entire collection
+        // unpaginated", which turns into a memory + JSON-serialisation
+        // DoS on multi-thousand-row deployments. Now an unset `limit`
+        // always falls through to `PAGINATION_MAX_LIMIT`, and an
+        // explicit oversized `limit` still clamps. Callers that need
+        // larger pages must walk the offset cursor.
         let total = items.len();
-        // Both unset → full collection, preserve old behaviour.
-        if self.offset.is_none() && self.limit.is_none() {
-            return (items, total, 0, None);
-        }
         let offset = self.offset.unwrap_or(0).min(total);
         let limit = self
             .limit
@@ -927,13 +930,37 @@ mod tests {
     }
 
     #[test]
-    fn pagination_unspecified_returns_full_collection() {
+    fn pagination_unspecified_falls_back_to_max_limit_not_full_collection() {
+        // Audit: agent-list-limit-none-unbounded. With no params the
+        // server still applies `PAGINATION_MAX_LIMIT` so that a
+        // multi-thousand-row deployment cannot DoS the listing
+        // endpoint via the absence of `?limit=`. Small collections (≤
+        // PAGINATION_MAX_LIMIT) still come back in full because the
+        // cap is a ceiling, not a floor.
         let q = PaginationQuery::default();
         let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
-        assert_eq!(items.len(), 10);
+        assert_eq!(items.len(), 10, "small collection still returned in full");
         assert_eq!(total, 10);
         assert_eq!(offset, 0);
-        assert_eq!(limit, None, "no params → no server cap reported");
+        assert_eq!(
+            limit,
+            Some(PAGINATION_MAX_LIMIT),
+            "the server cap is now always reported, never None"
+        );
+    }
+
+    #[test]
+    fn pagination_unspecified_truncates_large_collection_at_max_limit() {
+        // Companion to `..._not_full_collection`: the cap actually
+        // kicks in for collections > PAGINATION_MAX_LIMIT. This is the
+        // DoS scenario the audit closed (multi-thousand agents → a
+        // single unprotected GET would serialise the whole vec).
+        let q = PaginationQuery::default();
+        let big = (0..(PAGINATION_MAX_LIMIT + 50)).collect::<Vec<_>>();
+        let (items, total, _, limit) = q.paginate(big);
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(total, PAGINATION_MAX_LIMIT + 50, "total reflects the unclipped row count");
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
     }
 
     #[test]
