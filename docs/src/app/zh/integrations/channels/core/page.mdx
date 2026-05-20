@@ -88,21 +88,28 @@ librefang config set-key discord              # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-8. 添加到配置文件：
+8. 添加到配置文件（Discord 现为进程外 sidecar 适配器）：
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-default_agent = "coder"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_INTENTS = "37376"
 ```
 
 9. 重启守护进程。
 
 ### 工作原理
 
-Discord 适配器通过 WebSocket（v10）连接到 Discord Gateway。它监听 `MESSAGE_CREATE` 事件并将消息路由到配置的 Agent。响应通过 REST API 的 `channels/{id}/messages` 端点发送。
+Discord sidecar（Python SDK 中的 `librefang.sidecar.adapters.discord`）作为受守护进程监管的子进程运行，通过 WebSocket（v10）连接到 Discord Gateway，并使用基于换行符分隔的 JSON-RPC 通过 stdio 与守护进程通信。它监听 `MESSAGE_CREATE` 事件并以 `message` 事件发出；Agent 回复通过 REST API 的 `channels/{id}/messages` 端点 POST。
 
-适配器自动处理 Gateway 重连、心跳和会话恢复。
+Sidecar 自动处理 Gateway 重连、周期性心跳（首次心跳带 RFC 要求的抖动）、会话恢复以及 Gateway 关闭码处理。守护进程侧的监管（restart、指数退避、断路器）通过 `[[sidecar_channels]]` 的通用字段配置——详见 [Sidecar channels](/zh/configuration/channels#sidecar_channels)。
 
 ---
 
@@ -458,11 +465,11 @@ http://127.0.0.1:4545/
 
 ### 禁用自动拆分
 
-如需 LibreFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
+对仍为进程内适配器的渠道（Slack、Mattermost 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
 
 ```toml
-[channels.discord]
+[channels.slack]
 split_long_messages = false   # 截断而非拆分
 ```
 
-Discord 和 Telegram sidecar 适配器的默认值均为 `true`。
+默认值为 `true`。Discord 与 Telegram sidecar 始终在 2 000 UTF-16 单元边界处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。

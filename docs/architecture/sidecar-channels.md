@@ -151,10 +151,16 @@ ntfy proved the pipeline but also showed that fully removing one
 in-process channel's config type has a wide, kernel-touching,
 **breaking** blast radius (config schema, api routes/features, kernel
 `channel_sender` registry, cli TUI, validation, golden). Subsequent
-migrations have followed the same pattern: telegram (#5241) and now
-gotify both with hand-rolled stdlib-only transports (longpoll for
-telegram, WebSocket for gotify; the SDK has zero runtime
-dependencies). The in-process set only shrinks over time: subsequent
+migrations have followed the same pattern: telegram (#5241), gotify,
+mastodon, bluesky, reddit, and now discord — all with hand-rolled
+stdlib-only transports (longpoll for telegram + reddit, WebSocket for
+gotify + discord, SSE for mastodon, REST polling for bluesky; the SDK
+has zero runtime dependencies). The discord sidecar additionally
+introduced a `select`-gated heartbeat scheduler so a single WS read
+loop can interleave Discord Gateway heartbeats without a mid-frame
+timeout race — the in-process Rust adapter never sent its own
+heartbeats, so the sidecar is the first time discord sessions
+survive long idle periods. The in-process set only shrinks over time: subsequent
 cleanups have dropped 12 unmaintained adapters outright (gitter,
 keybase, flock, pumble, revolt, guilded, mumble, xmpp, irc, threema,
 twist, voice) rather than migrating them. Anyone who still needs one

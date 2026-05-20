@@ -664,10 +664,11 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Discord config
-        b.channels.discord =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::DiscordConfig {
-                bot_token_env: "DISCORD_TOKEN".to_string(),
+        // Change the channels config by adding a Slack config (Discord
+        // was migrated to a sidecar; Slack is the in-process fixture).
+        b.channels.slack =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::SlackConfig {
+                bot_token_env: "SLACK_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);

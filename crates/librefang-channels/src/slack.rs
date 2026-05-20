@@ -135,7 +135,7 @@ impl SlackAdapter {
     /// Route this adapter's REST client through `proxy_url` (#4795).
     /// Affects Slack Web API calls only — the Socket Mode WebSocket
     /// is not currently routed through the proxy. See
-    /// `DiscordConfig::proxy` for accepted URL shapes and env-var fallback.
+    /// `SlackConfig::proxy` for accepted URL shapes and env-var fallback.
     pub fn with_proxy(
         mut self,
         proxy_url: Option<&str>,

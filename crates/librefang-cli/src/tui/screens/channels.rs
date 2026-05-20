@@ -39,14 +39,10 @@ struct ChannelDef {
 }
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
-    // ── Messaging (11)
-    ChannelDef {
-        name: "discord",
-        display_name: "Discord",
-        category: "Messaging",
-        env_vars: &["DISCORD_BOT_TOKEN"],
-        description: "Discord bot adapter",
-    },
+    // ── Messaging
+    // discord migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.discord); see the channels page in
+    // the dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "slack",
         display_name: "Slack",

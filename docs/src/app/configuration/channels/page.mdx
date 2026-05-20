@@ -58,28 +58,33 @@ TELEGRAM_BOT_TOKEN = "..."
 
 See [`[[sidecar_channels]]`](#sidecar_channels) below for all fields. The sidecar preserves the same runtime semantics: `TELEGRAM_BOT_TOKEN` env var, optional `ALLOWED_USERS` allowlist, `channel_type = "telegram"`, and RBAC mapping via `channel_role_mapping.telegram`.
 
-#### `[channels.discord]`
+#### Discord (sidecar)
+
+Discord migrated to an out-of-process sidecar in v2026.5; declare it as a
+`[[sidecar_channels]]` block. The sidecar preserves runtime semantics
+of the removed in-process adapter: `DISCORD_BOT_TOKEN` env var, gateway
+intents, `allowed_guilds` / `allowed_users` filters, and RBAC mapping
+via `channel_role_mapping.discord`.
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-# default_agent = "assistant"
-intents = 37376
-ignore_bots = true
-# account_id = "my-discord-bot"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_ALLOWED_USERS = "789"
+# DISCORD_INTENTS = "37376"
+# DISCORD_IGNORE_BOTS = "true"
+# DISCORD_MENTION_PATTERNS = "hey bot,!ask"
+# DISCORD_ACCOUNT_ID = "guild-42"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | Env var holding the Discord bot token. |
-| `allowed_guilds` | list of u64 | `[]` | Guild (server) IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `allowed_users` | list of strings | `[]` | Discord user IDs allowed to interact. Empty = allow all. |
-| `intents` | u64 | `37376` | Gateway intents bitmask. Default = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT` (37376). |
-| `ignore_bots` | bool | `true` | When `true`, messages from other bots are ignored. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+See [`[[sidecar_channels]]`](#sidecar_channels) below for all
+supervisor fields (restart, backoff, ready timeout, message buffer).
 
 #### `[channels.slack]`
 

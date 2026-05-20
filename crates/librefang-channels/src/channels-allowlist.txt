@@ -21,7 +21,6 @@
 #
 # One basename per line, no `.rs`. Keep sorted.
 dingtalk
-discord
 email
 feishu
 google_chat

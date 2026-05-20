@@ -259,17 +259,6 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for dc in self.channels.discord.iter() {
-            if std::env::var(&dc.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Discord configured but {} is not set",
-                    dc.bot_token_env
-                ));
-            }
-        }
         for sl in self.channels.slack.iter() {
             if std::env::var(&sl.app_token_env)
                 .unwrap_or_default()

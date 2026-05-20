@@ -21,7 +21,6 @@ default = []
 # this; everyday `cargo build` paths don't.
 all-channels = [
     "channel-dingtalk",
-    "channel-discord",
     "channel-email",
     "channel-feishu",
     "channel-google-chat",
@@ -42,7 +41,6 @@ all-channels = [
 ]
 
 # Individual channel features
-channel-discord = []
 channel-slack = []
 channel-matrix = ["dep:pulldown-cmark"]
 channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]

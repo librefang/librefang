@@ -234,8 +234,6 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 }
 
 // Feature-gated adapter imports
-#[cfg(feature = "channel-discord")]
-use librefang_channels::discord::DiscordAdapter;
 #[cfg(feature = "channel-email")]
 use librefang_channels::email::EmailAdapter;
 #[cfg(feature = "channel-google-chat")]
@@ -1888,7 +1886,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
             "signal" => find_channel_info!(signal),
@@ -2552,7 +2549,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(discord, "channel-discord", "Discord");
     check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(signal, "channel-signal", "Signal");
@@ -2589,38 +2585,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Discord
-    #[cfg(feature = "channel-discord")]
-    for dc_config in config.discord.iter() {
-        if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
-            let base = DiscordAdapter::new(
-                token,
-                dc_config.allowed_guilds.clone(),
-                dc_config.allowed_users.clone(),
-                dc_config.ignore_bots,
-                dc_config.mention_patterns.clone(),
-                dc_config.intents,
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, dc_config.proxy.as_deref(), "Discord", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(dc_config.account_id.clone())
-                    .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                dc_config.default_agent.clone(),
-                dc_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Slack
     #[cfg(feature = "channel-slack")]
@@ -4139,7 +4103,6 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.discord.is_none());
         assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());
         assert!(config.channels.signal.is_none());

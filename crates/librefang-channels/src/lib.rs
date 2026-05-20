@@ -31,8 +31,8 @@ pub use message_truncator::{
 // Individual channel adapters — feature-gated (alphabetical order)
 #[cfg(feature = "channel-dingtalk")]
 pub mod dingtalk;
-#[cfg(feature = "channel-discord")]
-pub mod discord;
+// discord migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.discord); no longer an in-process channel.
 #[cfg(feature = "channel-email")]
 pub mod email;
 #[cfg(feature = "channel-feishu")]

@@ -327,10 +327,14 @@ channel_type = "telegram"
 [sidecar_channels.env]
 TELEGRAM_BOT_TOKEN = "..."
 
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-intents = 37376
+# Discord (sidecar)
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
 
 [channels.slack]
 app_token_env = "SLACK_APP_TOKEN"
@@ -824,28 +828,28 @@ TELEGRAM_BOT_TOKEN = "..."
 
 Sidecar 适配器保留了所有原有运行语义。详见 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
-#### `[channels.discord]`
+#### Discord（sidecar）
+
+Discord 已于 v2026.5 迁移为进程外 sidecar 适配器，请改用 `[[sidecar_channels]]` 配置。
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-# default_agent = "assistant"
-intents = 37376
-ignore_bots = true
-# account_id = "my-discord-bot"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_ALLOWED_USERS = "789"
+# DISCORD_INTENTS = "37376"
+# DISCORD_IGNORE_BOTS = "true"
+# DISCORD_MENTION_PATTERNS = "hey bot,!ask"
+# DISCORD_ACCOUNT_ID = "guild-42"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | 存放 Discord Bot 令牌的环境变量。 |
-| `allowed_guilds` | list of u64 | `[]` | 允许的服务器（Guild）ID 列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `allowed_users` | list of strings | `[]` | 允许交互的 Discord 用户 ID 列表。空列表 = 允许所有。 |
-| `intents` | u64 | `37376` | Gateway Intents 位掩码。默认 = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT`（37376）。 |
-| `ignore_bots` | bool | `true` | 为 `true` 时，忽略来自其他 Bot 的消息。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+Sidecar 保留原内置适配器的运行语义——Gateway Intents、`allowed_guilds` / `allowed_users` 过滤、@mention 检测，以及通过 `channel_role_mapping.discord` 的 RBAC 映射。完整的 supervisor 字段（restart、backoff、ready timeout、message buffer 等）参见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
 #### `[channels.slack]`
 

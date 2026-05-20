@@ -43,32 +43,6 @@ mod tests {
     }
 
     #[test]
-    fn test_discord_config_defaults() {
-        let dc = DiscordConfig::default();
-        assert_eq!(dc.bot_token_env, "DISCORD_BOT_TOKEN");
-        assert!(dc.allowed_guilds.is_empty());
-        assert_eq!(dc.intents, 37376);
-        assert!(dc.ignore_bots);
-    }
-
-    #[test]
-    fn test_discord_config_ignore_bots_deserialization() {
-        let toml_str = r#"
-            bot_token_env = "DISCORD_BOT_TOKEN"
-            ignore_bots = false
-        "#;
-        let dc: DiscordConfig = toml::from_str(toml_str).unwrap();
-        assert!(!dc.ignore_bots);
-
-        // Default (field omitted) should be true
-        let toml_str2 = r#"
-            bot_token_env = "DISCORD_BOT_TOKEN"
-        "#;
-        let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
-        assert!(dc2.ignore_bots);
-    }
-
-    #[test]
     fn test_slack_config_defaults() {
         let sl = SlackConfig::default();
         assert_eq!(sl.app_token_env, "SLACK_APP_TOKEN");
@@ -110,17 +84,6 @@ mod tests {
     /// validate the URL here — that's the adapter's job at init.
     #[test]
     fn test_channel_proxy_roundtrips() {
-        // Discord
-        let dc: DiscordConfig = toml::from_str(
-            r#"
-                bot_token_env = "DISCORD_BOT_TOKEN"
-                intents = 0
-                proxy = "socks5://127.0.0.1:1080"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(dc.proxy.as_deref(), Some("socks5://127.0.0.1:1080"));
-
         // Slack
         let sl: SlackConfig = toml::from_str(
             r#"
@@ -400,14 +363,15 @@ admin_role = "admin"
     #[test]
     fn test_validate_missing_env_vars() {
         let mut config = KernelConfig::default();
-        config.channels.discord = OneOrMany(vec![DiscordConfig {
-            bot_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_DC".to_string(),
+        config.channels.slack = OneOrMany(vec![SlackConfig {
+            app_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_SL_APP".to_string(),
+            bot_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_SL_BOT".to_string(),
             ..Default::default()
         }]);
         let warnings = config.validate();
         assert!(
-            warnings.iter().any(|w| w.contains("Discord")),
-            "expected a Discord warning in: {warnings:?}"
+            warnings.iter().any(|w| w.contains("Slack")),
+            "expected a Slack warning in: {warnings:?}"
         );
     }
 
@@ -1000,43 +964,46 @@ admin_role = "admin"
 
     #[test]
     fn test_one_or_many_single_toml_table() {
-        // Single [channels.discord] table should parse as OneOrMany with one element
+        // Single [channels.slack] table should parse as OneOrMany with one element
         let toml_str = r#"
-            [channels.discord]
-            bot_token_env = "MY_DC_TOKEN"
+            [channels.slack]
+            app_token_env = "MY_SL_APP"
+            bot_token_env = "MY_SL_BOT"
             account_id = "bot1"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.discord.is_some());
-        assert_eq!(config.channels.discord.len(), 1);
-        let dc = config.channels.discord.first().unwrap();
-        assert_eq!(dc.bot_token_env, "MY_DC_TOKEN");
-        assert_eq!(dc.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.slack.is_some());
+        assert_eq!(config.channels.slack.len(), 1);
+        let sl = config.channels.slack.first().unwrap();
+        assert_eq!(sl.bot_token_env, "MY_SL_BOT");
+        assert_eq!(sl.account_id.as_deref(), Some("bot1"));
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
-        // [[channels.discord]] should parse as OneOrMany with multiple elements
+        // [[channels.slack]] should parse as OneOrMany with multiple elements
         let toml_str = r#"
-            [[channels.discord]]
-            bot_token_env = "DC_TOKEN_1"
+            [[channels.slack]]
+            app_token_env = "SL_APP_1"
+            bot_token_env = "SL_BOT_1"
             account_id = "bot1"
             default_agent = "assistant"
 
-            [[channels.discord]]
-            bot_token_env = "DC_TOKEN_2"
+            [[channels.slack]]
+            app_token_env = "SL_APP_2"
+            bot_token_env = "SL_BOT_2"
             account_id = "bot2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.discord.is_some());
-        assert_eq!(config.channels.discord.len(), 2);
+        assert!(config.channels.slack.is_some());
+        assert_eq!(config.channels.slack.len(), 2);
 
-        let bots: Vec<_> = config.channels.discord.iter().collect();
-        assert_eq!(bots[0].bot_token_env, "DC_TOKEN_1");
+        let bots: Vec<_> = config.channels.slack.iter().collect();
+        assert_eq!(bots[0].bot_token_env, "SL_BOT_1");
         assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].bot_token_env, "DC_TOKEN_2");
+        assert_eq!(bots[1].bot_token_env, "SL_BOT_2");
         assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
@@ -1092,27 +1059,27 @@ admin_role = "admin"
     #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
-        assert!(config.channels.discord.is_none());
-        assert!(config.channels.discord.is_empty());
-        assert_eq!(config.channels.discord.len(), 0);
-        assert!(config.channels.discord.first().is_none());
-        assert!(config.channels.discord.as_ref().is_none());
+        assert!(config.channels.slack.is_none());
+        assert!(config.channels.slack.is_empty());
+        assert_eq!(config.channels.slack.len(), 0);
+        assert!(config.channels.slack.first().is_none());
+        assert!(config.channels.slack.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![DiscordConfig::default()]);
+        let single = OneOrMany(vec![SlackConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<DiscordConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<SlackConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![DiscordConfig::default(), DiscordConfig::default()]);
+        let multi = OneOrMany(vec![SlackConfig::default(), SlackConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<DiscordConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<SlackConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<DiscordConfig> = OneOrMany::default();
+        let empty: OneOrMany<SlackConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
@@ -1120,7 +1087,6 @@ admin_role = "admin"
     #[test]
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None
-        assert!(DiscordConfig::default().account_id.is_none());
         assert!(SlackConfig::default().account_id.is_none());
         assert!(WhatsAppConfig::default().account_id.is_none());
         assert!(SignalConfig::default().account_id.is_none());
@@ -1690,7 +1656,7 @@ admin_role = "admin"
     }
 
     // ---------------------------------------------------------------
-    // #5130 — typos inside repeated tables ([[channels.discord]],
+    // #5130 — typos inside repeated tables ([[channels.slack]],
     // [[mcp_servers]], …) used to be silently dropped because the
     // strict-mode walker only descended into single-table paths.
     // `deny_unknown_fields` on the per-element struct catches them at
@@ -1700,15 +1666,16 @@ admin_role = "admin"
     #[test]
     fn strict_config_rejects_typo_in_repeated_channel_table_5130() {
         let toml_src = r#"
-            [[channels.discord]]
-            bot_token_env = "DC_TOKEN"
+            [[channels.slack]]
+            app_token_env = "SL_APP"
+            bot_token_env = "SL_BOT"
             # Typo: should be `default_agent`. Before #5130, this
             # silently deserialised into the struct's Default and the
             # operator's intent was lost.
             defaul_agent = "research"
         "#;
         let err = toml::from_str::<KernelConfig>(toml_src)
-            .expect_err("typo inside [[channels.discord]] must be rejected by deny_unknown_fields");
+            .expect_err("typo inside [[channels.slack]] must be rejected by deny_unknown_fields");
         let msg = err.to_string();
         assert!(
             msg.contains("defaul_agent") || msg.contains("unknown field"),
@@ -1737,18 +1704,16 @@ admin_role = "admin"
     fn well_formed_repeated_channel_table_still_parses_5130() {
         // Drift sentinel: deny_unknown_fields must not regress the
         // happy path. If a future refactor renames a field on
-        // DiscordConfig / SlackConfig / WhatsAppConfig
-        // / MattermostConfig / McpServerConfigEntry without updating
-        // this fixture, the test will fail loudly.
+        // SlackConfig / WhatsAppConfig / MattermostConfig /
+        // McpServerConfigEntry without updating this fixture, the test
+        // will fail loudly. (DiscordConfig was in this set originally;
+        // Discord was migrated to a sidecar in v2026.5.)
         let cfg: KernelConfig = toml::from_str(
             r#"
-            [[channels.discord]]
-            bot_token_env = "DISCORD_TOKEN"
-            default_agent = "research"
-
             [[channels.slack]]
             app_token_env = "SLACK_APP"
             bot_token_env = "SLACK_BOT"
+            default_agent = "research"
 
             [[channels.whatsapp]]
             access_token_env = "WA_TOKEN"
@@ -1767,7 +1732,6 @@ admin_role = "admin"
             "#,
         )
         .expect("well-formed repeated tables must still parse with deny_unknown_fields");
-        assert_eq!(cfg.channels.discord.len(), 1);
         assert_eq!(cfg.channels.slack.len(), 1);
         assert_eq!(cfg.channels.whatsapp.len(), 1);
         assert_eq!(cfg.channels.mattermost.len(), 1);

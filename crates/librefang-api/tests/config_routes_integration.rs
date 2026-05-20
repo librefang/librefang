@@ -973,7 +973,7 @@ async fn boot_fails_on_stale_channel_output_format_key() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
 
-    // A `[channels.discord]` block where `initial_backoff_secs` has the
+    // A `[channels.slack]` block where `initial_backoff_secs` has the
     // wrong shape (string instead of u64) — the canonical "stale renamed
     // channel key" scenario the issue tracks: an older release tolerated
     // a string here (e.g. "1s"), the current schema is `u64` seconds,
@@ -988,8 +988,9 @@ async fn boot_fails_on_stale_channel_output_format_key() {
     // channel field, no "auth" leakage) is identical either way and is
     // the real regression contract.
     let bad_toml = "\
-[channels.discord]
-bot_token_env = \"DISCORD_BOT_TOKEN\"
+[channels.slack]
+app_token_env = \"SLACK_APP_TOKEN\"
+bot_token_env = \"SLACK_BOT_TOKEN\"
 initial_backoff_secs = \"thirty-seconds\"
 ";
     std::fs::write(&config_path, bad_toml).expect("write bad config.toml");
@@ -1009,15 +1010,15 @@ initial_backoff_secs = \"thirty-seconds\"
         "boot error must name the offending channel field; got: {err}"
     );
     assert!(
-        err.contains("channels") && err.contains("discord"),
-        "boot error must locate the field under [channels.discord]; got: {err}"
+        err.contains("channels") && err.contains("slack"),
+        "boot error must locate the field under [channels.slack]; got: {err}"
     );
 
     // The critical regression guard from the issue: the failure must NOT
     // be misclassified as an auth / token error downstream. Pre-#5186,
     // the load tolerated the bad value, defaults wiped the operator's
-    // `[channels.discord] bot_token_env`, and the next layer surfaced
-    // it as "discord bot token missing — authentication failed". Now
+    // `[channels.slack] bot_token_env`, and the next layer surfaced
+    // it as "slack bot token missing — authentication failed". Now
     // we abort at parse time with the field name and never reach auth.
     let lower = err.to_lowercase();
     assert!(

@@ -7991,9 +7991,11 @@ fn cmd_channel_list() {
 
     println!("Channel Integrations:\n");
 
+    // discord migrated to a sidecar adapter
+    // (librefang.sidecar.adapters.discord); managed via
+    // `[[sidecar_channels]]` rather than [channels.discord] now.
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("discord", "DISCORD_BOT_TOKEN"),
         ("slack", "SLACK_BOT_TOKEN"),
         ("whatsapp", "WA_ACCESS_TOKEN"),
         ("signal", ""),
@@ -8037,7 +8039,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("discord", "Discord bot"),
                 ("slack", "Slack app (Socket Mode)"),
                 ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
@@ -8065,36 +8066,10 @@ fn cmd_channel_setup(channel: Option<&str>) {
     };
 
     match channel.as_str() {
-        "discord" => {
-            ui::section(&i18n::t("section-setup-discord"));
-            ui::blank();
-            println!("  1. Go to https://discord.com/developers/applications");
-            println!("  2. Create a New Application");
-            println!("  3. Go to Bot section and click 'Add Bot'");
-            println!("  4. Copy the bot token");
-            println!("  5. Under Privileged Gateway Intents, enable:");
-            println!("     - Message Content Intent");
-            println!("  6. Use OAuth2 URL Generator to invite bot to your server");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error(&i18n::t("channel-no-token"));
-                return;
-            }
-
-            let config_block = "\n[channels.discord]\nbot_token_env = \"DISCORD_BOT_TOKEN\"\ndefault_agent = \"coder\"\n";
-            maybe_write_channel_config("discord", config_block);
-
-            match dotenv::save_env_key("DISCORD_BOT_TOKEN", &token) {
-                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
-                Err(_) => println!("    export DISCORD_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Discord")]));
-            notify_daemon_restart();
-        }
+        // discord was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.discord) in v2026.5; the in-process
+        // wizard arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
         "slack" => {
             ui::section(&i18n::t("section-setup-slack"));
             ui::blank();

@@ -760,8 +760,8 @@ pub trait ChannelAdapter: Send + Sync {
     }
 
     /// Account identifier for multi-bot deployments on the same channel type
-    /// (e.g. two Discord bots in the same daemon, each with a different
-    /// `account_id` in `[[channels.discord]]`). Used by the bridge to build
+    /// (e.g. two Slack workspaces in the same daemon, each with a different
+    /// `account_id` in `[[channels.slack]]`). Used by the bridge to build
     /// the same account-qualified channel key the `AgentRouter` stores when
     /// resolving `channel_default(channel_key)` — so an approval routed to
     /// agent A reaches only the adapter(s) bound to agent A (#4985).
