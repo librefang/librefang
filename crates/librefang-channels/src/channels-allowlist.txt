@@ -30,7 +30,6 @@ matrix
 mattermost
 nextcloud
 qq
-rocketchat
 sidecar
 signal
 slack

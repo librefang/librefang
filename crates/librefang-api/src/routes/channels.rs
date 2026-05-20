@@ -382,22 +382,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot user in Nextcloud", "Generate an app password", "Enter URL and token below"],
         config_template: "[channels.nextcloud]\nserver_url = \"\"\ntoken_env = \"NEXTCLOUD_TOKEN\"",
     },
-    ChannelMeta {
-        name: "rocketchat", display_name: "Rocket.Chat", icon: "RC",
-        description: "Rocket.Chat REST adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your server URL, user ID, and token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://rocket.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "user_id", label: "Bot User ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "abc123", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("ROCKETCHAT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Channel IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "GENERAL", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Admin > Users", "Generate a personal access token", "Enter URL, user ID, and token below"],
-        config_template: "[channels.rocketchat]\nserver_url = \"\"\ntoken_env = \"ROCKETCHAT_TOKEN\"\nuser_id = \"\"",
-    },
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -484,7 +468,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "dingtalk" => config.dingtalk.is_some(),
         "zulip" => config.zulip.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
-        "rocketchat" => config.rocketchat.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -755,6 +738,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Twitch IRC gateway adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.twitch"],
+    },
+    SidecarCatalogEntry {
+        name: "rocketchat",
+        display_name: "Rocket.Chat",
+        description: "Rocket.Chat REST API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.rocketchat"],
     },
 ];
 
@@ -1285,10 +1275,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "rocketchat" => config
-            .rocketchat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "zulip" => config
             .zulip
             .as_ref()
@@ -1356,7 +1342,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "dingtalk" => config.dingtalk.len(),
         "zulip" => config.zulip.len(),
         "nextcloud" => config.nextcloud.len(),
-        "rocketchat" => config.rocketchat.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1399,7 +1384,6 @@ fn channel_instances_serialized(
         "dingtalk" => ser(&config.dingtalk),
         "zulip" => ser(&config.zulip),
         "nextcloud" => ser(&config.nextcloud),
-        "rocketchat" => ser(&config.rocketchat),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),

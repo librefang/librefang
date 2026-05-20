@@ -347,14 +347,6 @@ impl KernelConfig {
                 warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
             }
         }
-        for rc in self.channels.rocketchat.iter() {
-            if std::env::var(&rc.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Rocket.Chat configured but {} is not set",
-                    rc.token_env
-                ));
-            }
-        }
         for gc in self.channels.google_chat.iter() {
             let has_env = !std::env::var(&gc.service_account_env)
                 .unwrap_or_default()

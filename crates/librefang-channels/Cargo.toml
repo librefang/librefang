@@ -30,7 +30,6 @@ all-channels = [
     "channel-mattermost",
     "channel-nextcloud",
     "channel-qq",
-    "channel-rocketchat",
     "channel-signal",
     "channel-slack",
     "channel-teams",
@@ -53,7 +52,6 @@ channel-signal = []
 channel-teams = []
 channel-mattermost = []
 channel-google-chat = ["dep:rsa"]
-channel-rocketchat = []
 channel-zulip = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []

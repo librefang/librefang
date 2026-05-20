@@ -1027,23 +1027,25 @@ TWITCH_CHANNELS = "channel1,channel2"      # 逗号分隔，不带 '#'
 
 Sidecar 默认通过 TLS 连接 `irc.chat.twitch.tv:6697`（原 Rust 适配器使用明文 6667，每次重连都会泄露 OAuth 令牌）。明文模式仅在 `TWITCH_PLAINTEXT=1` 下用于本地 mock 监听 — 生产环境严禁开启。
 
-#### `[channels.rocketchat]`
+#### Rocket.Chat
 
-```toml
-[channels.rocketchat]
-server_url = "https://rocketchat.example.com"
-token_env = "ROCKETCHAT_TOKEN"
-user_id = ""
-allowed_channels = []
+Rocket.Chat 现以 Python sidecar 适配器（`librefang.sidecar.adapters.rocketchat`）提供。原 in-process `[channels.rocketchat]` 配置块已在 sidecar 迁移中移除。请改为通过 `[[sidecar_channels]]` 条目声明：
+
+```bash
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # 可选；留空 = 所有已加入频道
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # 可选，多 Bot 路由键
+# ROCKETCHAT_POLL_INTERVAL_SECS = "2"           # 可选，默认 2，下限 1
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Rocket.Chat 服务器 URL。 |
-| `token_env` | string | `"ROCKETCHAT_TOKEN"` | 存放 Rocket.Chat 认证令牌的环境变量。 |
-| `user_id` | string | `""` | Bot 用户 ID。 |
-| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`ROCKETCHAT_TOKEN`（个人访问令牌）应写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Rocket.Chat 表单时会自动写入。
 
 #### `[channels.zulip]`
 
@@ -2629,7 +2631,7 @@ max_versions_per_agent = 50
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework 应用密码。 |
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost Bot 令牌。 |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth 令牌。 |
-| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat 认证令牌。 |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat 个人访问令牌（sidecar 适配器 —— 写入 `~/.librefang/secrets.env`）。 |
 | `ZULIP_API_KEY` | Zulip | Zulip Bot API Key。 |
 | `XMPP_PASSWORD` | XMPP | XMPP 账号密码。 |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
@@ -2681,7 +2683,6 @@ max_versions_per_agent = 50
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
 | Zulip | `api_key_env` |
-| Rocket.Chat | `token_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | LINE | `access_token_env` |

@@ -154,14 +154,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["NEXTCLOUD_TOKEN"],
         description: "Nextcloud Talk adapter",
     },
-    ChannelDef {
-        name: "rocketchat",
-        display_name: "Rocket.Chat",
-        category: "Developer",
-        env_vars: &["ROCKETCHAT_TOKEN"],
-        description: "Rocket.Chat REST adapter",
-    },
-    // ── Notifications — ntfy, gotify & twitch migrated to sidecar adapters
+    // twitch & rocketchat migrated to sidecar adapters
+    // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",
         display_name: "Webhook",

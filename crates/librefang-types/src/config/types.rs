@@ -6392,8 +6392,6 @@ pub struct ChannelsConfig {
     pub mattermost: OneOrMany<MattermostConfig>,
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
-    /// Rocket.Chat configuration(s).
-    pub rocketchat: OneOrMany<RocketChatConfig>,
     /// Zulip configuration(s).
     pub zulip: OneOrMany<ZulipConfig>,
     // Wave 3 — High-value channels
@@ -6478,7 +6476,6 @@ impl Default for ChannelsConfig {
             teams: OneOrMany::default(),
             mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            rocketchat: OneOrMany::default(),
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
             feishu: OneOrMany::default(),
@@ -7042,43 +7039,6 @@ impl Default for GoogleChatConfig {
             service_account_key_path: None,
             space_ids: vec![],
             webhook_port: 8444,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Rocket.Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct RocketChatConfig {
-    /// Rocket.Chat server URL.
-    pub server_url: String,
-    /// Env var name holding the auth token.
-    pub token_env: String,
-    /// User ID for the bot.
-    pub user_id: String,
-    /// Allowed channel IDs (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for RocketChatConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "ROCKETCHAT_TOKEN".to_string(),
-            user_id: String::new(),
-            allowed_channels: vec![],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

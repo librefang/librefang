@@ -1030,23 +1030,25 @@ TWITCH_CHANNELS = "channel1,channel2"      # comma-separated, no '#'
 
 The sidecar defaults to TLS on `irc.chat.twitch.tv:6697` (the Rust adapter used plaintext 6667, which leaked the OAuth token on every connect). Plaintext is reachable only via `TWITCH_PLAINTEXT=1` for local mock listeners — never set it in production.
 
-#### `[channels.rocketchat]`
+#### Rocket.Chat
 
-```toml
-[channels.rocketchat]
-server_url = "https://rocketchat.example.com"
-token_env = "ROCKETCHAT_TOKEN"
-user_id = ""
-allowed_channels = []
+Rocket.Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.rocketchat`). The in-process `[channels.rocketchat]` config block was removed in the sidecar migration. Declare Rocket.Chat as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # optional; empty = all joined
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # optional, multi-bot routing key
+# ROCKETCHAT_POLL_INTERVAL_SECS = "2"           # optional, default 2, floor 1
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Rocket.Chat server URL. |
-| `token_env` | string | `"ROCKETCHAT_TOKEN"` | Env var holding the Rocket.Chat auth token. |
-| `user_id` | string | `""` | Bot user ID. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`ROCKETCHAT_TOKEN` (the personal access token) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 
 #### `[channels.zulip]`
 
@@ -2633,7 +2635,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
-| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
@@ -2685,7 +2687,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
 | Zulip | `api_key_env` |
-| Rocket.Chat | `token_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | LINE | `access_token_env` |
