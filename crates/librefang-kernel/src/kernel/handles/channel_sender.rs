@@ -27,7 +27,6 @@ macro_rules! for_each_channel_field {
         // when multiple channel instances share a `default_agent`. See
         // CLAUDE.md "Deterministic prompt ordering".
         $mac!(dingtalk, "dingtalk");
-        $mac!(email, "email");
         $mac!(google_chat, "google_chat");
         $mac!(teams, "teams");
         $mac!(webhook, "webhook");
@@ -462,7 +461,6 @@ mod tests {
         // Hardcoded sorted reference — must match the macro body exactly.
         const EXPECTED: &[&str] = &[
             "dingtalk",
-            "email",
             "google_chat",
             "teams",
             "webhook",

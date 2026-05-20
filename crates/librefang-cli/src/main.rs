@@ -8103,39 +8103,11 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::success(&i18n::t_args("channel-configured", &[("name", "WhatsApp")]));
             notify_daemon_restart();
         }
-        "email" => {
-            ui::section(&i18n::t("section-setup-email"));
-            ui::blank();
-            println!("  For Gmail, use an App Password:");
-            println!("  https://myaccount.google.com/apppasswords");
-            ui::blank();
-
-            let username = prompt_input("  Email address: ");
-            if username.is_empty() {
-                ui::error(&i18n::t("channel-no-email"));
-                return;
-            }
-
-            let password = prompt_input("  App password (or Enter to set later): ");
-
-            let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
-            );
-            maybe_write_channel_config("email", &config_block);
-
-            if !password.is_empty() {
-                match dotenv::save_env_key("EMAIL_PASSWORD", &password) {
-                    Ok(()) => ui::success(&i18n::t("channel-password-saved")),
-                    Err(_) => println!("    export EMAIL_PASSWORD=your_app_password"),
-                }
-            } else {
-                ui::hint(&i18n::t("hint-set-key-provider"));
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Email")]));
-            notify_daemon_restart();
-        }
+        // email was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.email); the in-process wizard
+        // arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure
+        // page (which renders the sidecar's --describe schema).
         // signal was migrated to a sidecar adapter
         // (librefang.sidecar.adapters.signal) in v2026.5; the in-process
         // wizard arm was removed. Configure via [[sidecar_channels]] in

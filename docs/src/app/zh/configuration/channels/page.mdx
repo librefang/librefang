@@ -147,33 +147,31 @@ MATRIX_USER_ID = "@librefang:matrix.org"
 
 密钥放在 `~/.librefang/secrets.env`：`MATRIX_ACCESS_TOKEN`（Bot 在 homeserver 上的 access token，与 Element 一致）。
 
-#### `[channels.email]`
+#### Email（IMAP + SMTP，sidecar）
+
+Email 现以 Python sidecar 适配器（`librefang.sidecar.adapters.email`）提供。原 in-process `[channels.email]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明 Email：
 
 ```toml
-[channels.email]
-imap_host = "imap.gmail.com"
-imap_port = 993
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-username = "bot@example.com"
-password_env = "EMAIL_PASSWORD"
-poll_interval_secs = 30
-folders = ["INBOX"]
-allowed_senders = []
+[[sidecar_channels]]
+name = "email"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.email"]
+channel_type = "email"
+[sidecar_channels.env]
+EMAIL_IMAP_HOST = "imap.gmail.com"
+EMAIL_SMTP_HOST = "smtp.gmail.com"
+EMAIL_USERNAME = "bot@example.com"
+# EMAIL_IMAP_PORT = "993"
+# EMAIL_SMTP_PORT = "587"
+# EMAIL_POLL_INTERVAL_SECS = "30"      # IMAP 轮询间隔
+# EMAIL_FOLDERS = "INBOX"              # 逗号分隔
+# EMAIL_ALLOWED_SENDERS = ""           # 精确地址或 @domain，逗号分隔
+# EMAIL_ACCOUNT_ID = "prod"            # 多 bot 路由标识
+# EMAIL_TLS_ROOT_CA_PATH = ""          # 额外信任的 CA 证书包（PEM）
+# EMAIL_TLS_ACCEPT_INVALID_CERTS = ""  # 临时调试用 escape hatch
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `imap_host` | string | `""` | IMAP 服务器主机名。 |
-| `imap_port` | u16 | `993` | IMAP 服务器端口（993 用于 TLS）。 |
-| `smtp_host` | string | `""` | SMTP 服务器主机名。 |
-| `smtp_port` | u16 | `587` | SMTP 服务器端口（587 用于 STARTTLS）。 |
-| `username` | string | `""` | 用于 IMAP 和 SMTP 的邮箱地址。 |
-| `password_env` | string | `"EMAIL_PASSWORD"` | 存放邮箱密码或应用专用密码的环境变量。 |
-| `poll_interval_secs` | u64 | `30` | IMAP 轮询间隔（秒）。 |
-| `folders` | list of strings | `["INBOX"]` | 监控的 IMAP 文件夹。 |
-| `allowed_senders` | list of strings | `[]` | 仅处理来自这些发件人的邮件。空列表 = 全部处理。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`EMAIL_PASSWORD`（以及可选的分协议覆盖 `EMAIL_IMAP_PASSWORD` / `EMAIL_SMTP_PASSWORD`）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Email 表单时会自动写入。sidecar 用 `UID SEARCH UNSEEN UNKEYWORD Librefang-Quarantine` 轮询 IMAP（服务器拒绝该关键字时退回 `UNSEEN`），先 `LOGIN` 再 `AUTHENTICATE PLAIN` 兼容只支持 SASL PLAIN 的服务器（Lark 等），通过 per-sender `In-Reply-To` + `References` 缓存做外发回复线程化。
 
 #### `[channels.teams]`
 

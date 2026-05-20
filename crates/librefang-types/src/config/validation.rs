@@ -272,17 +272,8 @@ impl KernelConfig {
         }
         // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
         // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-        for em in self.channels.email.iter() {
-            if std::env::var(&em.password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Email configured but {} is not set",
-                    em.password_env
-                ));
-            }
-        }
+        // email migrated to a sidecar (librefang.sidecar.adapters.email);
+        // env-var presence is now validated inside the sidecar process.
         for t in self.channels.teams.iter() {
             if std::env::var(&t.app_password_env)
                 .unwrap_or_default()

@@ -171,24 +171,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // see SIDECAR_CATALOG below.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "email", display_name: "Email", icon: "EM",
-        description: "IMAP/SMTP email adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your email, password, and server hosts",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "username", label: "Email Address", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Password / App Password", field_type: FieldType::Secret, env_var: Some("EMAIL_PASSWORD"), required: true, placeholder: "app-password", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "imap_host", label: "IMAP Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "imap.gmail.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "smtp_host", label: "SMTP Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "smtp.gmail.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "imap_port", label: "IMAP Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "993", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "smtp_port", label: "SMTP Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "587", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enable IMAP on your email account", "Generate an app password if using Gmail", "Fill in email, password, and hosts below"],
-        config_template: "[channels.email]\nimap_host = \"imap.gmail.com\"\nsmtp_host = \"smtp.gmail.com\"\npassword_env = \"EMAIL_PASSWORD\"",
-    },
+    // email migrated to a sidecar (librefang.sidecar.adapters.email);
+    // see SIDECAR_CATALOG below.
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
     // see SIDECAR_CATALOG below.
     // ── Social ──────────────────────────────────────────────────────
@@ -296,7 +280,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
         "whatsapp" => config.whatsapp.is_some(),
-        "email" => config.email.is_some(),
         "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
@@ -645,6 +628,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WeCom (\u{4f01}\u{4e1a}\u{5fae}\u{4fe1}) intelligent-bot WebSocket adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.wecom"],
+    },
+    SidecarCatalogEntry {
+        name: "email",
+        display_name: "Email (IMAP + SMTP)",
+        description: "IMAP / SMTP email adapter (out-of-process sidecar, Python stdlib only)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.email"],
     },
 ];
 
@@ -1143,10 +1133,6 @@ fn channel_config_values(
             .whatsapp
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "email" => config
-            .email
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "teams" => config
             .teams
             .as_ref()
@@ -1180,7 +1166,6 @@ fn channel_config_values(
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
         "whatsapp" => config.whatsapp.len(),
-        "email" => config.email.len(),
         "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
         "dingtalk" => config.dingtalk.len(),
@@ -1210,7 +1195,6 @@ fn channel_instances_serialized(
     }
     match name {
         "whatsapp" => ser(&config.whatsapp),
-        "email" => ser(&config.email),
         "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
         "dingtalk" => ser(&config.dingtalk),
@@ -3047,15 +3031,15 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Email requires EMAIL_PASSWORD. With it unset we must surface
-        // a 412 — NOT a 200 with a "status: error" body, which silently
-        // passes dashboard `fetch().ok` checks (#3507). Witness rotated
-        // from WhatsApp (whose ChannelMeta marked WHATSAPP_ACCESS_TOKEN
-        // as `required: false` after the QR-first redesign — the field
-        // is now an advanced Business-API fallback, not a precondition).
-        let _g = EnvGuard::unset("EMAIL_PASSWORD");
+        // Teams requires TEAMS_APP_PASSWORD. With it unset we must
+        // surface a 412 — NOT a 200 with a "status: error" body,
+        // which silently passes dashboard `fetch().ok` checks
+        // (#3507). Witness rotated from Email (deleted in the email
+        // sidecar migration) → Teams, which still ships in-process
+        // with a `required: true` secret env var.
+        let _g = EnvGuard::unset("TEAMS_APP_PASSWORD");
 
-        let resp = test_channel(Path("email".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3071,9 +3055,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("EMAIL_PASSWORD", "not-a-real-password");
+        let _g = EnvGuard::set("TEAMS_APP_PASSWORD", "not-a-real-password");
 
-        let resp = test_channel(Path("email".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);

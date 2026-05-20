@@ -966,33 +966,9 @@ MATRIX_USER_ID = "@librefang:matrix.org"
 
 Secret via `~/.librefang/secrets.env`: `MATRIX_ACCESS_TOKEN` (the bot's access token from the homeserver — same shape Element uses).
 
-#### `[channels.email]`
+#### Email (IMAP + SMTP) (sidecar)
 
-```toml
-[channels.email]
-imap_host = "imap.gmail.com"
-imap_port = 993
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-username = "bot@example.com"
-password_env = "EMAIL_PASSWORD"
-poll_interval_secs = 30
-folders = ["INBOX"]
-allowed_senders = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `imap_host` | string | `""` | IMAP server hostname. |
-| `imap_port` | u16 | `993` | IMAP server port (993 for TLS). |
-| `smtp_host` | string | `""` | SMTP server hostname. |
-| `smtp_port` | u16 | `587` | SMTP server port (587 for STARTTLS). |
-| `username` | string | `""` | Email address for both IMAP and SMTP. |
-| `password_env` | string | `"EMAIL_PASSWORD"` | Env var holding the email password or app password. |
-| `poll_interval_secs` | u64 | `30` | IMAP polling interval in seconds. |
-| `folders` | list of strings | `["INBOX"]` | IMAP folders to monitor. |
-| `allowed_senders` | list of strings | `[]` | Only process emails from these senders. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Email is provided by the Python sidecar adapter (`librefang.sidecar.adapters.email`). The in-process `[channels.email]` config block was removed in the sidecar migration. Declare email as a `[[sidecar_channels]]` entry instead — see [Email in the channels configuration guide](/configuration/channels#email-imap--smtp-sidecar).
 
 #### `[channels.teams]`
 

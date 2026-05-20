@@ -332,53 +332,14 @@ admin_role = "admin"
     // sidecar (librefang.sidecar.adapters.matrix) and the in-process
     // MatrixConfig was deleted.
 
-    #[test]
-    fn test_email_config_defaults() {
-        let em = EmailConfig::default();
-        assert_eq!(em.imap_port, 993);
-        assert_eq!(em.smtp_port, 587);
-        assert_eq!(em.password_env, "EMAIL_PASSWORD");
-        assert_eq!(em.folders, vec!["INBOX".to_string()]);
-        // #4877: TLS knobs default safe.
-        assert_eq!(em.tls_root_ca_path, None);
-        assert!(!em.tls_accept_invalid_certs);
-    }
-
-    /// #4877: TLS knobs round-trip through TOML and only the set fields land
-    /// in the serialised output (skip_serializing_if on the optional path).
-    #[test]
-    fn test_email_config_tls_overrides_serde_roundtrip() {
-        let em = EmailConfig {
-            imap_host: "imap.internal.example.com".to_string(),
-            tls_root_ca_path: Some("/etc/librefang/internal-ca.pem".to_string()),
-            tls_accept_invalid_certs: true,
-            ..EmailConfig::default()
-        };
-        let toml_str = toml::to_string(&em).expect("serialize");
-        assert!(
-            toml_str.contains("tls_root_ca_path = \"/etc/librefang/internal-ca.pem\""),
-            "set path must appear: {toml_str}"
-        );
-        assert!(
-            toml_str.contains("tls_accept_invalid_certs = true"),
-            "set flag must appear: {toml_str}"
-        );
-
-        // When the path is None, nothing is emitted for that field.
-        let em_unset = EmailConfig::default();
-        let toml_unset = toml::to_string(&em_unset).expect("serialize default");
-        assert!(
-            !toml_unset.contains("tls_root_ca_path"),
-            "unset Option must not serialise: {toml_unset}"
-        );
-
-        let parsed: EmailConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert_eq!(
-            parsed.tls_root_ca_path.as_deref(),
-            Some("/etc/librefang/internal-ca.pem")
-        );
-        assert!(parsed.tls_accept_invalid_certs);
-    }
+    // test_email_config_defaults +
+    // test_email_config_tls_overrides_serde_roundtrip removed —
+    // email migrated to a sidecar (librefang.sidecar.adapters.email)
+    // and the in-process EmailConfig was deleted alongside the
+    // `[channels.email]` field on ChannelsConfig. TLS knobs
+    // (`EMAIL_TLS_ROOT_CA_PATH` / `EMAIL_TLS_ACCEPT_INVALID_CERTS`)
+    // now live on the sidecar's env contract; round-trip is exercised
+    // by `tests/test_email_adapter.py::test_tls_accept_invalid_certs_*`.
 
     #[test]
     fn test_whatsapp_config_serde() {
@@ -395,19 +356,20 @@ admin_role = "admin"
 
     #[test]
     fn test_channels_config_with_new_channels() {
-        // Matrix witness rotated to WhatsApp + Email after the matrix
-        // sidecar migration (#5368) deleted MatrixConfig and the
-        // `channels.matrix` field.
+        // Witness rotated to WhatsApp + Teams after the email sidecar
+        // migration deleted EmailConfig and the `channels.email`
+        // field. (Earlier rotations: Matrix #5368 → Email; Email →
+        // here.)
         let config = KernelConfig {
             channels: ChannelsConfig {
                 whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                email: OneOrMany(vec![EmailConfig::default()]),
+                teams: OneOrMany(vec![TeamsConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
         };
         assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.email.is_some());
+        assert!(config.channels.teams.is_some());
     }
 
     #[test]
@@ -971,10 +933,10 @@ admin_role = "admin"
     #[test]
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None.
-        // Matrix witness deleted by #5368, Feishu by #5380; remaining
-        // in-process witnesses that expose `account_id` are below.
+        // Matrix witness deleted by #5368, Feishu by #5380, Email by
+        // this PR; remaining in-process witnesses that expose
+        // `account_id` are below.
         assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(EmailConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());
         assert!(DingTalkConfig::default().account_id.is_none());
     }

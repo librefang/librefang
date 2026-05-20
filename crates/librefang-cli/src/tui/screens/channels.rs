@@ -56,13 +56,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    ChannelDef {
-        name: "email",
-        display_name: "Email",
-        category: "Messaging",
-        env_vars: &["EMAIL_PASSWORD"],
-        description: "IMAP/SMTP email adapter",
-    },
+    // email migrated to a sidecar (librefang.sidecar.adapters.email);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // ── Social
     // mastodon, bluesky, and reddit migrated to sidecar adapters
     // ── Enterprise (10)

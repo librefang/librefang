@@ -75,11 +75,12 @@ mobile = []
 # Windows the tray is always on (handled in the per-target dependency
 # blocks above) and this feature is a no-op.
 linux-tray = ["tauri/tray-icon"]
-# Mobile build flavor — excludes channel-email because rustls-connector 0.23.0
-# pulls rustls-platform-verifier 0.7.0, whose `Verifier::new_with_extra_roots`
-# is not implemented on the Android target. Used by mobile-smoke.yml with
-# `--no-default-features --features mobile-no-email`.
-mobile-no-email = ["librefang-api/all-channels-no-email"]
+# Email migrated to a sidecar (librefang.sidecar.adapters.email); the
+# Android-specific `mobile-no-email` flavor that worked around
+# rustls-connector's missing `Verifier::new_with_extra_roots` impl is
+# no longer needed because the IMAP/SMTP code path runs out of
+# process. Feature collapses to `all-channels`.
+mobile-no-email = ["librefang-api/all-channels"]
 
 [[bin]]
 name = "librefang-desktop"

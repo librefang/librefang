@@ -21,7 +21,6 @@ default = []
 # this; everyday `cargo build` paths don't.
 all-channels = [
     "channel-dingtalk",
-    "channel-email",
     "channel-google-chat",
     "channel-teams",
     "channel-webhook",
@@ -30,7 +29,8 @@ all-channels = [
 ]
 
 # Individual channel features
-channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
+# email migrated to a sidecar (librefang.sidecar.adapters.email);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 channel-webhook = []
 channel-whatsapp = []
 channel-teams = []
@@ -81,11 +81,12 @@ aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true }
 rustls = { workspace = true, features = ["ring"] }
 
-lettre = { workspace = true, optional = true }
-imap = { workspace = true, optional = true }
-rustls-connector = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
-mailparse = { workspace = true, optional = true }
+# Email-sidecar migration (#…): the `lettre` / `imap` /
+# `rustls-connector` / `rustls-pemfile` / `mailparse` optional deps
+# the in-process channel-email feature used to gate are removed
+# alongside the adapter — the sidecar runs on Python's stdlib
+# `imaplib` + `smtplib` + `email` packages and pulls nothing of the
+# sort into the Rust workspace.
 
 [dev-dependencies]
 criterion = { workspace = true }

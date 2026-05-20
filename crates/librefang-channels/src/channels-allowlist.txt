@@ -21,7 +21,6 @@
 #
 # One basename per line, no `.rs`. Keep sorted.
 dingtalk
-email
 google_chat
 sidecar
 teams

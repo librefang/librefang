@@ -33,8 +33,8 @@ pub use message_truncator::{
 pub mod dingtalk;
 // discord migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.discord); no longer an in-process channel.
-#[cfg(feature = "channel-email")]
-pub mod email;
+// email migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.email); no longer an in-process channel.
 // feishu migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.feishu); no longer an in-process channel.
 #[cfg(feature = "channel-google-chat")]
