@@ -1048,5 +1048,10 @@ def test_schema_exposes_required_env():
     }
 
 
-def test_capabilities_declares_interactive():
-    assert "interactive" in fs.FeishuAdapter.capabilities
+def test_capabilities_empty_matches_rust_parity():
+    # Rust adapter declared no capabilities — the sidecar matches.
+    # Interactive content still flows through on_send via the
+    # generic fallback path; declaring "interactive" would
+    # misrepresent what the sidecar actually does (text + `[label]`
+    # button-hint fallback, not real Feishu cards).
+    assert fs.FeishuAdapter.capabilities == []

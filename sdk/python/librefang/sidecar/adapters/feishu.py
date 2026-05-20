@@ -808,9 +808,13 @@ class FeishuAdapter(SidecarAdapter):
     both receive modes (WS gateway / HTTP webhook)."""
 
     # Feishu's surface — text only outbound (Rust adapter parity).
-    # Interactive cards go through a separate code path that the
-    # daemon doesn't currently route via ChannelContent.
-    capabilities: list = ["interactive"]
+    # Native interactive cards are not wired through ChannelContent
+    # by the daemon today; `build_approval_card` + `_send_card` ship
+    # as a public utility for callers that build their own cards.
+    # Don't claim "interactive" — the on_send branch for Interactive
+    # only does text + `[label]` button-hint fallback, same shape
+    # the daemon would do itself when the capability is absent.
+    capabilities: list = []
     # Inbound is group/p2p mixed — keep error replies on (matches
     # mattermost / matrix default).
     suppress_error_responses: bool = False
