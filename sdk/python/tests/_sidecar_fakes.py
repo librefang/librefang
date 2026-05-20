@@ -63,6 +63,14 @@ class HdrShim:
     def items(self):
         return list(self._hdrs.items())
 
+    def get(self, key: str, default: Any = None) -> Any:
+        # Case-insensitive lookup to match email.message.Message and the
+        # case-insensitive header handling sidecar code uses elsewhere.
+        for k, v in self._hdrs.items():
+            if k.lower() == key.lower():
+                return v
+        return default
+
 
 class FakeResp:
     """Minimal stand-in for ``http.client.HTTPResponse``.
@@ -81,8 +89,10 @@ class FakeResp:
         self._body = body
         self.headers = headers if headers is not None else HdrShim({})
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: Optional[int] = None) -> bytes:
+        if size is None or size < 0:
+            return self._body
+        return self._body[:size]
 
     def __enter__(self) -> "FakeResp":
         return self

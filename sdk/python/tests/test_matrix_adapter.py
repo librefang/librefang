@@ -792,6 +792,361 @@ async def test_on_send_falls_back_to_user_platform_id(monkeypatch):
     assert "%21fallback%3Am.test" in c["url"] or "!fallback" in c["url"]
 
 
+# ---- on_send (media + structured variants) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_send_image_url_fetch_upload_event(monkeypatch):
+    # script: fetch URL (200 bytes) → upload (mxc) → put event (event_id)
+    fake = _FakeUrlopen([
+        (200, b"PNGDATA"),
+        (200, {"content_uri": "mxc://m.test/img1"}),
+        (200, {"event_id": "$img"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Image": {
+            "url": "https://x.test/p.png",
+            "caption": "cute",
+            "mime_type": "image/png",
+        }},
+    ))
+    # last call is the m.room.message PUT
+    put = fake.calls[-1]
+    body = json.loads(put["body_raw"])
+    assert body["msgtype"] == "m.image"
+    assert body["body"] == "cute"
+    assert body["url"] == "mxc://m.test/img1"
+    assert body["info"]["mimetype"] == "image/png"
+    assert body["info"]["size"] == len(b"PNGDATA")
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_event(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"DOCBYTES"),
+        (200, {"content_uri": "mxc://m.test/f1"}),
+        (200, {"event_id": "$f"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"File": {"url": "https://x.test/x.pdf", "filename": "x.pdf"}},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.file"
+    assert body["body"] == "x.pdf"
+    assert body["filename"] == "x.pdf"
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_data_inline_bytes(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"content_uri": "mxc://m.test/inline"}),
+        (200, {"event_id": "$fd"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"FileData": {
+            "data": [0, 1, 2, 3, 4, 5],  # list[int] arrives over JSON-RPC
+            "filename": "raw.bin",
+            "mime_type": "application/octet-stream",
+        }},
+    ))
+    # No URL-fetch happens for FileData — only upload + put.
+    assert len(fake.calls) == 2
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.file"
+    assert body["info"]["size"] == 6
+
+
+@pytest.mark.asyncio
+async def test_on_send_audio_carries_duration(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"AUDIO"),
+        (200, {"content_uri": "mxc://m.test/a1"}),
+        (200, {"event_id": "$a"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Audio": {
+            "url": "https://x.test/a.ogg",
+            "caption": None,
+            "duration_seconds": 7,
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.audio"
+    assert body["info"]["duration"] == 7000  # ms
+
+
+@pytest.mark.asyncio
+async def test_on_send_voice_emits_msc3245_flag(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"VOICE"),
+        (200, {"content_uri": "mxc://m.test/v1"}),
+        (200, {"event_id": "$v"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Voice": {
+            "url": "https://x.test/v.ogg",
+            "caption": None,
+            "duration_seconds": 3,
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.audio"
+    assert "org.matrix.msc3245.voice" in body
+    assert body["org.matrix.msc3245.voice"] == {}
+    assert body["info"]["duration"] == 3000
+
+
+@pytest.mark.asyncio
+async def test_on_send_voice_with_thread_preserves_relation(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"V"),
+        (200, {"content_uri": "mxc://m.test/v2"}),
+        (200, {"event_id": "$v2"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        thread_id="$root",
+        content={"Voice": {
+            "url": "https://x.test/v.ogg",
+            "caption": None,
+            "duration_seconds": 1,
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert "org.matrix.msc3245.voice" in body
+    assert body["m.relates_to"]["rel_type"] == "m.thread"
+
+
+@pytest.mark.asyncio
+async def test_on_send_video(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"VID"),
+        (200, {"content_uri": "mxc://m.test/vid"}),
+        (200, {"event_id": "$vid"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Video": {
+            "url": "https://x.test/clip.mp4",
+            "caption": "demo",
+            "duration_seconds": 12,
+            "filename": "clip.mp4",
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.video"
+    assert body["info"]["duration"] == 12000
+
+
+@pytest.mark.asyncio
+async def test_on_send_animation_renders_as_image(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, b"GIF"),
+        (200, {"content_uri": "mxc://m.test/g1"}),
+        (200, {"event_id": "$g"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Animation": {
+            "url": "https://x.test/anim.gif",
+            "caption": "wave",
+            "duration_seconds": 2,
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    # Matrix has no native animation surface; falls back to m.image.
+    assert body["msgtype"] == "m.image"
+
+
+@pytest.mark.asyncio
+async def test_on_send_location(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$loc"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Location": {"lat": 12.34, "lon": -56.78}},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.location"
+    assert body["geo_uri"] == "geo:12.34,-56.78"
+
+
+@pytest.mark.asyncio
+async def test_on_send_delete_message_redacts(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$rdct"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"DeleteMessage": {"message_id": "$victim"}},
+    ))
+    assert len(fake.calls) == 1
+    assert "/redact/" in fake.calls[0]["url"]
+    assert "%24victim" in fake.calls[0]["url"]
+
+
+@pytest.mark.asyncio
+async def test_on_send_edit_interactive_emits_m_replace(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$edited"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"EditInteractive": {
+            "message_id": "$orig",
+            "text": "Pick:",
+            "buttons": [[{"label": "yes"}, {"label": "no"}]],
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["m.relates_to"]["rel_type"] == "m.replace"
+    assert body["m.relates_to"]["event_id"] == "$orig"
+    # Button labels suffix-rendered in both body and new_content.body.
+    assert "[yes]" in body["m.new_content"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_on_send_interactive_renders_button_hints(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$ix"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Interactive": {
+            "text": "Choose:",
+            "buttons": [[{"label": "A"}, {"label": "B"}]],
+        }},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert "[A]" in body["body"]
+    assert "[B]" in body["body"]
+
+
+@pytest.mark.asyncio
+async def test_on_send_sticker_placeholder(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$stk"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Sticker": {"file_id": "sticker_42"}},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["body"] == "(sticker: sticker_42)"
+
+
+@pytest.mark.asyncio
+async def test_on_send_poll_placeholder(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$p"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"Poll": {"question": "?", "options": []}},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["body"] == "(poll unsupported)"
+
+
+@pytest.mark.asyncio
+async def test_on_send_button_callback_is_noop(monkeypatch):
+    fake = _FakeUrlopen([])  # no HTTP at all
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"ButtonCallback": {"action": "ack"}},
+    ))
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_on_send_media_group_recurses(monkeypatch):
+    # one Photo + one Video → 2× (fetch + upload + put) = 6 HTTP calls
+    fake = _FakeUrlopen([
+        (200, b"P"),
+        (200, {"content_uri": "mxc://m.test/p"}),
+        (200, {"event_id": "$p1"}),
+        (200, b"V"),
+        (200, {"content_uri": "mxc://m.test/v"}),
+        (200, {"event_id": "$v1"}),
+    ])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        content={"MediaGroup": {"items": [
+            {"Photo": {"url": "https://x.test/p.jpg", "caption": "p"}},
+            {"Video": {
+                "url": "https://x.test/v.mp4",
+                "caption": "v",
+                "duration_seconds": 5,
+            }},
+        ]}},
+    ))
+    msgtypes = []
+    for c in fake.calls:
+        if c.get("body_raw") and c["method"] == "PUT":
+            try:
+                b = json.loads(c["body_raw"])
+                if "msgtype" in b:
+                    msgtypes.append(b["msgtype"])
+            except (ValueError, TypeError):
+                pass
+    assert "m.image" in msgtypes
+    assert "m.video" in msgtypes
+
+
+@pytest.mark.asyncio
+async def test_on_send_unknown_variant_falls_back_to_text(monkeypatch):
+    fake = _FakeUrlopen([(200, {"event_id": "$u"})])
+    monkeypatch.setattr(mx.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        text="hello", content={"NotARealVariant": {"foo": 1}},
+    ))
+    body = json.loads(fake.calls[-1]["body_raw"])
+    assert body["msgtype"] == "m.text"
+
+
+# ---- _coerce_bytes --------------------------------------------------
+
+
+def test_coerce_bytes_passthrough():
+    assert mx._coerce_bytes(b"hi") == b"hi"
+    assert mx._coerce_bytes(bytearray(b"hi")) == b"hi"
+
+
+def test_coerce_bytes_from_int_list():
+    assert mx._coerce_bytes([72, 105]) == b"Hi"
+
+
+def test_coerce_bytes_invalid_int_list_returns_none():
+    assert mx._coerce_bytes([72, 999]) is None
+
+
+def test_coerce_bytes_base64_string():
+    import base64
+    encoded = base64.b64encode(b"payload").decode("ascii")
+    assert mx._coerce_bytes(encoded) == b"payload"
+
+
+def test_coerce_bytes_non_b64_string_falls_back_to_utf8():
+    # A non-base64 string round-trips as utf-8 bytes.
+    assert mx._coerce_bytes("hello") == b"hello"
+
+
+def test_coerce_bytes_garbage_returns_none():
+    assert mx._coerce_bytes(123) is None
+    assert mx._coerce_bytes(None) is None
+
+
 # ---- schema / capability contract -----------------------------------
 
 

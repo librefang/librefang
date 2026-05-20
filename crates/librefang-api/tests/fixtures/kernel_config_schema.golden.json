@@ -1145,15 +1145,6 @@
           "default": null,
           "description": "LINE Messaging API configuration(s)."
         },
-        "matrix": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_MatrixConfig"
-            }
-          ],
-          "default": null,
-          "description": "Matrix protocol configuration(s)."
-        },
         "mattermost": {
           "allOf": [
             {
@@ -3498,107 +3489,6 @@
       },
       "type": "object"
     },
-    "MatrixConfig": {
-      "description": "Matrix protocol channel adapter configuration.",
-      "properties": {
-        "access_token_env": {
-          "default": "MATRIX_ACCESS_TOKEN",
-          "description": "Env var name holding the access token.",
-          "type": "string"
-        },
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_rooms": {
-          "default": [],
-          "description": "Room IDs to listen in (empty = all joined rooms).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "auto_accept_invites": {
-          "default": false,
-          "description": "Whether to auto-accept room invites (default: false).",
-          "type": "boolean"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "homeserver_url": {
-          "default": "https://matrix.org",
-          "description": "Matrix homeserver URL (e.g., `\"https://matrix.org\"`).",
-          "type": "string"
-        },
-        "initial_backoff_secs": {
-          "default": 1,
-          "description": "Initial backoff in seconds on sync failures (default: 1).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "max_backoff_secs": {
-          "default": 60,
-          "description": "Maximum backoff in seconds on sync failures (default: 60).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "user_id": {
-          "default": "",
-          "description": "Bot user ID (e.g., \"@librefang:matrix.org\").",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "MattermostConfig": {
       "additionalProperties": false,
       "description": "Mattermost channel adapter configuration.",
@@ -5319,117 +5209,6 @@
         {
           "items": {
             "$ref": "#/definitions/LineConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_MatrixConfig": {
-      "oneOf": [
-        {
-          "description": "Matrix protocol channel adapter configuration.",
-          "properties": {
-            "access_token_env": {
-              "default": "MATRIX_ACCESS_TOKEN",
-              "description": "Env var name holding the access token.",
-              "type": "string"
-            },
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_rooms": {
-              "default": [],
-              "description": "Room IDs to listen in (empty = all joined rooms).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "auto_accept_invites": {
-              "default": false,
-              "description": "Whether to auto-accept room invites (default: false).",
-              "type": "boolean"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "homeserver_url": {
-              "default": "https://matrix.org",
-              "description": "Matrix homeserver URL (e.g., `\"https://matrix.org\"`).",
-              "type": "string"
-            },
-            "initial_backoff_secs": {
-              "default": 1,
-              "description": "Initial backoff in seconds on sync failures (default: 1).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "max_backoff_secs": {
-              "default": 60,
-              "description": "Maximum backoff in seconds on sync failures (default: 60).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "user_id": {
-              "default": "",
-              "description": "Bot user ID (e.g., \"@librefang:matrix.org\").",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/MatrixConfig"
           },
           "type": "array"
         }
@@ -10228,7 +10007,6 @@
         "file_upload_max_bytes": 52428800,
         "google_chat": null,
         "line": null,
-        "matrix": null,
         "mattermost": null,
         "qq": null,
         "signal": null,

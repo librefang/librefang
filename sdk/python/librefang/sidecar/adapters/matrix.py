@@ -624,6 +624,32 @@ def parse_inbound_msg_content(content: dict, hs: str) -> Optional[dict]:
 # ---- helpers ---------------------------------------------------------
 
 
+def _coerce_bytes(data: Any) -> Optional[bytes]:
+    """Normalize inline-bytes payloads from the protocol.
+
+    ``FileData.data`` arrives as either real ``bytes`` (typed protocol
+    path) or as ``list[int]`` (raw JSON-RPC over stdio, since JSON has
+    no byte type). Anything else is unreadable and returns ``None``.
+    """
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    if isinstance(data, list):
+        try:
+            return bytes(data)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(data, str):
+        # Some senders may base64-encode. Best-effort decode; on
+        # failure, treat as raw UTF-8. (binascii.Error subclasses
+        # ValueError, so ValueError covers both cases.)
+        import base64
+        try:
+            return base64.b64decode(data, validate=True)
+        except ValueError:
+            return data.encode("utf-8", "replace")
+    return None
+
+
 def _format_with_button_hints(text: str, buttons: list) -> str:
     """Render ``text`` followed by ``[Label]`` hints for each button
     row — Matrix has no native interactive button surface, the
@@ -749,6 +775,10 @@ class MatrixAdapter(SidecarAdapter):
         self._seen = _SeenSet(
             max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
         )
+        # Streaming-edit state: stream_id → state dict.
+        # Initialized here (not lazily) so concurrent StreamStart calls
+        # never race-create separate dicts.
+        self._streams: dict[str, dict] = {}
         self._shutdown = threading.Event()
 
     # ---- HTTP plumbing ----------------------------------------------
@@ -1126,6 +1156,47 @@ class MatrixAdapter(SidecarAdapter):
             ids.append(eid)
         return ids
 
+    def _send_url_media(
+        self,
+        room_id: str,
+        msgtype: str,
+        *,
+        url: str,
+        caption: Optional[str],
+        mime_hint: Optional[str],
+        default_name: str,
+        thread_extra: Optional[dict],
+        duration_secs: Optional[int] = None,
+        override_filename: Optional[str] = None,
+        override_body: Optional[str] = None,
+    ) -> str:
+        """Fetch + upload + send for URL-based media variants. Returns
+        the resulting ``event_id``.
+
+        ``override_body`` / ``override_filename`` exist because the
+        ``File`` variant uses the platform filename for both body and
+        filename (no caption), whereas Image / Audio / Video / Voice /
+        Animation use the optional caption with default-name fallback.
+        """
+        if not url:
+            raise RuntimeError(f"matrix {msgtype}: empty url")
+        data, ct = self._fetch_url_bytes(url, self.max_upload_bytes)
+        mt = mime_hint or ct or "application/octet-stream"
+        fname = override_filename or caption or default_name
+        body_text = override_body or caption or fname
+        mxc = self._upload_media(data, fname, mt)
+        duration_ms: Optional[int] = None
+        if duration_secs is not None:
+            try:
+                duration_ms = int(duration_secs) * 1000
+            except (TypeError, ValueError):
+                duration_ms = None
+        return self._send_media_event(
+            room_id, msgtype,
+            body=body_text, mxc=mxc, mime_type=mt, size=len(data),
+            filename=fname, duration_ms=duration_ms, extras=thread_extra,
+        )
+
     def _send_media_event(
         self, room_id: str, msgtype: str, *, body: str, mxc: str,
         mime_type: str, size: int, filename: Optional[str] = None,
@@ -1206,73 +1277,291 @@ class MatrixAdapter(SidecarAdapter):
         text = cmd.text or ""
         loop = asyncio.get_event_loop()
 
-        if isinstance(content, dict) and "Text" in content:
+        if not isinstance(content, dict) or not content:
+            # No structured content — send raw cmd.text.
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_text(room_id, text, extra=thread_extra),
+            )
+            return
+
+        # Single-key tagged-union dispatch. content == {variant_name: payload}.
+        variant = next(iter(content))
+        payload = content[variant]
+
+        if variant == "Text":
             await loop.run_in_executor(
                 None, lambda: self._send_text(
                     room_id, text, extra=thread_extra,
                 ),
             )
             return
-        if isinstance(content, dict) and "Image" in content:
-            img = content["Image"]
-            url = img.get("url") or ""
-            caption = img.get("caption")
-            mime_hint = img.get("mime_type")
 
-            def _do_image() -> None:
-                data, ct = self._fetch_url_bytes(
-                    url, self.max_upload_bytes,
-                )
-                mt = mime_hint or ct or "application/octet-stream"
-                fname = caption or "image"
-                mxc = self._upload_media(data, fname, mt)
-                self._send_media_event(
-                    room_id, "m.image",
-                    body=caption or fname,
-                    mxc=mxc, mime_type=mt, size=len(data),
-                    filename=fname, extras=thread_extra,
-                )
-            await loop.run_in_executor(None, _do_image)
+        if variant == "DeleteMessage":
+            target = payload.get("message_id") if isinstance(payload, dict) else ""
+            if not target:
+                log.warn("matrix DeleteMessage: empty message_id, dropping")
+                return
+            await loop.run_in_executor(
+                None, lambda: self._redact(room_id, target, None),
+            )
             return
-        if isinstance(content, dict) and "File" in content:
-            f = content["File"]
-            url = f.get("url") or ""
-            fname = f.get("filename") or "file"
 
-            def _do_file() -> None:
-                data, ct = self._fetch_url_bytes(
-                    url, self.max_upload_bytes,
-                )
-                mt = ct or "application/octet-stream"
-                mxc = self._upload_media(data, fname, mt)
-                self._send_media_event(
-                    room_id, "m.file",
-                    body=fname,
-                    mxc=mxc, mime_type=mt, size=len(data),
-                    filename=fname, extras=thread_extra,
-                )
-            await loop.run_in_executor(None, _do_file)
+        if variant == "EditInteractive":
+            target = payload.get("message_id") if isinstance(payload, dict) else ""
+            new_text = payload.get("text", "") if isinstance(payload, dict) else ""
+            buttons = payload.get("buttons", []) if isinstance(payload, dict) else []
+            if not target:
+                log.warn("matrix EditInteractive: empty message_id, dropping")
+                return
+            combined = _format_with_button_hints(new_text, buttons)
+
+            def _do_edit() -> None:
+                body = build_edit_body(target, combined)
+                self._put_event(room_id, "m.room.message", body)
+            await loop.run_in_executor(None, _do_edit)
             return
-        if content and not (isinstance(content, dict) and "Text" in content):
-            # Other content types: send the text fallback. Non-text
-            # variants (Voice, Audio, Video, Animation, Location,
-            # Poll, etc.) could be implemented inline but the
-            # majority of outbound sidecar traffic is text — Voice
-            # / Audio / Video on Matrix is rare and operator-driven.
-            # The placeholder mirrors what other sidecars do.
+
+        if variant == "Image":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            caption = payload.get("caption") if isinstance(payload, dict) else None
+            mime_hint = payload.get("mime_type") if isinstance(payload, dict) else None
             await loop.run_in_executor(
                 None,
-                lambda: self._send_text(
-                    room_id, text or "(Unsupported content type)",
-                    extra=thread_extra,
+                lambda: self._send_url_media(
+                    room_id, "m.image", url=url, caption=caption,
+                    mime_hint=mime_hint, default_name="image",
+                    thread_extra=thread_extra,
                 ),
             )
             return
 
-        # Fall through: plain text from ``cmd.text``.
+        if variant == "File":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            fname = (
+                payload.get("filename") or "file"
+                if isinstance(payload, dict) else "file"
+            )
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_url_media(
+                    room_id, "m.file", url=url, caption=None,
+                    mime_hint=None, default_name=fname,
+                    thread_extra=thread_extra, override_filename=fname,
+                    override_body=fname,
+                ),
+            )
+            return
+
+        if variant == "FileData":
+            data_b = payload.get("data") if isinstance(payload, dict) else None
+            fname = (
+                payload.get("filename") or "file"
+                if isinstance(payload, dict) else "file"
+            )
+            mt = (
+                payload.get("mime_type") or "application/octet-stream"
+                if isinstance(payload, dict)
+                else "application/octet-stream"
+            )
+            # protocol delivers bytes payloads as base64-decoded list[int]
+            # or already-bytes; normalize to bytes.
+            data = _coerce_bytes(data_b)
+            if data is None:
+                log.warn("matrix FileData: missing or unreadable data")
+                return
+
+            def _do_filedata() -> None:
+                mxc = self._upload_media(data, fname, mt)
+                self._send_media_event(
+                    room_id, "m.file",
+                    body=fname, mxc=mxc, mime_type=mt, size=len(data),
+                    filename=fname, extras=thread_extra,
+                )
+            await loop.run_in_executor(None, _do_filedata)
+            return
+
+        if variant == "Audio":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            caption = payload.get("caption") if isinstance(payload, dict) else None
+            dur_secs = (
+                payload.get("duration_seconds")
+                if isinstance(payload, dict) else None
+            )
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_url_media(
+                    room_id, "m.audio", url=url, caption=caption,
+                    mime_hint=None, default_name="audio",
+                    thread_extra=thread_extra,
+                    duration_secs=dur_secs,
+                ),
+            )
+            return
+
+        if variant == "Voice":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            caption = payload.get("caption") if isinstance(payload, dict) else None
+            dur_secs = (
+                payload.get("duration_seconds")
+                if isinstance(payload, dict) else None
+            )
+            # m.audio + MSC3245 voice flag.
+            voice_extra = dict(thread_extra) if thread_extra else {}
+            voice_extra["org.matrix.msc3245.voice"] = {}
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_url_media(
+                    room_id, "m.audio", url=url, caption=caption,
+                    mime_hint=None, default_name="voice",
+                    thread_extra=voice_extra,
+                    duration_secs=dur_secs,
+                ),
+            )
+            return
+
+        if variant == "Video":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            caption = payload.get("caption") if isinstance(payload, dict) else None
+            dur_secs = (
+                payload.get("duration_seconds")
+                if isinstance(payload, dict) else None
+            )
+            fname = (
+                payload.get("filename")
+                if isinstance(payload, dict) else None
+            )
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_url_media(
+                    room_id, "m.video", url=url, caption=caption,
+                    mime_hint=None,
+                    default_name=fname or (caption or "video"),
+                    thread_extra=thread_extra,
+                    duration_secs=dur_secs,
+                ),
+            )
+            return
+
+        if variant == "Animation":
+            url = payload.get("url") or "" if isinstance(payload, dict) else ""
+            caption = payload.get("caption") if isinstance(payload, dict) else None
+            # Matrix has no native animation type — fall back to m.image.
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_url_media(
+                    room_id, "m.image", url=url, caption=caption,
+                    mime_hint=None, default_name="animation",
+                    thread_extra=thread_extra,
+                ),
+            )
+            return
+
+        if variant == "MediaGroup":
+            items = payload.get("items", []) if isinstance(payload, dict) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                # MediaGroupItem is also a tagged union: {Photo: …} or {Video: …}.
+                item_variant = next(iter(item), None)
+                if item_variant is None:
+                    continue
+                item_payload = item[item_variant]
+                if item_variant == "Photo":
+                    nested = {
+                        "Image": {
+                            "url": item_payload.get("url", ""),
+                            "caption": item_payload.get("caption"),
+                            "mime_type": None,
+                        },
+                    }
+                elif item_variant == "Video":
+                    nested = {
+                        "Video": {
+                            "url": item_payload.get("url", ""),
+                            "caption": item_payload.get("caption"),
+                            "duration_seconds": item_payload.get(
+                                "duration_seconds", 0,
+                            ),
+                            "filename": None,
+                        },
+                    }
+                else:
+                    continue
+                # Recurse via a shallow Send-like object.
+                from librefang.sidecar.protocol import Send as _Send
+                nested_cmd = _Send(
+                    user=getattr(cmd, "user", None),
+                    channel_id=room_id,
+                    thread_id=thread_id,
+                    text="",
+                    content=nested,
+                )
+                await self.on_send(nested_cmd)
+            return
+
+        if variant == "Location":
+            lat = payload.get("lat") if isinstance(payload, dict) else None
+            lon = payload.get("lon") if isinstance(payload, dict) else None
+            if lat is None or lon is None:
+                log.warn("matrix Location: missing lat/lon, dropping")
+                return
+            body: dict = {
+                "msgtype": "m.location",
+                "body": f"Location {lat},{lon}",
+                "geo_uri": f"geo:{lat},{lon}",
+            }
+            if thread_extra:
+                body.update(thread_extra)
+            await loop.run_in_executor(
+                None, lambda: self._put_event(room_id, "m.room.message", body),
+            )
+            return
+
+        if variant == "Interactive":
+            ix_text = payload.get("text", "") if isinstance(payload, dict) else ""
+            ix_buttons = payload.get("buttons", []) if isinstance(payload, dict) else []
+            combined = _format_with_button_hints(ix_text, ix_buttons)
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_text(
+                    room_id, combined, extra=thread_extra,
+                ),
+            )
+            return
+
+        if variant == "Sticker":
+            file_id = payload.get("file_id", "") if isinstance(payload, dict) else ""
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_text(
+                    room_id, f"(sticker: {file_id})", extra=thread_extra,
+                ),
+            )
+            return
+
+        if variant in ("Poll", "PollAnswer"):
+            await loop.run_in_executor(
+                None,
+                lambda: self._send_text(
+                    room_id, "(poll unsupported)", extra=thread_extra,
+                ),
+            )
+            return
+
+        if variant in ("ButtonCallback", "Command"):
+            # Outbound no-op (inbound-only variants). Matches Rust adapter.
+            log.debug("matrix outbound no-op", variant=variant)
+            return
+
+        # Unknown variant — fall back to text.
+        log.warn("matrix on_send: unknown content variant", variant=variant)
         await loop.run_in_executor(
             None,
-            lambda: self._send_text(room_id, text, extra=thread_extra),
+            lambda: self._send_text(
+                room_id, text or f"(unsupported variant: {variant})",
+                extra=thread_extra,
+            ),
         )
 
     async def on_command(self, cmd) -> None:
@@ -1365,11 +1654,9 @@ class MatrixAdapter(SidecarAdapter):
     # cleared on StreamEnd.
 
     def _stream_state_get(self, stream_id: str) -> Optional[dict]:
-        return getattr(self, "_streams", {}).get(stream_id)
+        return self._streams.get(stream_id)
 
     def _stream_state_set(self, stream_id: str, state: Optional[dict]) -> None:
-        if not hasattr(self, "_streams"):
-            self._streams: dict[str, dict] = {}
         if state is None:
             self._streams.pop(stream_id, None)
         else:
