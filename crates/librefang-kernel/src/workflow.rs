@@ -3597,6 +3597,19 @@ impl WorkflowEngine {
 
         // Operator response received → cancel the watchdog before driving
         // the resume so a racing timeout cannot also fire.
+        //
+        // Race idempotency note: the state flip from Paused → Running
+        // above runs inside the `self.runs.get_mut(&run_id)` critical
+        // section. If the timeout watchdog *also* enters
+        // `apply_operator_outcome` concurrently (e.g. the timer fires
+        // the same moment the operator clicks Approve), only the first
+        // caller into that critical section sees `is_paused() == true`
+        // and applies its outcome; the second sees `Running` and
+        // returns `NotPaused`. So the worst case is one wins and the
+        // other gets a clean `Err(NotPaused)` — no dual-resume, no
+        // forked state. The `cancel_operator_timeout_watchdog` below is
+        // a fast-path optimisation that prevents the watchdog from
+        // even spinning up an outcome attempt in the common case.
         self.cancel_operator_timeout_watchdog(run_id);
 
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());

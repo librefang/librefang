@@ -151,21 +151,29 @@ export function useResolveOperatorStep() {
       field?: string;
     }) => resolveOperatorStep(runId, { action, payload, field }),
     onSuccess: (_data, variables) => {
+      // Scoped invalidation — only the surfaces that actually change
+      // when an operator pause resolves. Previously this invalidated
+      // `workflowKeys.all`, which cascaded a refetch of every
+      // workflow list / template / unrelated run on the page; in a
+      // large install with dozens of workflows on screen that's a
+      // visible jank and an unnecessary load on the API.
       return Promise.all([
-        // The inspected pause is now resolved — drop it from cache so
-        // the action bar disappears.
+        // The inspected pause is resolved — drop it so the action bar
+        // disappears.
         qc.invalidateQueries({
           queryKey: workflowKeys.operatorPause(variables.runId),
         }),
-        // Whole operator worklist shifts.
-        qc.invalidateQueries({ queryKey: workflowKeys.pendingOperator() }),
+        // The whole operator worklist (pendingOperator + any other
+        // operator-scoped subkeys) shifts: at minimum this run leaves
+        // the pending list. Using `operatorAll()` rather than
+        // `pendingOperator()` so any future operator-scoped queries
+        // get invalidated together for free.
+        qc.invalidateQueries({ queryKey: workflowKeys.operatorAll() }),
         // The run itself transitions Paused → Running (and shortly to
         // Completed / Failed), so the detail panel needs a refresh.
         qc.invalidateQueries({
           queryKey: workflowKeys.runDetail(variables.runId),
         }),
-        // Per-workflow run lists may surface the new state.
-        qc.invalidateQueries({ queryKey: workflowKeys.all }),
       ]);
     },
   });

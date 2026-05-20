@@ -1679,9 +1679,21 @@ pub async fn resume_workflow_run(
 pub async fn operator_action_workflow_run(
     State(state): State<Arc<AppState>>,
     Path(run_id): Path<String>,
+    // Optional so the handler still compiles / works on installs that
+    // disable auth entirely; when auth is on, the middleware layer
+    // (see `is_public` in `middleware.rs`) rejects unauthenticated
+    // callers before we get here, so this Option is `Some` in
+    // production. The reason we still extract it: we want the
+    // operator's identity in the audit log on success, not just an
+    // anonymous "operator action accepted" event.
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use crate::workflow::OperatorAction;
+    let operator_name = api_user
+        .as_ref()
+        .map(|u| u.0.name.clone())
+        .unwrap_or_else(|| "<unauthenticated>".to_string());
 
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
@@ -1788,6 +1800,8 @@ pub async fn operator_action_workflow_run(
     // with `/resume` and avoids blocking the request on a long pipeline.
     let state_for_engine = state.clone();
     let state_for_send = state.clone();
+    let audit_action = action_str.clone();
+    let audit_operator = operator_name.clone();
     tokio::spawn(async move {
         let result = state_for_engine
             .kernel
@@ -1823,12 +1837,26 @@ pub async fn operator_action_workflow_run(
                 },
             )
             .await;
-        if let Err(e) = result {
-            tracing::warn!(
+        // Emit one structured event regardless of outcome so the audit
+        // trail records WHO did WHAT against WHICH run, not just the
+        // failures. Previously only `Err` produced a log line, which
+        // meant a successful approve / reject / edit was invisible to
+        // anyone tailing the daemon log or shipping audit events to a
+        // SIEM.
+        match result {
+            Ok(_) => tracing::info!(
                 run_id = %run_id,
+                operator = %audit_operator,
+                action = %audit_action,
+                "operator action applied to workflow run",
+            ),
+            Err(e) => tracing::warn!(
+                run_id = %run_id,
+                operator = %audit_operator,
+                action = %audit_action,
                 error = %e,
-                "Operator action resolution failed (or run rejected/failed)"
-            );
+                "operator action resolution failed (or run rejected/failed)",
+            ),
         }
     });
 
