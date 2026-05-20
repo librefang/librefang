@@ -1176,8 +1176,28 @@ pub async fn build_router(
     //   operators to remember a separate flag before reads stop leaking
     //   agent IDs to the LAN.
     let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
-    let require_auth_for_reads =
-        derive_require_auth_for_reads(configured_require_auth_for_reads, any_auth);
+    let external_auth_proxy = state.kernel.config_ref().external_auth_proxy;
+    let require_auth_for_reads = derive_require_auth_for_reads(
+        configured_require_auth_for_reads,
+        any_auth,
+        external_auth_proxy,
+    );
+    // Audit `require-auth-for-reads-false-leak`: surface the
+    // bypass-refused case loudly so an operator who set
+    // `require_auth_for_reads = false` without an external proxy
+    // sees that the bypass did NOT take effect. Without this log,
+    // the auto-clamp is silent and the operator wrongly assumes
+    // reads are open.
+    if configured_require_auth_for_reads == Some(false) && !external_auth_proxy && any_auth {
+        tracing::warn!(
+            "require_auth_for_reads = false is being IGNORED — \
+             external_auth_proxy is unset, so the reads-allowlist \
+             bypass has not been activated; dashboard reads still \
+             require a bearer token. Set `external_auth_proxy = true` \
+             only when an external auth proxy (nginx auth_request, \
+             Cloudflare Access, etc.) actually fronts the daemon."
+        );
+    }
     if require_auth_for_reads && !any_auth {
         tracing::warn!(
             "require_auth_for_reads = true but no authentication is configured \
@@ -1229,6 +1249,30 @@ pub async fn build_router(
                 listen_addr
             );
         }
+    }
+
+    // Audit `require-auth-for-reads-false-leak`: warn separately
+    // when bound to a non-loopback address WITHOUT
+    // `external_auth_proxy = true`. This is a posture mismatch even
+    // when auth is configured — an operator running `0.0.0.0`
+    // expecting their reverse proxy to attach credentials needs to
+    // explicitly opt in, both so the
+    // `require_auth_for_reads = false` escape hatch becomes
+    // honour-able AND so the operator sees that the boot-time
+    // assumption is recorded. Suppress when bound to loopback (the
+    // default, where no proxy is in play) and when the flag is
+    // already on (operator acknowledged).
+    if !bind_is_loopback && !state.kernel.config_ref().external_auth_proxy {
+        tracing::warn!(
+            "librefang is listening on a non-loopback bind ({}) with \
+             `external_auth_proxy = false` — the in-tree auth layer is the only \
+             gate. If a reverse proxy (nginx auth_request, Cloudflare Access, \
+             corporate SSO) actually fronts this daemon, set \
+             `external_auth_proxy = true` in config.toml so \
+             `require_auth_for_reads = false` is honoured and the operator \
+             posture is recorded.",
+            listen_addr
+        );
     }
 
     let auth_state = middleware::AuthState {
@@ -2348,15 +2392,40 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 /// Resolve the effective value of `require_auth_for_reads` from the explicit
-/// config option and whether any authentication method is configured.
+/// config option, whether any authentication method is configured, and the
+/// operator's acknowledgement that an external auth proxy fronts the daemon.
 ///
-/// - `Some(explicit)` preserves the operator's stated intent verbatim.
-/// - `None` derives the value from `any_auth` so that setting any form of
+/// - `Some(true)` is always honoured (operator forcing the allowlist closed).
+/// - `Some(false)` is honoured ONLY when `external_auth_proxy = true`. The
+///   audit (`require-auth-for-reads-false-leak`) found this branch was
+///   indistinguishable from a config typo on `0.0.0.0` binds — without the
+///   acknowledgement flag, `Some(false)` is dropped to a safe default
+///   (i.e. enforce auth when `any_auth` is set) and the operator is warned at
+///   boot. The proxy assumption was not enforced in code.
+/// - `None` (default) derives from `any_auth` so that setting any form of
 ///   auth (api_key / user keys / dashboard credentials) automatically closes
 ///   the dashboard reads allowlist.
-fn derive_require_auth_for_reads(configured: Option<bool>, any_auth: bool) -> bool {
+fn derive_require_auth_for_reads(
+    configured: Option<bool>,
+    any_auth: bool,
+    external_auth_proxy: bool,
+) -> bool {
     match configured {
-        Some(explicit) => explicit,
+        Some(true) => true,
+        Some(false) => {
+            // Refuse to honour the bypass without explicit
+            // acknowledgement of the proxy fronting it. When the
+            // operator hasn't flipped `external_auth_proxy`, fall
+            // back to the `None`-equivalent derivation so we close
+            // automatically once any auth is configured. This means
+            // a single-line typo in `require_auth_for_reads` cannot
+            // by itself expose dashboard reads on `0.0.0.0`.
+            if external_auth_proxy {
+                false
+            } else {
+                any_auth
+            }
+        }
         None => any_auth,
     }
 }
@@ -2385,24 +2454,61 @@ fn is_daemon_responding(addr: &str) -> bool {
 mod derive_require_auth_for_reads_tests {
     use super::derive_require_auth_for_reads;
 
+    // Legacy callers / `external_auth_proxy = false` (the default) —
+    // the bypass-without-proxy behaviour is the audit fix.
+
     #[test]
     fn none_with_auth_enables() {
-        assert!(derive_require_auth_for_reads(None, true));
+        assert!(derive_require_auth_for_reads(None, true, false));
     }
 
     #[test]
     fn none_without_auth_disables() {
-        assert!(!derive_require_auth_for_reads(None, false));
-    }
-
-    #[test]
-    fn some_false_is_preserved_even_when_auth_configured() {
-        assert!(!derive_require_auth_for_reads(Some(false), true));
+        assert!(!derive_require_auth_for_reads(None, false, false));
     }
 
     #[test]
     fn some_true_is_preserved_even_when_no_auth_configured() {
-        assert!(derive_require_auth_for_reads(Some(true), false));
+        assert!(derive_require_auth_for_reads(Some(true), false, false));
+    }
+
+    // Audit `require-auth-for-reads-false-leak`: refuse to honour
+    // `Some(false)` without `external_auth_proxy = true`.
+
+    #[test]
+    fn some_false_without_proxy_falls_back_to_any_auth() {
+        // any_auth = true → fall back to enforce-reads
+        assert!(
+            derive_require_auth_for_reads(Some(false), true, false),
+            "Some(false) without external_auth_proxy must not bypass auth when auth is configured",
+        );
+        // any_auth = false → still don't enforce (matches None)
+        assert!(
+            !derive_require_auth_for_reads(Some(false), false, false),
+            "Some(false) without external_auth_proxy + no auth = no enforcement \
+             (the bypass is meaningless without auth)",
+        );
+    }
+
+    #[test]
+    fn some_false_with_proxy_is_honoured() {
+        assert!(
+            !derive_require_auth_for_reads(Some(false), true, true),
+            "Some(false) WITH external_auth_proxy must bypass auth as intended",
+        );
+        assert!(
+            !derive_require_auth_for_reads(Some(false), false, true),
+            "Some(false) WITH external_auth_proxy must bypass auth even without local auth",
+        );
+    }
+
+    #[test]
+    fn some_true_overrides_external_auth_proxy() {
+        // Explicit close-down always wins, even with the proxy
+        // bypass flag set. An operator forcing the allowlist closed
+        // is unambiguous.
+        assert!(derive_require_auth_for_reads(Some(true), true, true));
+        assert!(derive_require_auth_for_reads(Some(true), false, true));
     }
 }
 

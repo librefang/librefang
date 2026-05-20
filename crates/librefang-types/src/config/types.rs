@@ -2935,6 +2935,29 @@ pub struct KernelConfig {
     /// `/api/health*` stay reachable in every mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_auth_for_reads: Option<bool>,
+    /// Acknowledges that the daemon is fronted by an external auth proxy
+    /// (e.g. nginx `auth_request`, Cloudflare Access, a corporate IAM
+    /// SSO sidecar) so the dashboard-reads allowlist can legitimately
+    /// be left open.
+    ///
+    /// This flag exists because the `require_auth_for_reads =
+    /// Some(false)` escape hatch is otherwise indistinguishable from a
+    /// config typo: an operator who flipped it without an external
+    /// proxy in front exposed `/api/agents`, `/api/sessions`,
+    /// `/api/providers` to any unauthenticated reader on non-loopback
+    /// binds. Per audit `require-auth-for-reads-false-leak`, the
+    /// resolver now refuses to honour `Some(false)` UNLESS this flag
+    /// is also set — defence in depth against a single-line config
+    /// mistake.
+    ///
+    /// Boot also emits a warning when `bind` is non-loopback and this
+    /// flag is `false`, regardless of `require_auth_for_reads`, so an
+    /// operator running open-on-LAN sees the posture mismatch even if
+    /// they meant to. Defaults to `false` (no external proxy
+    /// assumed); set to `true` only when the proxy in front is
+    /// known-good.
+    #[serde(default)]
+    pub external_auth_proxy: bool,
     /// Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to
     /// sign agent manifests. `verify_signed_manifest` requires the envelope's
     /// `signer_public_key` to be on this list before accepting a signature —
@@ -5700,6 +5723,7 @@ impl Default for KernelConfig {
             channels: ChannelsConfig::default(),
             api_key: String::new(),
             require_auth_for_reads: None,
+            external_auth_proxy: false,
             trusted_manifest_signers: Vec::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
