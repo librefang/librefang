@@ -234,8 +234,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // full rmp-encoded message history decoded just to call `.len()`.
     // The dashboard hammers this route on its 5 s status poll, so on
     // a workspace with 100 sessions × 200 KB history apiece the daemon
-    // burnt ~20 MB/s of needless decode + alloc work for what is
-    // morphologically a `SELECT COUNT(*)`.
+    // decoded ~20 MB (≈ 4 MB/s) of message bodies every poll for what
+    // is morphologically a `SELECT COUNT(*)`.
     let session_count = state
         .kernel
         .memory_substrate()
