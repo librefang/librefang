@@ -275,21 +275,23 @@ streams = []
 | `streams` | list of strings | `[]` | 监听的 Stream 名称列表。空列表 = 所有 Stream。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.line]`
+#### LINE
+
+LINE 由 Python sidecar 适配器（`librefang.sidecar.adapters.line`）提供，进程内 `[channels.line]` 配置块已在 sidecar 迁移中移除。请改用 `[[sidecar_channels]]` 形式声明 —— sidecar 自身运行 HTTP Webhook 服务器（不再挂载在 LibreFang API 端口上），因此你在 LINE Developers 控制台注册的 Webhook URL 现在为 `https://<sidecar-host>:<LINE_WEBHOOK_PORT><LINE_WEBHOOK_PATH>`：
 
 ```toml
-[channels.line]
-channel_secret_env = "LINE_CHANNEL_SECRET"
-access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
-# webhook_port = 8450  # 已弃用：Webhook 现共享 API 端口
+[[sidecar_channels]]
+name = "line"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.line"]
+channel_type = "line"
+[sidecar_channels.env]
+LINE_WEBHOOK_PORT = "9090"
+# LINE_WEBHOOK_PATH = "/webhook"
+# LINE_ACCOUNT_ID = "production"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | 存放 LINE Channel Secret 的环境变量。 |
-| `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | 存放 LINE Channel Access Token 的环境变量。 |
-| `webhook_port` | u16 | `8450` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`LINE_CHANNEL_SECRET`（用于验证入站 `X-Line-Signature` 的 HMAC-SHA256）和 `LINE_CHANNEL_ACCESS_TOKEN`（出站 `POST /v2/bot/message/push` 的 Bearer 凭据）需写入 `~/.librefang/secrets.env`。
 
 #### Reddit
 

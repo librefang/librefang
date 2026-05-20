@@ -313,21 +313,23 @@ streams = []
 | `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.line]`
+#### LINE
+
+LINE is provided by the Python sidecar adapter (`librefang.sidecar.adapters.line`). The in-process `[channels.line]` config block was removed in the sidecar migration. Declare LINE as a `[[sidecar_channels]]` entry instead — the sidecar runs its **own** HTTP webhook server (no longer mounted on the LibreFang API port), so the URL you register at the LINE Developers Console is now `https://<your-sidecar-host>:<LINE_WEBHOOK_PORT><LINE_WEBHOOK_PATH>`:
 
 ```toml
-[channels.line]
-channel_secret_env = "LINE_CHANNEL_SECRET"
-access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
-# webhook_port = 8450  # Deprecated: webhooks now share the API port
+[[sidecar_channels]]
+name = "line"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.line"]
+channel_type = "line"
+[sidecar_channels.env]
+LINE_WEBHOOK_PORT = "9090"
+# LINE_WEBHOOK_PATH = "/webhook"   # override the default path
+# LINE_ACCOUNT_ID = "production"   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. **Required** — every inbound webhook must carry a matching `X-Line-Signature`; missing → 400, mismatched → 401. |
-| `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
-| `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Set both `LINE_CHANNEL_SECRET` (used to verify the inbound `X-Line-Signature` HMAC-SHA256 over the raw request body) and `LINE_CHANNEL_ACCESS_TOKEN` (Bearer auth on outbound `POST /v2/bot/message/push`) in `~/.librefang/secrets.env`.
 
 #### Reddit
 

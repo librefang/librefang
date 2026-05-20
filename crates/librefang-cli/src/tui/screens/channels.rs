@@ -40,9 +40,10 @@ struct ChannelDef {
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
     // ── Messaging
-    // discord, slack, and webex migrated to out-of-process sidecar
-    // adapters (librefang.sidecar.adapters.{discord,slack,webex}); see
-    // the channels page in the dashboard / SIDECAR_CATALOG in
+    // discord, slack, webex, and line migrated to out-of-process
+    // sidecar adapters
+    // (librefang.sidecar.adapters.{discord,slack,webex,line}); see the
+    // channels page in the dashboard / SIDECAR_CATALOG in
     // routes/channels.rs.
     ChannelDef {
         name: "whatsapp",
@@ -71,13 +72,6 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         category: "Messaging",
         env_vars: &["EMAIL_PASSWORD"],
         description: "IMAP/SMTP email adapter",
-    },
-    ChannelDef {
-        name: "line",
-        display_name: "LINE",
-        category: "Messaging",
-        env_vars: &["LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN"],
-        description: "LINE Messaging API adapter",
     },
     // ── Social
     // mastodon, bluesky, and reddit migrated to sidecar adapters

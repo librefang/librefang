@@ -332,17 +332,8 @@ impl KernelConfig {
             }
         }
         // Wave 3 channels
-        for ln in self.channels.line.iter() {
-            if std::env::var(&ln.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "LINE configured but {} is not set",
-                    ln.access_token_env
-                ));
-            }
-        }
+        // line migrated to a sidecar (librefang.sidecar.adapters.line);
+        // env-var presence is now validated inside the sidecar process.
         for fs in self.channels.feishu.iter() {
             if std::env::var(&fs.app_secret_env)
                 .unwrap_or_default()

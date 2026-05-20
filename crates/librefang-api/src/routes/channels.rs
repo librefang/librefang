@@ -207,21 +207,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Enable IMAP on your email account", "Generate an app password if using Gmail", "Fill in email, password, and hosts below"],
         config_template: "[channels.email]\nimap_host = \"imap.gmail.com\"\nsmtp_host = \"smtp.gmail.com\"\npassword_env = \"EMAIL_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "line", display_name: "LINE", icon: "LN",
-        description: "LINE Messaging API adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your Channel Secret and Access Token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "channel_secret_env", label: "Channel Secret", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "access_token_env", label: "Channel Access Token", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_ACCESS_TOKEN"), required: true, placeholder: "xyz789...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8450", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
-        config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
-    },
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG below.
     // ── Social ──────────────────────────────────────────────────────
     // mastodon, bluesky, and reddit migrated to out-of-process sidecar
     // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
@@ -398,7 +385,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "signal" => config.signal.is_some(),
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
-        "line" => config.line.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
@@ -506,9 +492,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "google_chat" | "webhook" | "wecom" => {
-            Some("/webhook")
-        }
+        "feishu" | "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
         _ => None,
     }
 }
@@ -710,6 +694,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Cisco Webex bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.webex"],
+    },
+    SidecarCatalogEntry {
+        name: "line",
+        display_name: "LINE",
+        description: "LINE Messaging API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.line"],
     },
 ];
 
@@ -1236,10 +1227,6 @@ fn channel_config_values(
             .zulip
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "line" => config
-            .line
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
             .as_ref()
@@ -1280,7 +1267,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "signal" => config.signal.len(),
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
-        "line" => config.line.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
@@ -1318,7 +1304,6 @@ fn channel_instances_serialized(
         "signal" => ser(&config.signal),
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
-        "line" => ser(&config.line),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),

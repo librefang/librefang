@@ -24,7 +24,6 @@ all-channels = [
     "channel-email",
     "channel-feishu",
     "channel-google-chat",
-    "channel-line",
     "channel-matrix",
     "channel-mattermost",
     "channel-qq",
@@ -48,7 +47,6 @@ channel-mattermost = []
 channel-google-chat = ["dep:rsa"]
 channel-zulip = []
 channel-feishu = ["dep:aes", "dep:cbc"]
-channel-line = []
 channel-dingtalk = []
 channel-qq = []
 channel-wechat = []

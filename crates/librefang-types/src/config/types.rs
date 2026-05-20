@@ -6394,8 +6394,8 @@ pub struct ChannelsConfig {
     /// Zulip configuration(s).
     pub zulip: OneOrMany<ZulipConfig>,
     // Wave 3 — High-value channels
-    /// LINE Messaging API configuration(s).
-    pub line: OneOrMany<LineConfig>,
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
@@ -6472,7 +6472,6 @@ impl Default for ChannelsConfig {
             mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             zulip: OneOrMany::default(),
-            line: OneOrMany::default(),
             feishu: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
@@ -6938,39 +6937,8 @@ impl Default for ZulipConfig {
 }
 
 // ── Wave 3 channel configs ─────────────────────────────────────────
-
-/// LINE Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct LineConfig {
-    /// Env var name holding the channel secret.
-    pub channel_secret_env: String,
-    /// Env var name holding the channel access token.
-    pub access_token_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for LineConfig {
-    fn default() -> Self {
-        Self {
-            channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
-            access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
-            webhook_port: 8450,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// line migrated to a sidecar (librefang.sidecar.adapters.line); see
+// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Feishu/Lark Open Platform channel adapter configuration.
 ///

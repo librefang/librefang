@@ -255,8 +255,8 @@ use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
 #[cfg(feature = "channel-feishu")]
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
-#[cfg(feature = "channel-line")]
-use librefang_channels::line::LineAdapter;
+// line migrated to a sidecar (librefang.sidecar.adapters.line); see
+// SIDECAR_CATALOG in routes/channels.rs.
 // Wave 4 — webex migrated to a sidecar
 // (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
 // routes/channels.rs.
@@ -1891,7 +1891,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "google_chat" => find_channel_info!(google_chat),
             "zulip" => find_channel_info!(zulip),
             // Wave 3
-            "line" => find_channel_info!(line),
             "feishu" => find_channel_info!(feishu),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
@@ -2549,7 +2548,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(mattermost, "channel-mattermost", "Mattermost");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
     check_channel!(zulip, "channel-zulip", "Zulip");
-    check_channel!(line, "channel-line", "LINE");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
@@ -2842,24 +2840,8 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Wave 3 ──────────────────────────────────────────────────
-
-    // LINE
-    #[cfg(feature = "channel-line")]
-    for ln_config in config.line.iter() {
-        if let Some(secret) = read_token(&ln_config.channel_secret_env, "LINE (secret)") {
-            if let Some(token) = read_token(&ln_config.access_token_env, "LINE (token)") {
-                let adapter = Arc::new(
-                    LineAdapter::new(secret, token, ln_config.webhook_port)
-                        .with_account_id(ln_config.account_id.clone()),
-                );
-                adapters.push((
-                    adapter,
-                    ln_config.default_agent.clone(),
-                    ln_config.account_id.clone(),
-                ));
-            }
-        }
-    }
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Feishu/Lark (unified adapter)
     #[cfg(feature = "channel-feishu")]
@@ -4037,7 +4019,6 @@ mod tests {
         assert!(config.channels.google_chat.is_none());
         assert!(config.channels.zulip.is_none());
         // Wave 3
-        assert!(config.channels.line.is_none());
         assert!(config.channels.feishu.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());

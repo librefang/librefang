@@ -39,8 +39,8 @@ pub mod email;
 pub mod feishu;
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
-#[cfg(feature = "channel-line")]
-pub mod line;
+// line migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.line); no longer an in-process channel.
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
