@@ -767,6 +767,34 @@ async def test_on_send_unsupported_content_drops(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_on_send_refuses_plaintext_when_starttls_missing(monkeypatch):
+    """A server that doesn't advertise STARTTLS on a non-465 port
+    must NOT receive credentials over the plain socket. Mirror
+    lettre's `starttls_relay` semantics: fail loud instead of
+    silently downgrading."""
+
+    class _NoStarttlsSMTP(_FakeSMTP):
+        def has_extn(self, name):
+            # Server doesn't advertise STARTTLS — adapter must refuse.
+            return name.lower() != "starttls"
+
+    monkeypatch.setattr(em.smtplib, "SMTP", _NoStarttlsSMTP)
+    a = _adapter()
+    from librefang.sidecar.protocol import Send
+    cmd = Send(
+        channel_id="alice@test", text="hi",
+        content={"Text": "hi"}, thread_id=None, user={},
+    )
+    with pytest.raises(Exception) as e:
+        await a.on_send(cmd)
+    assert "STARTTLS" in str(e.value)
+    # Critically: send_message must NOT have been called — that's
+    # the whole point. The login call short-circuits before any
+    # message bytes hit the wire.
+    assert _FakeSMTP.sent == []
+
+
+@pytest.mark.asyncio
 async def test_on_send_smtp_ssl_465(monkeypatch):
     """Port 465 path uses SMTP_SSL instead of SMTP+STARTTLS."""
     called: list[str] = []

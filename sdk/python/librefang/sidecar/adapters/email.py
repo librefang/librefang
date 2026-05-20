@@ -647,9 +647,22 @@ class EmailAdapter(SidecarAdapter):
                 timeout=self.net_timeout_secs,
             ) as smtp:
                 smtp.ehlo()
-                if smtp.has_extn("starttls"):
-                    smtp.starttls(context=ssl.create_default_context())
-                    smtp.ehlo()
+                if not smtp.has_extn("starttls"):
+                    # Mirror lettre's `starttls_relay` semantics: refuse
+                    # to send credentials in plaintext. The Rust adapter
+                    # at email.rs:236 builds with `starttls_relay` which
+                    # fails the connection when STARTTLS isn't advertised.
+                    # Without this check we'd run `login` over a plain
+                    # TCP socket and leak the password to anyone on the
+                    # wire.
+                    raise RuntimeError(
+                        f"SMTP server at {self.smtp_host}:{self.smtp_port} "
+                        "does not advertise STARTTLS — refusing to send "
+                        "credentials in plaintext. Use port 465 for "
+                        "implicit TLS.",
+                    )
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.ehlo()
                 smtp.login(self.smtp_username, self.smtp_password)
                 smtp.send_message(msg)
 
