@@ -3938,13 +3938,10 @@ mod tests {
             .next()
             .expect("whatsapp configured");
         assert_eq!(wa.allowed_users, vec!["+1555".to_string()]);
-        let sig = cfg
-            .channels
-            .signal
-            .iter()
-            .next()
-            .expect("signal configured");
-        assert_eq!(sig.allowed_users, vec!["+1556".to_string()]);
+        // Signal migrated to a sidecar; `cfg.channels.signal` no longer
+        // exists. The migrator records the legacy `signal:` block as a
+        // skipped channel — covered by
+        // `test_signal_block_records_skipped_after_sidecar_migration`.
         let mx = cfg
             .channels
             .matrix
