@@ -357,6 +357,22 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
     }
 }
 
+/// Cookie-clear attributes used by the logout path. Unlike
+/// [`session_cookie_attrs`], we ALWAYS emit `Secure` — RFC 6265bis §5.6
+/// and current browser behaviour require the Set-Cookie attributes on a
+/// clear (`Max-Age=0`) response to match those on the original cookie,
+/// otherwise the browser keeps the live `Secure` cookie. A logout
+/// request that happened to land over plain HTTP (proxy misconfig,
+/// `X-Forwarded-Proto` missing, local-HTTP dev mode where the user
+/// signed in via HTTPS) would otherwise invalidate server-side state
+/// but leave the cookie pinned client-side until next failed auth.
+/// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
+/// on `Max-Age=0` responses regardless of transport.
+/// (audit: logout-no-secure-cookie).
+fn session_cookie_clear_attrs() -> &'static str {
+    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
@@ -651,9 +667,11 @@ pub(crate) async fn dashboard_logout(
         }
     }
 
+    // Always emit `Secure` on the clear cookie, regardless of the
+    // logout-request transport — see `session_cookie_clear_attrs`.
     let expired_cookie = format!(
         "librefang_session=; {}; Max-Age=0",
-        session_cookie_attrs(&headers),
+        session_cookie_clear_attrs(),
     );
     (
         axum::http::StatusCode::OK,
@@ -2378,6 +2396,39 @@ fn is_daemon_responding(addr: &str) -> bool {
         std::net::TcpStream::connect(addr_only)
             .map(|_| true)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod session_cookie_attrs_tests {
+    use super::{session_cookie_attrs, session_cookie_clear_attrs};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn clear_attrs_always_contain_secure() {
+        // Audit: logout-no-secure-cookie. The browser refuses to
+        // overwrite a `Secure` cookie with a clear response that lacks
+        // `Secure`, so the logout-cookie clear MUST emit `Secure`
+        // regardless of the logout request's transport.
+        let attrs = session_cookie_clear_attrs();
+        assert!(
+            attrs.contains("Secure"),
+            "clear attrs must include `Secure` so browsers actually drop the cookie: {attrs}"
+        );
+        assert!(attrs.contains("HttpOnly"));
+        assert!(attrs.contains("SameSite=Lax"));
+        assert!(attrs.contains("Path=/dashboard"));
+    }
+
+    #[test]
+    fn login_attrs_remain_transport_dependent() {
+        // Sanity: the login-path attrs builder still keeps `Secure`
+        // off for plain HTTP (local-dev affordance) and on for HTTPS /
+        // X-Forwarded-Proto=https. Only the clear path is unconditional.
+        let mut h = HeaderMap::new();
+        assert!(!session_cookie_attrs(&h).contains("Secure"));
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(session_cookie_attrs(&h).contains("Secure"));
     }
 }
 
