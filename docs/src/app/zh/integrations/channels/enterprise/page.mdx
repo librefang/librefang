@@ -205,6 +205,12 @@ FEISHU_APP_ID = "cli_abc123"
 
 sidecar 默认 `websocket` 模式：通过 `POST /callback/ws/endpoint` 获取真实的 `wss://` URL，并打开长连接到事件网关（无需公网 IP）。`webhook` 模式监听 `FEISHU_WEBHOOK_PORT`，配置 `FEISHU_ENCRYPT_KEY` 时支持 AES-256-CBC + PKCS7 加密载荷。外发回复通过 `POST /open-apis/im/v1/messages` 发送，tenant access token 自动缓存并刷新（2 小时有效，提前 5 分钟刷新）。
 
+<Note type="warning">
+**从 in-process 适配器迁移（webhook 模式）**：webhook URL 变了。原来的 in-process 适配器在 `<api-host>:<api-port>/channels/feishu/webhook`（共享 API 端口）。sidecar 在 `FEISHU_WEBHOOK_PORT`（默认 `8453`）启动独立 HTTP 服务器，URL 是 `<sidecar-host>:8453/webhook`。在 sidecar 启动前，**先到飞书开放平台后台更新事件订阅 URL**。
+
+超过 1 MiB 的请求体会返回 `413 Payload Too Large`——飞书事件实际都远小于 64 KB，这个上限是为了防止恶意发送方 OOM。
+</Note>
+
 ### 处理状态反应（Reactions）
 
 飞书通过给用户消息加 `Typing` reaction 显示"我在处理"反馈,回复发出后再移除。两个调用都是 fire-and-forget —— API 失败仅记录 warning，永远不阻塞消息处理。详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。

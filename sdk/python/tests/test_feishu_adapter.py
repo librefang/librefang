@@ -1021,6 +1021,21 @@ def test_webhook_404_for_non_webhook_path():
     assert status == 404
 
 
+def test_webhook_oversized_body_returns_413(monkeypatch):
+    """A malicious sender shouldn't be able to OOM the sidecar by
+    advertising Content-Length: 10G. Cap the body at 1 MiB."""
+    monkeypatch.setattr(fs, "WEBHOOK_MAX_BODY_BYTES", 64)
+    emit_target: list = []
+    a = _adapter()
+    # 80-byte JSON object, over the patched 64 B cap.
+    big_body = {"x": "A" * 70}
+    status, _ = _post_to_webhook(a, big_body, emit_target=emit_target)
+    assert status == 413
+    assert emit_target == []
+
+
+
+
 # ---- schema / capability contract ------------------------------
 
 

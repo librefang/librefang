@@ -128,6 +128,12 @@ DEFAULT_PING_INTERVAL_SECS = 120.0  # Go SDK default
 
 INITIAL_BACKOFF_SECS = 1.0  # auth-retry initial backoff
 
+# Hard cap on webhook request body. Feishu events are well under 64 KB
+# in practice; cap at 1 MiB so a malicious actor can't OOM the sidecar
+# by claiming Content-Length: 10G. The Rust adapter inherited axum's
+# default 2 MiB body cap; we keep parity within a factor of two.
+WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Region
@@ -1175,10 +1181,15 @@ class FeishuAdapter(SidecarAdapter):
         loop = asyncio.get_event_loop()
         # Best-effort: remove the processing reaction before sending
         # so the user sees Typing clear at the same moment the reply
-        # arrives. Spawn it concurrently — the send is what matters.
-        await loop.run_in_executor(
-            None, self._remove_processing_reaction, chat_id,
-        )
+        # arrives. Fire-and-forget — the send is what matters, an
+        # extra HTTP roundtrip waiting on DELETE would just slow
+        # every reply by ~100-300 ms. Matches the Rust adapter's
+        # `tokio::spawn` shape (feishu.rs:420).
+        threading.Thread(
+            target=self._remove_processing_reaction,
+            args=(chat_id,),
+            daemon=True,
+        ).start()
         text = cmd.text or ""
         content = cmd.content
         if isinstance(content, dict) and "Text" in content:
@@ -1417,9 +1428,14 @@ class FeishuAdapter(SidecarAdapter):
             bot_name = self._validate()
             log.info("feishu authenticated", bot_name=bot_name)
         except Exception as e:  # noqa: BLE001
-            log.warn(
-                "feishu webhook validation failed; "
-                "will still bind so events can be received",
+            # Don't fail-hard — webhook can still RECEIVE events even
+            # without a valid token; reply paths will surface the auth
+            # error themselves. But escalate to error-level so operators
+            # see this in the log instead of dismissing a warning.
+            log.error(
+                "feishu webhook validation failed; bot will receive "
+                "events but be unable to reply until credentials are "
+                "fixed",
                 error=str(e),
             )
         handler_cls = _make_webhook_handler(self, emit)
@@ -1513,7 +1529,27 @@ def _make_webhook_handler(adapter: FeishuAdapter, emit: Callable[[dict], None]):
                 self.send_response(404)
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if length < 0:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if length > WEBHOOK_MAX_BODY_BYTES:
+                # Bail before allocating — a malicious actor advertising
+                # Content-Length: 10G would otherwise drag the sidecar OOM.
+                # Mirrors axum's default `DefaultBodyLimit`.
+                log.warn(
+                    "feishu webhook rejected oversized body",
+                    content_length=length, cap=WEBHOOK_MAX_BODY_BYTES,
+                )
+                self.send_response(413)
+                self.end_headers()
+                return
             raw = self.rfile.read(length) if length > 0 else b""
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
