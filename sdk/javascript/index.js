@@ -765,6 +765,10 @@ class ModelsResource {
     return this._c._request("POST", "/api/catalog/update");
   }
 
+  async listCredentialPools() {
+    return this._c._request("GET", "/api/credential-pools");
+  }
+
   async listAllModels() {
     return this._c._request("GET", "/api/models");
   }
