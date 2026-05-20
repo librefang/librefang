@@ -500,3 +500,170 @@ async def test_on_send_text_and_content(monkeypatch):
 
 
 from librefang.sidecar import protocol  # noqa: E402,F401
+
+
+# ---- reconnect / produce loop (#5111) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_produce_recovers_after_startup_network_failure(monkeypatch):
+    """First poll raises (DNS / TCP / proxy failure on startup), the
+    next poll succeeds → produce() backs off, retries, recovers
+    without crashing the sidecar. Pre-#5111 the Rust adapter exited
+    on startup failure and the bridge stayed dead; the sidecar's
+    while-True/backoff loop must keep retrying until the network
+    comes back. The recovery path also logs an INFO line so the
+    operator's log timeline shows the reconnect."""
+    import asyncio
+    import urllib.error
+
+    # Save the real `asyncio.sleep` BEFORE we monkeypatch — the test's
+    # fake_sleep needs to actually yield to the event loop, but it
+    # MUST use the unpatched callable to avoid infinite recursion
+    # (`tg.asyncio` and the `asyncio` import in this test file point
+    # at the same module object).
+    real_sleep = asyncio.sleep
+
+    a = _adapter()
+    calls = {"n": 0}
+
+    def fake_poll(self, emit, state):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("Name or service not known")
+
+    async def fake_sleep(_d):
+        await real_sleep(0)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", fake_poll)
+    monkeypatch.setattr(tg.asyncio, "sleep", fake_sleep)
+
+    info_calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(tg.log, "info",
+                        lambda msg, **kw: info_calls.append((msg, kw)))
+    warn_calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(tg.log, "warn",
+                        lambda msg, **kw: warn_calls.append((msg, kw)))
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    # Yield enough event-loop turns for: poll1 → warn → sleep(0) →
+    # poll2 → info(recovered). 64 turns is comfortably above the
+    # ~6 await points needed; lower counts race against the executor
+    # context-switch on slow CI runners. Cancel + swallow once the
+    # observable side-effects are present.
+    for _ in range(64):
+        await real_sleep(0)
+        if info_calls and calls["n"] >= 2:
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert calls["n"] >= 2, (
+        "produce() must keep polling past the first network failure; "
+        f"only saw {calls['n']} polls")
+    assert any("backing off" in m for m, _ in warn_calls), (
+        f"expected warn on transient failure; got {warn_calls}")
+    assert any("recovered" in m for m, _ in info_calls), (
+        f"expected info on recovery; got {info_calls}")
+
+
+@pytest.mark.asyncio
+async def test_produce_backoff_is_capped_at_max(monkeypatch):
+    """Consecutive failures grow backoff exponentially (1 → 2 → 4 → …)
+    and cap at MAX_BACKOFF_SECS so a persistent outage doesn't
+    silently push retry intervals to hours. Regression for #5111 's
+    "should retry with 2s → 4s → 8s → 16s → 30s (capped) backoff"."""
+    import asyncio
+    import urllib.error
+
+    real_sleep = asyncio.sleep
+
+    a = _adapter()
+
+    def always_fail(self, emit, state):
+        raise urllib.error.URLError("network unreachable")
+
+    delays: list[float] = []
+
+    async def fake_sleep(d):
+        delays.append(d)
+        # Yield once via the unpatched sleep so the producer can be
+        # cancelled cleanly, but do not consume real wall-clock time.
+        await real_sleep(0)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", always_fail)
+    monkeypatch.setattr(tg.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    # Doubling sequence 1, 2, 4, 8, 16, 32, 60, 60, 60 caps after 7
+    # failures. 64 ticks gives the loop room past the cap point.
+    for _ in range(64):
+        await real_sleep(0)
+        if delays and delays[-1] >= tg.MAX_BACKOFF_SECS:
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert delays[:3] == [1.0, 2.0, 4.0], (
+        f"backoff must double from 1s; got {delays[:3]}")
+    assert max(delays) <= tg.MAX_BACKOFF_SECS, (
+        f"backoff must cap at MAX_BACKOFF_SECS={tg.MAX_BACKOFF_SECS}; "
+        f"got max={max(delays)}, full={delays}")
+    assert tg.MAX_BACKOFF_SECS in delays, (
+        f"backoff must actually reach the cap; got {delays}")
+
+
+@pytest.mark.asyncio
+async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
+    """Long-poll timeouts (LONGPOLL_SERVER_SECS expiring with no
+    updates) are normal Telegram protocol behaviour, NOT a transport
+    failure. They must reset backoff, skip the sleep, and re-enter
+    the loop immediately — otherwise an idle channel would slowly
+    push backoff to MAX over a few minutes."""
+    import asyncio
+
+    real_sleep = asyncio.sleep
+
+    a = _adapter()
+    calls = {"n": 0}
+
+    def alternating(self, emit, state):
+        calls["n"] += 1
+        if calls["n"] % 2 == 1:
+            raise TimeoutError("long-poll expired with no updates")
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(d):
+        sleep_calls.append(d)
+        await real_sleep(0)
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_poll_once", alternating)
+    monkeypatch.setattr(tg.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(tg.log, "warn", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tg.log, "info", lambda *_a, **_kw: None)
+
+    task = asyncio.create_task(a.produce(lambda _ev: None))
+    for _ in range(32):
+        await real_sleep(0)
+        if calls["n"] >= 4:
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert calls["n"] >= 4, (
+        f"produce() must re-poll after a TimeoutError; only saw "
+        f"{calls['n']} polls")
+    assert sleep_calls == [], (
+        "TimeoutError must NOT trigger the backoff sleep; got "
+        f"sleeps={sleep_calls}")

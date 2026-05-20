@@ -71,6 +71,11 @@ TELEGRAM_MSG_LIMIT = 4096
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
+# Backoff cap for the `produce()` reconnect loop on transient network
+# / DNS failures (#5111). Matches the convention every other polling
+# sidecar (bluesky / discord / line / mastodon / mattermost /
+# nextcloud / ntfy / reddit / rocketchat / twitch) settled on.
+MAX_BACKOFF_SECS = 60.0
 PARSE_MODE_HTML = "HTML"
 # Max bytes downloaded for the private-URL → multipart fallback.
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -1454,23 +1459,52 @@ class TelegramAdapter(SidecarAdapter):
                 emit(ev)
 
     async def produce(self, emit) -> None:
+        # Reconnect / startup-recovery contract (#5111):
+        # * The very first iteration is also the startup credential
+        #   probe — a DNS resolution failure, TCP RST, or proxy 5xx
+        #   raises through `_api_get` → `_poll_once` and is caught
+        #   below. We do NOT crash the producer; the daemon supervisor
+        #   restart was the pre-migration behaviour the issue
+        #   complained about, and we'd just churn the process for the
+        #   same transient.
+        # * Mid-session: identical handler. A network blip flips
+        #   getUpdates from "long-poll returning 200 with []" to
+        #   "URLError"; the same backoff applies.
+        # * Long-poll timeouts (the LONGPOLL_SERVER_SECS server-side
+        #   block expiring with no updates) are normal — they reset
+        #   backoff and skip the sleep so we re-enter the loop
+        #   immediately.
+        # * Successful recovery flips backoff back to 1.0 AND logs an
+        #   INFO line if we were in a degraded state, so operators see
+        #   the reconnect on their log timeline (the issue's
+        #   "restored DNS — bridge does NOT recover" scenario).
         loop = asyncio.get_event_loop()
         state = {"offset": 0}
         backoff = 1.0
+        retries_in_a_row = 0
         while True:
             try:
                 await loop.run_in_executor(None, self._poll_once, emit, state)
+                if retries_in_a_row > 0:
+                    log.info("telegram poll recovered",
+                             retries=retries_in_a_row,
+                             last_backoff=backoff)
                 backoff = 1.0
+                retries_in_a_row = 0
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
                 backoff = 1.0
+                retries_in_a_row = 0
                 continue
             except Exception as e:  # noqa: BLE001 - transport errors vary
+                retries_in_a_row += 1
                 log.warn("telegram poll error; backing off",
-                         error=str(e), delay=backoff)
+                         error=str(e),
+                         delay=backoff,
+                         retries=retries_in_a_row)
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 120.0)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECS)
 
     # ---- streaming ---------------------------------------------------
 
