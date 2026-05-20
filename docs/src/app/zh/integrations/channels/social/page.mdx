@@ -4,45 +4,57 @@
 
 ### 前置条件
 
-- Reddit 账户和已注册的 [Reddit API 应用](https://www.reddit.com/dev/api/)（script 类型）
+- Reddit 账户和已注册的 [Reddit API 应用](https://www.reddit.com/prefs/apps)（script 类型）
+
+Reddit 以 Python sidecar (`librefang.sidecar.adapters.reddit`, 随 `librefang-sdk` 发布) 形式运行。
 
 ### 设置步骤
 
-1. 前往 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)，创建新的 **script** 类型应用。
-2. 记录 Client ID（在应用名称下方）和 Client Secret。
-3. 设置环境变量：
-
-```bash
-export REDDIT_CLIENT_ID=your-client-id        # 环境变量
-export REDDIT_CLIENT_SECRET=your-client-secret
-export REDDIT_USERNAME=your-reddit-username
-export REDDIT_PASSWORD=your-reddit-password
-librefang vault set REDDIT_CLIENT_ID          # 加密金库（推荐）
-librefang vault set REDDIT_CLIENT_SECRET
-librefang vault set REDDIT_USERNAME
-librefang vault set REDDIT_PASSWORD
-librefang config set-key reddit               # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-4. 添加到配置文件：
+1. 前往 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) 创建一个新的 **script** 类型应用，记录应用名称下方的 Client ID 与 Client Secret。
+2. 打开仪表板 Channels 页面选择 Reddit 并填表 —— 仪表板会把 `REDDIT_CLIENT_SECRET` 和 `REDDIT_PASSWORD` 写入 `~/.librefang/secrets.env`，把其余字段写入 `~/.librefang/config.toml` 的 `[sidecar_channels.env]` 表。等价的手工配置：
 
 ```toml
-[channels.reddit]
-client_id_env = "REDDIT_CLIENT_ID"
-client_secret_env = "REDDIT_CLIENT_SECRET"
-username_env = "REDDIT_USERNAME"
-password_env = "REDDIT_PASSWORD"
-subreddits = ["mysubreddit"]
-poll_interval = 30
+[[sidecar_channels]]
+name = "reddit"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.reddit"]
+channel_type = "reddit"
 default_agent = "assistant"
+[sidecar_channels.env]
+REDDIT_CLIENT_ID = "abc123"
+REDDIT_USERNAME = "librefang-bot"
+REDDIT_SUBREDDITS = "mysubreddit,rust"
+REDDIT_USER_AGENT = "myorg/1.0 (by /u/myactual-reddit-name)"   # 必填，见下方
+# REDDIT_ACCOUNT_ID = "prod"               # 可选，多 Bot 路由
+# REDDIT_POLL_INTERVAL_SECS = "30"         # 可选，默认 30，下限 5
 ```
 
-5. 重启守护进程。
+### 防封号 —— 上线前必读
+
+Reddit 对 bot 行为有严格审查。adapter 自动做了能做的：
+
+- **`REDDIT_USER_AGENT` 必填。** Reddit API 规则要求 UA 标明真实维护者（`by /u/<你的 Reddit 用户名>`）。占位默认值会在启动时被拒绝以避免 IP + 账号双封。请使用你自己的 Reddit 用户名。
+- **默认 30 秒轮询间隔。** 低于 5 秒会快速烧掉每账号 60 req/min 的预算。下限是 5 秒，活跃度低的 sub 可以把 `REDDIT_POLL_INTERVAL_SECS` 调更高。
+- **自动节流。** 当 Reddit 返回 `X-Ratelimit-Remaining < 10` 时，poller 会提前睡到 reset 窗口。Polling 收到 429 会退避；`/api/comment` 收到 429 会读取 `Retry-After` 重试一次。
+
+adapter 无法强制、需要你自己保证的：
+
+- Bot 账号至少 30 天 + 评论 karma > 100，否则容易被 shadowban。
+- 进入任何 subreddit 前先跟 mod 报备。在陌生 sub 自动回复是常见的封号触发点。
+- 通过 agent 配置里的 `group_trigger_patterns` 限制触发条件，让 bot 只回应 `/cmd` 或具名 @mention —— 对每条新评论都回复是最快的全站封号路径。
+
+3. 把两个密钥写入 `~/.librefang/secrets.env`：
+
+```bash
+REDDIT_CLIENT_SECRET=your-client-secret
+REDDIT_PASSWORD=your-reddit-password
+```
+
+4. 重启守护进程。
 
 ### 工作原理
 
-Reddit 适配器使用 script 类型凭证通过 OAuth2 认证，按配置的间隔轮询指定子版块的新帖子和评论。响应通过 Reddit REST API 作为回复发布。
+Reddit sidecar 适配器使用 OAuth2（script 应用的 password grant）认证，按 5 秒间隔轮询每个已配置子版块的最新评论流，并通过 `POST /api/comment` 把回复以评论形式发出。Reddit 每个父项只允许一条回复，因此被分块的回复会以 `\n\n---\n\n` 拼接而不是拆成多条评论。
 
 ---
 
