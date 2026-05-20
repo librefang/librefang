@@ -7,8 +7,16 @@ import {
   createTrigger,
   updateTrigger,
   deleteTrigger,
+  createCronJob,
+  updateCronJob,
+  deleteCronJob,
+  toggleCronJob,
 } from "../http/client";
-import type { CronDeliveryTarget } from "../http/client";
+import type {
+  CreateCronJobPayload,
+  CronDeliveryTarget,
+  UpdateCronJobPayload,
+} from "../http/client";
 import type { TriggerPatch, CreateTriggerPayload } from "../../api";
 import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
 
@@ -113,5 +121,51 @@ export function useDeleteTrigger() {
       qc.removeQueries({ queryKey: triggerKeys.detail(id) });
       return invalidateTriggerCaches(qc);
     },
+  });
+}
+
+// Cron job writes — invalidate every `cronKeys.jobs(*)` snapshot. The
+// factory keys jobs by agentId so callers can subscribe to one agent's
+// list; broad invalidation here ensures both the per-agent Schedule tab
+// (`useCronJobs(agentId)`) and the global SchedulerPage (`useCronJobs()`)
+// refresh after any CRUD.
+function invalidateCronCaches(qc: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: cronKeys.all }),
+    qc.invalidateQueries({ queryKey: scheduleKeys.all }),
+  ]);
+}
+
+export function useCreateCronJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CreateCronJobPayload) => createCronJob(payload),
+    onSuccess: () => invalidateCronCaches(qc),
+  });
+}
+
+export function useUpdateCronJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateCronJobPayload; agentId?: string }) =>
+      updateCronJob(id, data),
+    onSuccess: () => invalidateCronCaches(qc),
+  });
+}
+
+export function useDeleteCronJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string; agentId?: string }) => deleteCronJob(id),
+    onSuccess: () => invalidateCronCaches(qc),
+  });
+}
+
+export function useToggleCronJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean; agentId?: string }) =>
+      toggleCronJob(id, enabled),
+    onSuccess: () => invalidateCronCaches(qc),
   });
 }

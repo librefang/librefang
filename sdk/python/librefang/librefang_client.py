@@ -621,6 +621,9 @@ class _ModelsResource(_Resource):
     def catalog_update(self):
         return self._c._request("POST", "/api/catalog/update")
 
+    def list_credential_pools(self):
+        return self._c._request("GET", "/api/credential-pools")
+
     def list_all_models(self):
         return self._c._request("GET", "/api/models")
 

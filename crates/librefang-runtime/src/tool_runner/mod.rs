@@ -14,6 +14,7 @@ mod channel;
 mod cron;
 mod definitions;
 mod dispatch;
+mod error;
 mod event;
 mod fs;
 mod goal;
@@ -51,6 +52,8 @@ use self::channel::tool_channel_send;
 use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_list};
 pub use self::definitions::{builtin_tool_definitions, select_native_tools, ALWAYS_NATIVE_TOOLS};
 pub use self::dispatch::{current_agent_depth, execute_tool, execute_tool_raw, ToolExecContext};
+#[allow(unused_imports)] // Re-exported for incremental migration of submodules (#3576).
+pub(super) use self::error::{ToolError, ToolResult as TypedToolResult};
 use self::event::tool_event_publish;
 use self::fs::{
     check_absolute_path_inside_workspace, maybe_dedup_file_read, maybe_snapshot, named_ws_prefixes,
@@ -125,6 +128,20 @@ pub(super) fn require_kernel(
     kernel.ok_or_else(|| {
         "Kernel handle not available. Inter-agent tools require a running kernel.".to_string()
     })
+}
+
+/// `ToolError`-returning twin of [`require_kernel`] used by submodules
+/// migrated to `Result<_, ToolError>` (#3576). Carries the same unavailable
+/// capability name (`"Kernel handle"`) so the rendered message — `"Kernel
+/// handle unavailable"` — is consistent across migrated modules.
+///
+/// During the migration window this lives alongside the stringly-typed
+/// helper; once every submodule has migrated, `require_kernel` is removed
+/// and this one is renamed.
+pub(super) fn require_kernel_typed(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<&Arc<dyn KernelHandle>, ToolError> {
+    kernel.ok_or(ToolError::Unavailable("Kernel handle"))
 }
 
 /// The memory-namespace operation a memory / wiki tool is about to perform.

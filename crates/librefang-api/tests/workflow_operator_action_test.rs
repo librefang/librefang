@@ -428,6 +428,209 @@ async fn operator_http_non_operator_pause_is_409() {
     );
 }
 
+/// `GET /api/workflows/runs/{run_id}/operator` on an operator-paused run
+/// returns the artifact + the allowed actions in the same shape the POST
+/// resolve endpoint consumes.
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_http_inspect_returns_artifact_and_actions() {
+    let h = boot().await;
+    let run_id = run_to_operator_pause(
+        &h,
+        produce_then_operator(vec![OperatorAction::Approve, OperatorAction::Edit]),
+    )
+    .await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/workflows/runs/{run_id}/operator"),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "inspect must be 200: {body:?}");
+    assert_eq!(body["run_id"].as_str().unwrap_or(""), &run_id.to_string());
+    assert_eq!(
+        body["workflow_name"].as_str().unwrap_or(""),
+        "op-action-it"
+    );
+    assert_eq!(body["step_name"].as_str().unwrap_or(""), "review");
+    assert_eq!(
+        body["artifact"].as_str().unwrap_or(""),
+        "ARTIFACT",
+        "artifact must be the producer's output"
+    );
+    let actions = body["actions"].as_array().expect("actions array");
+    assert_eq!(actions.len(), 2, "two actions authorised: {actions:?}");
+    // Actions serialise to lowercase verbs (`OperatorAction` uses
+    // `rename_all = snake_case`); confirm both authorised verbs appear.
+    let verb_strs: Vec<String> = actions
+        .iter()
+        .map(|a| {
+            a.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| a.to_string())
+        })
+        .collect();
+    assert!(
+        verb_strs.iter().any(|v| v == "approve"),
+        "approve must appear: {verb_strs:?}"
+    );
+    assert!(
+        verb_strs.iter().any(|v| v == "edit"),
+        "edit must appear: {verb_strs:?}"
+    );
+    assert!(
+        body["paused_at"].as_str().is_some(),
+        "paused_at must be ISO-8601: {body:?}"
+    );
+}
+
+/// `GET /api/workflows/runs/{unknown}/operator` → 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_http_inspect_unknown_run_is_404() {
+    let h = boot().await;
+    let (status, _b) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/workflows/runs/{}/operator", uuid::Uuid::new_v4()),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// `GET /api/workflows/runs/{run_id}/operator` on a non-operator pause
+/// returns 409 with `error: not_operator_pause` so the dashboard can
+/// surface a useful hint instead of an empty button bar.
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_http_inspect_non_operator_pause_is_409() {
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+    // Single Sequential step paused via the generic pause API — paused,
+    // but not at an operator step.
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "plain".to_string(),
+        description: String::new(),
+        steps: vec![WorkflowStep {
+            name: "s1".to_string(),
+            agent: StepAgent::ByName {
+                name: "a".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+    };
+    let wf_id = engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "seed".to_string())
+        .await
+        .expect("create_run");
+    let _t = engine.pause_run(run_id, "manual").await.expect("pause_run");
+    engine
+        .execute_run(
+            run_id,
+            |_a: &StepAgent| Some((AgentId::new(), "m".to_string(), false)),
+            |_i: AgentId, _p: String, _m: Option<SessionMode>| async {
+                Ok(("x".to_string(), 0u64, 0u64))
+            },
+        )
+        .await
+        .expect("pauses");
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/workflows/runs/{run_id}/operator"),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "non-operator pause must be 409: {body:?}"
+    );
+    assert_eq!(
+        body["error"].as_str().unwrap_or(""),
+        "not_operator_pause",
+        "{body:?}"
+    );
+}
+
+/// `GET /api/workflows/operator/pending` returns every operator-paused
+/// run as a worklist. Skips runs that are not paused at an operator
+/// step.
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_http_pending_lists_all_operator_paused_runs() {
+    let h = boot().await;
+
+    // Start with an empty worklist.
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/workflows/operator/pending",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "empty worklist must be []: {body:?}"
+    );
+
+    // Two operator-paused runs.
+    let run_a = run_to_operator_pause(
+        &h,
+        produce_then_operator(vec![OperatorAction::Approve, OperatorAction::Reject]),
+    )
+    .await;
+    let run_b = run_to_operator_pause(
+        &h,
+        produce_then_operator(vec![OperatorAction::Edit]),
+    )
+    .await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/workflows/operator/pending",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("array body");
+    assert_eq!(rows.len(), 2, "two paused operator runs: {body:?}");
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["run_id"].as_str())
+        .collect();
+    let a_str = run_a.to_string();
+    let b_str = run_b.to_string();
+    assert!(ids.contains(&a_str.as_str()), "run A must appear: {ids:?}");
+    assert!(ids.contains(&b_str.as_str()), "run B must appear: {ids:?}");
+    // Every row must carry the operator-pause shape — artifact + actions.
+    for r in rows {
+        assert!(
+            r["artifact"].as_str().is_some(),
+            "every row needs an artifact: {r:?}"
+        );
+        assert!(
+            r["actions"].as_array().is_some(),
+            "every row needs an actions array: {r:?}"
+        );
+    }
+}
+
 /// An action not authorised at the step → the resolve fails; the run
 /// stays Paused (the request is accepted-then-rejected async, so we
 /// assert the durable side effect: no state change).

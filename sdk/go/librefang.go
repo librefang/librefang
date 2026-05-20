@@ -878,6 +878,10 @@ func (r *ModelsResource) CatalogUpdate() (interface{}, error) {
 	return r.client.request("POST", "/api/catalog/update", nil, nil)
 }
 
+func (r *ModelsResource) ListCredentialPools() (interface{}, error) {
+	return r.client.request("GET", "/api/credential-pools", nil, nil)
+}
+
 func (r *ModelsResource) ListAllModels() (interface{}, error) {
 	return r.client.request("GET", "/api/models", nil, nil)
 }

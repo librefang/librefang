@@ -76,6 +76,8 @@ export {
   getModelOverrides,
   // providers
   listProviders,
+  // credential pools (#4965)
+  listCredentialPools,
   // network / peers / a2a
   getNetworkStatus,
   listPeers,
@@ -118,6 +120,9 @@ export {
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
+  // workflows — HITL operator-step (#4977)
+  inspectOperatorPause,
+  listPendingOperatorRuns,
   // terminal
   getTerminalHealth,
   listTerminalWindows,
@@ -162,6 +167,10 @@ export type {
   ChannelInstance,
   ChannelInstancesResponse,
   SidecarSaveResult,
+  // workflows — HITL operator-step (#4977)
+  OperatorPause,
+  OperatorActionVerb,
+  OperatorActionDescriptor,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -278,6 +287,11 @@ export {
   createTrigger,
   updateTrigger,
   deleteTrigger,
+  // cron jobs (per-agent scheduler entries)
+  createCronJob,
+  updateCronJob,
+  deleteCronJob,
+  toggleCronJob,
   // skills
   createSkill,
   reloadSkills,
@@ -303,6 +317,8 @@ export {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  // workflows — HITL operator-step resolution (#4977)
+  resolveOperatorStep,
   // terminal
   createTerminalWindow,
   renameTerminalWindow,
@@ -337,9 +353,14 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
+  CronActionSpec,
+  CronDeliverySpec,
   CronDeliveryTarget,
   CronDeliveryTargetType,
   CronJobItem,
+  CronScheduleSpec,
+  CreateCronJobPayload,
+  UpdateCronJobPayload,
   HandDefinitionItem,
   HandInstanceItem,
   HandSessionMessage,

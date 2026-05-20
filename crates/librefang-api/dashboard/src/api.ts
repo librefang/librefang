@@ -717,7 +717,15 @@ export interface CronJobItem {
   id?: string;
   enabled?: boolean;
   name?: string;
-  schedule?: string;
+  /**
+   * Cron schedule descriptor. The backend serializes
+   * `librefang_types::scheduler::CronSchedule` as a tagged object
+   * (`{ kind: "cron" | "every" | "at", … }`), so consumers must narrow
+   * before reading fields. Older code paths sometimes received a
+   * pre-rendered string; keep the union for back-compat (see
+   * `HandsPage.tsx::resolveCronSchedule` for an example consumer).
+   */
+  schedule?: string | CronScheduleSpec;
   [key: string]: unknown;
 }
 
@@ -1416,10 +1424,24 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
   }
 }
 
+/**
+ * Schedule-mode payload accepted by `PATCH /api/agents/{id}`.
+ *
+ * Mirrors the Rust `librefang_types::agent::ScheduleMode` enum which is
+ * `#[serde(rename_all = "snake_case")]` (externally tagged). The unit
+ * variant (`reactive`) is the bare string `"reactive"`; the
+ * fielded variants are wrapped objects (`{ continuous: { … } }`).
+ */
+export type AgentSchedulePatch =
+  | "reactive"
+  | { periodic: { cron: string } }
+  | { proactive: { conditions: string[] } }
+  | { continuous: { check_interval_secs: number } };
+
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
- * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
+ * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
@@ -1528,6 +1550,33 @@ export async function sendAgentMessage(
 export async function listProviders(): Promise<ProviderItem[]> {
   const data = await get<ProvidersResponse>("/api/providers");
   return data.providers ?? [];
+}
+
+// ── Credential pools (#4965) ────────────────────────────────────────────────
+
+/// Per-credential redacted snapshot returned by `GET /api/credential-pools`.
+/// `cooldown_remaining_secs` is either a number (seconds until cooldown
+/// expires) or the literal string `"permanent"` for keys marked invalid by
+/// a 401/403 response.
+export interface CredentialPoolKeySnapshot {
+  label: string;
+  key_hint: string;
+  priority: number;
+  request_count: number;
+  is_exhausted: boolean;
+  cooldown_remaining_secs: number | "permanent" | null;
+}
+
+export interface CredentialPoolStatus {
+  provider: string;
+  strategy: "fill_first" | "round_robin" | "random" | "least_used";
+  available_count: number;
+  total_count: number;
+  credentials: CredentialPoolKeySnapshot[];
+}
+
+export async function listCredentialPools(): Promise<CredentialPoolStatus[]> {
+  return get<CredentialPoolStatus[]>("/api/credential-pools");
 }
 
 export async function testProvider(providerId: string): Promise<ApiActionResponse> {
@@ -2304,6 +2353,83 @@ export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> 
   return get<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(runId)}`);
 }
 
+// ---------------------------------------------------------------------------
+// HITL operator-step pause inspection + resolution (#4977).
+//
+// Wire shape mirrors `OperatorAction` on the Rust side. Verbs are
+// snake_case (`approve` / `reject` / `edit` / `freeform_input` /
+// `provide_input`); `provide_input` carries the additional `field`
+// name. `edit` / `freeform_input` / `provide_input` require a non-empty
+// `payload`; the rest ignore it.
+// ---------------------------------------------------------------------------
+
+/** Discriminator for the action verbs the operator may invoke at a paused
+ *  operator step. Matches `OperatorAction` serde shape exactly. */
+export type OperatorActionVerb =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | "provide_input";
+
+/** One element of the `actions` array returned by the inspect endpoint. */
+export type OperatorActionDescriptor =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | { provide_input: { field: string } };
+
+/** Snapshot of a single paused operator-step pause — what the dashboard
+ *  renders to drive the action-button UI. */
+export interface OperatorPause {
+  /** Workflow run id (string-encoded `WorkflowRunId`). */
+  run_id: string;
+  /** Workflow definition id. */
+  workflow_id: string;
+  /** Workflow name (denormalised for the worklist row). */
+  workflow_name: string;
+  /** Name of the operator step holding the run paused. */
+  step_name: string;
+  /** Index of the operator step inside the workflow's step list. */
+  operator_step_index: number;
+  /** Output of the step that ran immediately before the operator step —
+   *  the thing the operator must review. */
+  artifact: string;
+  /** Actions the workflow author authorised at this step. */
+  actions: OperatorActionDescriptor[];
+  /** ISO-8601 run start time. */
+  started_at: string;
+  /** ISO-8601 pause time. Null only in the race window between pause and
+   *  state-write — treat as "just now" if missing. */
+  paused_at: string | null;
+}
+
+/** Fetch the operator pause for a single run. 404 if the run doesn't
+ *  exist, 409 (`{error: "not_operator_pause"}`) if the run is not paused
+ *  at an operator step — the HTTP layer's `request()` helper surfaces
+ *  both as thrown errors the caller can branch on. */
+export async function inspectOperatorPause(runId: string): Promise<OperatorPause> {
+  return get<OperatorPause>(`/api/workflows/runs/${encodeURIComponent(runId)}/operator`);
+}
+
+/** List every run currently paused at an operator step (oldest first). */
+export async function listPendingOperatorRuns(): Promise<OperatorPause[]> {
+  return get<OperatorPause[]>(`/api/workflows/operator/pending`);
+}
+
+/** Resolve a paused operator step with an action + optional payload.
+ *  Returns 200 immediately; the workflow continues asynchronously. */
+export async function resolveOperatorStep(
+  runId: string,
+  body: { action: OperatorActionVerb; payload?: string; field?: string },
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/workflows/runs/${encodeURIComponent(runId)}/operator`,
+    body,
+  );
+}
+
 export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
 }
@@ -2388,6 +2514,90 @@ export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
   const url = agentId ? `/api/cron/jobs?agent_id=${encodeURIComponent(agentId)}` : "/api/cron/jobs";
   const data = await get<{ jobs?: CronJobItem[]; total?: number }>(url);
   return data.jobs ?? [];
+}
+
+/**
+ * Cron schedule discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronSchedule` enum which is
+ * `#[serde(tag = "kind", rename_all = "snake_case")]`.
+ */
+export type CronScheduleSpec =
+  | { kind: "at"; at: string }
+  | { kind: "every"; every_secs: number }
+  | { kind: "cron"; expr: string; tz?: string | null };
+
+/**
+ * Cron action discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronAction` enum.
+ *
+ * The dashboard exposes only `agent_turn` for the agent-detail Schedule
+ * tab (the most common case). `system_event` / `workflow` exist on the
+ * backend; consumers needing those should extend this type.
+ */
+export type CronActionSpec =
+  | { kind: "agent_turn"; message: string; model_override?: string | null; timeout_secs?: number | null }
+  | { kind: "system_event"; text: string }
+  | { kind: "workflow"; workflow_id: string; input?: string | null; timeout_secs?: number | null };
+
+/**
+ * Cron delivery (single legacy destination) — mirrors the Rust
+ * `librefang_types::scheduler::CronDelivery` enum.
+ */
+export type CronDeliverySpec =
+  | { kind: "none" }
+  | { kind: "last_channel" }
+  | { kind: "channel"; channel: string; to: string }
+  | { kind: "webhook"; url: string };
+
+export interface CreateCronJobPayload {
+  agent_id: string;
+  name: string;
+  schedule: CronScheduleSpec;
+  action: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  /** Multi-destination fan-out. Optional; omit for single-target delivery. */
+  delivery_targets?: CronDeliveryTarget[];
+  /** Per-job session-mode override. `undefined` → use agent default. */
+  session_mode?: "persistent" | "new";
+  /** Optional peer/user ID used as SenderContext.user_id when the job fires. */
+  peer_id?: string;
+  /** Auto-delete after first fire; defaults to true for `at` schedules. */
+  one_shot?: boolean;
+}
+
+export interface UpdateCronJobPayload {
+  name?: string;
+  enabled?: boolean;
+  schedule?: CronScheduleSpec;
+  action?: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  delivery_targets?: CronDeliveryTarget[];
+  session_mode?: "persistent" | "new" | null;
+  peer_id?: string | null;
+}
+
+export async function createCronJob(
+  payload: CreateCronJobPayload,
+): Promise<{ job_id?: string; status?: string }> {
+  return post<{ job_id?: string; status?: string }>("/api/cron/jobs", payload);
+}
+
+export async function updateCronJob(
+  jobId: string,
+  payload: UpdateCronJobPayload,
+): Promise<CronJobItem> {
+  return put<CronJobItem>(`/api/cron/jobs/${encodeURIComponent(jobId)}`, payload);
+}
+
+export async function deleteCronJob(jobId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/cron/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function toggleCronJob(jobId: string, enabled: boolean): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/cron/jobs/${encodeURIComponent(jobId)}/enable`,
+    { enabled },
+  );
 }
 
 export async function getVersionInfo(): Promise<VersionResponse> {

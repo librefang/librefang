@@ -5,7 +5,6 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
-  type CronJobItem,
   type ToolDefinition,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -34,13 +33,15 @@ import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessionDetails } from "../lib/queries/sessions";
 import { useAgentKvMemory } from "../lib/queries/memory";
-import { useCronJobs } from "../lib/queries/runtime";
-import { useAgentTriggers } from "../lib/queries/schedules";
+// Schedule tab's cron + trigger queries live inside <AgentSchedulePanel/>
+// (issue #4924). React-Query dedupes identical queryKey subscriptions so
+// the panel and the SchedulerPage (when both mounted) share the same cache.
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
+import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -116,16 +117,6 @@ function safeStringify(v: unknown): string {
     return JSON.stringify(v);
   } catch {
     return String(v);
-  }
-}
-
-function formatPattern(pattern: unknown): string | undefined {
-  if (!pattern) return undefined;
-  if (typeof pattern === "string") return pattern;
-  try {
-    return JSON.stringify(pattern);
-  } catch {
-    return undefined;
   }
 }
 
@@ -492,15 +483,14 @@ export function AgentsPage() {
   // memory, which is empty unless [proactive_memory] is enabled — so the
   // tab read empty even when the agent had KV pairs.
   const agentKvMemoryQuery = useAgentKvMemory(detailAgent?.id ?? "");
-  const cronJobsQuery = useCronJobs(detailAgent?.id);
   // Per-agent KPI rollup (#4246) — replaces a global /api/sessions scan
   // that was capped by pagination and missed agents whose sessions
   // weren't in the latest N rows.
   const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
-  // Per-agent triggers — GET /api/triggers?agent_id=… so the Schedule
-  // tab's event-trigger cards don't depend on agent detail embedding
-  // them (which it currently doesn't).
-  const agentTriggersQuery = useAgentTriggers(detailAgent?.id ?? "");
+  // Cron jobs + per-agent triggers are now consumed inside
+  // <AgentSchedulePanel/> (issue #4924). React-Query dedupes identical
+  // queryKey subscriptions across components, so dropping the page-level
+  // hooks does not double-fetch.
   // Per-agent recent turn events — backs the Logs tab. usage_events is
   // turn-level (model dispatch, latency, tokens, cost) — exactly what
   // the design's stderr-style log feed wants. The previous source
@@ -1339,138 +1329,17 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
-  const renderScheduleTab = (agent: AgentDetail) => {
-    const cron = cronJobsQuery.data ?? [];
-    // GET /api/agents/{id} doesn't embed triggers, so we hit the
-    // dedicated /api/triggers?agent_id=... endpoint here. Falling back
-    // to the (legacy) embedded-on-detail field if a future backend
-    // version ships it.
-    const liveTriggers = (agentTriggersQuery.data ?? []) as Array<{
-      id?: string;
-      pattern?: unknown;
-      prompt_template?: string;
-      enabled?: boolean;
-    }>;
-    const triggers: AgentTriggerSummary[] = liveTriggers.map((tr) => {
-      // Render the trigger pattern compactly. The full TriggerPattern shape
-      // is rich (event filters / regex / etc.); the detail panel only
-      // needs a one-liner — full pattern lives on the dedicated page.
-      const patternStr = formatPattern(tr.pattern);
-      return {
-        event_pattern: patternStr,
-        name: tr.id,
-        description: tr.prompt_template,
-      };
-    });
-    // Synthetic "last 14 runs" — backend doesn't expose per-fire history
-    // through a single agent-scoped endpoint yet, so we visualise an
-    // agent-id-seeded waveform as a placeholder. Wire up real run
-    // telemetry in the next pass.
-    const seed = agent.id.charCodeAt(0) || 1;
-    const bars = Array.from({ length: 14 }, (_, i) =>
-      Math.round(35 + Math.sin((i + seed) / 2.1) * 12 + i * 1.5),
-    );
-    const hasSchedule = cron.length > 0 || triggers.length > 0;
-    const scheduleMode = (agent as AgentDetail).schedule;
-    const isScheduleReactive = !scheduleMode || scheduleMode === "manual";
-    return (
-      <div className="flex flex-col gap-3">
-        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-          {t("agents.detail.trigger", { defaultValue: "Trigger" })}
-        </div>
-        {hasSchedule ? (
-          <>
-            {cron.map((c: CronJobItem & AgentCronSummary, i: number) => (
-              <div
-                key={`c-${i}`}
-                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
-              >
-                <div className="w-8 h-8 rounded-md bg-accent/10 text-accent grid place-items-center shrink-0">
-                  <Clock className="w-4 h-4" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-[13px] truncate text-text-main">
-                    {c.schedule || c.cron || c.expression || "cron"}
-                  </div>
-                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
-                    {c.next_run
-                      ? `${t("agents.detail.next_run", { defaultValue: "Next run" })} · ${formatRelativeTime(c.next_run)}`
-                      : c.name || c.id || "cron job"}
-                  </div>
-                </div>
-                <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/scheduler" })}>
-                  {t("common.edit", { defaultValue: "Edit" })}
-                </Button>
-              </div>
-            ))}
-            {triggers.map((trig: AgentTriggerSummary, i: number) => (
-              <div
-                key={`t-${i}`}
-                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
-              >
-                <div className="w-8 h-8 rounded-md bg-warning/10 text-warning grid place-items-center shrink-0">
-                  <Zap className="w-4 h-4" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-[13px] truncate text-text-main">
-                    {trig.event_pattern || trig.name || "event trigger"}
-                  </div>
-                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
-                    {trig.description || t("agents.detail.event_driven", { defaultValue: "event-driven" })}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </>
-        ) : (
-                  <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
-                    <Zap className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-                    <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[12.5px] font-medium text-text-main">
-                        {isScheduleReactive
-                          ? t("agents.detail.schedule_reactive_title", { defaultValue: "Reactive" })
-                          : scheduleMode}
-                      </div>
-                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                        {isScheduleReactive
-                          ? t("agents.detail.schedule_reactive_desc", {
-                              defaultValue: "wakes on incoming messages and events — no cron or trigger pinned",
-                            })
-                          : t("agents.detail.schedule_no_triggers", {
-                              defaultValue: "schedule mode set but no cron jobs or event triggers configured",
-                            })}
-                      </div>
-                    </div>
-                  </div>
-            )}
-
-        <div className="flex items-center gap-2 mt-2">
-          <span className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.last_runs", { defaultValue: "Last 14 runs" })}
-          </span>
-          <Badge variant="default" className="text-[8px] px-1.5 py-0 font-normal opacity-60">Sample</Badge>
-        </div>
-        <div className="flex gap-[3px] items-end h-16 px-1">
-          {bars.map((v, i) => {
-            const isLast = i === bars.length - 1;
-            return (
-              <div
-                key={i}
-                className={`flex-1 rounded-t-[2px] ${isLast ? "bg-brand" : "bg-brand/40"}`}
-                style={{
-                  height: `${Math.max(8, Math.min(100, v))}%`,
-                  boxShadow: isLast ? "0 0 8px rgba(56,189,248,0.6)" : "none",
-                  minHeight: 6,
-                }}
-                aria-hidden="true"
-              />
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
+  // ---------- Schedule tab — editable triggers / cron / continuous-mode panel
+  // (issue #4924). The read-only summary that lived here previously is now
+  // owned by AgentSchedulePanel, which talks to the existing CRUD endpoints
+  // (POST/PATCH/DELETE /api/triggers and /api/cron/jobs, PATCH /api/agents/{id}
+  // for `schedule`). The synthetic "Last 14 runs" bar chart was a placeholder
+  // (no real per-fire telemetry endpoint yet) and was dropped in favour of
+  // real editing affordances — restore it once a per-agent run-history feed
+  // exists.
+  const renderScheduleTab = (agent: AgentDetail) => (
+    <AgentSchedulePanel agent={agent} />
+  );
 
   // ---------- Logs tab — terminal-style turn feed per design canvas
   // Sourced from /api/agents/{id}/events (usage_events) so each row is

@@ -381,14 +381,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for x in self.channels.xmpp.iter() {
-            if std::env::var(&x.password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!("XMPP configured but {} is not set", x.password_env));
-            }
-        }
         // Wave 3 channels
         for ln in self.channels.line.iter() {
             if std::env::var(&ln.access_token_env)
@@ -398,61 +390,6 @@ impl KernelConfig {
                 warnings.push(format!(
                     "LINE configured but {} is not set",
                     ln.access_token_env
-                ));
-            }
-        }
-        for vb in self.channels.viber.iter() {
-            if std::env::var(&vb.auth_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Viber configured but {} is not set",
-                    vb.auth_token_env
-                ));
-            }
-        }
-        for ms in self.channels.messenger.iter() {
-            if std::env::var(&ms.page_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Messenger configured but {} is not set",
-                    ms.page_token_env
-                ));
-            }
-        }
-        for rd in self.channels.reddit.iter() {
-            if std::env::var(&rd.client_secret_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Reddit configured but {} is not set",
-                    rd.client_secret_env
-                ));
-            }
-        }
-        for md in self.channels.mastodon.iter() {
-            if std::env::var(&md.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Mastodon configured but {} is not set",
-                    md.access_token_env
-                ));
-            }
-        }
-        for bs in self.channels.bluesky.iter() {
-            if std::env::var(&bs.app_password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Bluesky configured but {} is not set",
-                    bs.app_password_env
                 ));
             }
         }
@@ -467,64 +404,12 @@ impl KernelConfig {
                 ));
             }
         }
-        for rv in self.channels.revolt.iter() {
-            if std::env::var(&rv.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Revolt configured but {} is not set",
-                    rv.bot_token_env
-                ));
-            }
-        }
         // Wave 4 channels
         for nc in self.channels.nextcloud.iter() {
             if std::env::var(&nc.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Nextcloud configured but {} is not set",
                     nc.token_env
-                ));
-            }
-        }
-        for gd in self.channels.guilded.iter() {
-            if std::env::var(&gd.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Guilded configured but {} is not set",
-                    gd.bot_token_env
-                ));
-            }
-        }
-        for kb in self.channels.keybase.iter() {
-            if std::env::var(&kb.paperkey_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Keybase configured but {} is not set",
-                    kb.paperkey_env
-                ));
-            }
-        }
-        for tm in self.channels.threema.iter() {
-            if std::env::var(&tm.secret_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Threema configured but {} is not set",
-                    tm.secret_env
-                ));
-            }
-        }
-        for ns in self.channels.nostr.iter() {
-            if std::env::var(&ns.private_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Nostr configured but {} is not set",
-                    ns.private_key_env
                 ));
             }
         }
@@ -539,45 +424,7 @@ impl KernelConfig {
                 ));
             }
         }
-        for pb in self.channels.pumble.iter() {
-            if std::env::var(&pb.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Pumble configured but {} is not set",
-                    pb.bot_token_env
-                ));
-            }
-        }
-        for fl in self.channels.flock.iter() {
-            if std::env::var(&fl.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Flock configured but {} is not set",
-                    fl.bot_token_env
-                ));
-            }
-        }
-        for tw in self.channels.twist.iter() {
-            if std::env::var(&tw.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!("Twist configured but {} is not set", tw.token_env));
-            }
-        }
         // Wave 5 channels
-        for mb in self.channels.mumble.iter() {
-            if std::env::var(&mb.password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Mumble configured but {} is not set",
-                    mb.password_env
-                ));
-            }
-        }
         for dt in self.channels.dingtalk.iter() {
             use super::DingTalkReceiveMode;
             match dt.receive_mode {
@@ -614,22 +461,6 @@ impl KernelConfig {
                 }
             }
         }
-        for dc in self.channels.discourse.iter() {
-            if std::env::var(&dc.api_key_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Discourse configured but {} is not set",
-                    dc.api_key_env
-                ));
-            }
-        }
-        for gt in self.channels.gitter.iter() {
-            if std::env::var(&gt.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
-            }
-        }
         for wh in self.channels.webhook.iter() {
             if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
@@ -651,17 +482,6 @@ impl KernelConfig {
                     )),
                     Some(_) => {}
                 }
-            }
-        }
-        for li in self.channels.linkedin.iter() {
-            if std::env::var(&li.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "LinkedIn configured but {} is not set",
-                    li.access_token_env
-                ));
             }
         }
 

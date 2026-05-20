@@ -8,8 +8,8 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 - [Core Messaging](/integrations/channels/core) — Telegram, Discord, Slack, WhatsApp, WeChat, Signal, Matrix, Email, WebChat
 - [Enterprise](/integrations/channels/enterprise) — Teams, Mattermost, Google Chat, Webex, Feishu, Rocket.Chat, Zulip, Flock, Twist, Pumble, Guilded
-- [Social & Community](/integrations/channels/social) — Reddit, Mastodon, Bluesky, LinkedIn, Twitch, Discourse, Gitter, Revolt, Keybase, Nostr
-- [Integrations & Protocols](/integrations/channels/integrations) — LINE, Viber, Messenger, DingTalk, QQ, WeCom, Threema, IRC, XMPP, MQTT, Ntfy, Gotify, Nextcloud, Mumble, Webhook, Voice
+- [Social & Community](/integrations/channels/social) — Reddit, Mastodon, Bluesky, Twitch, Gitter, Revolt, Keybase
+- [Integrations & Protocols](/integrations/channels/integrations) — LINE, DingTalk, QQ, WeCom, Threema, IRC, XMPP, Ntfy, Gotify, Nextcloud, Mumble, Webhook, Voice
 - [Custom Adapters](/integrations/channels/custom) — Writing your own adapter
 
 ---
@@ -54,24 +54,14 @@ app_id_env = "TEAMS_APP_ID"
 app_secret_env = "TEAMS_APP_SECRET"
 default_agent = "ops"
 
-# Social example
-[channels.mastodon]
-token_env = "MASTODON_TOKEN"
-instance = "https://mastodon.social"
-default_agent = "social-media"
-
-# IoT/MQTT example (requires all-channels feature flag)
-[channels.mqtt]
-host = "broker.example.com"
-port = 1883
-client_id = "librefang-bot"
-subscribe_topics = ["home/agents/input", "home/agents/commands"]
-response_topic = "home/agents/output"
-qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
-# username_env = "MQTT_USERNAME"     # optional
-# password_env = "MQTT_PASSWORD"     # optional
-keep_alive_secs = 30
-default_agent = "home-assistant"
+# Social example (Mastodon — sidecar)
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
 ```
 
 ### Common Fields

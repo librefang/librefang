@@ -5223,6 +5223,29 @@
         }
       }
     },
+    "/api/credential-pools": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/credential-pools — Per-provider credential pool snapshot.",
+        "description": "Returns an array of provider pools (sorted by provider name) with their\nstrategy, available/total key counts, and per-credential redacted\nsnapshots. The raw API key is never serialized — only a `key_hint`\n(last 4 chars prefixed by `****`) and per-key telemetry are included.\n\nEach credential entry has the shape:\n```json\n{\n  \"label\": \"Primary\",\n  \"key_hint\": \"****abcd\",\n  \"priority\": 10,\n  \"request_count\": 42,\n  \"is_exhausted\": false,\n  \"cooldown_remaining_secs\": null\n}\n```\n`cooldown_remaining_secs` is `null` while available, a non-negative\ninteger (seconds) while in a 429/402/5xx cooldown, or the literal\nstring `\"permanent\"` for keys marked permanently invalid by an auth\nfailure (the kernel encodes this as the `u64::MAX` sentinel\ninternally; this endpoint converts it to `\"permanent\"` so SDK\nconsumers do not encounter a `2^64 - 1` magic number).\n\nLabels are carried with each materialized credential, so partial\nenv-var resolution (a configured pool entry whose env var is unset at\nboot time) never shifts a label onto the wrong key/cooldown row.\n\nIssue #4965: backs the dashboard Providers page credential-pools card\nand the `librefang auth pool list` CLI command.",
+        "operationId": "list_credential_pools",
+        "responses": {
+          "200": {
+            "description": "Per-provider credential pool snapshots. Each entry has `provider`, `strategy` (snake_case: fill_first / round_robin / random / least_used), `available_count`, `total_count`, and `credentials[]` with fields `label`, `key_hint` (last 4 chars prefixed by `****`), `priority`, `request_count`, `is_exhausted`, and `cooldown_remaining_secs` (null | non-negative integer seconds | literal string \"permanent\").",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cron/jobs": {
       "get": {
         "tags": [
