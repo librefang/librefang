@@ -242,9 +242,15 @@ impl LibreFangKernel {
         // — anything readable to a local UID is a credential leak on
         // shared hosts. `run_migrations` runs inside
         // `open_with_pool_size` before we get here, so librefang.db
-        // (+ -wal + -shm) exist and are safe to chmod by now. The
-        // same files back `PromptStore::new_with_path` below, so one
-        // chmod covers both pools. (audit: sqlite-file-permissions)
+        // is safe to chmod by now; the WAL/SHM/-journal siblings may
+        // or may not exist at this moment (clean shutdown deletes
+        // -wal/-shm; -journal only appears in non-WAL mode or during
+        // VACUUM / wal_checkpoint(TRUNCATE)), and any sibling that's
+        // (re)created later in the process lifetime inherits the
+        // umask — this hardening is a one-shot at boot, not a steady
+        // state. The same files back `PromptStore::new_with_path`
+        // below, so one chmod covers both pools.
+        // (audit: sqlite-file-permissions)
         harden_sqlite_files(&db_path);
 
         // Optionally attach an external vector store backend.
@@ -2482,14 +2488,39 @@ system_prompt = "You are a helpful assistant."
 /// The provider prefix is honoured **only when the LHS is a registered
 /// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
 /// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
-/// Restrict the SQLite primary file and its `-wal` / `-shm` siblings
-/// to `0o600` (Unix). No-op on non-Unix platforms.
+/// but where `google` is not a separate registered provider — the model id
+/// belongs to the OpenRouter provider verbatim).
 ///
-/// Tolerates `NotFound` silently (the WAL / SHM sibling files may not
-/// exist yet if no write has flushed them by the time this is called)
-/// and logs but does not fail on other errors — the operator can fix
-/// permissions out of band and refusing to boot would be worse than
-/// running with a logged warning.
+/// Returns `(default_provider, spec)` for bare model names so the caller
+/// can route to the kernel's existing `default_driver` without further
+/// branching.
+fn resolve_extraction_model_target(
+    spec: &str,
+    default_provider: &str,
+    is_known_provider: impl Fn(&str) -> bool,
+) -> (String, String) {
+    if let Some((provider, model)) = spec.split_once(':') {
+        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
+            return (provider.to_string(), model.to_string());
+        }
+    }
+    if let Some((provider, model)) = spec.split_once('/') {
+        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
+            return (provider.to_string(), model.to_string());
+        }
+    }
+    (default_provider.to_string(), spec.to_string())
+}
+
+/// Restrict the SQLite primary file and its `-wal` / `-shm` / `-journal`
+/// siblings to `0o600` (Unix). No-op on non-Unix platforms.
+///
+/// Tolerates `NotFound` silently (the WAL / SHM / rollback-journal sibling
+/// files may not exist yet if no write has flushed them by the time this is
+/// called, and `-journal` only appears in non-WAL modes or during VACUUM /
+/// `wal_checkpoint(TRUNCATE)`) and logs but does not fail on other errors —
+/// the operator can fix permissions out of band and refusing to boot would
+/// be worse than running with a logged warning.
 ///
 /// Extracted from `Kernel::open` so it is exercised independently in
 /// the `sqlite_permissions_hardening` tests below. (audit:
@@ -2497,7 +2528,7 @@ system_prompt = "You are a helpful assistant."
 #[cfg(unix)]
 fn harden_sqlite_files(db_path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut p = db_path.to_path_buf();
         if !suffix.is_empty() {
             let stem = p.file_name().map(|n| n.to_owned()).unwrap_or_default();
@@ -2522,30 +2553,6 @@ fn harden_sqlite_files(db_path: &Path) {
 
 #[cfg(not(unix))]
 fn harden_sqlite_files(_db_path: &Path) {}
-
-/// but where `google` is not a separate registered provider — the model id
-/// belongs to the OpenRouter provider verbatim).
-///
-/// Returns `(default_provider, spec)` for bare model names so the caller
-/// can route to the kernel's existing `default_driver` without further
-/// branching.
-fn resolve_extraction_model_target(
-    spec: &str,
-    default_provider: &str,
-    is_known_provider: impl Fn(&str) -> bool,
-) -> (String, String) {
-    if let Some((provider, model)) = spec.split_once(':') {
-        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
-            return (provider.to_string(), model.to_string());
-        }
-    }
-    if let Some((provider, model)) = spec.split_once('/') {
-        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
-            return (provider.to_string(), model.to_string());
-        }
-    }
-    (default_provider.to_string(), spec.to_string())
-}
 
 /// Build a fresh LLM driver for an explicit `[proactive_memory]
 /// extraction_model` provider that differs from the kernel's default
@@ -2700,15 +2707,16 @@ mod extraction_model_tests {
 #[cfg(all(test, unix))]
 mod sqlite_permissions_hardening {
     //! Regression guards for the `sqlite-file-permissions` audit item.
-    //! `librefang.db` (+ `-wal` + `-shm`) carry session history,
-    //! `kv_store` agent state, audit entries, OAuth nonces, TOTP used
-    //! codes, and `paired_devices.api_key_hash` — any local UID
-    //! reading these is a credential / replay leak on shared hosts.
-    //! `harden_sqlite_files` is invoked from `Kernel::open` after
-    //! `MemorySubstrate::open_with_pool_size`; these tests pin the
-    //! contract that it (a) chmods every file it finds to exactly
-    //! `0600`, (b) tolerates `NotFound` so a missing `-wal` / `-shm`
-    //! does not derail boot, and (c) leaves unrelated files alone.
+    //! `librefang.db` (+ `-wal` + `-shm` + `-journal`) carry session
+    //! history, `kv_store` agent state, audit entries, OAuth nonces,
+    //! TOTP used codes, and `paired_devices.api_key_hash` — any local
+    //! UID reading these is a credential / replay leak on shared
+    //! hosts. `harden_sqlite_files` is invoked from `Kernel::open`
+    //! after `MemorySubstrate::open_with_pool_size`; these tests pin
+    //! the contract that it (a) chmods every sibling it finds to
+    //! exactly `0600`, (b) tolerates `NotFound` so a missing `-wal` /
+    //! `-shm` / `-journal` does not derail boot, and (c) leaves
+    //! unrelated files alone.
 
     use super::harden_sqlite_files;
     use std::os::unix::fs::PermissionsExt;
@@ -2718,10 +2726,10 @@ mod sqlite_permissions_hardening {
     }
 
     #[test]
-    fn chmods_all_three_sqlite_files_to_0600_when_all_exist() {
+    fn chmods_all_sqlite_sibling_files_to_0600_when_all_exist() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("librefang.db");
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut p = db.clone();
             if !suffix.is_empty() {
                 let mut name = p.file_name().unwrap().to_owned();
@@ -2738,16 +2746,13 @@ mod sqlite_permissions_hardening {
         harden_sqlite_files(&db);
 
         assert_eq!(mode(&db), 0o600, "primary .db must be 0600");
-        let wal = db.with_file_name(format!(
-            "{}-wal",
-            db.file_name().unwrap().to_string_lossy()
-        ));
-        let shm = db.with_file_name(format!(
-            "{}-shm",
-            db.file_name().unwrap().to_string_lossy()
-        ));
-        assert_eq!(mode(&wal), 0o600, "-wal must be 0600");
-        assert_eq!(mode(&shm), 0o600, "-shm must be 0600");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let p = db.with_file_name(format!(
+                "{}{suffix}",
+                db.file_name().unwrap().to_string_lossy()
+            ));
+            assert_eq!(mode(&p), 0o600, "{suffix} sibling must be 0600");
+        }
     }
 
     #[test]
@@ -2784,7 +2789,7 @@ mod sqlite_permissions_hardening {
         assert_eq!(
             mode(&unrelated),
             0o644,
-            "harden_sqlite_files must only touch <name> / <name>-wal / <name>-shm",
+            "harden_sqlite_files must only touch <name> / <name>-wal / <name>-shm / <name>-journal",
         );
     }
 }
