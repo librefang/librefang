@@ -257,7 +257,16 @@ def parse_slack_event(
 
     is_group = not channel.startswith("D")
     thread_ts = msg_data.get("thread_ts") or event.get("thread_ts")
-    thread_id = thread_ts if isinstance(thread_ts, str) else None
+    # Fall back to the message's own ts when it is not already inside a
+    # thread. Two reasons: (1) a reply to a top-level message then threads
+    # under it (Slack's default bot UX — the `force_flat_replies` knob
+    # opts out), mirroring rocketchat / nextcloud's `thread_id = parent or
+    # own_id`; (2) on_send round-trips this id to finalize the :eyes:
+    # reaction on the exact triggering message, which is tracked by its own
+    # ts. Without the fallback, top-level messages carried `thread_id =
+    # None` and reaction finalization fell back to "first pending in the
+    # channel", flipping the wrong message under concurrency.
+    thread_id = thread_ts if isinstance(thread_ts, str) else ts
 
     metadata: dict[str, Any] = {
         # SENDER_USER_ID_KEY in the Rust adapter — preserves the
@@ -1076,13 +1085,14 @@ class SlackAdapter(SidecarAdapter):
         if not channel_id:
             log.warn("slack on_send: empty channel_id, dropping")
             return
-        # Decide thread context: cmd.thread_id wins; force-flat-replies
-        # mode forces the message to a top-level post (mirrors the
-        # Rust adapter's force_flat_replies knob).
-        thread_ts = (
-            None if self.force_flat_replies
-            else getattr(cmd, "thread_id", None)
-        )
+        # The inbound thread id (post-#5302 this is the message's own ts
+        # for a top-level message, or the thread root for an in-thread
+        # reply). Used as the reaction-finalization key below.
+        inbound_thread_id = getattr(cmd, "thread_id", None)
+        # Decide thread context for *posting*: force-flat-replies mode
+        # forces the reply to a top-level post (mirrors the Rust adapter's
+        # force_flat_replies knob); otherwise reply in the inbound thread.
+        thread_ts = None if self.force_flat_replies else inbound_thread_id
 
         content = cmd.content
         text = cmd.text or ""
@@ -1120,11 +1130,17 @@ class SlackAdapter(SidecarAdapter):
 
         # Flip eyes → white_check_mark for the message that triggered
         # this reply. The Rust adapter does this synchronously on the
-        # send path; we mirror it.
+        # send path; we mirror it. Finalization MUST use the inbound
+        # thread id (not the posting `thread_ts`, which is forced to None
+        # in force-flat mode) so it targets the message that actually got
+        # the :eyes: instead of falling back to "first pending in channel"
+        # and flipping the wrong message under concurrency.
         if self.reactions_enabled:
             await loop.run_in_executor(
                 None,
-                lambda: self._finalize_pending_reaction(channel_id, thread_ts),
+                lambda: self._finalize_pending_reaction(
+                    channel_id, inbound_thread_id,
+                ),
             )
 
 

@@ -389,6 +389,19 @@ def test_parse_event_thread_ts_captured():
     assert ev["params"]["thread_id"] == "1699000000.000001"
 
 
+def test_parse_event_top_level_thread_id_falls_back_to_ts():
+    # #5302: a top-level message (no thread_ts) surfaces its own ts as
+    # thread_id, so the reply threads under it (force_flat_replies opts
+    # out) and on_send can finalize the :eyes: on the exact triggering
+    # message — which is tracked by its own ts.
+    ev = sa.parse_slack_event(
+        _evt(ts="1700000000.000777"),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+    )
+    assert ev["params"]["thread_id"] == "1700000000.000777"
+    assert ev["params"]["message_id"] == "1700000000.000777"
+
+
 def test_parse_event_account_id_injected():
     ev = sa.parse_slack_event(
         _evt(),
@@ -898,6 +911,47 @@ async def test_on_send_force_flat_replies_drops_thread_ts(monkeypatch):
     await a.on_send(_Cmd())
     body = json.loads(fake.calls[0]["body_raw"])
     assert "thread_ts" not in body
+
+
+@pytest.mark.asyncio
+async def test_on_send_force_flat_finalizes_correct_message(monkeypatch):
+    # Regression (#5302): in force-flat mode the *post* drops thread_ts,
+    # but reaction finalization must still target the inbound message
+    # (cmd.thread_id) instead of falling back to "first pending in the
+    # channel" — otherwise concurrent messages flip the wrong :eyes:.
+    fake = _FakeUrlopen([
+        (200, {"ok": True}),  # chat.postMessage
+        (200, {"ok": True}),  # reactions.remove
+        (200, {"ok": True}),  # reactions.add
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_FORCE_FLAT_REPLIES="true")
+    # Two concurrent inbound messages got :eyes: in the same channel; T0
+    # is older, so the buggy fallback would have flipped it instead of T1.
+    a._track_pending_reaction("C01", "T0", "eyes")
+    a._track_pending_reaction("C01", "T1", "eyes")
+
+    class _Cmd:
+        channel_id = "C01"
+        text = "hi"
+        content = {"Text": "hi"}
+        thread_id = "T1"
+        user = {}
+
+    await a.on_send(_Cmd())
+    # The post is flat (force_flat dropped thread_ts)...
+    post_body = json.loads(fake.calls[0]["body_raw"])
+    assert "thread_ts" not in post_body
+    # ...but finalization targets T1, not the older T0.
+    assert fake.calls[1]["url"].endswith("/reactions.remove")
+    assert fake.calls[2]["url"].endswith("/reactions.add")
+    assert json.loads(fake.calls[1]["body_raw"])["timestamp"] == "T1"
+    add_body = json.loads(fake.calls[2]["body_raw"])
+    assert add_body["timestamp"] == "T1"
+    assert add_body["name"] == "white_check_mark"
+    # T1 finalized & removed; T0 stays pending (it was a different message).
+    assert ("C01", "T1") not in a._pending_reactions
+    assert ("C01", "T0") in a._pending_reactions
 
 
 @pytest.mark.asyncio
