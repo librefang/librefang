@@ -63,13 +63,24 @@
 //! ## Dedup window
 //!
 //! The dispatcher dedupes by `(agent_id, peer, reset_bucket_5min)` via a
-//! small process-local LRU ([`OWNER_NOTIFY_DEDUP`], capacity 64). Bucketing
-//! to 5-minute slots means the rapid retry storm a single rate-limit
-//! incident triggers (multiple turns from the same peer landing on the
-//! same exhausted quota window) produces exactly one chat notification.
-//! The bucket key uses the *reset* timestamp, not the current time, so
-//! a notify-on-retry within the same window is suppressed even when the
-//! retries straddle a wall-clock 5-minute boundary.
+//! small **per-process** LRU ([`OWNER_NOTIFY_DEDUP`], capacity 64).
+//! Bucketing to 5-minute slots means the rapid retry storm a single
+//! rate-limit incident triggers (multiple turns from the same peer landing
+//! on the same exhausted quota window) produces exactly one chat
+//! notification per daemon process. The bucket key uses the *reset*
+//! timestamp, not the current time, so a notify-on-retry within the same
+//! window is suppressed even when the retries straddle a wall-clock
+//! 5-minute boundary.
+//!
+//! The LRU is **not persisted across daemon restarts** (houko #5311
+//! finding 3): a config reload, `librefang start`, OOM-kill, or normal
+//! redeploy inside an open 5-hour OAuth-Max window wipes the bucket and
+//! the next incident from the same peer will notify again. Persisting to
+//! `~/.librefang/state/` was considered and rejected — the dedup window
+//! is short, the cross-process collision rate is low (daemon restarts
+//! are rare relative to the retry storms inside one process), and the
+//! marginal value of suppressing a second ping after an explicit restart
+//! does not justify a disk-backed cache here.
 
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -103,11 +114,15 @@ const DEDUP_CAPACITY: usize = 64;
 /// the same hour even though it's a genuinely new event.
 const DEDUP_BUCKET_SECS: i64 = 300;
 
-/// Process-local dedup LRU. Stored as `OnceLock<Mutex<VecDeque<...>>>` so
+/// Per-process dedup LRU. Stored as `OnceLock<Mutex<VecDeque<...>>>` so
 /// the module is lazy-initialised on first use and the test suite can
 /// run independent assertions in serial. The VecDeque is small enough
 /// (≤ [`DEDUP_CAPACITY`]) that linear scan is faster than a hashmap;
 /// optimising further isn't worth the complexity.
+///
+/// **Not persisted.** A daemon restart wipes the bucket — see the
+/// module-level "Dedup window" docs for the design rationale (houko
+/// #5311 finding 3).
 static OWNER_NOTIFY_DEDUP: OnceLock<Mutex<VecDeque<DedupKey>>> = OnceLock::new();
 
 /// Single-shot warn-once gate for unparseable timezones.
@@ -153,6 +168,10 @@ pub fn should_dispatch(agent_id: &str, peer: &str, reset_at_unix: i64) -> bool {
 /// to force a re-notify (the kernel does NOT call this on hot-reload —
 /// once we've told the owner about a reset, we don't want to spam them
 /// again when their config edit causes a manifest reload).
+///
+/// Note that a process restart already clears the LRU implicitly — the
+/// store lives in `OnceLock<Mutex<VecDeque>>` with no disk backing
+/// (houko #5311 finding 3).
 pub fn reset_dedup_for_tests() {
     if let Some(store) = OWNER_NOTIFY_DEDUP.get() {
         if let Ok(mut guard) = store.lock() {
