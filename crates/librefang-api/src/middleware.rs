@@ -657,6 +657,16 @@ impl PublicRoute {
             match_kind: PublicMatch::Exact,
         }
     }
+    // Kept available (no callers after `github-copilot/oauth/` moved
+    // behind auth in audit `github-copilot-oauth-unauthenticated`) so
+    // a future PublicRoute entry needing both prefix-match AND
+    // any-method semantics doesn't have to re-derive the constructor.
+    // Removing the constant would force the next public-prefix
+    // operator to also rediscover the `PublicMethod::Any +
+    // PublicMatch::Prefix` shape — a small but easy-to-fumble bit of
+    // API design. `prefix_get` exists for the GET-only variant and is
+    // currently the only used `PublicMatch::Prefix` arm.
+    #[allow(dead_code)]
     const fn prefix_any(path: &'static str) -> Self {
         Self {
             method: PublicMethod::Any,
@@ -710,8 +720,28 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     // contract; this PR restores it (#4868 review).
     PublicRoute::exact_any("/api/version"),
     PublicRoute::exact_any("/api/versions"),
-    // GitHub Copilot OAuth — prefix, any method
-    PublicRoute::prefix_any("/api/providers/github-copilot/oauth/"),
+    // GitHub Copilot OAuth removed from the public-prefix list
+    // (audit: github-copilot-oauth-unauthenticated).
+    //
+    // Pre-fix, both `POST /api/providers/github-copilot/oauth/start`
+    // and `GET /api/providers/github-copilot/oauth/poll/{id}` were
+    // public. A hostile pop-under page in a victim's browser could
+    // POST to `http://localhost:4545/api/providers/.../oauth/start`
+    // (simple POST → no preflight, no Origin check), display the
+    // returned `user_code` + `verification_uri` from the daemon's
+    // device-flow response in attacker-controlled UI (or
+    // social-engineer the user to enter the code at
+    // `github.com/login/device`), then poll until completion. The
+    // poll handler then writes the attacker's GitHub Copilot
+    // access token into `secrets.env` and the daemon environment
+    // (`providers.rs:2220-2236`) — every subsequent outbound LLM
+    // call routes through the attacker's GitHub account, billed
+    // to them and observable by them.
+    //
+    // The dashboard already authenticates before initiating the
+    // device flow; no legitimate unauthenticated caller exists.
+    // Removing the public-prefix entry forces the standard auth
+    // gate to apply.
 ];
 
 /// Routes that are public on **GET only**, regardless of auth config.
