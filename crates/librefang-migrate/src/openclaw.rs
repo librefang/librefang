@@ -1924,36 +1924,19 @@ fn migrate_channels_from_json(
     }
 
     // --- Feishu ---
+    // Feishu migrated from in-process to a sidecar
+    // (librefang.sidecar.adapters.feishu). Surface as skipped instead of
+    // writing a [channels.feishu] block the kernel would refuse to load.
     if let Some(ref fs) = oc_channels.feishu {
         if fs.enabled.unwrap_or(true) {
-            if let Some(ref secret) = fs.app_secret {
-                emit_secret(&secrets_path, dry_run, "FEISHU_APP_SECRET", secret, report);
-            }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "app_secret_env",
-                toml::Value::String("FEISHU_APP_SECRET".into()),
-            )];
-            if let Some(ref id) = fs.app_id {
-                fields.push(("app_id", toml::Value::String(id.clone())));
-            }
-            if let Some(ref domain) = fs.domain {
-                // Map OpenClaw 'domain' to LibreFang 'region': any non-CN domain
-                // (e.g. lark.com / larksuite.com) → "intl", otherwise "cn".
-                let region = if domain.contains("lark") || domain.contains("intl") {
-                    "intl"
-                } else {
-                    "cn"
-                };
-                fields.push(("region", toml::Value::String(region.to_string())));
-            }
-            channels_table.insert(
-                "feishu".to_string(),
-                build_channel_table(fields, fs.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "feishu".to_string(),
-                destination: "config.toml [channels.feishu]".to_string(),
+                reason: "Feishu in-process adapter was migrated to a \
+                         sidecar (librefang.sidecar.adapters.feishu). \
+                         Declare a [[sidecar_channels]] entry instead — see \
+                         docs/integrations/channels/enterprise."
+                    .to_string(),
             });
         }
     }
@@ -2976,18 +2959,17 @@ fn parse_legacy_channels(
                 });
             }
             "feishu" => {
-                let fields: Vec<(&str, toml::Value)> = vec![(
-                    "app_secret_env",
-                    toml::Value::String("FEISHU_APP_SECRET".into()),
-                )];
-                channels_table.insert(
-                    "feishu".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // Feishu migrated from in-process to a sidecar;
+                // surface a warning instead of writing a [channels.feishu]
+                // block the kernel would refuse to deserialize.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "feishu".to_string(),
-                    destination: "config.toml [channels.feishu]".to_string(),
+                    reason: "Feishu in-process adapter was migrated to a \
+                             sidecar (librefang.sidecar.adapters.feishu). \
+                             Declare a [[sidecar_channels]] entry instead — see \
+                             docs/integrations/channels/enterprise."
+                        .to_string(),
                 });
             }
             "googlechat" => {
@@ -3676,14 +3658,14 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 channels in the JSON5 fixture; 9 are skipped (telegram,
-        // discord, slack, signal, matrix, irc, mattermost all migrated
-        // to sidecar adapters in v2026.5, plus imessage + bluebubbles
-        // which the migrator always skips). That leaves 4 in-process
+        // 13 channels in the JSON5 fixture; 10 are skipped (telegram,
+        // discord, slack, signal, matrix, irc, mattermost, feishu all
+        // migrated to sidecar adapters, plus imessage + bluebubbles
+        // which the migrator always skips). That leaves 3 in-process
         // imports — listed by destination-table name, since the JSON5
         // keys `googlechat` / `msteams` are aliased to `google_chat` /
-        // `teams` on write: whatsapp, feishu, google_chat, teams.
-        assert_eq!(channel_items.len(), 4);
+        // `teams` on write: whatsapp, google_chat, teams.
+        assert_eq!(channel_items.len(), 3);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3754,7 +3736,17 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "mattermost"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.feishu]"));
+        // Feishu migrated to a sidecar; the migrator records a
+        // skipped entry instead of emitting a [channels.feishu]
+        // block (same shape as the IRC / matrix removals above).
+        assert!(
+            !config_toml.contains("[channels.feishu]"),
+            "Feishu is no longer an in-process adapter; the migrator must not \
+             emit a [channels.feishu] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "feishu"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.teams]"));
         assert!(
             config_toml.contains("[channels.google_chat]"),
@@ -4873,11 +4865,11 @@ mod tests {
     #[test]
     fn test_policy_migration() {
         let target = TempDir::new().unwrap();
-        // Discord, Slack, Mattermost, Signal, and Matrix all migrated
-        // to sidecars in v2026.5 — every in-process `[channels.<x>]`
+        // Discord, Slack, Mattermost, Signal, Matrix, and Feishu all
+        // migrated to sidecars — every in-process `[channels.<x>]`
         // write for them is gone (migrator now records a SkippedItem
-        // instead). Feishu is still in-process so the policy-mapping
-        // happy path is asserted against it.
+        // instead). Google Chat is still in-process so the
+        // policy-mapping happy path is asserted against it.
         let json5_content = r#"{
   channels: {
     discord: {
@@ -4912,6 +4904,10 @@ mod tests {
       appId: "cli_feishu",
       appSecret: "feishu-secret",
       dmPolicy: "disabled"
+    },
+    googlechat: {
+      serviceAccountFile: "/etc/sa.json",
+      dmPolicy: "disabled"
     }
   }
 }"#;
@@ -4923,10 +4919,10 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Discord, Slack, Mattermost, Signal, and Matrix must NOT be
-        // written as in-process `[channels.<x>]` blocks — sidecar
-        // migration replaced them with SkippedItem entries.
-        for name in ["discord", "slack", "mattermost", "signal", "matrix"] {
+        // Discord, Slack, Mattermost, Signal, Matrix, and Feishu must
+        // NOT be written as in-process `[channels.<x>]` blocks —
+        // sidecar migration replaced them with SkippedItem entries.
+        for name in ["discord", "slack", "mattermost", "signal", "matrix", "feishu"] {
             assert!(
                 !table.contains_key(name),
                 "{name} is a sidecar channel now; migrator must not write \
@@ -4942,14 +4938,14 @@ mod tests {
             );
         }
 
-        // Feishu still has the in-process adapter — assert the policy
-        // string "disabled" maps to dm_policy = "ignore" (the
+        // Google Chat still has the in-process adapter — assert the
+        // policy string "disabled" maps to dm_policy = "ignore" (the
         // previously discord-only mapping coverage was kept alive via
-        // slack → mattermost → signal → matrix as each migrated, and
-        // now lives on feishu).
-        let fs = table["feishu"].as_table().unwrap();
-        let fs_overrides = fs["overrides"].as_table().unwrap();
-        assert_eq!(fs_overrides["dm_policy"].as_str().unwrap(), "ignore");
+        // slack → mattermost → signal → matrix → feishu as each
+        // migrated, and now lives on google_chat).
+        let gc = table["google_chat"].as_table().unwrap();
+        let gc_overrides = gc["overrides"].as_table().unwrap();
+        assert_eq!(gc_overrides["dm_policy"].as_str().unwrap(), "ignore");
     }
 
     #[test]

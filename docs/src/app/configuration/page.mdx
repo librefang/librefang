@@ -1179,21 +1179,9 @@ BLUESKY_IDENTIFIER = "mybot.bsky.social"
 
 `BLUESKY_APP_PASSWORD` (Bluesky app password) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Bluesky form.
 
-#### `[channels.feishu]`
+#### Feishu / Lark (sidecar)
 
-```toml
-[channels.feishu]
-app_id = ""
-app_secret_env = "FEISHU_APP_SECRET"
-webhook_port = 8453
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Feishu/Lark app ID. |
-| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
-| `webhook_port` | u16 | `8453` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Feishu / Lark is provided by the Python sidecar adapter (`librefang.sidecar.adapters.feishu`). The in-process `[channels.feishu]` config block was removed in the sidecar migration. Declare Feishu / Lark as a `[[sidecar_channels]]` entry instead — see [Feishu / Lark in the channels integration guide](/integrations/channels/enterprise#feishu-lark).
 
 #### Nextcloud Talk
 

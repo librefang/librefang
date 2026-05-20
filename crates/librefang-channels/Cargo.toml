@@ -22,7 +22,6 @@ default = []
 all-channels = [
     "channel-dingtalk",
     "channel-email",
-    "channel-feishu",
     "channel-google-chat",
     "channel-teams",
     "channel-webhook",
@@ -37,7 +36,6 @@ channel-webhook = []
 channel-whatsapp = []
 channel-teams = []
 channel-google-chat = ["dep:rsa"]
-channel-feishu = ["dep:aes", "dep:cbc"]
 channel-dingtalk = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]

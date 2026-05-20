@@ -251,10 +251,10 @@ use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
 use librefang_channels::whatsapp::WhatsAppAdapter;
 // Wave 3
-#[cfg(feature = "channel-feishu")]
-use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 // line migrated to a sidecar (librefang.sidecar.adapters.line); see
 // SIDECAR_CATALOG in routes/channels.rs.
+// feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // Wave 4 — webex migrated to a sidecar
 // (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
 // routes/channels.rs.
@@ -1884,8 +1884,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
             "google_chat" => find_channel_info!(google_chat),
-            // Wave 3
-            "feishu" => find_channel_info!(feishu),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
             "webhook" => find_channel_info!(webhook),
@@ -2538,7 +2536,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
@@ -2737,40 +2734,8 @@ pub async fn start_channel_bridge_with_config(
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
     // see SIDECAR_CATALOG in routes/channels.rs.
 
-    // Feishu/Lark (unified adapter)
-    #[cfg(feature = "channel-feishu")]
-    for fs_config in config.feishu.iter() {
-        let region = match fs_config.region.as_str() {
-            "intl" | "lark" => FeishuRegion::Intl,
-            _ => FeishuRegion::Cn,
-        };
-        let receive_mode = match fs_config.receive_mode.as_str() {
-            "webhook" => FeishuReceiveMode::Webhook,
-            _ => FeishuReceiveMode::Websocket,
-        };
-        let label = region.label();
-        if let Some(secret) = read_token(&fs_config.app_secret_env, label) {
-            let adapter = Arc::new(
-                FeishuAdapter::new(
-                    fs_config.app_id.clone(),
-                    secret,
-                    fs_config.webhook_port,
-                    region,
-                    receive_mode,
-                )
-                .with_account_id(fs_config.account_id.clone())
-                .with_verification(
-                    fs_config.verification_token.clone(),
-                    fs_config.encrypt_key.clone(),
-                ),
-            );
-            adapters.push((
-                adapter,
-                fs_config.default_agent.clone(),
-                fs_config.account_id.clone(),
-            ));
-        }
-    }
+    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // WeChat (personal account via iLink)
     // Only start when a bot token is available — without a token the adapter
@@ -3891,8 +3856,6 @@ mod tests {
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());
         assert!(config.channels.google_chat.is_none());
-        // Wave 3
-        assert!(config.channels.feishu.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.webhook.is_none());

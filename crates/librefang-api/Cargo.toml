@@ -97,7 +97,6 @@ channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
 channel-teams = ["librefang-channels/channel-teams"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
-channel-feishu = ["librefang-channels/channel-feishu"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
@@ -116,7 +115,6 @@ core-channels = [
 all-channels = [
     "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-feishu",
     "channel-dingtalk",
     "channel-wechat", "channel-wecom",
 ]
@@ -126,7 +124,6 @@ all-channels = [
 all-channels-no-email = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-feishu",
     "channel-dingtalk",
     "channel-wechat", "channel-wecom",
 ]

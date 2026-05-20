@@ -86,13 +86,9 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // webex migrated to a sidecar
     // (librefang.sidecar.adapters.webex); see the channels page in the
     // dashboard / SIDECAR_CATALOG in routes/channels.rs.
-    ChannelDef {
-        name: "feishu",
-        display_name: "Feishu/Lark",
-        category: "Enterprise",
-        env_vars: &["FEISHU_APP_SECRET"],
-        description: "Feishu/Lark Open Platform adapter",
-    },
+    // feishu migrated to a sidecar
+    // (librefang.sidecar.adapters.feishu); see the channels page in the
+    // dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "dingtalk",
         display_name: "DingTalk",

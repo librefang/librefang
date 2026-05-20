@@ -35,8 +35,8 @@ pub mod dingtalk;
 // (librefang.sidecar.adapters.discord); no longer an in-process channel.
 #[cfg(feature = "channel-email")]
 pub mod email;
-#[cfg(feature = "channel-feishu")]
-pub mod feishu;
+// feishu migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.feishu); no longer an in-process channel.
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
 // line migrated to an out-of-process sidecar adapter

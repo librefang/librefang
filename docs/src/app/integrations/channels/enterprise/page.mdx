@@ -172,49 +172,50 @@ The Webex sidecar (`librefang.sidecar.adapters.webex`) connects to Cisco's Mercu
 
 ## Feishu / Lark
 
+Feishu / Lark is provided by the Python sidecar adapter (`librefang.sidecar.adapters.feishu`). The in-process `[channels.feishu]` config block was removed in the sidecar migration. Declare Feishu/Lark as a `[[sidecar_channels]]` entry instead.
+
 ### Prerequisites
 
 - A Feishu (or Lark) custom app with Bot capabilities (from the [Feishu Open Platform](https://open.feishu.cn/document/))
+- `python3` on the daemon host (no third-party Python packages required — the sidecar is stdlib-only)
 
 ### Setup
 
 1. Go to the [Feishu Open Platform](https://open.feishu.cn/) and create a custom application.
 2. Enable **Bot** under the app's capabilities.
 3. Note the **App ID** and **App Secret** from the app credentials page.
-4. Configure event subscriptions to point to your LibreFang instance's webhook URL (e.g., `https://your-domain.com:4545/channels/feishu/webhook`).
-5. Set environment variables:
-
-```bash
-export FEISHU_APP_ID=your-app-id              # Environment variable
-export FEISHU_APP_SECRET=your-app-secret
-librefang vault set FEISHU_APP_ID             # Encrypted vault (recommended)
-librefang vault set FEISHU_APP_SECRET
-librefang config set-key feishu               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-6. Add to config:
+4. Add to `config.toml`:
 
 ```toml
-[channels.feishu]
-app_id_env = "FEISHU_APP_ID"
-app_secret_env = "FEISHU_APP_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "feishu"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.feishu"]
+channel_type = "feishu"
+[sidecar_channels.env]
+FEISHU_APP_ID = "cli_abc123"
+# FEISHU_REGION = "cn"                       # cn (default) or intl (Lark)
+# FEISHU_RECEIVE_MODE = "websocket"          # websocket (default) or webhook
+# FEISHU_WEBHOOK_PORT = "8453"               # webhook mode only
+# FEISHU_VERIFICATION_TOKEN = "..."          # webhook mode only
+# FEISHU_ENCRYPT_KEY = "..."                 # webhook mode only — AES-256-CBC payloads
+# FEISHU_ACCOUNT_ID = "prod"                 # optional, multi-bot routing key
 ```
 
-7. Restart the daemon.
+5. Put `FEISHU_APP_SECRET` in `~/.librefang/secrets.env` (the dashboard's Channels page writes it for you).
+6. Restart the daemon.
 
 ### How It Works
 
-The Feishu adapter receives message events via webhook callbacks on the shared API server at `/channels/feishu/webhook`. It obtains a tenant access token using the app credentials, then uses the Feishu REST API to send message replies. Event payloads are verified using the app's verification token.
+The sidecar defaults to `websocket` mode: it discovers the real `wss://` URL via `POST /callback/ws/endpoint` and opens a long-lived gateway connection (no public IP required). `webhook` mode listens on `FEISHU_WEBHOOK_PORT` and accepts both plaintext and AES-256-CBC + PKCS7 encrypted payloads (with `FEISHU_ENCRYPT_KEY` configured). Outbound replies go through `POST /open-apis/im/v1/messages` with a tenant access token cached and refreshed automatically (2-hour expiry with a 5-minute refresh buffer).
 
 ### Processing-State Reactions
 
-Feishu shows live "I'm working on it" feedback by adding a `Typing` reaction to the user's message on receive and removing it once the reply is sent. Both calls are fire-and-forget — API failures `warn!` but never block message processing. See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
+Feishu shows live "I'm working on it" feedback by adding a `Typing` reaction to the user's message on receive and removing it once the reply is sent. Both calls are fire-and-forget — API failures log a warning but never block message processing. See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
 
 ### @Mention Preservation
 
-The Feishu adapter substitutes each `@_user_N` placeholder with `@<display-name>` resolved from the mention payload (falling back to `open_id` when name is absent), and rewrites `@_all` to `@all`. Agents see the original conversational text — "@alice can you check this?" — instead of bare punctuation. See [Feishu @Mention Preservation](/integrations/channels#feishu-mention-preservation).
+The sidecar substitutes each `@_user_N` placeholder with `@<display-name>` resolved from the mention payload (falling back to `open_id` when name is absent), and rewrites `@_all` to `@all`. Agents see the original conversational text — "@alice can you check this?" — instead of bare punctuation. See [Feishu @Mention Preservation](/integrations/channels#feishu-mention-preservation).
 
 ---
 

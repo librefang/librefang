@@ -1167,21 +1167,9 @@ BLUESKY_IDENTIFIER = "mybot.bsky.social"
 
 `BLUESKY_APP_PASSWORD`（Bluesky 应用密码）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Bluesky 表单时会自动写入。
 
-#### `[channels.feishu]`
+#### 飞书 / Lark（sidecar）
 
-```toml
-[channels.feishu]
-app_id = ""
-app_secret_env = "FEISHU_APP_SECRET"
-webhook_port = 8453
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | string | `""` | 飞书/Lark 应用 ID。 |
-| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | 存放飞书应用密钥的环境变量。 |
-| `webhook_port` | u16 | `8453` | 入站 Webhook 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+飞书 / Lark 现以 Python sidecar 适配器（`librefang.sidecar.adapters.feishu`）提供。原 in-process `[channels.feishu]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明 —— 详见[频道集成指南中的飞书 / Lark 部分](/zh/integrations/channels/enterprise#feishu-lark)。
 
 #### Nextcloud Talk
 

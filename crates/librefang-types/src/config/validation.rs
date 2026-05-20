@@ -314,17 +314,8 @@ impl KernelConfig {
         // Wave 3 channels
         // line migrated to a sidecar (librefang.sidecar.adapters.line);
         // env-var presence is now validated inside the sidecar process.
-        for fs in self.channels.feishu.iter() {
-            if std::env::var(&fs.app_secret_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Feishu configured but {} is not set",
-                    fs.app_secret_env
-                ));
-            }
-        }
+        // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 4 channels
         // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
         // env-var presence is now validated inside the sidecar process.

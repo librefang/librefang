@@ -168,49 +168,50 @@ Webex sidecar（`librefang.sidecar.adapters.webex`）连接 Cisco 的 Mercury We
 
 ## 飞书 / Lark
 
+飞书 / Lark 现以 Python sidecar 适配器（`librefang.sidecar.adapters.feishu`）提供。原 in-process `[channels.feishu]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明。
+
 ### 前置条件
 
 - 具备 Bot 能力的飞书（或 Lark）自建应用（从[飞书开放平台](https://open.feishu.cn/document/)创建）
+- 守护进程主机上有 `python3`（无须第三方 Python 包——sidecar 仅依赖标准库）
 
 ### 设置步骤
 
 1. 前往[飞书开放平台](https://open.feishu.cn/)，创建自建应用。
 2. 在应用能力中启用 **机器人**。
 3. 从应用凭证页面记录 **App ID** 和 **App Secret**。
-4. 配置事件订阅，指向 LibreFang 实例的 webhook URL。
-5. 设置环境变量：
-
-```bash
-export FEISHU_APP_ID=your-app-id              # 环境变量
-export FEISHU_APP_SECRET=your-app-secret
-librefang vault set FEISHU_APP_ID             # 加密金库（推荐）
-librefang vault set FEISHU_APP_SECRET
-librefang config set-key feishu               # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-6. 添加到配置文件：
+4. 添加到 `config.toml`：
 
 ```toml
-[channels.feishu]
-app_id_env = "FEISHU_APP_ID"
-app_secret_env = "FEISHU_APP_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "feishu"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.feishu"]
+channel_type = "feishu"
+[sidecar_channels.env]
+FEISHU_APP_ID = "cli_abc123"
+# FEISHU_REGION = "cn"                       # cn（默认）或 intl（Lark）
+# FEISHU_RECEIVE_MODE = "websocket"          # websocket（默认）或 webhook
+# FEISHU_WEBHOOK_PORT = "8453"               # 仅 webhook 模式
+# FEISHU_VERIFICATION_TOKEN = "..."          # 仅 webhook 模式
+# FEISHU_ENCRYPT_KEY = "..."                 # 仅 webhook 模式——AES-256-CBC 加密载荷
+# FEISHU_ACCOUNT_ID = "prod"                 # 可选，多 bot 路由标识
 ```
 
-7. 重启守护进程。
+5. 把 `FEISHU_APP_SECRET` 放到 `~/.librefang/secrets.env`（在仪表盘 Channels 页填写飞书表单时会自动写入）。
+6. 重启守护进程。
 
 ### 工作原理
 
-飞书适配器使用开放平台 webhook 协议接收消息事件。它使用应用凭证获取 tenant access token，然后通过飞书 REST API 发送消息回复。事件负载通过应用的验证令牌进行校验。
+sidecar 默认 `websocket` 模式：通过 `POST /callback/ws/endpoint` 获取真实的 `wss://` URL，并打开长连接到事件网关（无需公网 IP）。`webhook` 模式监听 `FEISHU_WEBHOOK_PORT`，配置 `FEISHU_ENCRYPT_KEY` 时支持 AES-256-CBC + PKCS7 加密载荷。外发回复通过 `POST /open-apis/im/v1/messages` 发送，tenant access token 自动缓存并刷新（2 小时有效，提前 5 分钟刷新）。
 
 ### 处理状态反应（Reactions）
 
-飞书通过给用户消息加 `Typing` reaction 显示"我在处理"反馈,回复发出后再移除。两个调用都是 fire-and-forget —— API 失败 `warn!` 但永远不阻塞消息处理。详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。
+飞书通过给用户消息加 `Typing` reaction 显示"我在处理"反馈,回复发出后再移除。两个调用都是 fire-and-forget —— API 失败仅记录 warning，永远不阻塞消息处理。详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。
 
 ### @ 提及保留
 
-飞书适配器把每个 `@_user_N` 占位符替换成 `@<display-name>`(从 mention payload 解析,name 缺省时退回 `open_id`),把 `@_all` 改写成 `@all`。Agent 看到的是原本的对话语气 ——"@alice 你看下这个" —— 而不是光秃秃的标点。详见 [Feishu @Mention Preservation](/zh/integrations/channels#feishu-mention-preservation)。
+sidecar 把每个 `@_user_N` 占位符替换成 `@<display-name>`（从 mention payload 解析,name 缺省时退回 `open_id`），把 `@_all` 改写成 `@all`。Agent 看到的是原本的对话语气 ——"@alice 你看下这个" —— 而不是光秃秃的标点。详见 [Feishu @Mention Preservation](/zh/integrations/channels#feishu-mention-preservation)。
 
 ---
 

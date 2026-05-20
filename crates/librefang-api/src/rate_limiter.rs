@@ -517,7 +517,7 @@ mod tests {
         assert!(!is_rate_limit_exempt("/mcp"));
         assert!(!is_rate_limit_exempt("/hooks/wake"));
         assert!(!is_rate_limit_exempt("/hooks/agent"));
-        assert!(!is_rate_limit_exempt("/channels/feishu/webhook"));
+        assert!(!is_rate_limit_exempt("/channels/dingtalk/webhook"));
         // Prefix discipline: the exempt list must not leak onto siblings.
         assert!(!is_rate_limit_exempt("/dashboard-login"));
         assert!(!is_rate_limit_exempt("/dashboardz"));

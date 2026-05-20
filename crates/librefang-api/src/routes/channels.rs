@@ -222,21 +222,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     },
     // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "feishu", display_name: "Feishu/Lark", icon: "FS",
-        description: "Feishu/Lark Open Platform adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your App ID and App Secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "cli_abc123", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("FEISHU_APP_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8453", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an app at open.feishu.cn", "Copy App ID and Secret", "Paste them below"],
-        config_template: "[channels.feishu]\napp_id = \"\"\napp_secret_env = \"FEISHU_APP_SECRET\"",
-    },
+    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "dingtalk", display_name: "DingTalk", icon: "DT",
         description: "DingTalk Robot API adapter (webhook or stream mode)",
@@ -320,7 +307,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "email" => config.email.is_some(),
         "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
@@ -422,7 +408,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
+        "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
         _ => None,
     }
 }
@@ -666,6 +652,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Matrix Client-Server API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.matrix"],
+    },
+    SidecarCatalogEntry {
+        name: "feishu",
+        display_name: "Feishu / Lark",
+        description: "Feishu/Lark Open Platform adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.feishu"],
     },
 ];
 
@@ -1176,10 +1169,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "feishu" => config
-            .feishu
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
             .as_ref()
@@ -1212,7 +1201,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "email" => config.email.len(),
         "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
-        "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
@@ -1244,7 +1232,6 @@ fn channel_instances_serialized(
         "email" => ser(&config.email),
         "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
-        "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),

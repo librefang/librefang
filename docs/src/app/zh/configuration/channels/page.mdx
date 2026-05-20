@@ -345,21 +345,27 @@ BLUESKY_IDENTIFIER = "mybot.bsky.social"
 
 `BLUESKY_APP_PASSWORD` 写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Bluesky 表单时会自动写入。sidecar 每 5 秒轮询 `app.bsky.notification.listNotifications`，并通过内存 LRU 缓存（容量 200）将外发回复线程化关联到原通知。
 
-#### `[channels.feishu]`
+#### 飞书 / Lark（sidecar）
 
-```toml
-[channels.feishu]
-app_id = ""
-app_secret_env = "FEISHU_APP_SECRET"
-# webhook_port = 8453  # 已弃用：Webhook 现共享 API 端口
+飞书 / Lark 已迁移为进程外 sidecar 适配器；请通过 `[[sidecar_channels]]` 条目声明，而不是 `[channels.feishu]`。
+
+```bash
+[[sidecar_channels]]
+name = "feishu"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.feishu"]
+channel_type = "feishu"
+[sidecar_channels.env]
+FEISHU_APP_ID = "cli_abc123"
+# FEISHU_REGION = "cn"                       # cn（默认）或 intl（Lark）
+# FEISHU_RECEIVE_MODE = "websocket"          # websocket（默认）或 webhook
+# FEISHU_WEBHOOK_PORT = "8453"               # 仅 webhook 模式
+# FEISHU_VERIFICATION_TOKEN = "..."          # 仅 webhook 模式
+# FEISHU_ENCRYPT_KEY = "..."                 # 仅 webhook 模式（AES-256-CBC 加密载荷）
+# FEISHU_ACCOUNT_ID = "prod"                 # 可选，多 bot 路由标识
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | string | `""` | 飞书/Lark 应用 ID。 |
-| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | 存放飞书应用密钥的环境变量。 |
-| `webhook_port` | u16 | `8453` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`FEISHU_APP_SECRET` 写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写飞书表单时会自动写入。默认 `websocket` 模式与飞书事件网关建立长连接（无需公网 IP）。`webhook` 模式监听 `FEISHU_WEBHOOK_PORT`，当配置 `FEISHU_ENCRYPT_KEY` 时支持解密 AES-256-CBC + PKCS7 加密载荷。
 
 #### Nextcloud Talk
 
