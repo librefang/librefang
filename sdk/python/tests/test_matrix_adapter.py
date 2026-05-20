@@ -1174,3 +1174,32 @@ def test_capabilities_declares_full_set():
     assert "typing" in mx.MatrixAdapter.capabilities
     assert "reaction" in mx.MatrixAdapter.capabilities
     assert "streaming" in mx.MatrixAdapter.capabilities
+
+
+# ---- header_rules (authenticated media fetch) -----------------------
+
+
+def test_header_rules_emits_bearer_for_homeserver_host():
+    a = _adapter(MATRIX_HOMESERVER_URL="https://matrix.example.org")
+    # [(host, [[k, v], ...]), ...]
+    assert a.header_rules == [
+        ("matrix.example.org",
+         [["Authorization", "Bearer syt_test_token"]]),
+    ]
+
+
+def test_header_rules_strips_port_from_host():
+    # urllib.parse.urlparse().hostname drops the port.
+    a = _adapter(MATRIX_HOMESERVER_URL="https://matrix.example.org:8448")
+    assert a.header_rules[0][0] == "matrix.example.org"
+
+
+def test_header_rules_surfaces_in_ready_event():
+    a = _adapter()
+    ev = a.ready_event()
+    rules = ev["params"]["header_rules"]
+    assert len(rules) == 1
+    host, headers = rules[0]
+    assert host == "matrix.test"
+    # Each header is a 2-element list.
+    assert ["Authorization", "Bearer syt_test_token"] in headers

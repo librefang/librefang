@@ -781,6 +781,18 @@ class MatrixAdapter(SidecarAdapter):
         self._streams: dict[str, dict] = {}
         self._shutdown = threading.Event()
 
+        # Tell LibreFang to attach our Bearer token when the daemon
+        # fetches authenticated media URLs (MSC3916 endpoints —
+        # `/_matrix/client/v1/media/download/{server}/{mediaId}` —
+        # require Authorization or fail 401). Only emit auth for the
+        # exact homeserver host so a forged inbound message can't
+        # exfiltrate the token via a model-controlled URL.
+        hs_host = urllib.parse.urlparse(self.homeserver_url).hostname or ""
+        if hs_host:
+            self.header_rules = [
+                (hs_host, [["Authorization", f"Bearer {self.access_token}"]]),
+            ]
+
     # ---- HTTP plumbing ----------------------------------------------
 
     def _auth_headers(self, *, content_type: bool = False) -> dict:
