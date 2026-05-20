@@ -552,6 +552,21 @@ impl LibreFangKernel {
 /// continue to work (they hold an `ArcCredentialPool` which is not
 /// invalidated by the map-level replace). Newly created `PooledDriver`s
 /// in `resolve_driver` will look up the new pool entries.
+///
+/// Hot-reload cooldown semantics: replacing a pool entry drops all
+/// in-flight cooldown timers (429-rate-limited / 402-credit-exhausted
+/// marks) for that provider. This is by design — a hot-reload is
+/// conceptually "operator changed the key set", and assuming any
+/// remaining cooldown still applies to a key set the operator just
+/// edited is wrong (the offending key may have been removed, or the
+/// account may have been topped up). Existing `PooledDriver` clones
+/// holding the OLD `ArcCredentialPool` continue to honour their
+/// in-progress cooldowns until they next look up the pool from the
+/// `DashMap`; new requests see the fresh pool with no cooldown state.
+/// If preserving cooldowns across reloads becomes desirable, mutate
+/// pools in place via interior mutability instead of replacing the
+/// `ArcCredentialPool` (and document the implications for the
+/// rotation-state invariants the pool currently relies on).
 fn rebuild_credential_pools(
     pools: &dashmap::DashMap<String, librefang_llm_drivers::ArcCredentialPool>,
     config: &librefang_types::config::KernelConfig,
