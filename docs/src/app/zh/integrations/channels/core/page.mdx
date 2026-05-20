@@ -302,38 +302,49 @@ allowed_users = []        # 留空允许所有人；格式: "hash@im.wechat"
 
 ---
 
-## Signal
+## Signal（Sidecar）
+
+Signal 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.signal`）。
 
 ### 前置条件
 
-- 已安装 Signal CLI 并关联了一个手机号
+- 独立运行的 [`signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) 实例（推荐用官方 Docker 镜像），并完成手机号注册
+- Python 3 + `librefang` SDK（`pip install -e sdk/python`）
 
 ### 设置步骤
 
-1. 安装 [signal-cli](https://github.com/AsamK/signal-cli)。
-2. 注册或关联一个手机号。
-3. 添加到配置文件：
+1. 部署 `signal-cli-rest-api`（通常放在 HTTPS 反向代理后），并完成 Bot 手机号在 Signal 上的注册。
+2. 在 `~/.librefang/config.toml` 中声明 sidecar：
 
 ```toml
-[channels.signal]
-signal_cli_path = "/usr/local/bin/signal-cli"
-phone_number = "+1234567890"
+[[sidecar_channels]]
+name = "signal"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.signal"]
+channel_type = "signal"
 default_agent = "assistant"
+[sidecar_channels.env]
+SIGNAL_API_URL = "https://signal-cli.example.com"
+SIGNAL_NUMBER  = "+15555550100"
+# SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"   # 可选
+# SIGNAL_POLL_INTERVAL_SECS = "2"                       # 可选
+# SIGNAL_ALLOW_LOCAL = "1"                              # 仅当 API 跑在 localhost
 ```
 
+3.（可选）若 `signal-cli-rest-api` 启动时带了 `--api-key`，在 `~/.librefang/secrets.env` 加上 `SIGNAL_API_KEY=…`。
 4. 重启守护进程。
 
 ### 工作原理
 
-Signal 适配器以守护进程模式将 `signal-cli` 作为子进程启动，通过 JSON-RPC 通信。传入的消息从 signal-cli 输出流中读取并路由到配置的 Agent。
+Sidecar 每 `SIGNAL_POLL_INTERVAL_SECS`（默认 2 秒）轮询 `GET /v1/receive/{phone}`，将每条新 `dataMessage.message` 通过 stdio 推送给内核；出站用 `POST /v2/send`。SSRF 保护拒绝解析到 private / loopback / CGNAT / link-local 的 `SIGNAL_API_URL`，除非显式设置 `SIGNAL_ALLOW_LOCAL=1`。
 
 ### 默认纯文本输出
 
-Signal 默认用 `OutputFormat::PlainText`,因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。要恢复 Markdown 输出,在 agent 或 channel 上覆盖 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
+Signal 默认 `OutputFormat::PlainText`，因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。这个默认值按 sidecar 配置里的 `channel_type = "signal"` 匹配，迁移后照常生效。`[[sidecar_channels]]` 目前不暴露 `output_format` 的逐通道覆盖；如需发送 Markdown，请在 agent 这一端翻转 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
 
 ### 媒体附件
 
-Signal 适配器投递 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` content block。媒体 URL 会被下载、base64 编码,放进 `/v2/send` 的 `base64_attachments`。不支持的类型(`Poll`、`Sticker` 等)优雅降级 —— 退回纯文本或跳过 —— 而不是让整个回复失败。完整类型列表见 [Signal Media Attachments](/zh/integrations/channels#signal-media-attachments)。
+Rust 适配器原本支持把 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` 下载后 base64 化通过 `/v2/send` 的 `base64_attachments` 投递。Sidecar 当前对非文本内容统一返回 `(Unsupported content type)` 占位，后续会单独补一个 PR 把 base64 附件链路接回来。
 
 ---
 

@@ -7997,7 +7997,6 @@ fn cmd_channel_list() {
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
         ("whatsapp", "WA_ACCESS_TOKEN"),
-        ("signal", ""),
         ("matrix", "MATRIX_TOKEN"),
         ("email", "EMAIL_PASSWORD"),
     ];
@@ -8040,7 +8039,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let channel_list = [
                 ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
-                ("signal", "Signal (signal-cli)"),
                 ("matrix", "Matrix homeserver"),
             ];
 
@@ -8140,38 +8138,10 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::success(&i18n::t_args("channel-configured", &[("name", "Email")]));
             notify_daemon_restart();
         }
-        "signal" => {
-            ui::section(&i18n::t("section-setup-signal"));
-            ui::blank();
-            println!("  Signal requires signal-cli (https://github.com/AsamK/signal-cli).");
-            ui::blank();
-            println!("  1. Install signal-cli:");
-            println!("     - macOS: brew install signal-cli");
-            println!("     - Linux: download from GitHub releases");
-            println!("     - Or use the Docker image");
-            println!("  2. Register or link a phone number:");
-            println!("     signal-cli -u +1YOURPHONE register");
-            println!("     signal-cli -u +1YOURPHONE verify CODE");
-            println!("  3. Start signal-cli in JSON-RPC mode:");
-            println!("     signal-cli -u +1YOURPHONE jsonRpc --socket /tmp/signal-cli.sock");
-            ui::blank();
-
-            let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
-
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("signal", config_block);
-
-            if !phone.is_empty() {
-                match dotenv::save_env_key("SIGNAL_PHONE", &phone) {
-                    Ok(()) => ui::success(&i18n::t("channel-phone-saved")),
-                    Err(_) => println!("    export SIGNAL_PHONE={phone}"),
-                }
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Signal")]));
-            notify_daemon_restart();
-        }
+        // signal was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.signal) in v2026.5; the in-process
+        // wizard arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
         "matrix" => {
             ui::section(&i18n::t("section-setup-matrix"));
             ui::blank();

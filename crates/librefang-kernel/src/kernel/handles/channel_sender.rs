@@ -31,8 +31,6 @@ macro_rules! for_each_channel_field {
         $mac!(feishu, "feishu");
         $mac!(google_chat, "google_chat");
         $mac!(matrix, "matrix");
-        $mac!(qq, "qq");
-        $mac!(signal, "signal");
         $mac!(teams, "teams");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
@@ -471,8 +469,6 @@ mod tests {
             "feishu",
             "google_chat",
             "matrix",
-            "qq",
-            "signal",
             "teams",
             "webhook",
             "wechat",

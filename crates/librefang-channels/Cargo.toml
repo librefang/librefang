@@ -25,8 +25,6 @@ all-channels = [
     "channel-feishu",
     "channel-google-chat",
     "channel-matrix",
-    "channel-qq",
-    "channel-signal",
     "channel-teams",
     "channel-webhook",
     "channel-wechat",
@@ -39,12 +37,10 @@ channel-matrix = ["dep:pulldown-cmark"]
 channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
 channel-webhook = []
 channel-whatsapp = []
-channel-signal = []
 channel-teams = []
 channel-google-chat = ["dep:rsa"]
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-dingtalk = []
-channel-qq = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]
 

@@ -242,8 +242,8 @@ use librefang_channels::google_chat::GoogleChatAdapter;
 use librefang_channels::matrix::MatrixAdapter;
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-signal")]
-use librefang_channels::signal::SignalAdapter;
+// signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+// see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
 #[cfg(feature = "channel-webhook")]
@@ -261,8 +261,8 @@ use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion}
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
-#[cfg(feature = "channel-qq")]
-use librefang_channels::qq::QqAdapter;
+// qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+// see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-wechat")]
 use librefang_channels::wechat::WeChatAdapter;
 #[cfg(feature = "channel-wecom")]
@@ -1881,7 +1881,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let (mut overrides, default_agent_name) = match channel_type {
             "whatsapp" => find_channel_info!(whatsapp),
-            "signal" => find_channel_info!(signal),
             "matrix" => find_channel_info!(matrix),
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
@@ -2537,7 +2536,6 @@ pub async fn start_channel_bridge_with_config(
     }
 
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
-    check_channel!(signal, "channel-signal", "Signal");
     check_channel!(matrix, "channel-matrix", "Matrix");
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
@@ -2546,7 +2544,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
-    check_channel!(qq, "channel-qq", "QQ");
     check_channel!(webhook, "channel-webhook", "Webhook");
 
     // Sidecar channels (always available, not feature-gated)
@@ -2598,37 +2595,8 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Signal
-    #[cfg(feature = "channel-signal")]
-    for sig_config in config.signal.iter() {
-        if !sig_config.phone_number.is_empty() {
-            match SignalAdapter::with_options(
-                sig_config.api_url.clone(),
-                sig_config.phone_number.clone(),
-                sig_config.allowed_users.clone(),
-                sig_config.api_key.clone(),
-                sig_config.allow_local,
-            ) {
-                Ok(signal_adapter) => {
-                    let adapter = Arc::new(
-                        signal_adapter
-                            .with_account_id(sig_config.account_id.clone())
-                            .with_poll_interval(sig_config.poll_interval_secs),
-                    );
-                    adapters.push((
-                        adapter,
-                        sig_config.default_agent.clone(),
-                        sig_config.account_id.clone(),
-                    ));
-                }
-                Err(e) => {
-                    warn!("Signal channel disabled: {e}");
-                }
-            }
-        } else {
-            warn!("Signal configured but phone_number is empty, skipping");
-        }
-    }
+    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Matrix
     #[cfg(feature = "channel-matrix")]
@@ -2959,25 +2927,8 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // QQ
-    #[cfg(feature = "channel-qq")]
-    for qq_config in config.qq.iter() {
-        if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
-            let adapter = Arc::new(
-                QqAdapter::new(
-                    qq_config.app_id.clone(),
-                    secret,
-                    qq_config.allowed_users.clone(),
-                )
-                .with_account_id(qq_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                qq_config.default_agent.clone(),
-                qq_config.account_id.clone(),
-            ));
-        }
-    }
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Webhook
     #[cfg(feature = "channel-webhook")]
@@ -3962,7 +3913,6 @@ mod tests {
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
         assert!(config.channels.whatsapp.is_none());
-        assert!(config.channels.signal.is_none());
         assert!(config.channels.matrix.is_none());
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());

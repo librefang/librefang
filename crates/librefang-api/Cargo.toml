@@ -96,12 +96,10 @@ channel-matrix = ["librefang-channels/channel-matrix"]
 channel-email = ["librefang-channels/channel-email"]
 channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
-channel-signal = ["librefang-channels/channel-signal"]
 channel-teams = ["librefang-channels/channel-teams"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
-channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
 
@@ -118,28 +116,28 @@ core-channels = [
 
 all-channels = [
     "channel-matrix",
-    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-feishu",
     "channel-dingtalk",
-    "channel-qq", "channel-wechat", "channel-wecom",
+    "channel-wechat", "channel-wecom",
 ]
 
 # All channels except email — used for Android targets where rustls-connector's
 # rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
 all-channels-no-email = [
     "channel-matrix",
-    "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-feishu",
     "channel-dingtalk",
-    "channel-qq", "channel-wechat", "channel-wecom",
+    "channel-wechat", "channel-wecom",
 ]
 
 # Mini: a small core set of channels
 mini = [
     "channel-matrix",
-    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
 ]
 

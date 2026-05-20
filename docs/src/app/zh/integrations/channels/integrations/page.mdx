@@ -116,42 +116,45 @@ default_agent = "assistant"
 
 ---
 
-## QQ
+## QQ（Sidecar）
+
+QQ 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.qq`）。
 
 ### 前置条件
 
-- 在 [QQ 机器人平台](https://bot.q.qq.com/wiki/) 注册的 QQ Bot
-- App ID 和令牌
+- 在 [QQ 机器人平台](https://bot.q.qq.com/wiki/) 注册的 QQ Bot，并拿到 App ID 与 App Secret。
+- Python 3 + `librefang` SDK（`pip install -e sdk/python`）。
 
 ### 设置步骤
 
-1. 前往 [QQ 机器人平台](https://bot.q.qq.com/)，注册 Bot 应用。
-2. 记录 App ID 和令牌。
-3. 设置环境变量：
+1. 在 QQ 开放平台注册 Bot，记录 `App ID` 和 `App Secret`。
+2. 把密钥写入 `~/.librefang/secrets.env`：
 
 ```bash
-export QQ_APP_ID=your-app-id                 # 环境变量
-export QQ_TOKEN=your-bot-token
-librefang vault set QQ_APP_ID                # 加密金库（推荐）
-librefang vault set QQ_TOKEN
-librefang config set-key qq                   # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+QQ_APP_SECRET=your-app-secret
 ```
 
-4. 添加到配置文件：
+3. 在 `~/.librefang/config.toml` 中声明 sidecar：
 
 ```toml
-[channels.qq]
-app_id_env = "QQ_APP_ID"
-token_env = "QQ_TOKEN"
+[[sidecar_channels]]
+name = "qq"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.qq"]
+channel_type = "qq"
 default_agent = "assistant"
+[sidecar_channels.env]
+QQ_APP_ID = "your-app-id"
+# QQ_ALLOWED_USERS = "openid-1,openid-2"   # 可选
+# QQ_ACCOUNT_ID = "prod-bot"               # 可选
+# QQ_INTENTS = "1073746435"                # 可选，覆盖 intents bitmask
 ```
 
-5. 重启守护进程。
+4. 重启守护进程。
 
 ### 工作原理
 
-QQ 适配器通过 WebSocket 连接到 QQ Bot API 接收实时消息。它使用应用凭证认证，监听已授权频道和子频道中的消息事件，并通过 QQ Bot REST API 发送响应。
+Sidecar 先调 `https://bots.qq.com/app/getAppAccessToken` 拿 access token，再通过 `GET /gateway` 发现 WebSocket 网关，然后用 HELLO → IDENTIFY → READY 流程建立持久 WS 连接并周期发心跳。入站 `MESSAGE_CREATE` / `AT_MESSAGE_CREATE` / `DIRECT_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` 事件转发给内核；出站回复走 `POST {api_base}{reply_endpoint}`，把入站 `msg_id` 作为被动回复目标。
 
 ---
 

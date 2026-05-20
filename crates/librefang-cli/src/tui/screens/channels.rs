@@ -52,13 +52,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN"],
         description: "WhatsApp Cloud API adapter",
     },
-    ChannelDef {
-        name: "signal",
-        display_name: "Signal",
-        category: "Messaging",
-        env_vars: &[],
-        description: "Signal via signal-cli REST API",
-    },
+    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     ChannelDef {
         name: "matrix",
         display_name: "Matrix",

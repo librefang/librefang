@@ -142,21 +142,26 @@ allowed_users = []
 | `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
-#### `[channels.signal]`
+#### Signal (sidecar)
+
+Signal migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.signal`). The sidecar talks to a separately-run `signal-cli-rest-api` container. An existing `[channels.signal]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.signal]
-api_url = "http://localhost:8080"
-phone_number = ""
-allowed_users = []
+[[sidecar_channels]]
+name = "signal"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.signal"]
+channel_type = "signal"
+[sidecar_channels.env]
+SIGNAL_API_URL = "https://signal-cli.example.com"
+SIGNAL_NUMBER  = "+15555550100"
+# SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"  # optional
+# SIGNAL_ACCOUNT_ID = "prod-bot"                       # optional
+# SIGNAL_POLL_INTERVAL_SECS = "2"                      # optional
+# SIGNAL_ALLOW_LOCAL = "1"                             # opt-in SSRF bypass for localhost
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `"http://localhost:8080"` | URL of the signal-cli REST API. |
-| `phone_number` | string | `""` | Registered phone number for the bot. |
-| `allowed_users` | list of strings | `[]` | Allowed phone numbers. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+The sidecar enforces the same SSRF guard as the Rust adapter — `SIGNAL_API_URL` must resolve to a public address unless `SIGNAL_ALLOW_LOCAL=1` is set. Optional `SIGNAL_API_KEY` belongs in `~/.librefang/secrets.env`.
 
 #### `[channels.matrix]`
 
@@ -507,27 +512,24 @@ listen_port = 8460
 | `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.qq]`
+#### QQ Bot (sidecar)
 
-QQ Bot channel adapter using the official QQ Bot Open Platform API.
+QQ migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.qq`). The sidecar talks to the QQ Open Platform via WebSocket (gateway) + REST (token + outbound). An existing `[channels.qq]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.qq]
-app_id = "your-app-id"
-app_secret_env = "QQ_BOT_APP_SECRET"
-allowed_users = []
-# default_agent = "assistant"
-# account_id = "my-qq-bot"
+[[sidecar_channels]]
+name = "qq"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.qq"]
+channel_type = "qq"
+[sidecar_channels.env]
+QQ_APP_ID = "your-app-id"
+# QQ_ALLOWED_USERS = "openid-1,openid-2"   # optional
+# QQ_ACCOUNT_ID = "prod-bot"               # optional
+# QQ_INTENTS = "1073746435"                # optional bitmask override
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | QQ Bot application ID registered on the QQ Open Platform. |
-| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | Env var holding the QQ Bot application secret. The actual secret is never stored in config. |
-| `allowed_users` | list of strings | `[]` | QQ user IDs allowed to interact. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+Secret via `~/.librefang/secrets.env`: `QQ_APP_SECRET` (the bot's `clientSecret` from the QQ Open Platform console).
 
 #### `[channels.wecom]`
 

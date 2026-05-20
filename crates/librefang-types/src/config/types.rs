@@ -5672,10 +5672,9 @@ fn default_channel_initial_backoff_2s() -> u64 {
     2
 }
 
-/// Default poll interval for Signal (2s).
-fn default_signal_poll_interval_secs() -> u64 {
-    2
-}
+// default_signal_poll_interval_secs removed — Signal migrated to a
+// sidecar; the polling cadence is now controlled by
+// SIGNAL_POLL_INTERVAL_SECS in [sidecar_channels.env].
 
 impl Default for KernelConfig {
     fn default() -> Self {
@@ -6379,8 +6378,8 @@ impl std::fmt::Debug for NetworkConfig {
 pub struct ChannelsConfig {
     /// WhatsApp Cloud API configuration(s).
     pub whatsapp: OneOrMany<WhatsAppConfig>,
-    /// Signal (via signal-cli) configuration(s).
-    pub signal: OneOrMany<SignalConfig>,
+    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Matrix protocol configuration(s).
     pub matrix: OneOrMany<MatrixConfig>,
     /// Email (IMAP/SMTP) configuration(s).
@@ -6402,8 +6401,8 @@ pub struct ChannelsConfig {
     // Wave 5 — Niche & differentiating channels
     /// DingTalk robot configuration(s).
     pub dingtalk: OneOrMany<DingTalkConfig>,
-    /// QQ Bot API v2 configuration(s).
-    pub qq: OneOrMany<QqConfig>,
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
     /// WeChat personal account (iLink) configuration(s).
@@ -6463,14 +6462,12 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             whatsapp: OneOrMany::default(),
-            signal: OneOrMany::default(),
             matrix: OneOrMany::default(),
             email: OneOrMany::default(),
             teams: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             feishu: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
-            qq: OneOrMany::default(),
             webhook: OneOrMany::default(),
             wechat: OneOrMany::default(),
             wecom: OneOrMany::default(),
@@ -6571,53 +6568,10 @@ impl Default for WhatsAppConfig {
     }
 }
 
-/// Signal channel adapter configuration (via signal-cli REST API).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct SignalConfig {
-    /// URL of the signal-cli REST API (e.g., "http://localhost:8080").
-    pub api_url: String,
-    /// Registered phone number.
-    pub phone_number: String,
-    /// Allowed phone numbers (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Poll interval in seconds for checking new messages (default: 2).
-    #[serde(default = "default_signal_poll_interval_secs")]
-    pub poll_interval_secs: u64,
-    /// Optional API key sent as `Authorization: Bearer <api_key>` on every request.
-    /// If absent, requests are sent without an Authorization header.
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.
-    /// Defaults to `false`; set to `true` only when signal-cli runs on localhost.
-    #[serde(default)]
-    pub allow_local: bool,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for SignalConfig {
-    fn default() -> Self {
-        Self {
-            api_url: "http://localhost:8080".to_string(),
-            phone_number: String::new(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            poll_interval_secs: default_signal_poll_interval_secs(),
-            api_key: None,
-            allow_local: false,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+// the in-process `SignalConfig` + `[channels.signal]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 /// Matrix protocol channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -7087,39 +7041,9 @@ impl Default for DingTalkConfig {
     }
 }
 
-/// QQ Bot API v2 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct QqConfig {
-    /// QQ Bot application ID.
-    pub app_id: String,
-    /// Env var name holding the app secret (NOT the secret itself).
-    pub app_secret_env: String,
-    /// QQ user IDs allowed to interact (empty = allow all).
-    #[serde(default)]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for QqConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_secret_env: "QQ_BOT_APP_SECRET".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// qq migrated to a sidecar (librefang.sidecar.adapters.qq); the
+// in-process `QqConfig` + `[channels.qq]` block were removed in this
+// migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Generic webhook channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

@@ -159,20 +159,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
         config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"",
     },
-    ChannelMeta {
-        name: "signal", display_name: "Signal", icon: "SG",
-        description: "Signal via signal-cli REST API",
-        category: "messaging", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Enter your signal-cli API URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "api_url", label: "signal-cli API URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "http://localhost:8080", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "phone_number", label: "Phone Number", field_type: FieldType::Text, env_var: None, required: true, placeholder: "+1234567890", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Install signal-cli-rest-api", "Enter the API URL and your phone number"],
-        config_template: "[channels.signal]\napi_url = \"http://localhost:8080\"\nphone_number = \"\"",
-    },
+    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "matrix", display_name: "Matrix", icon: "MX",
         description: "Matrix/Element bot via homeserver",
@@ -335,28 +323,14 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: set Callback Token and EncodingAESKey, then configure the displayed Callback URL in WeCom admin"],
         config_template: "[channels.wecom]\nbot_id = \"\"\nsecret_env = \"WECOM_BOT_SECRET\"\nmode = \"websocket\"",
     },
-    ChannelMeta {
-        name: "qq", display_name: "QQ Bot", icon: "QQ",
-        description: "QQ Bot API v2 — guild, group, and DM adapter",
-        category: "messaging", difficulty: "Medium", setup_time: "~5 min",
-        quick_setup: "Enter your App ID and set QQ_BOT_APP_SECRET env var",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "102xxxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("QQ_BOT_APP_SECRET"), required: true, placeholder: "secret", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "12345, 67890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Register a QQ Bot at q.qq.com", "Get App ID and App Secret", "Set QQ_BOT_APP_SECRET environment variable"],
-        config_template: "[channels.qq]\napp_id = \"\"\napp_secret_env = \"QQ_BOT_APP_SECRET\"",
-    },
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG below.
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
         "whatsapp" => config.whatsapp.is_some(),
-        "signal" => config.signal.is_some(),
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "teams" => config.teams.is_some(),
@@ -366,7 +340,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
-        "qq" => config.qq.is_some(),
         _ => false,
     }
 }
@@ -687,6 +660,20 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Mattermost WebSocket + REST adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.mattermost"],
+    },
+    SidecarCatalogEntry {
+        name: "signal",
+        display_name: "Signal",
+        description: "signal-cli REST API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.signal"],
+    },
+    SidecarCatalogEntry {
+        name: "qq",
+        display_name: "QQ Bot",
+        description: "QQ Bot API v2 WebSocket + REST adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.qq"],
     },
 ];
 
@@ -1185,10 +1172,6 @@ fn channel_config_values(
             .whatsapp
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "signal" => config
-            .signal
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "matrix" => config
             .matrix
             .as_ref()
@@ -1225,10 +1208,6 @@ fn channel_config_values(
             .wecom
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "qq" => config
-            .qq
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -1242,7 +1221,6 @@ fn channel_config_values(
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
         "whatsapp" => config.whatsapp.len(),
-        "signal" => config.signal.len(),
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "teams" => config.teams.len(),
@@ -1252,7 +1230,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
-        "qq" => config.qq.len(),
         _ => 0,
     }
 }
@@ -1277,7 +1254,6 @@ fn channel_instances_serialized(
     }
     match name {
         "whatsapp" => ser(&config.whatsapp),
-        "signal" => ser(&config.signal),
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "teams" => ser(&config.teams),
@@ -1287,7 +1263,6 @@ fn channel_instances_serialized(
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),
-        "qq" => ser(&config.qq),
         _ => Vec::new(),
     }
 }
