@@ -408,6 +408,26 @@ pub async fn create_event_webhook(
         return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
     }
 
+    // SSRF gate at write-time (audit: webhook-create-no-ssrf-check).
+    // Pre-fix, `create_event_webhook` only ran `url::Url::parse`;
+    // internal URLs (`http://169.254.169.254/...`,
+    // `http://localhost:6379/`, `http://10.0.0.1/`) **persisted** in
+    // `EVENT_WEBHOOKS`. The `/test` route and the daemon's normal
+    // delivery path re-validate at fire-time, but defence in depth
+    // matters: the cron equivalent
+    // (`librefang_types::scheduler::validate_webhook_url`) already
+    // rejects at write time, and a future "test without validation"
+    // / "bulk dispatch" feature would turn every stored hostile URL
+    // into a live exploit. Reject the literal-IP / hostname-resolves-
+    // to-private cases up front so the store never holds them. (DNS-
+    // rebind hardening at fire-time keeps using
+    // `validate_webhook_url_resolved` — the cheap literal check here
+    // is the additional layer, not a replacement.)
+    if let Err(reason) = crate::webhook_store::validate_webhook_url(&url) {
+        return ApiErrorResponse::bad_request(format!("{err_invalid_url}: {reason}"))
+            .into_json_tuple();
+    }
+
     let events = match req.get("events").and_then(|v| v.as_array()) {
         Some(arr) => match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => ev,
@@ -465,6 +485,14 @@ pub async fn update_event_webhook(
     if let Some(url_val) = req.get("url").and_then(|v| v.as_str()) {
         if url::Url::parse(url_val).is_err() {
             return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
+        }
+        // Mirror the create-time SSRF gate (audit:
+        // webhook-create-no-ssrf-check). Without this, an attacker
+        // who created a benign webhook could `PATCH` it to an
+        // internal URL post-creation, bypassing the gate.
+        if let Err(reason) = crate::webhook_store::validate_webhook_url(url_val) {
+            return ApiErrorResponse::bad_request(format!("{err_invalid_url}: {reason}"))
+                .into_json_tuple();
         }
         updated["url"] = serde_json::json!(url_val);
     }
