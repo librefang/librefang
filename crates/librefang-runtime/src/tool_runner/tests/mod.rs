@@ -584,6 +584,7 @@ impl SessionWriter for DispatchCapture {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
@@ -887,6 +888,7 @@ impl SessionWriter for MirrorKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
@@ -1285,6 +1287,7 @@ impl SessionWriter for ApprovalKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
@@ -1512,6 +1515,7 @@ impl SessionWriter for ForceHumanCapturingKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
