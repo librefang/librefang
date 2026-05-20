@@ -111,6 +111,11 @@ DEFAULT_POLL_INTERVAL_SECS = 3
 MIN_POLL_INTERVAL_SECS = 1
 SEND_TIMEOUT_SECS = 30
 MAX_BACKOFF_SECS = 60.0
+# Default fallback when Talk 429s without a `Retry-After` header. The
+# OCS bruteforce throttler typically sends one (delay-in-seconds form),
+# but the protocol does not require it, so we need a sane fallback.
+# 30 s matches Talk's documented default throttle window.
+RETRY_AFTER_DEFAULT_SECS = 30.0
 # How many messages per `chat/<token>?lookIntoFuture=1` poll. Matches
 # the Rust adapter's `limit=100` query param.
 CHAT_FETCH_LIMIT = 100
@@ -279,32 +284,59 @@ class NextcloudAdapter(SidecarAdapter):
         body: bytes | None = None,
         headers: dict | None = None,
         timeout: float = SEND_TIMEOUT_SECS,
-    ) -> tuple[int, dict | None, bytes]:
+    ) -> tuple[int, dict | None, bytes, dict]:
         """Issue an HTTP request and return
-        ``(status, parsed_json_or_None, raw_body)``. Captures HTTPError
-        and surfaces it via the status code so callers can branch on
-        401 / 4xx / 5xx without try/except."""
+        ``(status, parsed_json_or_None, raw_body, response_headers)``.
+        Response header keys are normalised to lowercase so callers can
+        do case-insensitive lookups (notably for ``Retry-After`` on
+        429). Captures HTTPError and surfaces it via the status code so
+        callers can branch on 401 / 4xx / 5xx without try/except
+        (response headers are still returned on HTTPError, which is
+        what makes ``Retry-After`` reachable after a 429)."""
         req = urllib.request.Request(
             url, data=body, headers=headers or {}, method=method,
         )
+        resp_headers: dict = {}
         try:
             with urllib.request.urlopen(  # noqa: S310 — configured URL
                 req, timeout=timeout,
             ) as resp:
                 status = getattr(resp, "status", 200)
                 raw = resp.read()
+                if resp.headers is not None:
+                    resp_headers = {
+                        k.lower(): v for k, v in resp.headers.items()
+                    }
         except urllib.error.HTTPError as e:
             status = e.code
             try:
                 raw = e.read()
             except Exception:  # noqa: BLE001
                 raw = b""
+            if e.headers is not None:
+                resp_headers = {k.lower(): v for k, v in e.headers.items()}
         if not raw:
-            return status, None, b""
+            return status, None, b"", resp_headers
         try:
-            return status, json.loads(raw.decode("utf-8")), raw
+            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
         except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw
+            return status, None, raw, resp_headers
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the poller for more than a minute. We don't support
+        the HTTP-date form — Talk's bruteforce throttler always sends
+        seconds for rate-limit replies."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
 
     # ---- startup: validate credentials -------------------------------
 
@@ -316,7 +348,22 @@ class NextcloudAdapter(SidecarAdapter):
         Mirrors the Rust adapter's `validate()` (nextcloud.rs:87-101);
         a non-2xx response raises so the caller backs off."""
         url = f"{self.server_url}/ocs/v2.php/cloud/user?format=json"
-        status, resp, raw = self._http(url, headers=self._auth_headers())
+        status, resp, raw, resp_hdrs = self._http(
+            url, headers=self._auth_headers(),
+        )
+        if status == 429:
+            # OCS bruteforce protection — usually triggered by a string
+            # of failed auths from the same IP. Honour Retry-After and
+            # raise; the producer loop's exponential backoff would
+            # otherwise spam more probes inside the throttling window.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "nextcloud 429 on /cloud/user "
+                "(OCS bruteforce throttling); sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            raise RuntimeError("nextcloud 429 — bruteforce throttled")
         if status != 200 or not isinstance(resp, dict):
             snippet = raw[:200].decode("utf-8", "replace")
             raise RuntimeError(
@@ -353,7 +400,7 @@ class NextcloudAdapter(SidecarAdapter):
             f"/ocs/v2.php/apps/spreed/api/v4/room?format=json"
         )
         try:
-            status, body, _raw = self._http(
+            status, body, _raw, resp_hdrs = self._http(
                 url, headers=self._auth_headers(),
             )
         except urllib.error.URLError as e:
@@ -361,6 +408,17 @@ class NextcloudAdapter(SidecarAdapter):
                 "nextcloud room list transport error",
                 error=str(e),
             )
+            return []
+        if status == 429:
+            # Same OCS bruteforce throttling can surface here. Sleeping
+            # is enough — discovery is one-shot, so we just yield no
+            # rooms and let the next producer-loop iteration retry.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "nextcloud 429 on room discovery; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
             return []
         if status != 200 or not isinstance(body, dict):
             log.warn(
@@ -525,7 +583,7 @@ class NextcloudAdapter(SidecarAdapter):
                 f"?{urllib.parse.urlencode(params)}"
             )
             try:
-                status, body, _raw = self._http(
+                status, body, _raw, resp_hdrs = self._http(
                     url, headers=self._auth_headers(),
                 )
             except urllib.error.URLError as e:
@@ -534,6 +592,19 @@ class NextcloudAdapter(SidecarAdapter):
                     room_token=room_token, error=str(e),
                 )
                 continue
+            if status == 429:
+                # OCS bruteforce protection. Honour Retry-After then
+                # raise so the producer loop sleeps before its next
+                # pass — without this the per-room loop would keep
+                # hammering the same endpoint inside the throttling
+                # window, extending the ban.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "nextcloud 429 on chat poll; sleeping then backing off",
+                    room_token=room_token, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("nextcloud 429 — rate-limited")
             if status == 401:
                 # Mirror reddit / bluesky / rocketchat: surface so the
                 # producer loop backs off and the next pass
@@ -687,9 +758,25 @@ class NextcloudAdapter(SidecarAdapter):
             headers = self._auth_headers({
                 "Content-Type": "application/x-www-form-urlencoded",
             })
-            status, _resp, raw = self._http(
+            status, _resp, raw, resp_hdrs = self._http(
                 url, method="POST", body=body, headers=headers,
             )
+            if status == 429:
+                # POST to /chat can also be throttled (Talk rate-limits
+                # chat posting separately from auth). Honour Retry-After
+                # and raise once — `suppress_error_responses=True`
+                # already prevents the raise from echoing back as a
+                # chat reply.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "nextcloud 429 on chat POST; sleeping",
+                    room_token=room_token, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError(
+                    f"nextcloud chat POST 429 — rate-limited "
+                    f"(retry-after={wait:.0f}s)"
+                )
             if status >= 300:
                 snippet = raw[:200].decode("utf-8", "replace")
                 raise RuntimeError(

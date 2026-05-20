@@ -166,6 +166,10 @@ def test_split_message_32000_cap_matches_rust():
 
 
 class _HdrShim:
+    """Mimic the parts of ``email.message.Message`` that ``_http``
+    touches — only ``.items()``. urllib's real response headers are a
+    Message; tests want a dict shape, so wrap it."""
+
     def __init__(self, hdrs: dict):
         self._hdrs = hdrs or {}
 
@@ -175,7 +179,9 @@ class _HdrShim:
 
 class _FakeUrlopen:
     """Capture urllib.request.urlopen calls and return scripted
-    responses. Script entry: ``(status, body)``."""
+    responses. Each script entry is ``(status, body)`` or
+    ``(status, body, response_headers)``; the 2-tuple form keeps
+    existing tests unchanged."""
 
     def __init__(self, script):
         self.script = list(script)
@@ -198,10 +204,14 @@ class _FakeUrlopen:
                 f"unexpected extra urlopen call to {req.full_url}"
             )
         entry = self.script.pop(0)
-        status, body = entry[0], entry[1]
+        if len(entry) == 3:
+            status, body, resp_hdrs = entry
+        else:
+            status, body = entry
+            resp_hdrs = {}
         if status >= 400:
             raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim({}),
+                req.full_url, status, "Error", _HdrShim(resp_hdrs),
                 io.BytesIO(json.dumps(body or {}).encode("utf-8")),
             )
         if body is None:
@@ -210,13 +220,14 @@ class _FakeUrlopen:
             payload = json.dumps(body).encode("utf-8")
         else:
             payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload)
+        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 class _FakeResp:
-    def __init__(self, status, body=b""):
+    def __init__(self, status, body=b"", headers=None):
         self.status = status
         self._body = body
+        self.headers = headers if headers is not None else _HdrShim({})
 
     def read(self):
         return self._body
@@ -573,6 +584,119 @@ def test_poll_once_401_raises(monkeypatch):
     a._room_watermarks["R1"] = 0
     with pytest.raises(RuntimeError, match="401"):
         a._poll_once(lambda _: None, ["R1"])
+
+
+def test_retry_after_secs_parses_header_value():
+    """``Retry-After`` (seconds form) is parsed as a float and capped
+    at ``MAX_BACKOFF_SECS`` so a misreported value can't block the
+    poller for more than a minute."""
+    assert nc.NextcloudAdapter._retry_after_secs({"retry-after": "5"}) == 5.0
+    assert nc.NextcloudAdapter._retry_after_secs({"retry-after": "0.5"}) == 1.0
+    assert (
+        nc.NextcloudAdapter._retry_after_secs({"retry-after": "9999"})
+        == nc.MAX_BACKOFF_SECS
+    )
+
+
+def test_retry_after_secs_falls_back_when_absent_or_invalid():
+    """Without a ``Retry-After`` (or with a garbled value), fall back
+    to ``RETRY_AFTER_DEFAULT_SECS`` rather than busy-looping at
+    1 second."""
+    assert (
+        nc.NextcloudAdapter._retry_after_secs({})
+        == nc.RETRY_AFTER_DEFAULT_SECS
+    )
+    assert (
+        nc.NextcloudAdapter._retry_after_secs({"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"})
+        == nc.RETRY_AFTER_DEFAULT_SECS
+    )
+
+
+def test_poll_once_429_sleeps_retry_after_then_raises(monkeypatch):
+    """OCS bruteforce throttling returns 429 with a `Retry-After`
+    header. The poll loop must sleep the indicated interval *then*
+    raise so the producer loop's outer backoff doesn't immediately
+    issue another probe inside the throttling window."""
+    a = _adapter()
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([
+        (429, {"message": "Throttled"}, {"Retry-After": "7"}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None, ["R1"])
+    assert sleeps == [7.0], (
+        "must honour Retry-After before raising — measured sleeps="
+        f"{sleeps}"
+    )
+
+
+def test_poll_once_429_without_header_uses_default(monkeypatch):
+    """Talk's bruteforce throttler usually sends ``Retry-After``, but
+    spec doesn't require it. A 429 with no header must fall back to
+    ``RETRY_AFTER_DEFAULT_SECS`` instead of looping at 1 s."""
+    a = _adapter()
+    a._room_watermarks["R1"] = 0
+    fake = _FakeUrlopen([(429, {"message": "Throttled"})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None, ["R1"])
+    assert sleeps == [nc.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_verify_credentials_429_sleeps_retry_after_then_raises(monkeypatch):
+    """OCS bruteforce throttling targets failed auth most aggressively,
+    so the credential probe is the most likely place to see 429. The
+    sidecar must honour ``Retry-After`` here too — otherwise the
+    producer loop's auth-retry backoff would compound with the
+    server-side block and extend the ban."""
+    a = _adapter()
+    fake = _FakeUrlopen([
+        (429, {"message": "Throttled"}, {"Retry-After": "3"}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._verify_credentials()
+    assert sleeps == [3.0]
+
+
+def test_list_joined_rooms_429_sleeps_then_returns_empty(monkeypatch):
+    """Room discovery is one-shot; the producer just retries on the
+    next pass, so a 429 here only needs to sleep — surfacing it as an
+    empty-list signal (same as transport error) is enough."""
+    a = _adapter()
+    fake = _FakeUrlopen([
+        (429, {"message": "Throttled"}, {"Retry-After": "4"}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
+    out = a._list_joined_rooms()
+    assert out == []
+    assert sleeps == [4.0]
+
+
+def test_post_message_429_sleeps_retry_after_then_raises(monkeypatch):
+    """Talk rate-limits chat posting separately from auth; a 429 on
+    POST /chat must honour ``Retry-After`` and raise (caller is
+    `on_send`; `suppress_error_responses=True` prevents the raise from
+    echoing back into the room)."""
+    a = _adapter()
+    fake = _FakeUrlopen([
+        (429, {"message": "Throttled"}, {"Retry-After": "6"}),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._post_message("R1", "hi", reply_to=None)
+    assert sleeps == [6.0]
 
 
 def test_poll_once_304_treated_as_no_op(monkeypatch):
