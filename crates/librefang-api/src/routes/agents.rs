@@ -3108,7 +3108,7 @@ pub async fn list_agent_sessions(
             Json(serde_json::json!({"sessions": sessions})),
         ),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),
@@ -3147,7 +3147,7 @@ pub async fn create_agent_session(
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),
@@ -3198,7 +3198,7 @@ pub async fn switch_agent_session(
             Json(serde_json::json!({"status": "ok", "message": "Session switched"})),
         ),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),
@@ -3251,7 +3251,7 @@ pub async fn export_session(
             Json(serde_json::to_value(export).unwrap_or_default()),
         ),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),
@@ -3886,7 +3886,7 @@ pub async fn set_model(
             )
         }
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),
@@ -5001,6 +5001,35 @@ fn hand_override_nullable_string(raw: Option<String>) -> Option<Option<String>> 
     })
 }
 
+/// Translate a kernel error into the right HTTP status code for the
+/// generic CRUD-style /api/agents/* error paths (audit:
+/// agent-not-found-returns-500). The handler then renders the error
+/// message body with the existing fluent key plus this status; that
+/// keeps the per-route ergonomics (translated body, hot-reload-safe)
+/// while pinning the structural mapping in ONE place so a future
+/// `LibreFangError` variant is gated by adding an arm here, not by
+/// hunting every site.
+///
+/// Variants covered today:
+/// - `AgentNotFound`      → 404 (was 500 across 5 sites)
+/// - `AgentAlreadyExists` → 409 (was 500 in `clone_agent`)
+/// - everything else      → 500 (preserves the pre-fix default)
+///
+/// The `send_message` handler at `agents.rs:1936-1951` predates this
+/// helper and adds its own arms for `QuotaExceeded → 429` and a
+/// session-mismatch substring → 400. Those are message-specific
+/// statuses worth keeping inline at that site; this helper covers
+/// the lowest-common-denominator CRUD shape.
+fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
+    use crate::error::KernelError;
+    use librefang_types::error::LibreFangError;
+    match e {
+        KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => StatusCode::NOT_FOUND,
+        KernelError::LibreFang(LibreFangError::AgentAlreadyExists(_)) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 /// Translate a kernel error from `update_hand_agent_runtime_override` or
 /// `clear_hand_agent_runtime_override` into a `(StatusCode, message)` pair.
 ///
@@ -5308,7 +5337,11 @@ pub async fn clone_agent(
         Ok(id) => id,
         Err(e) => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                // Map AgentAlreadyExists → 409 Conflict (audit:
+                // agent-not-found-returns-500). Pre-fix this branch
+                // returned 500 for every `spawn_agent_typed` error
+                // including the well-known duplicate-name case.
+                kernel_err_to_status(&e),
                 Json(
                     serde_json::json!({"error": t.t_args("api-error-agent-clone-failed", &[("error", &e.to_string())])}),
                 ),
@@ -7552,6 +7585,49 @@ mod monitoring_tests {
                 .manifest
                 .mcp_servers,
             Vec::<String>::new()
+        );
+    }
+}
+
+#[cfg(test)]
+mod kernel_err_to_status_tests {
+    //! Regression guards for the audit fix
+    //! `agent-not-found-returns-500`. The helper is the single
+    //! shared mapping table used by 5 session-route err arms +
+    //! `clone_agent`'s spawn-error arm. Pinning the table here
+    //! means adding a new `LibreFangError` variant that should
+    //! map to a non-500 status requires an arm in
+    //! `kernel_err_to_status` *and* a test here; both will be
+    //! caught by `cargo test` if missed.
+    use super::kernel_err_to_status;
+    use crate::error::KernelError;
+    use axum::http::StatusCode;
+    use librefang_types::error::LibreFangError;
+
+    #[test]
+    fn agent_not_found_maps_to_404() {
+        let err = KernelError::LibreFang(LibreFangError::AgentNotFound("agt_xyz".to_string()));
+        assert_eq!(kernel_err_to_status(&err), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn agent_already_exists_maps_to_409() {
+        let err = KernelError::LibreFang(LibreFangError::AgentAlreadyExists(
+            "dup-name".to_string(),
+        ));
+        assert_eq!(kernel_err_to_status(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn other_libre_fang_errors_default_to_500() {
+        // Sanity: the catch-all preserves the pre-fix behaviour so
+        // a transient kernel error doesn't surprise-surface as a
+        // client-error class.
+        let err =
+            KernelError::LibreFang(LibreFangError::Internal("disk full".to_string()));
+        assert_eq!(
+            kernel_err_to_status(&err),
+            StatusCode::INTERNAL_SERVER_ERROR,
         );
     }
 }
