@@ -41,8 +41,8 @@ pub mod feishu;
 pub mod google_chat;
 // line migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.line); no longer an in-process channel.
-#[cfg(feature = "channel-matrix")]
-pub mod matrix;
+// matrix migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.matrix); no longer an in-process channel.
 // mattermost migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.mattermost); no longer an in-process channel.
 // qq migrated to an out-of-process sidecar adapter

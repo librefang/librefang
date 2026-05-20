@@ -238,8 +238,8 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 use librefang_channels::email::EmailAdapter;
 #[cfg(feature = "channel-google-chat")]
 use librefang_channels::google_chat::GoogleChatAdapter;
-#[cfg(feature = "channel-matrix")]
-use librefang_channels::matrix::MatrixAdapter;
+// matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // see SIDECAR_CATALOG in routes/channels.rs.
 // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
@@ -1881,7 +1881,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let (mut overrides, default_agent_name) = match channel_type {
             "whatsapp" => find_channel_info!(whatsapp),
-            "matrix" => find_channel_info!(matrix),
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
             "google_chat" => find_channel_info!(google_chat),
@@ -2536,7 +2535,6 @@ pub async fn start_channel_bridge_with_config(
     }
 
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
-    check_channel!(matrix, "channel-matrix", "Matrix");
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
@@ -2598,31 +2596,8 @@ pub async fn start_channel_bridge_with_config(
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in routes/channels.rs.
 
-    // Matrix
-    #[cfg(feature = "channel-matrix")]
-    for mx_config in config.matrix.iter() {
-        if let Some(token) = read_token(&mx_config.access_token_env, "Matrix") {
-            let adapter = Arc::new(
-                MatrixAdapter::new(
-                    mx_config.homeserver_url.clone(),
-                    mx_config.user_id.clone(),
-                    token,
-                    mx_config.allowed_rooms.clone(),
-                    mx_config.auto_accept_invites,
-                )
-                .with_account_id(mx_config.account_id.clone())
-                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs)
-                .with_max_upload_bytes(
-                    usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
-                ),
-            );
-            adapters.push((
-                adapter,
-                mx_config.default_agent.clone(),
-                mx_config.account_id.clone(),
-            ));
-        }
-    }
+    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Email
     #[cfg(feature = "channel-email")]
@@ -3913,7 +3888,6 @@ mod tests {
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
         assert!(config.channels.whatsapp.is_none());
-        assert!(config.channels.matrix.is_none());
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());
         assert!(config.channels.google_chat.is_none());

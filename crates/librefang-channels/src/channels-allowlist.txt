@@ -24,7 +24,6 @@ dingtalk
 email
 feishu
 google_chat
-matrix
 sidecar
 teams
 webhook

@@ -1758,39 +1758,28 @@ fn migrate_channels_from_json(
     }
 
     // --- Matrix ---
+    //
+    // Matrix was removed as an in-process adapter and migrated to a
+    // sidecar (`librefang.sidecar.adapters.matrix`). The OpenClaw block
+    // can't be auto-mapped to `[[sidecar_channels]]` cleanly because
+    // the sidecar reads secrets from `~/.librefang/secrets.env` and
+    // non-secret knobs from `[sidecar_channels.env]`, both of which
+    // are out of band from this migrator's TOML output. Same shape as
+    // the signal / mattermost removals.
     if let Some(ref mx) = oc_channels.matrix {
         if mx.enabled.unwrap_or(true) {
-            if let Some(ref token) = mx.access_token {
-                emit_secret(&secrets_path, dry_run, "MATRIX_ACCESS_TOKEN", token, report);
-            }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "access_token_env",
-                toml::Value::String("MATRIX_ACCESS_TOKEN".into()),
-            )];
-            if let Some(ref hs) = mx.homeserver {
-                fields.push(("homeserver_url", toml::Value::String(hs.clone())));
-            }
-            if let Some(ref uid) = mx.user_id {
-                fields.push(("user_id", toml::Value::String(uid.clone())));
-            }
-            if let Some(arr) = allow_from_to_toml_array(mx.rooms.as_ref()) {
-                fields.push(("allowed_rooms", arr));
-            }
-            if allow_from_to_toml_array(mx.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "Matrix: OpenClaw 'allow_from' could not be auto-mapped — \
-                     MatrixConfig has no per-user allowlist, only 'allowed_rooms' (room IDs)."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "matrix".to_string(),
-                build_channel_table(fields, mx.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "Matrix in-process adapter was removed and migrated to a \
+                          sidecar (librefang.sidecar.adapters.matrix). Your OpenClaw \
+                          Matrix block was NOT migrated to config.toml — declare a \
+                          [[sidecar_channels]] entry pointing at the sidecar (see \
+                          docs/integrations/channels/messaging) or pin a pre-removal \
+                          LibreFang release."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "matrix".to_string(),
-                destination: "config.toml [channels.matrix]".to_string(),
+                reason,
             });
         }
     }
@@ -2944,20 +2933,17 @@ fn parse_legacy_channels(
                 });
             }
             "matrix" => {
-                let token_env = ch
-                    .access_token_env
-                    .clone()
-                    .unwrap_or_else(|| "MATRIX_ACCESS_TOKEN".to_string());
-                let fields: Vec<(&str, toml::Value)> =
-                    vec![("access_token_env", toml::Value::String(token_env))];
-                channels_table.insert(
-                    "matrix".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // Matrix migrated from in-process to a sidecar; surface
+                // a warning instead of writing a [channels.matrix] block
+                // the kernel would refuse to deserialize.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "matrix".to_string(),
-                    destination: "config.toml [channels.matrix]".to_string(),
+                    reason: "Matrix in-process adapter was migrated to a \
+                             sidecar (librefang.sidecar.adapters.matrix). \
+                             Declare a [[sidecar_channels]] entry instead — see \
+                             docs/integrations/channels/messaging."
+                        .to_string(),
                 });
             }
             "irc" => {
@@ -3690,15 +3676,14 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 channels in the JSON5 fixture; 8 are skipped (telegram,
-        // discord, slack, signal, irc, mattermost all migrated to
-        // sidecar adapters in v2026.5, plus imessage + bluebubbles
-        // which the migrator always skips). That leaves 5 in-process
+        // 13 channels in the JSON5 fixture; 9 are skipped (telegram,
+        // discord, slack, signal, matrix, irc, mattermost all migrated
+        // to sidecar adapters in v2026.5, plus imessage + bluebubbles
+        // which the migrator always skips). That leaves 4 in-process
         // imports — listed by destination-table name, since the JSON5
         // keys `googlechat` / `msteams` are aliased to `google_chat` /
-        // `teams` on write: whatsapp, matrix, feishu, google_chat,
-        // teams.
-        assert_eq!(channel_items.len(), 5);
+        // `teams` on write: whatsapp, feishu, google_chat, teams.
+        assert_eq!(channel_items.len(), 4);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3737,7 +3722,16 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "signal"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.matrix]"));
+        // Matrix migrated to a sidecar; the migrator records a skipped
+        // entry instead of a [channels.matrix] block.
+        assert!(
+            !config_toml.contains("[channels.matrix]"),
+            "Matrix is no longer an in-process adapter; the migrator must not \
+             emit a [channels.matrix] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "matrix"
+            && s.reason.contains("sidecar")));
         // IRC adapter was removed in v2026.5; the migrator now emits a
         // skipped entry instead of a [channels.irc] block (which the
         // kernel would refuse to deserialize).
@@ -3951,13 +3945,15 @@ mod tests {
         // exists. The migrator records the legacy `signal:` block as a
         // skipped channel — covered by
         // `test_signal_block_records_skipped_after_sidecar_migration`.
-        let mx = cfg
-            .channels
-            .matrix
-            .iter()
-            .next()
-            .expect("matrix configured");
-        assert_eq!(mx.allowed_rooms, vec!["!room:matrix.org".to_string()]);
+        // Matrix migrated to a sidecar; `cfg.channels.matrix` no longer
+        // exists. The migrator records the legacy `matrix:` block as a
+        // skipped channel.
+        assert!(
+            report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+                && s.name == "matrix"
+                && s.reason.contains("sidecar")),
+            "Matrix must surface as a skipped sidecar channel"
+        );
 
         // 6. (Discord's `dmPolicy: "allowlist"` / `groupPolicy: "open"`
         // → DmPolicy::AllowedOnly / GroupPolicy::All translation used to
@@ -4877,10 +4873,10 @@ mod tests {
     #[test]
     fn test_policy_migration() {
         let target = TempDir::new().unwrap();
-        // Discord, Slack, Mattermost, and Signal all migrated to
-        // sidecars in v2026.5 — every in-process `[channels.<x>]`
+        // Discord, Slack, Mattermost, Signal, and Matrix all migrated
+        // to sidecars in v2026.5 — every in-process `[channels.<x>]`
         // write for them is gone (migrator now records a SkippedItem
-        // instead). Matrix is still in-process so the policy-mapping
+        // instead). Feishu is still in-process so the policy-mapping
         // happy path is asserted against it.
         let json5_content = r#"{
   channels: {
@@ -4911,6 +4907,11 @@ mod tests {
       userId: "@bot:example.com",
       accessToken: "syt_matrix_token",
       dmPolicy: "disabled"
+    },
+    feishu: {
+      appId: "cli_feishu",
+      appSecret: "feishu-secret",
+      dmPolicy: "disabled"
     }
   }
 }"#;
@@ -4922,10 +4923,10 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Discord, Slack, Mattermost, and Signal must NOT be written
-        // as in-process `[channels.<x>]` blocks — sidecar migration
-        // replaced them with SkippedItem entries.
-        for name in ["discord", "slack", "mattermost", "signal"] {
+        // Discord, Slack, Mattermost, Signal, and Matrix must NOT be
+        // written as in-process `[channels.<x>]` blocks — sidecar
+        // migration replaced them with SkippedItem entries.
+        for name in ["discord", "slack", "mattermost", "signal", "matrix"] {
             assert!(
                 !table.contains_key(name),
                 "{name} is a sidecar channel now; migrator must not write \
@@ -4941,14 +4942,14 @@ mod tests {
             );
         }
 
-        // Matrix still has the in-process adapter — assert the policy
+        // Feishu still has the in-process adapter — assert the policy
         // string "disabled" maps to dm_policy = "ignore" (the
-        // previously discord-only mapping coverage was kept alive
-        // via slack → mattermost → signal as each migrated, and now
-        // lives on matrix).
-        let mx = table["matrix"].as_table().unwrap();
-        let mx_overrides = mx["overrides"].as_table().unwrap();
-        assert_eq!(mx_overrides["dm_policy"].as_str().unwrap(), "ignore");
+        // previously discord-only mapping coverage was kept alive via
+        // slack → mattermost → signal → matrix as each migrated, and
+        // now lives on feishu).
+        let fs = table["feishu"].as_table().unwrap();
+        let fs_overrides = fs["overrides"].as_table().unwrap();
+        assert_eq!(fs_overrides["dm_policy"].as_str().unwrap(), "ignore");
     }
 
     #[test]

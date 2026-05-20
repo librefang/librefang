@@ -6380,8 +6380,8 @@ pub struct ChannelsConfig {
     pub whatsapp: OneOrMany<WhatsAppConfig>,
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Matrix protocol configuration(s).
-    pub matrix: OneOrMany<MatrixConfig>,
+    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Email (IMAP/SMTP) configuration(s).
     pub email: OneOrMany<EmailConfig>,
     /// Microsoft Teams configuration(s).
@@ -6462,7 +6462,6 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             whatsapp: OneOrMany::default(),
-            matrix: OneOrMany::default(),
             email: OneOrMany::default(),
             teams: OneOrMany::default(),
             google_chat: OneOrMany::default(),
@@ -6573,54 +6572,10 @@ impl Default for WhatsAppConfig {
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Matrix protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MatrixConfig {
-    /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
-    pub homeserver_url: String,
-    /// Bot user ID (e.g., "@librefang:matrix.org").
-    pub user_id: String,
-    /// Env var name holding the access token.
-    pub access_token_env: String,
-    /// Room IDs to listen in (empty = all joined rooms).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Whether to auto-accept room invites (default: false).
-    #[serde(default)]
-    pub auto_accept_invites: bool,
-    /// Initial backoff in seconds on sync failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on sync failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for MatrixConfig {
-    fn default() -> Self {
-        Self {
-            homeserver_url: "https://matrix.org".to_string(),
-            user_id: String::new(),
-            access_token_env: "MATRIX_ACCESS_TOKEN".to_string(),
-            allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            auto_accept_invites: false,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+// the in-process `MatrixConfig` + `[channels.matrix]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 /// Email (IMAP/SMTP) channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

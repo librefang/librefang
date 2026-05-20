@@ -328,13 +328,9 @@ admin_role = "admin"
     // sidecar (librefang.sidecar.adapters.signal) and the in-process
     // SignalConfig was deleted.
 
-    #[test]
-    fn test_matrix_config_defaults() {
-        let mx = MatrixConfig::default();
-        assert_eq!(mx.homeserver_url, "https://matrix.org");
-        assert_eq!(mx.access_token_env, "MATRIX_ACCESS_TOKEN");
-        assert!(mx.allowed_rooms.is_empty());
-    }
+    // test_matrix_config_defaults removed — matrix migrated to a
+    // sidecar (librefang.sidecar.adapters.matrix) and the in-process
+    // MatrixConfig was deleted.
 
     #[test]
     fn test_email_config_defaults() {
@@ -395,16 +391,7 @@ admin_role = "admin"
         assert_eq!(back.phone_number_id, "12345");
     }
 
-    #[test]
-    fn test_matrix_config_serde() {
-        let mx = MatrixConfig {
-            user_id: "@bot:matrix.org".to_string(),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&mx).unwrap();
-        let back: MatrixConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.user_id, "@bot:matrix.org");
-    }
+    // test_matrix_config_serde removed — matrix migrated to a sidecar.
 
     #[test]
     fn test_channels_config_with_new_channels() {
