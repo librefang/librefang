@@ -1542,10 +1542,6 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = librefang_kernel::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("HTTP client build");
     let mut blocks = Vec::new();
 
     for att in attachments {
@@ -1561,6 +1557,57 @@ pub async fn resolve_url_attachments(
             tracing::debug!(url = %att.url, content_type, "Skipping non-image attachment");
             continue;
         }
+
+        // SSRF gate (audit: ssrf-attachment-urls). `POST /message`
+        // is reachable by the lowest-privilege role that can produce
+        // LLM traffic (`User` per `middleware.rs:163-178`), and
+        // before this gate the handler would happily fetch
+        // `http://169.254.169.254/...` (IMDS / EC2 metadata) or any
+        // RFC1918 / loopback / link-local address, base64-encode the
+        // response, and inject it into the agent session as an image
+        // block — the LLM then transcribes the contents back to the
+        // attacker on the next turn. Run the same DNS-resolving
+        // validator + `.resolve(host, addr)` pin that
+        // `/api/webhooks/events/{id}/test` already uses at
+        // `webhooks.rs:738-744`. On rejection we skip the attachment
+        // with a warn (matches the existing "non-image / fetch
+        // failure" skip semantics — the function never propagated
+        // per-attachment errors anyway), and the agent's message
+        // continues to send without the offending block.
+        let pinned_host =
+            match crate::webhook_store::validate_webhook_url_resolved(&att.url).await {
+                Ok(pinned) => pinned,
+                Err(reason) => {
+                    tracing::warn!(
+                        url = %att.url,
+                        error = %reason,
+                        "Attachment URL rejected by SSRF guard, skipping",
+                    );
+                    continue;
+                }
+            };
+
+        // Build a per-attachment client with the resolver pinned to
+        // the validated IP. Without `.resolve()`, reqwest does its
+        // own DNS lookup before connecting and a low-TTL record can
+        // flip between our validation and reqwest's resolve (the
+        // canonical DNS-rebind exploit #3701). Per-attachment build
+        // is unavoidable here — `ClientBuilder::resolve` is on the
+        // builder, not the client, and each URL pins a different
+        // host. Bounded by N attachments (typically 1-3) per
+        // message, so the overhead is acceptable.
+        let mut builder = librefang_kernel::http_client::proxied_client_builder()
+            .timeout(std::time::Duration::from_secs(30));
+        if let Some((ref host, addr)) = pinned_host {
+            builder = builder.resolve(host, addr);
+        }
+        let client = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(url = %att.url, error = %e, "HTTP client build failed, skipping");
+                continue;
+            }
+        };
 
         match client.get(&att.url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -7709,5 +7756,122 @@ mod kernel_err_to_status_tests {
             kernel_err_to_status(&err),
             StatusCode::INTERNAL_SERVER_ERROR,
         );
+    }
+}
+
+#[cfg(test)]
+mod ssrf_attachment_gate {
+    //! Regression guards for the `ssrf-attachment-urls` audit item —
+    //! `POST /api/agents/{id}/message` formerly fetched any
+    //! caller-supplied attachment URL, including IMDS / RFC1918 /
+    //! loopback, base64-encoded the response, and injected it as
+    //! an image block (which the LLM then summarised back to the
+    //! attacker on the next turn). `resolve_url_attachments` now
+    //! delegates to `webhook_store::validate_webhook_url_resolved`
+    //! before fetching. These tests pin the validator envelope at
+    //! the call boundary the handler relies on, without making a
+    //! real HTTP request.
+    use librefang_types::comms::Attachment;
+
+    /// End-to-end check: feeding a batch of disallowed attachment
+    /// URLs to `resolve_url_attachments` returns zero blocks (the
+    /// SSRF guard skips each one with a warn, mirroring the
+    /// existing "skip non-image" / "skip fetch failure" semantics
+    /// of the function).
+    #[tokio::test]
+    async fn rejects_loopback_link_local_and_zeronet_url_literals() {
+        let attachments = vec![
+            Attachment {
+                url: "http://127.0.0.1:1/whatever".to_string(),
+                content_type: Some("image/png".to_string()),
+                filename: None,
+                caption: None,
+            },
+            Attachment {
+                url: "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+                    .to_string(),
+                content_type: Some("image/png".to_string()),
+                filename: None,
+                caption: None,
+            },
+            Attachment {
+                url: "http://0.0.0.0/".to_string(),
+                content_type: Some("image/png".to_string()),
+                filename: None,
+                caption: None,
+            },
+            Attachment {
+                url: "http://10.0.0.1/".to_string(),
+                content_type: Some("image/png".to_string()),
+                filename: None,
+                caption: None,
+            },
+        ];
+
+        let blocks = super::resolve_url_attachments(&attachments).await;
+        assert!(
+            blocks.is_empty(),
+            "every SSRF-disallowed URL must be skipped; got {} blocks",
+            blocks.len(),
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unparseable_url() {
+        let attachments = vec![Attachment {
+            url: "not://a real://url at all".to_string(),
+            content_type: Some("image/png".to_string()),
+            filename: None,
+            caption: None,
+        }];
+        let blocks = super::resolve_url_attachments(&attachments).await;
+        assert!(blocks.is_empty(), "unparseable URL must be skipped");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_schemes() {
+        // `validate_webhook_url` rejects anything outside http/https.
+        // file://, gopher://, javascript: are all classic SSRF /
+        // smuggling vectors.
+        for url in [
+            "file:///etc/passwd",
+            "gopher://127.0.0.1/_GET%20/",
+            "javascript:alert(1)",
+        ] {
+            let attachments = vec![Attachment {
+                url: url.to_string(),
+                content_type: Some("image/png".to_string()),
+                filename: None,
+                caption: None,
+            }];
+            let blocks = super::resolve_url_attachments(&attachments).await;
+            assert!(blocks.is_empty(), "URL '{url}' must be skipped");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_image_content_type_is_skipped_before_ssrf_check() {
+        // Existing behaviour: non-image attachments are skipped early.
+        // The SSRF gate is the SECOND filter, not the first. We pin
+        // the order so a future refactor doesn't accidentally pay
+        // for DNS resolution on a `text/plain` URL.
+        let attachments = vec![Attachment {
+            url: "https://example.invalid/whatever.txt".to_string(),
+            content_type: Some("text/plain".to_string()),
+            filename: None,
+            caption: None,
+        }];
+        let blocks = super::resolve_url_attachments(&attachments).await;
+        assert!(blocks.is_empty(), "non-image attachment must be skipped");
+    }
+
+    /// Empty input is the obvious base case but worth pinning —
+    /// the handler treats an empty Vec as "no attachments" and we
+    /// don't want a refactor to start returning `None` or error
+    /// instead.
+    #[tokio::test]
+    async fn empty_input_returns_empty_output() {
+        let blocks = super::resolve_url_attachments(&[]).await;
+        assert!(blocks.is_empty());
     }
 }
