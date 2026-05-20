@@ -1268,8 +1268,27 @@ pub async fn build_router(
     let v1_routes = api_v1_routes();
 
     // Upload routes are defined separately so they can share the auth/rate-limit
-    // layers but bypass RequestBodyLimitLayer — the handler enforces its own
-    // configurable max_upload_size_bytes (default 10 MB).
+    // layers but bypass the *global* `RequestBodyLimitLayer` applied at
+    // `app.layer(...)` below — uploads have their own, larger, operator-
+    // configurable cap (`max_upload_size_bytes`, default 10 MB) which
+    // would otherwise be clamped by the global cap intended for JSON
+    // request bodies.
+    //
+    // Pre-#audit, the upload sub-router was merged into `app` BEFORE the
+    // global limit ran but had no limit of its own — `body: axum::body::Bytes`
+    // forces axum to buffer the entire request into RAM before the
+    // handler's after-the-fact `body.len() > upload_limit` check at
+    // `agents.rs:6054` runs. An authenticated user (the route sits inside
+    // the auth-required tree) could push a multi-gigabyte body and
+    // exhaust the daemon's RAM. The 10 MB cap was an after-the-fact
+    // check, not a wire-level cap.
+    //
+    // Fix per audit (upload-route-bypasses-body-limit): apply a
+    // route-local `RequestBodyLimitLayer` sized to the operator's
+    // `max_upload_size_bytes`. The handler's same-value check stays in
+    // place as defence-in-depth (and to surface a localised error
+    // message instead of the framework-default 413).
+    let upload_body_cap = kernel.config_ref().max_upload_size_bytes;
     let upload_routes = Router::new()
         .route(
             "/api/agents/{id}/upload",
@@ -1278,7 +1297,8 @@ pub async fn build_router(
         .route(
             "/api/v1/agents/{id}/upload",
             axum::routing::post(routes::agents::upload_file),
-        );
+        )
+        .layer(RequestBodyLimitLayer::new(upload_body_cap));
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
@@ -1378,8 +1398,11 @@ pub async fn build_router(
     // were merged before the security layers above and therefore covered by
     // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
     // only apply to routes registered before the layer call, so routes merged
-    // after this point (channel_routes below) are also exempt.  Upload handler
-    // enforces its own max_upload_size_bytes cap instead.
+    // after this point (channel_routes below) are also exempt.  The upload
+    // sub-router now carries its OWN `RequestBodyLimitLayer` sized to
+    // `max_upload_size_bytes` (added above), so the upload path remains
+    // wire-level capped — the global limit here is intentionally the
+    // smaller JSON-body cap and is not the upload safety net.
     let app = app.layer(RequestBodyLimitLayer::new(
         kernel.config_ref().max_request_body_bytes,
     ));
