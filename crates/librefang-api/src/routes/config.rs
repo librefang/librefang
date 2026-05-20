@@ -799,7 +799,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             };
         }
         ch!(whatsapp);
-        ch!(signal);
         ch!(matrix);
         ch!(email);
         ch!(teams);

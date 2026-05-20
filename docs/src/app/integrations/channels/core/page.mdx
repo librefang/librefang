@@ -316,30 +316,41 @@ The WeChat adapter uses Tencent's official **iLink protocol** (`ilinkai.weixin.q
 
 ---
 
-## Signal
+## Signal (sidecar)
+
+Signal migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.signal`).
 
 ### Prerequisites
 
-- Signal CLI installed and linked to a phone number
+- A running [`signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) instance (Docker image recommended), registered with a phone number.
+- Python 3 + the `librefang` SDK (`pip install -e sdk/python`).
 
 ### Setup
 
-1. Install [signal-cli](https://github.com/AsamK/signal-cli).
-2. Register or link a phone number.
-3. Add to config:
+1. Stand up `signal-cli-rest-api` (typically as a container behind an HTTPS reverse proxy) and register the bot's phone number with Signal.
+2. Declare the sidecar in `~/.librefang/config.toml`:
 
 ```toml
-[channels.signal]
-signal_cli_path = "/usr/local/bin/signal-cli"
-phone_number = "+1234567890"
+[[sidecar_channels]]
+name = "signal"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.signal"]
+channel_type = "signal"
 default_agent = "assistant"
+[sidecar_channels.env]
+SIGNAL_API_URL = "https://signal-cli.example.com"
+SIGNAL_NUMBER  = "+15555550100"
+# SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"   # optional
+# SIGNAL_POLL_INTERVAL_SECS = "2"                       # optional
+# SIGNAL_ALLOW_LOCAL = "1"                              # only if API runs on localhost
 ```
 
+3. (Optional) If `signal-cli-rest-api` was started with `--api-key`, add `SIGNAL_API_KEY=…` to `~/.librefang/secrets.env`.
 4. Restart the daemon.
 
 ### How It Works
 
-The Signal adapter spawns `signal-cli` as a subprocess in daemon mode and communicates via JSON-RPC. Incoming messages are read from the signal-cli output stream and routed to the configured agent.
+The sidecar polls `GET /v1/receive/{phone}` every `SIGNAL_POLL_INTERVAL_SECS` (default 2 s) and emits each new `dataMessage.message` to the kernel over stdio. Outbound messages use `POST /v2/send`. The SSRF guard rejects `SIGNAL_API_URL` values that resolve to private / loopback / CGNAT / link-local addresses unless `SIGNAL_ALLOW_LOCAL=1` is set explicitly.
 
 ### Plain-Text Output by Default
 
@@ -347,7 +358,7 @@ Signal defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdo
 
 ### Media Attachments
 
-The Signal adapter delivers `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks. Media URLs are downloaded and base64-encoded into `base64_attachments` on `/v2/send`. Unsupported types (`Poll`, `Sticker`, …) degrade gracefully — text-only fallback or skip — rather than fail the whole reply. See [Signal Media Attachments](/integrations/channels#signal-media-attachments) for the full type list.
+The Rust adapter delivered `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks via `base64_attachments` on `/v2/send`. The sidecar currently routes anything other than text to the standard `(Unsupported content type)` placeholder; a follow-up will re-wire base64 attachments end-to-end through the sidecar runtime.
 
 ---
 

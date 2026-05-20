@@ -324,12 +324,9 @@ admin_role = "admin"
         assert!(wa.allowed_users.is_empty());
     }
 
-    #[test]
-    fn test_signal_config_defaults() {
-        let sig = SignalConfig::default();
-        assert_eq!(sig.api_url, "http://localhost:8080");
-        assert!(sig.phone_number.is_empty());
-    }
+    // test_signal_config_defaults removed — signal migrated to a
+    // sidecar (librefang.sidecar.adapters.signal) and the in-process
+    // SignalConfig was deleted.
 
     #[test]
     fn test_matrix_config_defaults() {
@@ -414,7 +411,6 @@ admin_role = "admin"
         let config = KernelConfig {
             channels: ChannelsConfig {
                 whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                signal: OneOrMany(vec![SignalConfig::default()]),
                 matrix: OneOrMany(vec![MatrixConfig::default()]),
                 email: OneOrMany(vec![EmailConfig::default()]),
                 ..Default::default()
@@ -422,7 +418,6 @@ admin_role = "admin"
             ..Default::default()
         };
         assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.signal.is_some());
         assert!(config.channels.matrix.is_some());
         assert!(config.channels.email.is_some());
     }
@@ -1016,7 +1011,6 @@ admin_role = "admin"
         // Verify account_id field exists and defaults to None
         assert!(MatrixConfig::default().account_id.is_none());
         assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(SignalConfig::default().account_id.is_none());
         assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());

@@ -1730,30 +1730,29 @@ fn migrate_channels_from_json(
     }
 
     // --- Signal ---
+    //
+    // Signal was removed as an in-process adapter and migrated to a
+    // sidecar (`librefang.sidecar.adapters.signal`). The OpenClaw
+    // block can't be auto-mapped to `[[sidecar_channels]]` cleanly
+    // because the sidecar reads secrets from `~/.librefang/secrets.env`
+    // and non-secret knobs from `[sidecar_channels.env]`, both of which
+    // are out of band from this migrator's TOML output. Surface a
+    // skipped item with the migration path instead of silently
+    // dropping. Same shape as the mattermost / irc removals.
     if let Some(ref sig) = oc_channels.signal {
         if sig.enabled.unwrap_or(true) {
-            // Construct API URL from host+port or use http_url directly
-            let api_url = sig.http_url.clone().unwrap_or_else(|| {
-                let host = sig.http_host.as_deref().unwrap_or("localhost");
-                let port = sig.http_port.unwrap_or(8080);
-                format!("http://{host}:{port}")
-            });
-            let mut fields: Vec<(&str, toml::Value)> =
-                vec![("api_url", toml::Value::String(api_url))];
-            if let Some(ref account) = sig.account {
-                fields.push(("phone_number", toml::Value::String(account.clone())));
-            }
-            if let Some(arr) = allow_from_to_toml_array(sig.allow_from.as_ref()) {
-                fields.push(("allowed_users", arr));
-            }
-            channels_table.insert(
-                "signal".to_string(),
-                build_channel_table(fields, sig.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "Signal in-process adapter was removed and migrated to a \
+                          sidecar (librefang.sidecar.adapters.signal). Your OpenClaw \
+                          Signal block was NOT migrated to config.toml — declare a \
+                          [[sidecar_channels]] entry pointing at the sidecar (see \
+                          docs/integrations/channels/messaging) or pin a pre-removal \
+                          LibreFang release."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "signal".to_string(),
-                destination: "config.toml [channels.signal]".to_string(),
+                reason,
             });
         }
     }
@@ -2931,18 +2930,17 @@ fn parse_legacy_channels(
                 });
             }
             "signal" => {
-                let fields: Vec<(&str, toml::Value)> = vec![(
-                    "api_url",
-                    toml::Value::String("http://localhost:8080".into()),
-                )];
-                channels_table.insert(
-                    "signal".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // Signal migrated from in-process to a sidecar; surface
+                // a warning instead of writing a [channels.signal] block
+                // the kernel would refuse to deserialize.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "signal".to_string(),
-                    destination: "config.toml [channels.signal]".to_string(),
+                    reason: "Signal in-process adapter was migrated to a \
+                             sidecar (librefang.sidecar.adapters.signal). \
+                             Declare a [[sidecar_channels]] entry instead — see \
+                             docs/integrations/channels/messaging."
+                        .to_string(),
                 });
             }
             "matrix" => {
@@ -3719,7 +3717,17 @@ mod tests {
             && s.name == "slack"
             && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.whatsapp]"));
-        assert!(config_toml.contains("[channels.signal]"));
+        // Signal migrated to a sidecar; the migrator records a skipped
+        // entry instead of a [channels.signal] block (same shape as the
+        // IRC / Mattermost removals).
+        assert!(
+            !config_toml.contains("[channels.signal]"),
+            "Signal is no longer an in-process adapter; the migrator must not \
+             emit a [channels.signal] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "signal"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.matrix]"));
         // IRC adapter was removed in v2026.5; the migrator now emits a
         // skipped entry instead of a [channels.irc] block (which the
@@ -5077,7 +5085,12 @@ mod tests {
     }
 
     #[test]
-    fn test_signal_url_construction() {
+    fn test_signal_block_records_skipped_after_sidecar_migration() {
+        // Signal migrated to a sidecar; the JSON-block path now records
+        // a `report.skipped` entry instead of emitting a
+        // [channels.signal] table. Previously this test asserted the
+        // host+port → api_url construction; that logic moved into the
+        // sidecar's `_server_url_to_ws` / env config.
         let target = TempDir::new().unwrap();
         let json5_content = r#"{
   channels: {
@@ -5092,14 +5105,20 @@ mod tests {
         let mut report = MigrationReport::default();
 
         let channels = migrate_channels_from_json(&root, target.path(), false, &mut report);
-        assert!(channels.is_some());
-        let ch_table = channels.unwrap();
-        let table = ch_table.as_table().unwrap();
-        let sig = table["signal"].as_table().unwrap();
-        assert_eq!(
-            sig["api_url"].as_str().unwrap(),
-            "http://signal-api.local:9090"
+        // No more [channels.signal] in the output.
+        if let Some(ch_table) = channels {
+            let table = ch_table.as_table().unwrap();
+            assert!(
+                !table.contains_key("signal"),
+                "Signal must not appear in migrated channels table",
+            );
+        }
+        assert!(
+            report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+                && s.name == "signal"
+                && s.reason.contains("sidecar")),
+            "Signal must surface as a skipped sidecar channel: {:?}",
+            report.skipped,
         );
-        assert_eq!(sig["phone_number"].as_str().unwrap(), "+15551234567");
     }
 }

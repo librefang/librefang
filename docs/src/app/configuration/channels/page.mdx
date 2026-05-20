@@ -142,21 +142,26 @@ allowed_users = []
 | `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
-#### `[channels.signal]`
+#### Signal (sidecar)
+
+Signal migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.signal`). The sidecar talks to a separately-run `signal-cli-rest-api` container. An existing `[channels.signal]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.signal]
-api_url = "http://localhost:8080"
-phone_number = ""
-allowed_users = []
+[[sidecar_channels]]
+name = "signal"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.signal"]
+channel_type = "signal"
+[sidecar_channels.env]
+SIGNAL_API_URL = "https://signal-cli.example.com"
+SIGNAL_NUMBER  = "+15555550100"
+# SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"  # optional
+# SIGNAL_ACCOUNT_ID = "prod-bot"                       # optional
+# SIGNAL_POLL_INTERVAL_SECS = "2"                      # optional
+# SIGNAL_ALLOW_LOCAL = "1"                             # opt-in SSRF bypass for localhost
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `api_url` | string | `"http://localhost:8080"` | URL of the signal-cli REST API. |
-| `phone_number` | string | `""` | Registered phone number for the bot. |
-| `allowed_users` | list of strings | `[]` | Allowed phone numbers. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+The sidecar enforces the same SSRF guard as the Rust adapter — `SIGNAL_API_URL` must resolve to a public address unless `SIGNAL_ALLOW_LOCAL=1` is set. Optional `SIGNAL_API_KEY` belongs in `~/.librefang/secrets.env`.
 
 #### `[channels.matrix]`
 

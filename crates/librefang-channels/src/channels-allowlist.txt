@@ -27,7 +27,6 @@ google_chat
 matrix
 qq
 sidecar
-signal
 teams
 webhook
 wechat
