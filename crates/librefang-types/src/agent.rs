@@ -1286,6 +1286,15 @@ pub struct AgentManifest {
     /// per agent via `[skill_workshop]` in `agent.toml`.
     #[serde(default)]
     pub skill_workshop: SkillWorkshopConfig,
+    /// Per-agent override for the kernel-global `[rate_limit_notify]`
+    /// policy (issue 2026-05-20: silent failure when Claude CLI hits
+    /// OAuth-Max quota). When `enabled = true`, the agent loop dispatches
+    /// a rendered template to the channel/peer that originated the turn
+    /// once retries are exhausted. See
+    /// [`crate::config::RateLimitNotifyConfig`] for placeholders.
+    /// Resolution order: per-agent > kernel-global > hardcoded fallback.
+    #[serde(default)]
+    pub rate_limit_notify: crate::config::RateLimitNotifyConfig,
     /// Per-agent override for the kernel-global `[proactive_memory]`
     /// policy (#4870). Each field of
     /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
@@ -1545,6 +1554,7 @@ impl Default for AgentManifest {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
+            rate_limit_notify: crate::config::RateLimitNotifyConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
             compaction: None,
             triggers: Vec::new(),

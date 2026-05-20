@@ -1046,9 +1046,31 @@ pub async fn run_agent_loop(
             k.touch_heartbeat(&agent_id_str);
         }
 
-        // Call LLM with retry, error classification, and circuit breaker
+        // Call LLM with retry, error classification, and circuit breaker.
+        // On exhausted rate-limit, dispatch an owner-side notification
+        // through the originating channel BEFORE propagating the error
+        // upward — the kernel/channel bridge otherwise drops the turn
+        // silently, leaving the user with no signal that the agent is
+        // offline until the quota window resets.
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
+        let mut response = match call_with_retry(&*driver, request, Some(provider_name), None).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(ref k) = kernel {
+                    let _ = crate::rate_limit_notify::dispatch_via_kernel(
+                        manifest,
+                        k,
+                        sender_channel.as_deref(),
+                        sender_user_id.as_deref(),
+                        None,
+                        &e.to_string(),
+                    )
+                    .await;
+                }
+                return Err(e);
+            }
+        };
 
         accumulate_token_usage(&mut total_usage, &response.usage);
         // Track the actual-serving slot for billing attribution (#4807

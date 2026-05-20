@@ -738,6 +738,22 @@ pub async fn run_agent_loop_streaming(
             Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
+                // Dispatch the rate-limit owner notification BEFORE
+                // injecting the timeout/error note into the session.
+                // Mirrors the non-streaming `mod.rs` call site: the
+                // channel ping must land regardless of how the kernel
+                // post-processes the failed turn.
+                if let Some(ref k) = kernel {
+                    let _ = crate::rate_limit_notify::dispatch_via_kernel(
+                        manifest,
+                        k,
+                        sender_channel.as_deref(),
+                        sender_user_id.as_deref(),
+                        None,
+                        &err_str,
+                    )
+                    .await;
+                }
                 if err_str.contains("timed out") {
                     // Extract last_activity from error if present (format: "last: <activity>")
                     let activity = err_str

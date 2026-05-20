@@ -42,6 +42,14 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
         librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
     }
 
+    fn rate_limit_notify_config(&self) -> Option<librefang_types::config::RateLimitNotifyConfig> {
+        Some(self.config.load().rate_limit_notify.clone())
+    }
+
+    fn system_timezone(&self) -> Option<String> {
+        self.config.load().system.timezone.clone()
+    }
+
     fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.config.load().channels.effective_file_download_dir())
     }
