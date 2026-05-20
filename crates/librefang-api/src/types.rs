@@ -259,6 +259,47 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 500 Internal Server Error with **server-side full-error
+    /// log + client-side scrubbed body** (audit:
+    /// rusqlite-errors-leak).
+    ///
+    /// `librefang-memory` wraps every rusqlite error in
+    /// `LibreFangError::Internal(e.to_string())` (`substrate.rs:
+    /// 368, 625, 664, 677, 839, 872, 906, 921`). Routes that
+    /// echo `e.to_string()` into the response body leak SQL
+    /// internals — column names, constraint identifiers, "database
+    /// is locked", "UNIQUE constraint failed: agents.id" — to any
+    /// caller able to trigger an internal error. That's a free
+    /// schema-disclosure oracle that helps craft follow-up attacks
+    /// (e.g. via known constraint names) and exposes admin-only
+    /// implementation detail to lower-privilege roles.
+    ///
+    /// `internal_scrub` logs the full error chain at `error!`
+    /// (operators retain forensics via journald / Sentry / log
+    /// aggregator) and returns the static `"Internal server
+    /// error"` to the client. This is the inverse of
+    /// [`Self::internal`], which echoes the raw text — kept around
+    /// for the legacy and tracing-only call sites still in the
+    /// codebase, but new code (and audited rewrites) should use
+    /// `internal_scrub`.
+    ///
+    /// Reference pattern: `MemoryRouteError::Internal` in
+    /// `routes/memory.rs:198-215` already follows this shape; this
+    /// helper lifts it into a workspace-wide accessor so every
+    /// route can adopt it without copy-paste.
+    pub fn internal_scrub(e: impl std::fmt::Display) -> Self {
+        let full = e.to_string();
+        tracing::error!(error = %full, "internal error scrubbed before response");
+        Self {
+            error: "Internal server error".to_string(),
+            code: None,
+            r#type: None,
+            details: None,
+            request_id: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         let code = code.into();
@@ -735,6 +776,23 @@ pub struct PushMessageRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_scrub_returns_generic_message_not_source_error() {
+        // Audit: rusqlite-errors-leak. Verifies that the helper hides
+        // SQL- and kernel-internal error chains from clients while still
+        // emitting the full message to tracing (visible in the test
+        // logs, not asserted here — log capture is environment-specific).
+        let leaked = "no such column: agent_workspaces.invalid_field (code 1)";
+        let scrubbed = ApiErrorResponse::internal_scrub(leaked);
+        assert_eq!(scrubbed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(scrubbed.error, "Internal server error");
+        assert!(
+            !scrubbed.error.contains("agent_workspaces"),
+            "scrubbed body must not echo column/table identifiers"
+        );
+        assert!(scrubbed.code.is_none() && scrubbed.details.is_none());
+    }
 
     #[test]
     fn extension_install_request_deserialize() {

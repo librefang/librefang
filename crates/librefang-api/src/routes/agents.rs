@@ -1144,11 +1144,12 @@ pub async fn get_agent_stats(
     let substrate = state.kernel.memory_substrate();
     match substrate.agent_stats_24h(&id) {
         Ok(stats) => Json(AgentStats24hView::from(stats)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // `e` carries raw rusqlite error messages (column names,
+        // constraint identifiers, "database is locked") from the
+        // memory layer (audit: rusqlite-errors-leak). Scrub the
+        // body before sending to the client; the full chain still
+        // lands in `tracing::error!` for ops.
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -1265,11 +1266,12 @@ pub async fn list_agent_events(
             };
             Json(view).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // `e` carries raw rusqlite error messages (column names,
+        // constraint identifiers, "database is locked") from the
+        // memory layer (audit: rusqlite-errors-leak). Scrub the
+        // body before sending to the client; the full chain still
+        // lands in `tracing::error!` for ops.
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -4378,10 +4380,22 @@ pub async fn patch_agent(
                     "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
                 })),
             ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            ),
+            // Memory/kernel error scrubbed before response (audit:
+            // rusqlite-errors-leak). The full chain (column names,
+            // constraint identifiers, lock state) still reaches
+            // tracing::error! for ops; the response body is the
+            // generic "Internal server error" so the client sees
+            // no schema details. Surrounding match arm shape is
+            // `(StatusCode, Json<Value>)` so we hand-construct the
+            // scrubbed pair here rather than detour through
+            // `ApiErrorResponse::into_response()`.
+            Err(e) => {
+                tracing::error!(error = %e, "agent manifest update failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Internal server error"})),
+                )
+            }
         };
     }
 
