@@ -6805,14 +6805,17 @@ bot_token_env = \"SLACK_BOT_TOKEN\"
         );
         assert!(raw.contains("SECOND"), "new entry must be present: {raw}");
 
-        // Round-trip through the typed config to make sure the kernel will
-        // see both instances post-promotion.
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.matrix.len(), 2);
+        // The kernel will see both instances post-promotion. We can't
+        // round-trip into `ChannelsConfig` since `matrix` migrated to a
+        // sidecar (#5368) and the typed shape no longer has the field,
+        // but counting `[[channels.matrix]]` markers is equivalent for
+        // this helper — `append_channel_instance` writes one array-of-
+        // tables header per instance, end of story.
+        let array_header_count = raw.matches("[[channels.matrix]]").count();
+        assert_eq!(
+            array_header_count, 2,
+            "promoted layout must contain two array-of-tables headers: {raw}"
+        );
     }
 
     #[test]
@@ -6918,12 +6921,15 @@ bot_token_env = \"SLACK_BOT_TOKEN\"
             "removed instance must be gone: {raw}"
         );
 
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.matrix.len(), 2);
+        // Same as in `append_channel_instance_promotes_legacy_single_table`:
+        // matrix is now a sidecar channel, so typed `ChannelsConfig`
+        // round-trip is no longer available — count the array headers
+        // in the raw TOML instead.
+        let array_header_count = raw.matches("[[channels.matrix]]").count();
+        assert_eq!(
+            array_header_count, 2,
+            "removing the middle entry must leave two array-of-tables headers: {raw}"
+        );
     }
 
     #[test]
@@ -6934,14 +6940,20 @@ bot_token_env = \"SLACK_BOT_TOKEN\"
         remove_channel_instance(&path, "matrix", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         // Either the channels.matrix entry is gone entirely, or the channels
-        // table itself is empty — both forms parse back to zero instances.
-        #[derive(serde::Deserialize, Default)]
-        struct Doc {
-            #[serde(default)]
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
-        assert_eq!(parsed.channels.matrix.len(), 0);
+        // table itself is empty. Same constraint as the sibling tests:
+        // matrix migrated to a sidecar (#5368), so we count remaining
+        // array-of-tables headers (and the legacy single-table header)
+        // in the raw text instead of round-tripping through
+        // `ChannelsConfig`.
+        assert_eq!(
+            raw.matches("[[channels.matrix]]").count(),
+            0,
+            "last instance removed: no array-of-tables headers must remain: {raw}"
+        );
+        assert!(
+            !raw.contains("[channels.matrix]"),
+            "legacy single-table header must also be absent: {raw}"
+        );
     }
 
     #[test]
