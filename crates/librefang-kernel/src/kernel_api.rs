@@ -547,6 +547,15 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
     )>;
+    // Trait takes `Option<SenderContext>` by value (not by reference) because
+    // callers across crate boundaries (api, channel_bridge) typically build a
+    // fresh `SenderContext` per request and pass ownership in. The matching
+    // inherent impl on `LibreFangKernel` takes `Option<&SenderContext>` and
+    // the trait impl bridges via `.as_ref()` — see line ~1330 below. This
+    // avoids forcing a clone at every call site while keeping the inherent
+    // signature borrow-flexible for internal callers that already hold a
+    // reference. Do not "unify" by making both by-ref or both by-value
+    // without auditing every callsite.
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
