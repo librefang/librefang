@@ -437,18 +437,24 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     a = _adapter()
     a.own_username = "librefang-bot"
     a._room_watermarks["R1"] = "2026-01-01T00:00:00.000Z"
+    # Rocket.Chat's `channels.history` returns messages NEWEST-FIRST, so
+    # the scripted payload has m2 (ts ...06) ahead of m1 (ts ...05) the
+    # way the real API would. The adapter must re-order to chronological
+    # before emitting.
     fake = _FakeUrlopen([
         (200, {"messages": [
-            _msg(mid="m1", ts="2026-01-01T00:00:05.000Z"),
             _msg(mid="m2", ts="2026-01-01T00:00:06.000Z",
                  text="/cmd args"),
+            _msg(mid="m1", ts="2026-01-01T00:00:05.000Z"),
         ]}),
     ])
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
     emitted = []
     a._poll_once(emitted.append, ["R1"])
     assert len(emitted) == 2
+    # Emitted oldest-first despite the newest-first API order.
     assert emitted[0]["params"]["message_id"] == "m1"
+    assert emitted[1]["params"]["message_id"] == "m2"
     assert emitted[1]["params"]["content"] == {
         "Command": {"name": "cmd", "args": ["args"]},
     }
@@ -457,6 +463,32 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Both message ids tracked for dedupe.
     assert "m1" in a._seen_messages_set
     assert "m2" in a._seen_messages_set
+
+
+def test_poll_once_emits_in_chronological_order(monkeypatch):
+    """Regression: `channels.history` returns newest-first. A burst of
+    several messages caught in one poll must reach the agent oldest →
+    newest, not reversed. The Rust adapter (and the first cut of this
+    sidecar) iterated the raw newest-first array and delivered the burst
+    backwards."""
+    a = _adapter()
+    a.own_username = "librefang-bot"
+    a._room_watermarks["R1"] = "2026-01-01T00:00:00.000Z"
+    # API order: newest (m3) first, oldest (m1) last.
+    fake = _FakeUrlopen([
+        (200, {"messages": [
+            _msg(mid="m3", ts="2026-01-01T00:00:30.000Z", text="third"),
+            _msg(mid="m2", ts="2026-01-01T00:00:20.000Z", text="second"),
+            _msg(mid="m1", ts="2026-01-01T00:00:10.000Z", text="first"),
+        ]}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    assert [e["params"]["message_id"] for e in emitted] == ["m1", "m2", "m3"]
+    assert [e["params"]["content"]["Text"] for e in emitted] == [
+        "first", "second", "third",
+    ]
 
 
 def test_poll_once_dedupes_same_ts_repeats(monkeypatch):
@@ -485,7 +517,9 @@ def test_poll_once_dedupes_same_ts_repeats(monkeypatch):
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
     emitted = []
     a._poll_once(emitted.append, ["R1"])
-    assert [e["params"]["message_id"] for e in emitted] == ["m1", "m2"]
+    # Order is asserted by the chronological-order tests; here we only
+    # care that both same-ts ids are emitted exactly once.
+    assert sorted(e["params"]["message_id"] for e in emitted) == ["m1", "m2"]
     emitted.clear()
     a._poll_once(emitted.append, ["R1"])
     # Only the new m3 emits on the second poll.

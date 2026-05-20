@@ -641,3 +641,39 @@ def test_poll_once_seenAt_query_param_when_set(monkeypatch):
     url = fake.calls[0]["url"]
     assert "seenAt=2026-05-19T09" in url
     assert "limit=25" in url
+
+
+def test_poll_once_emits_in_chronological_order(monkeypatch):
+    """Regression: `listNotifications` returns notifications
+    newest-first. A burst caught in one poll must reach the agent
+    oldest -> newest, not reversed (the Rust adapter iterated the raw
+    newest-first list). The high-water mark is the max `indexedAt` and
+    so is independent of emit order."""
+    a = _adapter()
+    a.own_did = "did:plc:bot"
+    a._access_jwt = "access-1"
+    a._refresh_jwt = "refresh-1"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = ba.time.monotonic()
+
+    def _n(uri, text, indexed):
+        n = _notif(text=text, uri=uri, cid="bafy" + uri[-1])
+        n["indexedAt"] = indexed
+        return n
+
+    fake = _FakeUrlopen([
+        (200, {"notifications": [  # API order: newest-first
+            _n("at://post/C", "@bot third", "2026-05-19T10:00:30.000Z"),
+            _n("at://post/B", "@bot second", "2026-05-19T10:00:20.000Z"),
+            _n("at://post/A", "@bot first", "2026-05-19T10:00:10.000Z"),
+        ]}),
+        (200, {}),  # updateSeen
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    emitted: list[dict] = []
+    new_seen = a._poll_once(emitted.append, last_seen_at=None)
+    assert [e["params"]["message_id"] for e in emitted] == [
+        "at://post/A", "at://post/B", "at://post/C",
+    ]
+    # High-water mark = max indexedAt, order-independent.
+    assert new_seen == "2026-05-19T10:00:30.000Z"

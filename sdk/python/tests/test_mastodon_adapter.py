@@ -453,3 +453,48 @@ def test_self_mention_skipped_only_after_verify():
     # is silenced.
     a.own_account_id = "own-1"
     assert a._parse_notification(notif) is None
+
+
+# ---- _poll_once: chronological emit order -------------------------
+
+
+def _mention(nid, text, sender="acc-x"):
+    return {
+        "id": nid,
+        "type": "mention",
+        "account": {
+            "id": sender, "username": "u",
+            "display_name": "U", "acct": "u@example.com",
+        },
+        "status": {
+            "id": f"st-{nid}", "content": f"<p>{text}</p>",
+            "visibility": "public", "in_reply_to_id": None,
+        },
+    }
+
+
+def test_poll_once_emits_in_chronological_order(monkeypatch):
+    """Regression: `/api/v1/notifications` returns newest-first. A burst
+    of mentions caught in one poll must reach the agent oldest -> newest,
+    not reversed (the Rust adapter iterated the raw newest-first list).
+    The high-water mark stays the newest id regardless of emit order."""
+    a = _adapter()
+    a.own_account_id = "own-123"
+    # API order: newest (n3) first, oldest (n1) last.
+    notifs = [
+        _mention("n3", "third"),
+        _mention("n2", "second"),
+        _mention("n1", "first"),
+    ]
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResp(200, json.dumps(notifs).encode("utf-8"))
+
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake_urlopen)
+    emitted = []
+    newest = a._poll_once(emitted.append, None)
+    assert [e["params"]["content"]["Text"] for e in emitted] == [
+        "first", "second", "third",
+    ]
+    # High-water mark = newest id (notifs[0]), order-independent.
+    assert newest == "n3"

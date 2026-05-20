@@ -46,7 +46,11 @@ configured interval (default 2 s, matching the Rust adapter, with a
 floor of 1 s). On startup, ``GET /api/v1/me`` validates the token and
 discovers the bot's own username (also kept as a fallback self-skip
 key). Empty ``ROCKETCHAT_CHANNELS`` discovers joined channels via
-``GET /api/v1/channels.list.joined``. Slash-command bodies (``/cmd
+``GET /api/v1/channels.list.joined``. ``channels.history`` returns
+messages newest-first, so each poll batch is reversed to oldest-first
+before emitting — a burst caught in one poll reaches the agent in
+conversation order (the Rust adapter delivered such bursts backwards).
+Slash-command bodies (``/cmd
 args``) become ``Content.command``; everything else is plain
 ``Content.text``. Metadata carries ``sender_id``, ``sender_username``,
 ``room_id``, ``ts``, ``tmid`` (when inbound was inside a thread), and
@@ -492,9 +496,15 @@ class RocketChatAdapter(SidecarAdapter):
             messages = body.get("messages")
             if not isinstance(messages, list):
                 continue
-
+            # `channels.history` returns messages newest-first
+            # (descending by `ts`). Emit them oldest-first so a burst of
+            # messages caught in one poll reaches the agent in
+            # conversation order. The Rust adapter iterated the raw
+            # newest-first array and delivered a multi-message poll
+            # backwards; this matches the chronological order
+            # nextcloud's Talk feed already yields.
             newest_ts = oldest
-            for msg in messages:
+            for msg in reversed(messages):
                 if not isinstance(msg, dict):
                     continue
                 msg_id = str(msg.get("_id") or "")

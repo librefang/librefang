@@ -436,7 +436,13 @@ class BlueskyAdapter(SidecarAdapter):
         if not isinstance(notifs, list):
             return last_seen_at
         new_seen = last_seen_at
-        for notif in notifs:
+        # `listNotifications` returns notifications newest-first. Emit
+        # them oldest-first so a burst caught in one poll reaches the
+        # agent in conversation order; the high-water mark below is the
+        # max `indexedAt` and so is order-independent. The Rust adapter
+        # iterated the raw newest-first list and delivered such bursts
+        # backwards.
+        for notif in reversed(notifs):
             if not isinstance(notif, dict):
                 continue
             indexed = notif.get("indexedAt")

@@ -330,7 +330,12 @@ class MastodonAdapter(SidecarAdapter):
         newest = None
         if notifs and isinstance(notifs[0], dict):
             newest = str(notifs[0].get("id") or "") or None
-        for notif in notifs:
+        # Emit oldest-first so a burst of mentions caught in one poll
+        # reaches the agent in conversation order. The list is
+        # newest-first off the wire (and the high-water mark above is
+        # taken from notifs[0] accordingly); the Rust adapter iterated it
+        # as-is and delivered multi-mention bursts backwards.
+        for notif in reversed(notifs):
             if not isinstance(notif, dict):
                 continue
             ev = self._parse_notification(notif)

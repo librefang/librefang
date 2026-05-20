@@ -630,7 +630,12 @@ class RedditAdapter(SidecarAdapter):
             ) else None
             if not isinstance(children, list):
                 continue
-            for child in children:
+            # `?sort=new` returns comments newest-first. Emit them
+            # oldest-first so a burst caught in one poll reaches the
+            # agent in conversation order; the Rust adapter iterated the
+            # raw newest-first listing and delivered such bursts
+            # backwards.
+            for child in reversed(children):
                 if not isinstance(child, dict):
                     continue
                 comment_id = str(
