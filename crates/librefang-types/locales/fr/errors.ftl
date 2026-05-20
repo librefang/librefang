@@ -68,3 +68,9 @@ api-error-not-found = Ressource non trouvee
 api-error-internal = Erreur interne du serveur
 api-error-bad-request = Requete invalide : { $reason }
 api-error-rate-limited = Limite de requetes depassee. Veuillez reessayer plus tard.
+
+# Generic catch-all — interpolates the underlying error string verbatim.
+# Used by 41+ HTTP 500 handlers as a stopgap until each route is moved to a
+# typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
+# call returns the literal key as the response body and `$error` interpolation never runs.
+api-error-generic = Erreur: { $error }
