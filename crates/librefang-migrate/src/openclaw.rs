@@ -4056,9 +4056,10 @@ mod tests {
         assert!(!ch_table.contains_key("slack"));
         for name in ["telegram", "discord", "slack"] {
             assert!(
-                report.skipped.iter().any(|s|
-                    s.kind == ItemKind::Channel && s.name == name
-                ),
+                report
+                    .skipped
+                    .iter()
+                    .any(|s| s.kind == ItemKind::Channel && s.name == name),
                 "expected {name} in report.skipped",
             );
         }
