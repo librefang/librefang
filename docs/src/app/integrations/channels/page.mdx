@@ -215,12 +215,9 @@ The wrap is applied once on every non-streaming success path (`auto_reply`, kern
 
 ## Signal Plain-Text Default
 
-The Signal adapter defaults to `OutputFormat::PlainText`. `signal-cli` renders Markdown asterisks and underscores literally, so leaving them in produced visible noise. To re-enable Markdown, override the format on the agent or channel:
+Signal output defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally and leaving them in produced visible noise. The mapping lives in `default_output_format_for_channel("signal")` (`crates/librefang-channels/src/formatter.rs`) and is keyed off the `channel_type` string, so the default still applies after the sidecar migration — the `[[sidecar_channels]]` entry preserves `channel_type = "signal"`.
 
-```toml
-[channels.signal.overrides]
-output_format = "markdown_v2"
-```
+Per-channel `output_format` overrides are not currently exposed on `[[sidecar_channels]]` (the `overrides` block lived on the in-process per-channel configs like `[channels.signal]` and was removed with them). Agents that need to send Markdown unmodified can flip the format on the agent side.
 
 Other channels keep their previous formatter defaults — only Signal flipped.
 
@@ -239,7 +236,7 @@ Feishu used to silently drop `@_user_N` placeholders from incoming text. The Fei
 
 ## Signal Media Attachments
 
-The Signal adapter now delivers `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks. Media URLs are downloaded and base64-encoded into `base64_attachments` on `/v2/send`. `MediaGroup` recurses into one `send()` per item. Unsupported types (`Poll`, `Sticker`, …) `warn!` and degrade gracefully — text-only fallback or skip — rather than fail the whole reply.
+The retired in-process Rust adapter delivered `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks by downloading the media URL and base64-encoding it into `base64_attachments` on `POST /v2/send`. After the sidecar migration (`librefang.sidecar.adapters.signal`) anything other than text degrades to a `(Unsupported content type)` placeholder; restoring the base64 round-trip end-to-end through the sidecar is a follow-up.
 
 ## WhatsApp Voice + DM/Group Policies
 

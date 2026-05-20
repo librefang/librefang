@@ -340,7 +340,7 @@ Sidecar 每 `SIGNAL_POLL_INTERVAL_SECS`（默认 2 秒）轮询 `GET /v1/receive
 
 ### 默认纯文本输出
 
-Signal 默认用 `OutputFormat::PlainText`，因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。要恢复 Markdown 输出，在 agent 或 channel 上覆盖 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
+Signal 默认 `OutputFormat::PlainText`，因为 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染。这个默认值按 sidecar 配置里的 `channel_type = "signal"` 匹配，迁移后照常生效。`[[sidecar_channels]]` 目前不暴露 `output_format` 的逐通道覆盖；如需发送 Markdown，请在 agent 这一端翻转 format —— 详见 channels overview 的 [Signal Plain-Text Default](/zh/integrations/channels#signal-plain-text-default)。
 
 ### 媒体附件
 

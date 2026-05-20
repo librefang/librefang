@@ -215,12 +215,9 @@ prefix_agent_name = "BoldBracket"
 
 ## Signal 默认纯文本
 
-Signal adapter 默认 `OutputFormat::PlainText`。`signal-cli` 把 Markdown 星号下划线原样渲染，留着会产生可见噪音。要重启 Markdown，在 agent 或频道上覆盖：
+Signal 默认 `OutputFormat::PlainText`，原因是 `signal-cli` 会把 Markdown 的 `*` 和 `_` 当字面量渲染，保留会产生可见噪音。这个映射写在 `default_output_format_for_channel("signal")` 中（见 `crates/librefang-channels/src/formatter.rs`），按 `channel_type` 字符串匹配；sidecar 迁移后 `[[sidecar_channels]]` 里仍然保留 `channel_type = "signal"`，所以默认值依旧生效。
 
-```toml
-[channels.signal.overrides]
-output_format = "markdown_v2"
-```
+`[[sidecar_channels]]` 目前不暴露 `output_format` 的逐通道覆盖（原 `overrides` 块挂在 `[channels.signal]` 之类的进程内配置上，已随之一起删除）。如果某个 agent 必须原样发送 Markdown，请在 agent 这一端翻转 format。
 
 其他通道保留各自的 formatter 默认值——只翻了 Signal。
 
@@ -239,7 +236,7 @@ Feishu 之前会静默删掉传入文本里的 `@_user_N` 占位符。Feishu ada
 
 ## Signal 媒体附件
 
-Signal adapter 现在支持发送 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` content block。媒体 URL 被下载并 base64 编码进 `/v2/send` 的 `base64_attachments`。`MediaGroup` 递归调用 `send()`。不支持的类型（`Poll`、`Sticker` …）`warn!` 优雅降级——纯文本 fallback 或跳过——而不是失败整个回复。
+已下线的进程内 Rust adapter 支持下载媒体 URL、base64 编码后塞进 `POST /v2/send` 的 `base64_attachments`，覆盖 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup`。Sidecar 迁移（`librefang.sidecar.adapters.signal`）之后，非文本内容暂时统一退回 `(Unsupported content type)` 占位符；恢复 base64 round-trip 是后续工作。
 
 ## WhatsApp 语音 + DM/群消息策略
 

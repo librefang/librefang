@@ -354,7 +354,7 @@ The sidecar polls `GET /v1/receive/{phone}` every `SIGNAL_POLL_INTERVAL_SECS` (d
 
 ### Plain-Text Output by Default
 
-Signal defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally. To re-enable Markdown output, override the format on the agent or channel — see [Signal Plain-Text Default](/integrations/channels#signal-plain-text-default) on the channels overview.
+Signal output defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally. The mapping is keyed off the sidecar entry's `channel_type = "signal"`, so the default still applies after the migration. Per-channel `output_format` overrides on `[[sidecar_channels]]` are not currently exposed — flip the format on the agent if you need Markdown — see [Signal Plain-Text Default](/integrations/channels#signal-plain-text-default) on the channels overview.
 
 ### Media Attachments
 
