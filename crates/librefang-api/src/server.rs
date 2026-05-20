@@ -1360,6 +1360,14 @@ pub async fn build_router(
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
+        // JSON depth guard — buffers `application/json` bodies once,
+        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
+        // adversarial `[[[[…]]]]` payloads at the layer boundary
+        // before any handler sees them. Sits below auth/rate-limit
+        // (so the cost of buffering is gated by auth) and above
+        // request-logging (so rejections show up in the request log
+        // with the right status). Audit: check-json-depth-unused.
+        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())

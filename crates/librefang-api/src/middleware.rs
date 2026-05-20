@@ -537,6 +537,96 @@ fn default_error_code_for_status(status: StatusCode) -> &'static str {
 
 /// API version headers middleware.
 ///
+/// Maximum JSON nesting depth accepted by the global request-body
+/// guard. Defense-in-depth against deeply-nested
+/// `[[[[…]]]]` payloads that would flow through the `Json<Value>`
+/// extractors and recurse through downstream consumers (Cypher
+/// conversion in memory routes, plugin config validators, etc.).
+/// `serde_json` has no built-in depth cap, and the crate-level
+/// `#![recursion_limit = "256"]` only applies to macro expansion —
+/// it has no effect on runtime JSON deserialization. Audit:
+/// check-json-depth-unused.
+pub const MAX_JSON_BODY_DEPTH: usize = 32;
+
+/// Tower middleware that enforces [`MAX_JSON_BODY_DEPTH`] on every
+/// `application/json` request body before the handler sees it.
+///
+/// Non-JSON bodies pass through untouched. Empty bodies pass
+/// through. A body whose `Content-Type` starts with
+/// `application/json` is buffered (already capped by the global
+/// `RequestBodyLimitLayer`), parsed once via `serde_json`, fed to
+/// `crate::validation::check_json_depth`, and re-attached to the
+/// request before forwarding. Buffering cost is paid only on JSON
+/// requests; the body bytes round-trip with no copy beyond the
+/// single `to_bytes` collect.
+///
+/// Audit: check-json-depth-unused.
+pub async fn enforce_json_body_depth(request: Request<Body>, next: Next) -> Response<Body> {
+    // Cheap pre-check: skip non-JSON content types and bail on
+    // missing Content-Type. The audit only requires the guard for
+    // `application/json` bodies; multipart uploads, plain text, raw
+    // bytes etc. are unaffected.
+    let is_json = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let lower = s.trim().to_ascii_lowercase();
+            // Match both `application/json` and `application/json;
+            // charset=utf-8` style. Strict prefix check on the
+            // media-type token only; never matches
+            // `application/jsonpatch+json` or other vendor types
+            // (those would need their own deserializer-specific
+            // guards).
+            lower == "application/json"
+                || lower.starts_with("application/json;")
+                || lower.starts_with("application/json ")
+        })
+        .unwrap_or(false);
+    if !is_json {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    // `RequestBodyLimitLayer` upstream of this middleware already
+    // caps the body size; the high ceiling here exists so a misordered
+    // layer stack doesn't silently turn this into a memory bomb —
+    // anything past it is rejected with 400 (which also short-circuits
+    // a downstream OOM). 8 MiB matches the highest cap the kernel
+    // currently exposes for `max_request_body_bytes`.
+    const HARD_CEILING_BYTES: usize = 8 * 1024 * 1024;
+    let bytes = match axum::body::to_bytes(body, HARD_CEILING_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"error": "request body too large for JSON depth guard"})
+                        .to_string(),
+                ))
+                .expect("static error response must build");
+        }
+    };
+    // Empty body — nothing to validate; forward untouched.
+    // Malformed JSON (`Err`) — forward as-is. The handler's own
+    // deserializer will return a more specific 400 with the exact
+    // column/offset, which is more useful to the client than a
+    // generic depth-check error.
+    if !bytes.is_empty() {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Err(e) = crate::validation::check_json_depth(&value, MAX_JSON_BODY_DEPTH) {
+                // `ValidationError::into_response` formats the body
+                // as the standard `ApiErrorResponse` shape; reuse it
+                // so the response matches every other 4xx the API
+                // surface returns.
+                return axum::response::IntoResponse::into_response(e);
+            }
+        }
+    }
+    let request = Request::from_parts(parts, Body::from(bytes));
+    next.run(request).await
+}
+
 /// Adds `X-API-Version` to every response so clients always know which version
 /// they are talking to. When a request targets `/api/v1/...` the header reflects
 /// `v1`; for the unversioned `/api/...` alias it returns the latest version.
@@ -2793,6 +2883,100 @@ mod tests {
             )),
             "/api/cron/ must stay out of PUBLIC_ROUTES_DASHBOARD_READS (#5139)"
         );
+    }
+
+    /// Audit: check-json-depth-unused. The layer must reject deeply
+    /// nested JSON before the handler sees it, but only when
+    /// `Content-Type: application/json` is set. Other media types
+    /// (multipart, text/plain, raw bytes) must pass through.
+    #[tokio::test]
+    async fn enforce_json_body_depth_rejects_payload_above_max_depth() {
+        // Build a body with depth > MAX_JSON_BODY_DEPTH. Each level
+        // wraps the next in an array so depth = nesting count.
+        let deep_depth = MAX_JSON_BODY_DEPTH + 5;
+        let mut body = String::from("0");
+        for _ in 0..deep_depth {
+            body = format!("[{body}]");
+        }
+
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "deeply nested JSON must be rejected at the middleware boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_accepts_payload_at_or_below_max_depth() {
+        // Build a body at exactly MAX_JSON_BODY_DEPTH levels.
+        let mut body = String::from("0");
+        for _ in 0..MAX_JSON_BODY_DEPTH {
+            body = format!("[{body}]");
+        }
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_ignores_non_json_content_type() {
+        // The middleware must NOT buffer non-JSON requests. A deeply-
+        // bracketed `text/plain` body that would trigger a depth-
+        // exceeded JSON error must pass through untouched and reach
+        // the handler.
+        let mut body = String::from("x");
+        for _ in 0..(MAX_JSON_BODY_DEPTH + 10) {
+            body = format!("[{body}]");
+        }
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "text/plain")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-JSON content types must skip the depth guard entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_passes_malformed_json_through_to_handler() {
+        // The middleware should NOT reject a malformed JSON body —
+        // the handler's own deserializer will return a more specific
+        // 4xx with the exact column. This test pins that contract:
+        // the depth guard never observes a value, so it forwards.
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from("{not valid"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // Handler returns 200; the malformed JSON never matters here
+        // because the test handler is `async { "ok" }` — it doesn't
+        // deserialize. The point of this test is that the *middleware*
+        // doesn't short-circuit a 400 on malformed JSON itself.
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Regression for #4860: the inline login page must redirect to `/`
