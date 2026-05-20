@@ -992,6 +992,22 @@ class MattermostAdapter(SidecarAdapter):
                 ),
             )
 
+    async def on_command(self, cmd) -> None:
+        """Dispatch incoming commands. The default :class:`SidecarAdapter`
+        routes ``send`` to :meth:`on_send` and drops the rest. We declare
+        the ``typing`` capability, so the daemon will send us
+        :class:`~librefang.sidecar.protocol.TypingCmd` envelopes — wire
+        them through to ``POST /api/v4/users/me/typing`` (mirrors the
+        Rust adapter at mattermost.rs:464-485). Same pattern as discord
+        / telegram which also surface a typing indicator."""
+        from librefang.sidecar.protocol import Send, TypingCmd
+        if isinstance(cmd, Send):
+            await self.on_send(cmd)
+        elif isinstance(cmd, TypingCmd):
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._post_typing, cmd.channel_id,
+            )
+
 
 if __name__ == "__main__":
     run_stdio_main(MattermostAdapter)

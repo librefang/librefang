@@ -858,3 +858,56 @@ def test_schema_round_trip():
         f["key"] for f in schema["fields"] if f["type"] == "secret"
     }
     assert secret_fields == {"MATTERMOST_TOKEN"}
+
+
+# ---- on_command dispatch (typing capability) -----------------------
+
+
+def test_capabilities_declare_thread_and_typing():
+    """The adapter advertises ``typing`` to the daemon, so the daemon
+    will route ``TypingCmd`` to us — verify the contract."""
+    assert "typing" in mm.MattermostAdapter.capabilities
+    assert "thread" in mm.MattermostAdapter.capabilities
+
+
+@pytest.mark.asyncio
+async def test_on_command_routes_send_to_on_send(monkeypatch):
+    fake = _FakeUrlopen([(201, {})])
+    monkeypatch.setattr(mm.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(_send_cmd(text="hello", content={"Text": "hello"}))
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body == {"channel_id": "ch-1", "message": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_on_command_routes_typing_to_typing_endpoint(monkeypatch):
+    """Regression for the typing-capability gap: declaring ``typing``
+    in ``capabilities`` is a contract — the daemon will send
+    ``TypingCmd`` envelopes and the adapter must POST to
+    ``/api/v4/users/me/typing`` (mirrors the Rust adapter at
+    mattermost.rs:464-485)."""
+    from librefang.sidecar.protocol import TypingCmd
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(mm.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(TypingCmd(channel_id="ch-1"))
+    assert len(fake.calls) == 1
+    c = fake.calls[0]
+    assert c["url"].endswith("/api/v4/users/me/typing")
+    assert c["method"] == "POST"
+    body = json.loads(c["body_raw"])
+    assert body == {"channel_id": "ch-1"}
+
+
+@pytest.mark.asyncio
+async def test_on_command_ignores_unknown(monkeypatch):
+    """``on_command`` must not crash on commands we don't handle (e.g.
+    Reaction, Interactive) — the daemon may send any command shape and
+    the adapter is responsible for ignoring what it doesn't model."""
+    from librefang.sidecar.protocol import Reaction
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(mm.urllib.request, "urlopen", fake)
+    a = _adapter()
+    await a.on_command(Reaction(channel_id="ch", message_id="m", reaction=":+1:"))
+    assert fake.calls == []
