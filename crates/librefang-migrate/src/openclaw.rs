@@ -3468,11 +3468,11 @@ mod tests {
         .unwrap();
 
         // messaging/telegram.yaml + messaging/discord.yaml + messaging/slack.yaml
-        // (all three now migrated as skipped sidecar channels) plus
-        // messaging/mattermost.yaml (still an in-process channel, so the
-        // legacy path keeps exercising channel import — without an
-        // in-process channel the test below would see zero imported
-        // channels and fail).
+        // + messaging/mattermost.yaml (all four now migrated as skipped sidecar
+        // channels) plus messaging/whatsapp.yaml (still an in-process channel,
+        // so the legacy path keeps exercising channel import — without an
+        // in-process channel the test below would see zero imported channels
+        // and fail).
         let msg_dir = dir.join("messaging");
         std::fs::create_dir_all(&msg_dir).unwrap();
         std::fs::write(
@@ -3495,6 +3495,11 @@ mod tests {
             msg_dir.join("mattermost.yaml"),
             "type: mattermost\ntoken_env: MATTERMOST_TOKEN\n\
              server_url: \"https://mm.example.com\"\ndefault_agent: coder\n",
+        )
+        .unwrap();
+        std::fs::write(
+            msg_dir.join("whatsapp.yaml"),
+            "type: whatsapp\naccess_token_env: WHATSAPP_ACCESS_TOKEN\ndefault_agent: coder\n",
         )
         .unwrap();
     }
@@ -3679,17 +3684,18 @@ mod tests {
         assert!(target.path().join("agents/coder/agent.toml").exists());
         assert!(target.path().join("agents/researcher/agent.toml").exists());
 
-        // Channels imported (10 in-process channels from fixture).
+        // Channels imported.
         let channel_items: Vec<_> = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 - imessage - bluebubbles - telegram - discord - irc
-        // (telegram, discord, and slack migrated to sidecar adapters
-        // and irc removed entirely in v2026.5: all four are reported
-        // as skipped, not imported).
-        assert_eq!(channel_items.len(), 7);
+        // 13 channels in the JSON5 fixture; 8 are skipped (telegram,
+        // discord, slack, signal, irc, mattermost all migrated to
+        // sidecar adapters in v2026.5, plus imessage + bluebubbles
+        // which the migrator always skips). That leaves 5 in-process
+        // imports: whatsapp, matrix, feishu, google_chat, msteams.
+        assert_eq!(channel_items.len(), 5);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -4040,16 +4046,17 @@ mod tests {
     #[test]
     fn test_json5_channel_extraction() {
         let target = TempDir::new().unwrap();
-        // Mattermost is the in-process witness here — telegram /
-        // discord / slack are all sidecar-skipped, so without an
-        // in-process channel the imported-count assertion below
-        // wouldn't have anything to count.
+        // WhatsApp is the in-process witness here — telegram /
+        // discord / slack / mattermost are all sidecar-skipped, so
+        // without an in-process channel the imported-count assertion
+        // below wouldn't have anything to count.
         let json5_content = r#"{
   channels: {
     telegram: { botToken: "123", allowFrom: ["alice"], enabled: true },
     discord: { token: "abc", allowFrom: ["alice"], enabled: true },
     slack: { botToken: "xoxb", appToken: "xapp" },
-    mattermost: { botToken: "mm-token", baseUrl: "https://mm.example.com" }
+    mattermost: { botToken: "mm-token", baseUrl: "https://mm.example.com" },
+    whatsapp: { dmPolicy: "open", allowFrom: ["phone1"] }
   }
 }"#;
         let root: OpenClawRoot = json5::from_str(json5_content).unwrap();
@@ -4059,12 +4066,13 @@ mod tests {
         assert!(channels.is_some());
         let ch = channels.unwrap();
         let ch_table = ch.as_table().unwrap();
-        // Telegram, Discord, and Slack are sidecar channels now —
-        // skipped, not in the table.
+        // Telegram, Discord, Slack, and Mattermost are all sidecar
+        // channels now — skipped, not in the table.
         assert!(!ch_table.contains_key("telegram"));
         assert!(!ch_table.contains_key("discord"));
         assert!(!ch_table.contains_key("slack"));
-        for name in ["telegram", "discord", "slack"] {
+        assert!(!ch_table.contains_key("mattermost"));
+        for name in ["telegram", "discord", "slack", "mattermost"] {
             assert!(
                 report
                     .skipped
@@ -4073,10 +4081,10 @@ mod tests {
                 "expected {name} in report.skipped",
             );
         }
-        assert!(ch_table.contains_key("mattermost"));
+        assert!(ch_table.contains_key("whatsapp"));
 
-        // 1 channel import (mattermost; telegram + discord + slack are
-        // all sidecar/skipped).
+        // 1 channel import (whatsapp; telegram + discord + slack +
+        // mattermost are all sidecar/skipped).
         assert_eq!(
             report
                 .imported
@@ -4089,7 +4097,7 @@ mod tests {
         // 5 secrets extracted (telegram + discord + slack-bot +
         // slack-app tokens still go to secrets.env so the sidecars
         // can read them; mattermost's botToken also flows into
-        // MATTERMOST_TOKEN via the in-process path).
+        // MATTERMOST_TOKEN via the sidecar-skipped path).
         assert_eq!(
             report
                 .imported
@@ -4105,6 +4113,7 @@ mod tests {
         assert!(secrets.contains("DISCORD_BOT_TOKEN=abc"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb"));
         assert!(secrets.contains("SLACK_APP_TOKEN=xapp"));
+        assert!(secrets.contains("MATTERMOST_TOKEN=mm-token"));
     }
 
     #[test]
@@ -4749,11 +4758,12 @@ mod tests {
         assert_eq!(result.agents.len(), 1);
         assert_eq!(result.agents[0].name, "coder");
         assert!(result.agents[0].has_memory);
-        assert_eq!(result.channels.len(), 4);
+        assert_eq!(result.channels.len(), 5);
         assert!(result.channels.contains(&"telegram".to_string()));
         assert!(result.channels.contains(&"discord".to_string()));
         assert!(result.channels.contains(&"slack".to_string()));
         assert!(result.channels.contains(&"mattermost".to_string()));
+        assert!(result.channels.contains(&"whatsapp".to_string()));
     }
 
     #[test]
@@ -4864,11 +4874,11 @@ mod tests {
     #[test]
     fn test_policy_migration() {
         let target = TempDir::new().unwrap();
-        // Discord and Slack migrated to sidecars in v2026.5 — both
-        // in-process `[channels.<x>]` writes are gone (migrator now
-        // records a SkippedItem instead). Mattermost is still
-        // in-process so the policy-mapping happy path is asserted
-        // against it.
+        // Discord, Slack, Mattermost, and Signal all migrated to
+        // sidecars in v2026.5 — every in-process `[channels.<x>]`
+        // write for them is gone (migrator now records a SkippedItem
+        // instead). Matrix is still in-process so the policy-mapping
+        // happy path is asserted against it.
         let json5_content = r#"{
   channels: {
     discord: {
@@ -4886,6 +4896,18 @@ mod tests {
       botToken: "mm-token",
       baseUrl: "https://mm.example.com",
       dmPolicy: "disabled"
+    },
+    signal: {
+      httpHost: "signal-api.local",
+      httpPort: 9090,
+      account: "+15551234567",
+      dmPolicy: "disabled"
+    },
+    matrix: {
+      homeserver: "https://matrix.example.com",
+      userId: "@bot:example.com",
+      accessToken: "syt_matrix_token",
+      dmPolicy: "disabled"
     }
   }
 }"#;
@@ -4897,10 +4919,10 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Discord and Slack must NOT be written as in-process
-        // `[channels.<x>]` blocks — sidecar migration replaced them
-        // with SkippedItem entries.
-        for name in ["discord", "slack"] {
+        // Discord, Slack, Mattermost, and Signal must NOT be written
+        // as in-process `[channels.<x>]` blocks — sidecar migration
+        // replaced them with SkippedItem entries.
+        for name in ["discord", "slack", "mattermost", "signal"] {
             assert!(
                 !table.contains_key(name),
                 "{name} is a sidecar channel now; migrator must not write \
@@ -4916,13 +4938,14 @@ mod tests {
             );
         }
 
-        // Mattermost still has the in-process adapter — assert the
-        // policy string "disabled" maps to dm_policy = "ignore" (the
-        // previously discord-only mapping coverage was kept alive via
-        // slack and now lives on mattermost).
-        let mm = table["mattermost"].as_table().unwrap();
-        let mm_overrides = mm["overrides"].as_table().unwrap();
-        assert_eq!(mm_overrides["dm_policy"].as_str().unwrap(), "ignore");
+        // Matrix still has the in-process adapter — assert the policy
+        // string "disabled" maps to dm_policy = "ignore" (the
+        // previously discord-only mapping coverage was kept alive
+        // via slack → mattermost → signal as each migrated, and now
+        // lives on matrix).
+        let mx = table["matrix"].as_table().unwrap();
+        let mx_overrides = mx["overrides"].as_table().unwrap();
+        assert_eq!(mx_overrides["dm_policy"].as_str().unwrap(), "ignore");
     }
 
     #[test]
