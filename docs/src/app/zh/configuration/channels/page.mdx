@@ -501,25 +501,26 @@ QQ_APP_ID = "your-app-id"
 
 密钥放在 `~/.librefang/secrets.env`：`QQ_APP_SECRET`（QQ 开放平台控制台里的 `clientSecret`）。
 
-#### `[channels.wecom]`
+#### 企业微信（sidecar）
 
-企业微信（WeCom）智能机器人通道适配器。通过 WebSocket 连接到 `wss://openws.work.weixin.qq.com`。
+企业微信（WeCom）已从 in-process Rust 适配器迁移到 out-of-process Python sidecar（`librefang.sidecar.adapters.wecom`）。Sidecar 使用 WebSocket 连接到 `wss://openws.work.weixin.qq.com`，凭智能机器人的 Bot ID 和 Secret 鉴权。**Callback 模式**（HTTP webhook + AES-CBC-256 入站解密）不再支持 —— Python 标准库没有 AES，而 sidecar SDK 按惯例只用 stdlib。原先使用 callback 模式的运维人员需要在企业微信管理后台将机器人切换到 WebSocket 模式。
+
+原有 `[channels.wecom]` 不再识别，请改为 `[[sidecar_channels]]`：
 
 ```toml
-[channels.wecom]
-bot_id = "YOUR_BOT_ID"
-secret_env = "WECOM_BOT_SECRET"
-# account_id = "my-wecom-bot"
-# default_agent = "assistant"
+[[sidecar_channels]]
+name = "wecom"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wecom"]
+channel_type = "wecom"
+
+[sidecar_channels.env]
+WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_ALLOWED_USERS = "alice,bob"
+# WECOM_ACCOUNT_ID    = "prod-bot"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_id` | string | `""` | 企业微信管理后台的智能机器人 Bot ID。 |
-| `secret_env` | string | `"WECOM_BOT_SECRET"` | 存放机器人密钥的环境变量。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+密钥放在 `~/.librefang/secrets.env`：`WECOM_BOT_SECRET`（企业微信管理后台里的机器人密钥）。
 
 #### `[channels.wechat]`
 

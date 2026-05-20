@@ -3890,7 +3890,11 @@ mod tests {
             target_dir: target.path().to_path_buf(),
             dry_run: false,
         };
-        let _ = migrate(&options).unwrap();
+        // Bind the report so the assertion at line ~3952 (matrix skipped
+        // sidecar channel) can inspect `report.skipped`. The previous
+        // `let _ =` discard predated the matrix sidecar migration and
+        // left the test broken on main.
+        let report = migrate(&options).unwrap();
 
         // ---- config.toml round-trip ----
         let config_str = std::fs::read_to_string(target.path().join("config.toml")).unwrap();

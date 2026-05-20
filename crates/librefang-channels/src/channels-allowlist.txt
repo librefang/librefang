@@ -27,5 +27,4 @@ sidecar
 teams
 webhook
 wechat
-wecom
 whatsapp

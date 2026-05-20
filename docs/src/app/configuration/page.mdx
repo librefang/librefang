@@ -355,9 +355,14 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # [sidecar_channels.env]
 # QQ_APP_ID = "your-app-id"
 
-# [channels.wecom]
-# bot_id = "YOUR_BOT_ID"
-# secret_env = "WECOM_BOT_SECRET"
+# WeCom: see sidecar example below (was [channels.wecom])
+# [[sidecar_channels]]
+# name = "wecom"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wecom"]
+# channel_type = "wecom"
+# [sidecar_channels.env]
+# WECOM_BOT_ID = "aibxxxxxxx"
 
 # [channels.wechat]
 # bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
@@ -1319,25 +1324,24 @@ QQ_APP_ID = "your-app-id"
 
 Secret via `~/.librefang/secrets.env`: `QQ_APP_SECRET` (the bot's `clientSecret` from the QQ Open Platform console).
 
-#### `[channels.wecom]`
+#### WeCom (sidecar)
 
-WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
+WeCom (formerly WeChat Work / Enterprise WeChat) migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.wecom`). The sidecar connects via WebSocket to `wss://openws.work.weixin.qq.com` using the intelligent-bot Bot ID and Secret. The legacy **callback mode** (HTTP webhook + AES-CBC-256 inbound decryption) is no longer supported — Python's stdlib has no AES, and the sidecar SDK is stdlib-only by policy. Operators who relied on callback mode must switch the bot to WebSocket mode in the WeCom admin console.
 
 ```toml
-[channels.wecom]
-bot_id = "YOUR_BOT_ID"
-secret_env = "WECOM_BOT_SECRET"
-# account_id = "my-wecom-bot"
-# default_agent = "assistant"
+[[sidecar_channels]]
+name = "wecom"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wecom"]
+channel_type = "wecom"
+
+[sidecar_channels.env]
+WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_ALLOWED_USERS = "alice,bob"
+# WECOM_ACCOUNT_ID    = "prod-bot"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_id` | string | `""` | Bot ID from the WeCom admin console (intelligent bot). |
-| `secret_env` | string | `"WECOM_BOT_SECRET"` | Env var holding the bot secret. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+Secret via `~/.librefang/secrets.env`: `WECOM_BOT_SECRET` (the bot secret from the WeCom admin console).
 
 #### `[channels.wechat]`
 

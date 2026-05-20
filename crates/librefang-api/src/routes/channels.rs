@@ -85,6 +85,14 @@ pub(crate) enum FieldType {
     Text,
     Number,
     List,
+    /// Dropdown-style enum picker. WeCom's `mode` field was the only
+    /// in-process consumer; after its sidecar migration the variant
+    /// has no callers, but the dashboard form runtime still emits
+    /// `"select"` for sidecar adapters that declare it via the
+    /// `--describe` schema, so the enum surface is preserved for any
+    /// future in-process channel that wants to opt in without
+    /// reintroducing the variant.
+    #[allow(dead_code)]
     Select,
 }
 
@@ -278,24 +286,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Open WeChat on your phone", "The QR code will appear in the dashboard", "Scan it with WeChat to connect"],
         config_template: "[channels.wechat]\nbot_token_env = \"WECHAT_BOT_TOKEN\"",
     },
-    ChannelMeta {
-        name: "wecom", display_name: "WeCom", icon: "WC",
-        description: "WeCom intelligent bot (WebSocket or URL callback)",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter your Bot ID and Secret from the WeCom admin console",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_id", label: "Bot ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "aibxxxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "secret_env", label: "Bot Secret", field_type: FieldType::Secret, env_var: Some("WECOM_BOT_SECRET"), required: true, placeholder: "xxxxxxxxxxxxxxxx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "mode", label: "Connection Mode", field_type: FieldType::Select, env_var: None, required: false, placeholder: "websocket", advanced: false, options: Some(&["websocket", "callback"]), show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL (configure in WeCom admin)", field_type: FieldType::Text, env_var: None, required: false, placeholder: "", advanced: false, options: None, show_when: Some("callback"), readonly: true },
-            ChannelField { key: "token_env", label: "Callback Token", field_type: FieldType::Secret, env_var: Some("WECOM_CALLBACK_TOKEN"), required: true, placeholder: "Token from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
-            ChannelField { key: "encoding_aes_key_env", label: "EncodingAESKey", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: true, placeholder: "EncodingAESKey from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: set Callback Token and EncodingAESKey, then configure the displayed Callback URL in WeCom admin"],
-        config_template: "[channels.wecom]\nbot_id = \"\"\nsecret_env = \"WECOM_BOT_SECRET\"\nmode = \"websocket\"",
-    },
+    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+    // see SIDECAR_CATALOG below.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG below.
 ];
@@ -310,7 +302,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "dingtalk" => config.dingtalk.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
-        "wecom" => config.wecom.is_some(),
         _ => false,
     }
 }
@@ -378,29 +369,17 @@ fn build_field_json(
 ///
 /// Since v2026.3.31 all webhook channels share the main API server port.
 /// The URL pattern is `http://{api_listen}/channels/{channel_name}/webhook`.
+///
+/// After the wecom-sidecar migration this function has no in-process
+/// callers (wecom was the only `callback_url`-bearing in-process
+/// channel); kept as a stub so future in-process callback-style
+/// channels can opt in by adding their match arm without changing the
+/// surrounding call sites.
 fn inject_callback_url(
-    fields: &mut [serde_json::Value],
-    channel_name: &str,
+    _fields: &mut [serde_json::Value],
+    _channel_name: &str,
     _config_values: Option<&serde_json::Value>,
 ) {
-    let path = match channel_name {
-        "wecom" => "/channels/wecom/webhook",
-        _ => return,
-    };
-
-    // Use 0.0.0.0 with the default API port — users should substitute their
-    // public hostname when pasting into external platform consoles.
-    let url = format!(
-        "http://0.0.0.0:{}{path}",
-        librefang_types::config::DEFAULT_API_PORT
-    );
-
-    for field in fields.iter_mut() {
-        if field.get("key").and_then(|v| v.as_str()) == Some("callback_url") {
-            field["value"] = serde_json::Value::String(url.clone());
-            field["has_value"] = serde_json::Value::Bool(true);
-        }
-    }
 }
 
 /// Channels that receive messages via webhook on the shared server.
@@ -408,7 +387,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
+        "teams" | "dingtalk" | "google_chat" | "webhook" => Some("/webhook"),
         _ => None,
     }
 }
@@ -659,6 +638,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Feishu/Lark Open Platform adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.feishu"],
+    },
+    SidecarCatalogEntry {
+        name: "wecom",
+        display_name: "WeCom",
+        description: "WeCom (\u{4f01}\u{4e1a}\u{5fae}\u{4fe1}) intelligent-bot WebSocket adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.wecom"],
     },
 ];
 
@@ -1181,10 +1167,6 @@ fn channel_config_values(
             .wechat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "wecom" => config
-            .wecom
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -1204,7 +1186,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "dingtalk" => config.dingtalk.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
-        "wecom" => config.wecom.len(),
         _ => 0,
     }
 }
@@ -1235,7 +1216,6 @@ fn channel_instances_serialized(
         "dingtalk" => ser(&config.dingtalk),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
-        "wecom" => ser(&config.wecom),
         _ => Vec::new(),
     }
 }

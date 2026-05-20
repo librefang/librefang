@@ -5657,10 +5657,10 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-/// Default initial backoff in seconds for channels using exponential backoff (1s).
-fn default_channel_initial_backoff_secs() -> u64 {
-    1
-}
+// `default_channel_initial_backoff_secs` was removed in the
+// wecom-sidecar migration: WeCom was the only remaining caller, and
+// the sidecar uses its own constant (`INITIAL_BACKOFF_SECS` in
+// `librefang.sidecar.adapters.wecom`).
 
 /// Default maximum backoff in seconds for channels using exponential backoff (60s).
 fn default_channel_max_backoff_secs() -> u64 {
@@ -6407,8 +6407,8 @@ pub struct ChannelsConfig {
     pub webhook: OneOrMany<WebhookConfig>,
     /// WeChat personal account (iLink) configuration(s).
     pub wechat: OneOrMany<WeChatConfig>,
-    /// WeCom/WeChat Work configuration(s).
-    pub wecom: OneOrMany<WeComConfig>,
+    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
     // --- Global file-download settings ---
     /// Maximum file size in bytes for channel file downloads (default: 50 MB).
@@ -6468,7 +6468,6 @@ impl Default for ChannelsConfig {
             dingtalk: OneOrMany::default(),
             webhook: OneOrMany::default(),
             wechat: OneOrMany::default(),
-            wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6767,64 +6766,13 @@ impl Default for GoogleChatConfig {
 // the in-process `FeishuConfig` + `[channels.feishu]` block were
 // removed in this migration.
 
-/// Connection mode for the WeCom intelligent bot adapter.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WeComMode {
-    /// WebSocket long-connection (no public endpoint required).
-    #[default]
-    Websocket,
-    /// URL callback (requires a publicly reachable HTTP endpoint).
-    Callback,
-}
-
-/// WeCom intelligent bot adapter configuration.
-///
-/// Supports two connection modes:
-/// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
-/// - `callback`: starts an HTTP server to receive message callbacks
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WeComConfig {
-    /// Bot ID obtained from the WeCom admin console.
-    pub bot_id: String,
-    /// Env var name holding the bot secret.
-    pub secret_env: String,
-    /// Connection mode: "websocket" (default) or "callback".
-    pub mode: WeComMode,
-    /// Port for the callback HTTP server (only used in callback mode).
-    pub webhook_port: u16,
-    /// Env var name holding the callback verification token (callback mode only).
-    pub token_env: Option<String>,
-    /// Env var name holding the EncodingAESKey (callback mode only).
-    pub encoding_aes_key_env: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WeComConfig {
-    fn default() -> Self {
-        Self {
-            bot_id: String::new(),
-            secret_env: "WECOM_BOT_SECRET".to_string(),
-            mode: WeComMode::default(),
-            webhook_port: 8454,
-            token_env: None,
-            encoding_aes_key_env: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// WeCom (`WeComConfig` / `WeComMode`) migrated to a sidecar
+// (librefang.sidecar.adapters.wecom); see SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs. The legacy callback mode
+// (HTTP webhook + AES-CBC-256 inbound payload decryption) is NOT
+// ported — Python stdlib has no AES, and the sidecar SDK is
+// stdlib-only by policy. Operators on callback mode must switch
+// the bot to WebSocket mode in the WeCom admin console.
 
 /// WeChat personal account (iLink protocol) adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

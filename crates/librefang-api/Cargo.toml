@@ -99,7 +99,8 @@ channel-teams = ["librefang-channels/channel-teams"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
 channel-wechat = ["librefang-channels/channel-wechat"]
-channel-wecom = ["librefang-channels/channel-wecom"]
+# wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+# see SIDECAR_CATALOG in src/routes/channels.rs.
 
 # Small curated default set: 5 light adapters covering the most common
 # integration points. Each member only uses the workspace HTTP stack
@@ -116,7 +117,7 @@ all-channels = [
     "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-dingtalk",
-    "channel-wechat", "channel-wecom",
+    "channel-wechat",
 ]
 
 # All channels except email — used for Android targets where rustls-connector's
@@ -125,7 +126,7 @@ all-channels-no-email = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-dingtalk",
-    "channel-wechat", "channel-wecom",
+    "channel-wechat",
 ]
 
 # Mini: a small core set of channels

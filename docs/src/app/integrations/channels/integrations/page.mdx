@@ -162,40 +162,44 @@ The sidecar fetches an access token from `https://bots.qq.com/app/getAppAccessTo
 
 ---
 
-## WeCom
+## WeCom (sidecar)
+
+WeCom (WeChat Work / Enterprise WeChat) migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.wecom`). The legacy callback mode (HTTP webhook + AES-CBC-256 inbound decryption) is no longer supported — Python's stdlib has no AES, and the sidecar SDK is stdlib-only by policy. Operators who relied on callback mode must switch the bot to WebSocket mode in the WeCom admin console.
 
 ### Prerequisites
 
-- A WeCom (WeChat Work) enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
+- A WeCom enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
+- `librefang-sdk` installed in the Python environment that runs the sidecar (`pip install -e sdk/python` from the repo root, or `pip install librefang-sdk` once the package is published)
 
 ### Setup
 
-1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**.
-2. Note the **Bot ID** and **Secret** from the bot settings page.
-3. Set the secret environment variable:
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**. Note the **Bot ID** and **Secret** from the bot settings page.
+2. Put the secret in `~/.librefang/secrets.env`:
 
 ```bash
-export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
-librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
-librefang config set-key wecom                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+WECOM_BOT_SECRET=your-bot-secret
 ```
 
-4. Add to config:
+3. Add the sidecar to `config.toml`:
 
 ```toml
-[channels.wecom]
-bot_id = "YOUR_BOT_ID"
-secret_env = "WECOM_BOT_SECRET"
-# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
-# default_agent = "assistant"    # Optional: route messages to specific agent
+[[sidecar_channels]]
+name = "wecom"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wecom"]
+channel_type = "wecom"
+
+[sidecar_channels.env]
+WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_ALLOWED_USERS = "alice,bob"   # optional CSV; empty = all
+# WECOM_ACCOUNT_ID    = "prod-bot"    # optional multi-bot routing
 ```
 
-5. Restart the daemon.
+4. Restart the daemon.
 
 ### How It Works
 
-The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
+The WeCom sidecar connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket, subscribes with `cmd: "aibot_subscribe"` carrying the Bot ID and Secret, and sends a `cmd: "ping"` heartbeat every 30 s. Inbound messages arrive as `cmd: "aibot_msg_callback"` JSON frames; replies use `cmd: "aibot_respond_msg"` (passive reply to a cached inbound `req_id`, one-shot) or `cmd: "aibot_send_msg"` (proactive). Outbound bodies are always `msgtype: "markdown"` since the intelligent-bot `aibot_respond_msg` does not accept `msgtype: "text"`. Inbound `req_id`s are deduped via a bounded set (capacity 10000 / evict 5000) so a WS reconnect that races with platform redelivery does not double-emit.
 
 ---
 

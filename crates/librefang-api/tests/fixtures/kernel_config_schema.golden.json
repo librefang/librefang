@@ -1208,15 +1208,6 @@
           "default": null,
           "description": "WeChat personal account (iLink) configuration(s)."
         },
-        "wecom": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_WeComConfig"
-            }
-          ],
-          "default": null,
-          "description": "WeCom/WeChat Work configuration(s)."
-        },
         "whatsapp": {
           "allOf": [
             {
@@ -5619,117 +5610,6 @@
         }
       ]
     },
-    "OneOrMany_WeComConfig": {
-      "oneOf": [
-        {
-          "description": "WeCom intelligent bot adapter configuration.\n\nSupports two connection modes: - `websocket` (default): connects to `wss://openws.work.weixin.qq.com` - `callback`: starts an HTTP server to receive message callbacks",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "bot_id": {
-              "default": "",
-              "description": "Bot ID obtained from the WeCom admin console.",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "encoding_aes_key_env": {
-              "default": null,
-              "description": "Env var name holding the EncodingAESKey (callback mode only).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "mode": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/WeComMode"
-                }
-              ],
-              "default": "websocket",
-              "description": "Connection mode: \"websocket\" (default) or \"callback\"."
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "secret_env": {
-              "default": "WECOM_BOT_SECRET",
-              "description": "Env var name holding the bot secret.",
-              "type": "string"
-            },
-            "token_env": {
-              "default": null,
-              "description": "Env var name holding the callback verification token (callback mode only).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "webhook_port": {
-              "default": 8454,
-              "description": "Port for the callback HTTP server (only used in callback mode).",
-              "format": "uint16",
-              "minimum": 0.0,
-              "type": "integer"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/WeComConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_WebexConfig": {
       "oneOf": [
         {
@@ -8874,107 +8754,6 @@
       },
       "type": "object"
     },
-    "WeComConfig": {
-      "description": "WeCom intelligent bot adapter configuration.\n\nSupports two connection modes: - `websocket` (default): connects to `wss://openws.work.weixin.qq.com` - `callback`: starts an HTTP server to receive message callbacks",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "bot_id": {
-          "default": "",
-          "description": "Bot ID obtained from the WeCom admin console.",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "encoding_aes_key_env": {
-          "default": null,
-          "description": "Env var name holding the EncodingAESKey (callback mode only).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mode": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/WeComMode"
-            }
-          ],
-          "default": "websocket",
-          "description": "Connection mode: \"websocket\" (default) or \"callback\"."
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "secret_env": {
-          "default": "WECOM_BOT_SECRET",
-          "description": "Env var name holding the bot secret.",
-          "type": "string"
-        },
-        "token_env": {
-          "default": null,
-          "description": "Env var name holding the callback verification token (callback mode only).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "webhook_port": {
-          "default": 8454,
-          "description": "Port for the callback HTTP server (only used in callback mode).",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "WeComMode": {
       "description": "Connection mode for the WeCom intelligent bot adapter.",
       "oneOf": [
@@ -9791,7 +9570,6 @@
         "webex": null,
         "webhook": null,
         "wechat": null,
-        "wecom": null,
         "whatsapp": null,
         "zulip": null
       },

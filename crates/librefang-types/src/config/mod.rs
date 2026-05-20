@@ -395,17 +395,18 @@ admin_role = "admin"
 
     #[test]
     fn test_channels_config_with_new_channels() {
+        // Matrix witness rotated to WhatsApp + Email after the matrix
+        // sidecar migration (#5368) deleted MatrixConfig and the
+        // `channels.matrix` field.
         let config = KernelConfig {
             channels: ChannelsConfig {
                 whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                matrix: OneOrMany(vec![MatrixConfig::default()]),
                 email: OneOrMany(vec![EmailConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
         };
         assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.matrix.is_some());
         assert!(config.channels.email.is_some());
     }
 
@@ -871,48 +872,48 @@ admin_role = "admin"
         assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
     }
 
+    // OneOrMany single-table + array-of-tables tests rotated from
+    // matrix (deleted by #5368) to dingtalk (still in-process). The
+    // assertion is on OneOrMany's TOML parse behaviour, not on any
+    // adapter-specific field shape — any remaining in-process channel
+    // works as the witness.
     #[test]
     fn test_one_or_many_single_toml_table() {
-        // Single [channels.matrix] table should parse as OneOrMany with one element
         let toml_str = r#"
-            [channels.matrix]
-            access_token_env = "MY_MX_TOKEN"
-            homeserver_url = "https://matrix.example.org"
+            [channels.dingtalk]
+            access_token_env = "MY_DT_TOKEN"
             account_id = "bot1"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.matrix.is_some());
-        assert_eq!(config.channels.matrix.len(), 1);
-        let mx = config.channels.matrix.first().unwrap();
-        assert_eq!(mx.access_token_env, "MY_MX_TOKEN");
-        assert_eq!(mx.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.dingtalk.is_some());
+        assert_eq!(config.channels.dingtalk.len(), 1);
+        let dt = config.channels.dingtalk.first().unwrap();
+        assert_eq!(dt.access_token_env, "MY_DT_TOKEN");
+        assert_eq!(dt.account_id.as_deref(), Some("bot1"));
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
-        // [[channels.matrix]] should parse as OneOrMany with multiple elements
         let toml_str = r#"
-            [[channels.matrix]]
-            access_token_env = "MX_TOKEN_1"
-            homeserver_url = "https://a.example.org"
+            [[channels.dingtalk]]
+            access_token_env = "DT_TOKEN_1"
             account_id = "bot1"
             default_agent = "assistant"
 
-            [[channels.matrix]]
-            access_token_env = "MX_TOKEN_2"
-            homeserver_url = "https://b.example.org"
+            [[channels.dingtalk]]
+            access_token_env = "DT_TOKEN_2"
             account_id = "bot2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.matrix.is_some());
-        assert_eq!(config.channels.matrix.len(), 2);
+        assert!(config.channels.dingtalk.is_some());
+        assert_eq!(config.channels.dingtalk.len(), 2);
 
-        let bots: Vec<_> = config.channels.matrix.iter().collect();
-        assert_eq!(bots[0].access_token_env, "MX_TOKEN_1");
+        let bots: Vec<_> = config.channels.dingtalk.iter().collect();
+        assert_eq!(bots[0].access_token_env, "DT_TOKEN_1");
         assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].access_token_env, "MX_TOKEN_2");
+        assert_eq!(bots[1].access_token_env, "DT_TOKEN_2");
         assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
@@ -935,73 +936,49 @@ admin_role = "admin"
         assert_eq!(wechat.default_agent.as_deref(), Some("assistant"));
     }
 
-    #[test]
-    fn test_one_or_many_array_of_wecom_tables() {
-        let toml_str = r#"
-            [[channels.wecom]]
-            bot_id = "bot-main"
-            secret_env = "WECOM_SECRET_MAIN"
-            account_id = "wecom-main"
-            default_agent = "assistant"
-
-            [[channels.wecom]]
-            bot_id = "bot-sales"
-            secret_env = "WECOM_SECRET_SALES"
-            account_id = "wecom-sales"
-            default_agent = "sales-assistant"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wecom.is_some());
-        assert_eq!(config.channels.wecom.len(), 2);
-
-        let bots: Vec<_> = config.channels.wecom.iter().collect();
-        assert_eq!(bots[0].bot_id, "bot-main");
-        assert_eq!(bots[0].secret_env, "WECOM_SECRET_MAIN");
-        assert_eq!(bots[0].account_id.as_deref(), Some("wecom-main"));
-        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].bot_id, "bot-sales");
-        assert_eq!(bots[1].secret_env, "WECOM_SECRET_SALES");
-        assert_eq!(bots[1].account_id.as_deref(), Some("wecom-sales"));
-        assert_eq!(bots[1].default_agent.as_deref(), Some("sales-assistant"));
-    }
+    // test_one_or_many_array_of_wecom_tables removed — wecom migrated to
+    // a sidecar (librefang.sidecar.adapters.wecom); the [channels.wecom]
+    // TOML key is no longer recognised.
 
     #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
-        assert!(config.channels.matrix.is_none());
-        assert!(config.channels.matrix.is_empty());
-        assert_eq!(config.channels.matrix.len(), 0);
-        assert!(config.channels.matrix.first().is_none());
-        assert!(config.channels.matrix.as_ref().is_none());
+        assert!(config.channels.dingtalk.is_none());
+        assert!(config.channels.dingtalk.is_empty());
+        assert_eq!(config.channels.dingtalk.len(), 0);
+        assert!(config.channels.dingtalk.first().is_none());
+        assert!(config.channels.dingtalk.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![MatrixConfig::default()]);
+        let single = OneOrMany(vec![DingTalkConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<MatrixConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<DingTalkConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![MatrixConfig::default(), MatrixConfig::default()]);
+        let multi = OneOrMany(vec![DingTalkConfig::default(), DingTalkConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<MatrixConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<DingTalkConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<MatrixConfig> = OneOrMany::default();
+        let empty: OneOrMany<DingTalkConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
 
     #[test]
     fn test_account_id_in_channel_configs() {
-        // Verify account_id field exists and defaults to None
-        assert!(MatrixConfig::default().account_id.is_none());
+        // Verify account_id field exists and defaults to None.
+        // Matrix witness deleted by #5368; rotated to WhatsApp + Email +
+        // WeChat + DingTalk + Feishu — every remaining in-process
+        // channel struct that exposes `account_id`.
         assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());
-        assert!(WeComConfig::default().account_id.is_none());
+        assert!(DingTalkConfig::default().account_id.is_none());
+        assert!(FeishuConfig::default().account_id.is_none());
     }
 
     #[test]

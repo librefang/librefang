@@ -26,7 +26,6 @@ all-channels = [
     "channel-teams",
     "channel-webhook",
     "channel-wechat",
-    "channel-wecom",
     "channel-whatsapp",
 ]
 
@@ -38,7 +37,8 @@ channel-teams = []
 channel-google-chat = ["dep:rsa"]
 channel-dingtalk = []
 channel-wechat = []
-channel-wecom = ["dep:aes", "dep:cbc"]
+# wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }

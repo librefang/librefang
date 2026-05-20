@@ -664,12 +664,12 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Matrix config
-        // (Discord and Slack were migrated to sidecars; Matrix is the
-        // in-process fixture).
-        b.channels.matrix =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::MatrixConfig {
-                access_token_env: "MATRIX_TOKEN".to_string(),
+        // Change the channels config by adding a DingTalk config.
+        // (Discord / Slack / Matrix were migrated to sidecars;
+        // DingTalk is a remaining in-process fixture.)
+        b.channels.dingtalk =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::DingTalkConfig {
+                access_token_env: "DINGTALK_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);
