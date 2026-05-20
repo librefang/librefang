@@ -328,10 +328,14 @@ channel_type = "telegram"
 [sidecar_channels.env]
 TELEGRAM_BOT_TOKEN = "..."
 
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-intents = 37376
+# Discord (sidecar)
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
 
 [channels.slack]
 app_token_env = "SLACK_APP_TOKEN"
@@ -825,28 +829,32 @@ TELEGRAM_BOT_TOKEN = "..."
 
 The sidecar preserves all prior runtime semantics. See [`[[sidecar_channels]]`](#sidecar_channels) for the full field reference.
 
-#### `[channels.discord]`
+#### Discord (sidecar)
+
+Discord migrated to an out-of-process sidecar in v2026.5; declare it as a `[[sidecar_channels]]` block instead of `[channels.discord]`.
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-# default_agent = "assistant"
-intents = 37376
-ignore_bots = true
-# account_id = "my-discord-bot"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_ALLOWED_USERS = "789"
+# DISCORD_INTENTS = "37376"
+# DISCORD_IGNORE_BOTS = "true"
+# DISCORD_MENTION_PATTERNS = "hey bot,!ask"
+# DISCORD_ACCOUNT_ID = "guild-42"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | Env var holding the Discord bot token. |
-| `allowed_guilds` | list of u64 | `[]` | Guild (server) IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `allowed_users` | list of strings | `[]` | Discord user IDs allowed to interact. Empty = allow all. |
-| `intents` | u64 | `37376` | Gateway intents bitmask. Default = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT` (37376). |
-| `ignore_bots` | bool | `true` | When `true`, messages from other bots are ignored. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+The sidecar preserves the same runtime semantics — gateway intents,
+`allowed_guilds` / `allowed_users` filters, mention detection, and
+RBAC mapping via `channel_role_mapping.discord`. See
+[`[[sidecar_channels]]`](#sidecar_channels) below for the full
+supervisor field reference.
 
 #### `[channels.slack]`
 
@@ -1008,39 +1016,47 @@ webhook_port = 8444
 | `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.twitch]`
+#### Twitch
+
+Twitch is provided by the Python sidecar adapter (`librefang.sidecar.adapters.twitch`). The in-process `[channels.twitch]` config block was removed in the sidecar migration. Declare Twitch as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-channels = ["mychannel"]
-nick = "librefang"
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # comma-separated, no '#'
+# TWITCH_ACCOUNT_ID = "prod"                # optional, multi-bot routing
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 20/30s for unmodded; 100 if bot is mod
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | Env var holding the Twitch OAuth token. |
-| `channels` | list of strings | `[]` | Twitch channels to join (without `#` prefix). |
-| `nick` | string | `"librefang"` | Bot nickname in Twitch chat. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`TWITCH_OAUTH_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Twitch form. The `oauth:` prefix is auto-added if you leave it off.
 
-#### `[channels.rocketchat]`
+The sidecar defaults to TLS on `irc.chat.twitch.tv:6697` (the Rust adapter used plaintext 6667, which leaked the OAuth token on every connect). Plaintext is reachable only via `TWITCH_PLAINTEXT=1` for local mock listeners — never set it in production.
 
-```toml
-[channels.rocketchat]
-server_url = "https://rocketchat.example.com"
-token_env = "ROCKETCHAT_TOKEN"
-user_id = ""
-allowed_channels = []
+#### Rocket.Chat
+
+Rocket.Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.rocketchat`). The in-process `[channels.rocketchat]` config block was removed in the sidecar migration. Declare Rocket.Chat as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # optional; empty = all joined
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # optional, multi-bot routing key
+# ROCKETCHAT_POLL_INTERVAL_SECS = "2"           # optional, default 2, floor 1
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Rocket.Chat server URL. |
-| `token_env` | string | `"ROCKETCHAT_TOKEN"` | Env var holding the Rocket.Chat auth token. |
-| `user_id` | string | `""` | Bot user ID. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`ROCKETCHAT_TOKEN` (the personal access token) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 
 #### `[channels.zulip]`
 
@@ -2627,7 +2643,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
-| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
@@ -2679,8 +2695,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
 | Zulip | `api_key_env` |
-| Twitch | `oauth_token_env` |
-| Rocket.Chat | `token_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | LINE | `access_token_env` |

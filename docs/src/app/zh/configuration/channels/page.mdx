@@ -33,28 +33,28 @@ TELEGRAM_BOT_TOKEN = "..."
 
 Sidecar 适配器保留了与原内置适配器相同的运行语义：`TELEGRAM_BOT_TOKEN` 环境变量、可选的 `ALLOWED_USERS` 允许列表、`channel_type = "telegram"` 以及 `channel_role_mapping.telegram` 的 RBAC 映射。详见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
-#### `[channels.discord]`
+#### Discord（sidecar）
+
+Discord 已于 v2026.5 迁移为进程外 sidecar 适配器，请改用 `[[sidecar_channels]]` 配置。Sidecar 保留原内置适配器的运行语义：`DISCORD_BOT_TOKEN` 环境变量、Gateway Intents、`allowed_guilds` / `allowed_users` 过滤，以及通过 `channel_role_mapping.discord` 的 RBAC 映射。
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-allowed_guilds = []
-# default_agent = "assistant"
-intents = 37376
-ignore_bots = true
-# account_id = "my-discord-bot"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_ALLOWED_USERS = "789"
+# DISCORD_INTENTS = "37376"
+# DISCORD_IGNORE_BOTS = "true"
+# DISCORD_MENTION_PATTERNS = "hey bot,!ask"
+# DISCORD_ACCOUNT_ID = "guild-42"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | 存放 Discord Bot 令牌的环境变量。 |
-| `allowed_guilds` | list of u64 | `[]` | 允许的服务器（Guild）ID 列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `allowed_users` | list of strings | `[]` | 允许交互的 Discord 用户 ID 列表。空列表 = 允许所有。 |
-| `intents` | u64 | `37376` | Gateway Intents 位掩码。默认 = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT`（37376）。 |
-| `ignore_bots` | bool | `true` | 为 `true` 时，忽略来自其他 Bot 的消息。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+完整的 supervisor 字段（restart、backoff、ready timeout、message buffer 等）参见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
 #### `[channels.slack]`
 
@@ -214,39 +214,44 @@ space_ids = []
 | `webhook_port` | u16 | `8444` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.twitch]`
+#### Twitch
+
+Twitch 由 Python sidecar 适配器 (`librefang.sidecar.adapters.twitch`) 提供。原 in-process `[channels.twitch]` 配置块已在 sidecar 迁移中移除。请改用 `[[sidecar_channels]]` 条目：
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-channels = ["mychannel"]
-nick = "librefang"
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # 逗号分隔，不带 '#'
+# TWITCH_ACCOUNT_ID = "prod"                # 可选，多机器人路由
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 非 mod 账号 20/30s；mod 可设为 100
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | 存放 Twitch OAuth 令牌的环境变量。 |
-| `channels` | list of strings | `[]` | 要加入的 Twitch 频道（不带 `#` 前缀）。 |
-| `nick` | string | `"librefang"` | 在 Twitch 聊天中的 Bot 昵称。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`TWITCH_OAUTH_TOKEN` 写入 `~/.librefang/secrets.env`。Sidecar 默认通过 TLS 连接 `irc.chat.twitch.tv:6697`；明文模式仅在 `TWITCH_PLAINTEXT=1` 下用于本地 mock 监听。
 
-#### `[channels.rocketchat]`
+#### Rocket.Chat
 
-```toml
-[channels.rocketchat]
-server_url = "https://rocketchat.example.com"
-token_env = "ROCKETCHAT_TOKEN"
-user_id = ""
-allowed_channels = []
+Rocket.Chat 现以 Python sidecar 适配器（`librefang.sidecar.adapters.rocketchat`）提供。原 in-process `[channels.rocketchat]` 配置块已在 sidecar 迁移中移除。请改为通过 `[[sidecar_channels]]` 条目声明：
+
+```bash
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # 可选；留空 = 所有已加入频道
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # 可选，多 Bot 路由
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Rocket.Chat 服务器 URL。 |
-| `token_env` | string | `"ROCKETCHAT_TOKEN"` | 存放 Rocket.Chat 认证令牌的环境变量。 |
-| `user_id` | string | `""` | Bot 用户 ID。 |
-| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`ROCKETCHAT_TOKEN` 应写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Rocket.Chat 表单时会自动写入。
 
 #### `[channels.zulip]`
 

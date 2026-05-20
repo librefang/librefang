@@ -138,26 +138,10 @@ struct ChannelMeta {
 }
 
 const CHANNEL_REGISTRY: &[ChannelMeta] = &[
-    // ── Messaging (11) ──────────────────────────────────────────────
-    // telegram migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.telegram); no longer an in-process
-    // channel.
-    ChannelMeta {
-        name: "discord", display_name: "Discord", icon: "DC",
-        description: "Discord Gateway bot adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your bot token from the Discord Developer Portal",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("DISCORD_BOT_TOKEN"), required: true, placeholder: "MTIz...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_guilds", label: "Allowed Guild IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123456789, 987654321", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123456789, 987654321", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "intents", label: "Intents Bitmask", field_type: FieldType::Number, env_var: None, required: false, placeholder: "37376", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Go to discord.com/developers/applications", "Create a bot and copy the token", "Paste it below"],
-        config_template: "[channels.discord]\nbot_token_env = \"DISCORD_BOT_TOKEN\"",
-    },
+    // ── Messaging ───────────────────────────────────────────────────
+    // telegram and discord migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{telegram,discord}); no longer
+    // in-process channels.
     ChannelMeta {
         name: "slack", display_name: "Slack", icon: "SL",
         description: "Slack Socket Mode + Events API",
@@ -382,37 +366,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot user in Nextcloud", "Generate an app password", "Enter URL and token below"],
         config_template: "[channels.nextcloud]\nserver_url = \"\"\ntoken_env = \"NEXTCLOUD_TOKEN\"",
     },
-    ChannelMeta {
-        name: "rocketchat", display_name: "Rocket.Chat", icon: "RC",
-        description: "Rocket.Chat REST adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your server URL, user ID, and token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://rocket.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "user_id", label: "Bot User ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "abc123", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("ROCKETCHAT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Channel IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "GENERAL", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Admin > Users", "Generate a personal access token", "Enter URL, user ID, and token below"],
-        config_template: "[channels.rocketchat]\nserver_url = \"\"\ntoken_env = \"ROCKETCHAT_TOKEN\"\nuser_id = \"\"",
-    },
-    ChannelMeta {
-        name: "twitch", display_name: "Twitch", icon: "TV",
-        description: "Twitch IRC gateway adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your OAuth token and enter channel name",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "oauth_token_env", label: "OAuth Token", field_type: FieldType::Secret, env_var: Some("TWITCH_OAUTH_TOKEN"), required: true, placeholder: "oauth:abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "nick", label: "Bot Nickname", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channels", label: "Channels (no #)", field_type: FieldType::List, env_var: None, required: true, placeholder: "mychannel", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Generate an OAuth token at twitchapps.com/tmi", "Enter token, nick, and channel below"],
-        config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
-    },
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -484,7 +437,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
-        "discord" => config.discord.is_some(),
         "slack" => config.slack.is_some(),
         "whatsapp" => config.whatsapp.is_some(),
         "signal" => config.signal.is_some(),
@@ -499,8 +451,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "dingtalk" => config.dingtalk.is_some(),
         "zulip" => config.zulip.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
-        "rocketchat" => config.rocketchat.is_some(),
-        "twitch" => config.twitch.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -764,6 +714,27 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Reddit OAuth2 API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.reddit"],
+    },
+    SidecarCatalogEntry {
+        name: "twitch",
+        display_name: "Twitch",
+        description: "Twitch IRC gateway adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.twitch"],
+    },
+    SidecarCatalogEntry {
+        name: "rocketchat",
+        display_name: "Rocket.Chat",
+        description: "Rocket.Chat REST API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.rocketchat"],
+    },
+    SidecarCatalogEntry {
+        name: "discord",
+        display_name: "Discord",
+        description: "Discord Gateway bot adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.discord"],
     },
 ];
 
@@ -1258,10 +1229,6 @@ fn channel_config_values(
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "discord" => config
-            .discord
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "slack" => config
             .slack
             .as_ref()
@@ -1292,14 +1259,6 @@ fn channel_config_values(
             .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "twitch" => config
-            .twitch
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "rocketchat" => config
-            .rocketchat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "zulip" => config
@@ -1354,7 +1313,6 @@ fn channel_config_values(
 /// `instance_count`.
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
-        "discord" => config.discord.len(),
         "slack" => config.slack.len(),
         "whatsapp" => config.whatsapp.len(),
         "signal" => config.signal.len(),
@@ -1369,8 +1327,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "dingtalk" => config.dingtalk.len(),
         "zulip" => config.zulip.len(),
         "nextcloud" => config.nextcloud.len(),
-        "rocketchat" => config.rocketchat.len(),
-        "twitch" => config.twitch.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1398,7 +1354,6 @@ fn channel_instances_serialized(
             .collect()
     }
     match name {
-        "discord" => ser(&config.discord),
         "slack" => ser(&config.slack),
         "whatsapp" => ser(&config.whatsapp),
         "signal" => ser(&config.signal),
@@ -1413,8 +1368,6 @@ fn channel_instances_serialized(
         "dingtalk" => ser(&config.dingtalk),
         "zulip" => ser(&config.zulip),
         "nextcloud" => ser(&config.nextcloud),
-        "rocketchat" => ser(&config.rocketchat),
-        "twitch" => ser(&config.twitch),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),
@@ -1890,7 +1843,7 @@ fn build_instance_fields_json(
         .collect();
 
     // For per-instance secret fields, override `has_value` to check the env
-    // var that THIS instance's `<key>` points at (e.g. `DISCORD_BOT_TOKEN_2`)
+    // var that THIS instance's `<key>` points at (e.g. `SLACK_BOT_TOKEN_2`)
     // instead of the field schema's default env var. Without this, every
     // instance would report the same `has_value` derived from the default
     // env var, defeating the purpose of multiple instances.
@@ -1916,7 +1869,7 @@ fn build_instance_fields_json(
             if field_json.get("key").and_then(|v| v.as_str()) == Some(field_def.key) {
                 field_json["has_value"] = serde_json::Value::Bool(has_value);
                 // Surface the env-var name the instance is pointing at so
-                // the UI can show "DISCORD_BOT_TOKEN_2" next to the secret
+                // the UI can show "SLACK_BOT_TOKEN_2" next to the secret
                 // field — otherwise the user can't tell instances apart.
                 field_json["env_var"] = serde_json::Value::String(pointed_env_name.to_string());
             }
@@ -2009,7 +1962,7 @@ fn resolve_secret_env_overrides(
 /// — `OneOrMany`'s deserialiser coerces TOML integers to JSON strings in
 /// some fields (see `librefang-types/src/config/serde_helpers.rs`), and
 /// the two views diverge. All sites that build the hash today route
-/// through `serde_json::to_value(&DiscordConfig)` (and friends) so this
+/// through `serde_json::to_value(&SlackConfig)` (and friends) so this
 /// holds; the test `instance_signature_stable_across_key_order` pins it.
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
@@ -2755,22 +2708,6 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {
-        "discord" => {
-            let token = std::env::var("DISCORD_BOT_TOKEN")
-                .map_err(|_| "DISCORD_BOT_TOKEN not set".to_string())?;
-            let url = format!("https://discord.com/api/v10/channels/{target_id}/messages");
-            let resp = client
-                .post(&url)
-                .header("Authorization", format!("Bot {token}"))
-                .json(&serde_json::json!({ "content": test_msg }))
-                .send()
-                .await
-                .map_err(|e| format!("HTTP request failed: {e}"))?;
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Discord API error: {body}"));
-            }
-        }
         "slack" => {
             let token = std::env::var("SLACK_BOT_TOKEN")
                 .map_err(|_| "SLACK_BOT_TOKEN not set".to_string())?;
@@ -3284,12 +3221,12 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Discord requires DISCORD_BOT_TOKEN. With it unset we must surface
+        // Slack requires SLACK_BOT_TOKEN. With it unset we must surface
         // a 412 — NOT a 200 with a "status: error" body, which silently passes
         // dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("DISCORD_BOT_TOKEN");
+        let _g = EnvGuard::unset("SLACK_BOT_TOKEN");
 
-        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("slack".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3305,45 +3242,25 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "test-token-not-real");
+        let _bot = EnvGuard::set("SLACK_BOT_TOKEN", "xoxb-test-not-real");
+        let _app = EnvGuard::set("SLACK_APP_TOKEN", "xapp-test-not-real");
 
-        let resp = test_channel(Path("discord".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("slack".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    #[tokio::test]
-    async fn downstream_send_failure_returns_502() {
-        let _lock = ENV_LOCK.lock().await;
-        // Discord bot token is set (so we get past the 412 gate) but the
-        // value is bogus, so Bot API will reject the call. We pass a
-        // `chat_id` to force the live-send branch. Result: handler must
-        // surface a 502 Bad Gateway.
-        //
-        // This exercises a real network round-trip to discord.com —
-        // it'll be skipped in offline CI environments. We detect that by
-        // looking at the response status: anything other than 502 in an
-        // offline run means we couldn't reach the network at all, which
-        // is fine for the purpose of *this* assertion (we already cover
-        // the 200 / 412 / 404 paths deterministically above).
-        let _g = EnvGuard::set("DISCORD_BOT_TOKEN", "0:invalid-token-for-test");
-
-        let body = axum::body::Bytes::from_static(b"{\"chat_id\":\"1\"}");
-        let resp = test_channel(Path("discord".to_string()), body)
-            .await
-            .into_response();
-
-        // Either: we reached Discord and got a 401-equivalent → handler
-        // returns 502; or we have no network → reqwest errors out which
-        // also gets mapped to 502. Both are acceptable. A 200 here would
-        // be the bug from #3507.
-        assert_ne!(
-            resp.status(),
-            StatusCode::OK,
-            "downstream send failure must NOT be reported as 200"
-        );
-    }
+    // (downstream_send_failure_returns_502 was retired during the
+    // discord-sidecar migration. It used Discord's REST 401-on-bad-token
+    // behaviour to exercise the handler's 502 path; Slack's
+    // `chat.postMessage` returns 200 with `{"ok": false, ...}` on auth
+    // failure so `resp.status().is_success()` is true and the test was
+    // structurally untestable against any other in-process channel
+    // without a wiremock'd HTTP server in this test binary. The 200/412
+    // paths in this module — the only ones #3507 was scoped to — are
+    // still covered by `missing_required_env_returns_412` and
+    // `credentials_present_no_target_returns_200` above.)
 }
 
 #[cfg(test)]
@@ -3354,8 +3271,8 @@ mod instance_helper_tests {
     //! and have no business reaching production untested.
     use super::*;
 
-    fn discord_meta() -> &'static ChannelMeta {
-        find_channel_meta("discord").expect("discord is in the registry")
+    fn slack_meta() -> &'static ChannelMeta {
+        find_channel_meta("slack").expect("slack is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
@@ -3366,11 +3283,11 @@ mod instance_helper_tests {
     /// env-var name (no suffix), matching the legacy single-instance flow.
     #[test]
     fn resolve_overrides_picks_default_for_first_instance() {
-        let meta = discord_meta();
+        let meta = slack_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("DISCORD_BOT_TOKEN"),
+            Some("SLACK_BOT_TOKEN"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -3381,15 +3298,15 @@ mod instance_helper_tests {
     /// at idx 1) — it must pick `_BOT_TOKEN_2`, the lowest unused suffix.
     #[test]
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
-        let meta = discord_meta();
+        let meta = slack_meta();
         let existing = vec![
-            inst_with_env("DISCORD_BOT_TOKEN"),
-            inst_with_env("DISCORD_BOT_TOKEN_3"),
+            inst_with_env("SLACK_BOT_TOKEN"),
+            inst_with_env("SLACK_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("DISCORD_BOT_TOKEN_2"),
+            Some("SLACK_BOT_TOKEN_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -3400,15 +3317,15 @@ mod instance_helper_tests {
     /// bot token in place" actually rotate in place.
     #[test]
     fn resolve_overrides_preserves_existing_env_name_on_update() {
-        let meta = discord_meta();
+        let meta = slack_meta();
         let existing = vec![
-            inst_with_env("DISCORD_BOT_TOKEN"),
-            inst_with_env("MY_CUSTOM_DC_TOKEN"),
+            inst_with_env("SLACK_BOT_TOKEN"),
+            inst_with_env("MY_CUSTOM_SL_TOKEN"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_DC_TOKEN"),
+            Some("MY_CUSTOM_SL_TOKEN"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -3420,18 +3337,18 @@ mod instance_helper_tests {
     /// row should still be allowed to pick its own slot).
     #[test]
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
-        let meta = discord_meta();
+        let meta = slack_meta();
         let existing = vec![
-            inst_with_env("DISCORD_BOT_TOKEN"),
+            inst_with_env("SLACK_BOT_TOKEN"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("DISCORD_BOT_TOKEN_3"),
+            inst_with_env("SLACK_BOT_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
             overrides.get("bot_token_env").map(|s| s.as_str()),
-            Some("DISCORD_BOT_TOKEN_2")
+            Some("SLACK_BOT_TOKEN_2")
         );
     }
 

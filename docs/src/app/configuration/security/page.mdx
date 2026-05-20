@@ -365,7 +365,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `TEAMS_SECURITY_TOKEN` | Teams | Outgoing webhook security token (base64) — HMAC-SHA256 key used to verify the `Authorization: HMAC <…>` header on every inbound activity. Production deployments should always set this. |
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
-| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |

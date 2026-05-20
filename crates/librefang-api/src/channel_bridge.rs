@@ -234,8 +234,6 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 }
 
 // Feature-gated adapter imports
-#[cfg(feature = "channel-discord")]
-use librefang_channels::discord::DiscordAdapter;
 #[cfg(feature = "channel-email")]
 use librefang_channels::email::EmailAdapter;
 #[cfg(feature = "channel-google-chat")]
@@ -244,16 +242,12 @@ use librefang_channels::google_chat::GoogleChatAdapter;
 use librefang_channels::matrix::MatrixAdapter;
 #[cfg(feature = "channel-mattermost")]
 use librefang_channels::mattermost::MattermostAdapter;
-#[cfg(feature = "channel-rocketchat")]
-use librefang_channels::rocketchat::RocketChatAdapter;
 #[cfg(feature = "channel-signal")]
 use librefang_channels::signal::SignalAdapter;
 #[cfg(feature = "channel-slack")]
 use librefang_channels::slack::SlackAdapter;
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-twitch")]
-use librefang_channels::twitch::TwitchAdapter;
 #[cfg(feature = "channel-webhook")]
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
@@ -1892,7 +1886,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
             "signal" => find_channel_info!(signal),
@@ -1901,8 +1894,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "teams" => find_channel_info!(teams),
             "mattermost" => find_channel_info!(mattermost),
             "google_chat" => find_channel_info!(google_chat),
-            "twitch" => find_channel_info!(twitch),
-            "rocketchat" => find_channel_info!(rocketchat),
             "zulip" => find_channel_info!(zulip),
             // Wave 3
             "line" => find_channel_info!(line),
@@ -2558,7 +2549,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(discord, "channel-discord", "Discord");
     check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(signal, "channel-signal", "Signal");
@@ -2567,8 +2557,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(mattermost, "channel-mattermost", "Mattermost");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(twitch, "channel-twitch", "Twitch");
-    check_channel!(rocketchat, "channel-rocketchat", "Rocket.Chat");
     check_channel!(zulip, "channel-zulip", "Zulip");
     check_channel!(line, "channel-line", "LINE");
     check_channel!(feishu, "channel-feishu", "Feishu");
@@ -2597,38 +2585,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Discord
-    #[cfg(feature = "channel-discord")]
-    for dc_config in config.discord.iter() {
-        if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
-            let base = DiscordAdapter::new(
-                token,
-                dc_config.allowed_guilds.clone(),
-                dc_config.allowed_users.clone(),
-                dc_config.ignore_bots,
-                dc_config.mention_patterns.clone(),
-                dc_config.intents,
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, dc_config.proxy.as_deref(), "Discord", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(dc_config.account_id.clone())
-                    .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                dc_config.default_agent.clone(),
-                dc_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Slack
     #[cfg(feature = "channel-slack")]
@@ -2902,43 +2858,6 @@ pub async fn start_channel_bridge_with_config(
             ));
         } else {
             warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
-        }
-    }
-
-    // Twitch
-    #[cfg(feature = "channel-twitch")]
-    for tw_config in config.twitch.iter() {
-        if let Some(token) = read_token(&tw_config.oauth_token_env, "Twitch") {
-            let adapter = Arc::new(
-                TwitchAdapter::new(token, tw_config.channels.clone(), tw_config.nick.clone())
-                    .with_account_id(tw_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tw_config.default_agent.clone(),
-                tw_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Rocket.Chat
-    #[cfg(feature = "channel-rocketchat")]
-    for rc_config in config.rocketchat.iter() {
-        if let Some(token) = read_token(&rc_config.token_env, "Rocket.Chat") {
-            let adapter = Arc::new(
-                RocketChatAdapter::new(
-                    rc_config.server_url.clone(),
-                    token,
-                    rc_config.user_id.clone(),
-                    rc_config.allowed_channels.clone(),
-                )
-                .with_account_id(rc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                rc_config.default_agent.clone(),
-                rc_config.account_id.clone(),
-            ));
         }
     }
 
@@ -4184,7 +4103,6 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.discord.is_none());
         assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());
         assert!(config.channels.signal.is_none());
@@ -4193,8 +4111,6 @@ mod tests {
         assert!(config.channels.teams.is_none());
         assert!(config.channels.mattermost.is_none());
         assert!(config.channels.google_chat.is_none());
-        assert!(config.channels.twitch.is_none());
-        assert!(config.channels.rocketchat.is_none());
         assert!(config.channels.zulip.is_none());
         // Wave 3
         assert!(config.channels.line.is_none());

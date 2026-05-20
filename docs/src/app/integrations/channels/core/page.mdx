@@ -92,21 +92,38 @@ librefang config set-key discord              # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-8. Add to config:
+8. Add to config (Discord is an out-of-process sidecar adapter):
 
 ```toml
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-default_agent = "coder"
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
+# DISCORD_ALLOWED_GUILDS = "123,456"
+# DISCORD_INTENTS = "37376"
 ```
 
 9. Restart the daemon.
 
 ### How It Works
 
-The Discord adapter connects to the Discord Gateway via WebSocket (v10). It listens for `MESSAGE_CREATE` events and routes messages to the configured agent. Responses are sent via the REST API's `channels/{id}/messages` endpoint.
+The Discord sidecar (`librefang.sidecar.adapters.discord` in the
+Python SDK) connects to the Discord Gateway via WebSocket (v10) in a
+supervised subprocess and speaks newline-delimited JSON-RPC over
+stdio with the daemon. It listens for `MESSAGE_CREATE` events and
+emits them as `message` events; agent replies are POSTed via the REST
+API's `channels/{id}/messages` endpoint.
 
-The adapter handles Gateway reconnection, heartbeating, and session resumption automatically.
+The sidecar handles Gateway reconnection, periodic heartbeats (with
+RFC-required jitter on the first beat), session resumption, and
+gateway close-code handling automatically. Daemon-side supervision
+(restart, exponential backoff, circuit-break) is configured via the
+common `[[sidecar_channels]]` fields documented under
+[Sidecar channels](/configuration/channels#sidecar_channels).
 
 ---
 
@@ -471,12 +488,15 @@ chunk ends in the middle of a character.
 
 ### Disabling Automatic Splitting
 
-If you want LibreFang to truncate rather than split long messages for a specific
-channel, set `split_long_messages = false` in the channel configuration:
+For the still-in-process channels (Slack, Mattermost, …), set
+`split_long_messages = false` in the channel configuration to truncate
+rather than split long messages:
 
 ```toml
-[channels.discord]
+[channels.slack]
 split_long_messages = false   # truncate instead of splitting
 ```
 
-The default is `true` for Discord and the Telegram sidecar adapter.
+The default is `true`. The Discord and Telegram sidecars always chunk
+at the 2 000 UTF-16-unit boundary — they own their own chunking
+inside the subprocess and the daemon-side knob does not reach them.

@@ -123,11 +123,13 @@ pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Ch
 /// `with_proxy`) gives them a fighting chance to spot the misconfig
 /// before they file a bug.
 ///
-/// Called by `SlackAdapter::start` (Socket Mode), `DiscordAdapter::start`
-/// (Gateway), and `MattermostAdapter::start` (WebSocket). Telegram is
-/// pure REST long-polling and does not call this. The `#[allow]` keeps it
-/// available when all three WS-using channel features happen to be off
-/// (the lib still compiles without forcing a `cfg(any(...))` here).
+/// Called by `SlackAdapter::start` (Socket Mode) and
+/// `MattermostAdapter::start` (WebSocket). Discord moved to a sidecar
+/// in v2026.5 (its old `DiscordAdapter::start` called this too).
+/// Telegram is pure REST long-polling and does not call this. The
+/// `#[allow]` keeps it available when both WS-using channel features
+/// happen to be off (the lib still compiles without forcing a
+/// `cfg(any(...))` here).
 #[allow(dead_code)]
 pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
     tracing::warn!(
@@ -964,13 +966,11 @@ mod tests {
     /// adapter names the start() paths pass in.
     #[cfg(any(
         feature = "channel-slack",
-        feature = "channel-discord",
         feature = "channel-mattermost",
     ))]
     #[test]
     fn warn_ws_proxy_bypass_smoke() {
         warn_ws_proxy_bypass("slack");
-        warn_ws_proxy_bypass("discord");
         warn_ws_proxy_bypass("mattermost");
     }
 

@@ -259,17 +259,6 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for dc in self.channels.discord.iter() {
-            if std::env::var(&dc.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Discord configured but {} is not set",
-                    dc.bot_token_env
-                ));
-            }
-        }
         for sl in self.channels.slack.iter() {
             if std::env::var(&sl.app_token_env)
                 .unwrap_or_default()
@@ -345,25 +334,6 @@ impl KernelConfig {
         for z in self.channels.zulip.iter() {
             if std::env::var(&z.api_key_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
-            }
-        }
-        for tw in self.channels.twitch.iter() {
-            if std::env::var(&tw.oauth_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Twitch configured but {} is not set",
-                    tw.oauth_token_env
-                ));
-            }
-        }
-        for rc in self.channels.rocketchat.iter() {
-            if std::env::var(&rc.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Rocket.Chat configured but {} is not set",
-                    rc.token_env
-                ));
             }
         }
         for gc in self.channels.google_chat.iter() {

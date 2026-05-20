@@ -21,7 +21,6 @@
 #
 # One basename per line, no `.rs`. Keep sorted.
 dingtalk
-discord
 email
 feishu
 google_chat
@@ -30,12 +29,10 @@ matrix
 mattermost
 nextcloud
 qq
-rocketchat
 sidecar
 signal
 slack
 teams
-twitch
 webex
 webhook
 wechat

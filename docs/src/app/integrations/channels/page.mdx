@@ -7,7 +7,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 ## Table of Contents
 
 - [Core Messaging](/integrations/channels/core) — Telegram, Discord, Slack, WhatsApp, WeChat, Signal, Matrix, Email, WebChat
-- [Enterprise](/integrations/channels/enterprise) — Teams, Mattermost, Google Chat, Webex, Feishu, Rocket.Chat, Zulip, Flock, Twist, Pumble, Guilded
+- [Enterprise](/integrations/channels/enterprise) — Teams, Mattermost, Google Chat, Webex, Feishu, Zulip, Flock, Twist, Pumble, Guilded
 - [Social & Community](/integrations/channels/social) — Reddit, Mastodon, Bluesky, Twitch, Gitter, Revolt, Keybase
 - [Integrations & Protocols](/integrations/channels/integrations) — LINE, DingTalk, QQ, WeCom, Threema, IRC, XMPP, Ntfy, Gotify, Nextcloud, Mumble, Webhook, Voice
 - [Custom Adapters](/integrations/channels/custom) — Writing your own adapter
@@ -39,9 +39,14 @@ channel_type = "telegram"
 TELEGRAM_BOT_TOKEN = "..."
 # ALLOWED_USERS = "123456789,@alice"
 
-[channels.discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-default_agent = "coder"
+# Discord (sidecar)
+[[sidecar_channels]]
+name = "discord"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.discord"]
+channel_type = "discord"
+[sidecar_channels.env]
+DISCORD_BOT_TOKEN = "..."
 
 [channels.slack]
 bot_token_env = "SLACK_BOT_TOKEN"
