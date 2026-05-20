@@ -533,80 +533,6 @@
       },
       "type": "object"
     },
-    "BlueskyConfig": {
-      "description": "Bluesky/AT Protocol channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "app_password_env": {
-          "default": "BLUESKY_APP_PASSWORD",
-          "description": "Env var name holding the app password.",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "identifier": {
-          "default": "",
-          "description": "Bluesky identifier (handle or DID).",
-          "type": "string"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "service_url": {
-          "default": "https://bsky.social",
-          "description": "PDS service URL.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "BraveSearchConfig": {
       "description": "Brave Search API configuration.",
       "properties": {
@@ -1143,15 +1069,6 @@
     "ChannelsConfig": {
       "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`) and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.",
       "properties": {
-        "bluesky": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_BlueskyConfig"
-            }
-          ],
-          "default": null,
-          "description": "Bluesky/AT Protocol configuration(s)."
-        },
         "dingtalk": {
           "allOf": [
             {
@@ -1246,15 +1163,6 @@
           "default": null,
           "description": "Mattermost configuration(s)."
         },
-        "nextcloud": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_NextcloudConfig"
-            }
-          ],
-          "default": null,
-          "description": "Nextcloud Talk configuration(s)."
-        },
         "qq": {
           "allOf": [
             {
@@ -1263,24 +1171,6 @@
           ],
           "default": null,
           "description": "QQ Bot API v2 configuration(s)."
-        },
-        "reddit": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_RedditConfig"
-            }
-          ],
-          "default": null,
-          "description": "Reddit API configuration(s)."
-        },
-        "rocketchat": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_RocketChatConfig"
-            }
-          ],
-          "default": null,
-          "description": "Rocket.Chat configuration(s)."
         },
         "signal": {
           "allOf": [
@@ -1308,15 +1198,6 @@
           ],
           "default": null,
           "description": "Microsoft Teams configuration(s)."
-        },
-        "twitch": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_TwitchConfig"
-            }
-          ],
-          "default": null,
-          "description": "Twitch chat configuration(s)."
         },
         "webex": {
           "allOf": [
@@ -4552,83 +4433,6 @@
       },
       "type": "object"
     },
-    "NextcloudConfig": {
-      "description": "Nextcloud Talk channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_rooms": {
-          "default": [],
-          "description": "Room tokens to listen in (empty = all).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "server_url": {
-          "default": "",
-          "description": "Nextcloud server URL.",
-          "type": "string"
-        },
-        "token_env": {
-          "default": "NEXTCLOUD_TOKEN",
-          "description": "Env var name holding the auth token.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "NotificationConfig": {
       "description": "Notification engine configuration.",
       "properties": {
@@ -4813,90 +4617,6 @@
         "id"
       ],
       "type": "object"
-    },
-    "OneOrMany_BlueskyConfig": {
-      "oneOf": [
-        {
-          "description": "Bluesky/AT Protocol channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "app_password_env": {
-              "default": "BLUESKY_APP_PASSWORD",
-              "description": "Env var name holding the app password.",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "identifier": {
-              "default": "",
-              "description": "Bluesky identifier (handle or DID).",
-              "type": "string"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "service_url": {
-              "default": "https://bsky.social",
-              "description": "PDS service URL.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/BlueskyConfig"
-          },
-          "type": "array"
-        }
-      ]
     },
     "OneOrMany_DingTalkConfig": {
       "oneOf": [
@@ -5824,93 +5544,6 @@
         }
       ]
     },
-    "OneOrMany_NextcloudConfig": {
-      "oneOf": [
-        {
-          "description": "Nextcloud Talk channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_rooms": {
-              "default": [],
-              "description": "Room tokens to listen in (empty = all).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "server_url": {
-              "default": "",
-              "description": "Nextcloud server URL.",
-              "type": "string"
-            },
-            "token_env": {
-              "default": "NEXTCLOUD_TOKEN",
-              "description": "Env var name holding the auth token.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/NextcloudConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_QqConfig": {
       "oneOf": [
         {
@@ -5993,195 +5626,6 @@
         {
           "items": {
             "$ref": "#/definitions/QqConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_RedditConfig": {
-      "oneOf": [
-        {
-          "description": "Reddit API channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "client_id": {
-              "default": "",
-              "description": "Reddit app client ID.",
-              "type": "string"
-            },
-            "client_secret_env": {
-              "default": "REDDIT_CLIENT_SECRET",
-              "description": "Env var name holding the client secret.",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "password_env": {
-              "default": "REDDIT_PASSWORD",
-              "description": "Env var name holding the bot password.",
-              "type": "string"
-            },
-            "subreddits": {
-              "default": [],
-              "description": "Subreddits to monitor.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "username": {
-              "default": "",
-              "description": "Reddit bot username.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/RedditConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_RocketChatConfig": {
-      "oneOf": [
-        {
-          "description": "Rocket.Chat channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_channels": {
-              "default": [],
-              "description": "Allowed channel IDs (empty = all).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "server_url": {
-              "default": "",
-              "description": "Rocket.Chat server URL.",
-              "type": "string"
-            },
-            "token_env": {
-              "default": "ROCKETCHAT_TOKEN",
-              "description": "Env var name holding the auth token.",
-              "type": "string"
-            },
-            "user_id": {
-              "default": "",
-              "description": "User ID for the bot.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/RocketChatConfig"
           },
           "type": "array"
         }
@@ -6518,93 +5962,6 @@
         {
           "items": {
             "$ref": "#/definitions/TeamsConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
-    "OneOrMany_TwitchConfig": {
-      "oneOf": [
-        {
-          "description": "Twitch chat channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "channels": {
-              "default": [],
-              "description": "Twitch channels to join (without #).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "nick": {
-              "default": "librefang",
-              "description": "Bot nickname.",
-              "type": "string"
-            },
-            "oauth_token_env": {
-              "default": "TWITCH_OAUTH_TOKEN",
-              "description": "Env var name holding the OAuth token.",
-              "type": "string"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/TwitchConfig"
           },
           "type": "array"
         }
@@ -7912,93 +7269,6 @@
       },
       "type": "object"
     },
-    "RedditConfig": {
-      "description": "Reddit API channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "client_id": {
-          "default": "",
-          "description": "Reddit app client ID.",
-          "type": "string"
-        },
-        "client_secret_env": {
-          "default": "REDDIT_CLIENT_SECRET",
-          "description": "Env var name holding the client secret.",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "password_env": {
-          "default": "REDDIT_PASSWORD",
-          "description": "Env var name holding the bot password.",
-          "type": "string"
-        },
-        "subreddits": {
-          "default": [],
-          "description": "Subreddits to monitor.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "username": {
-          "default": "",
-          "description": "Reddit bot username.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "RegistryConfig": {
       "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" ```",
       "properties": {
@@ -8071,88 +7341,6 @@
           "type": "string"
         }
       ]
-    },
-    "RocketChatConfig": {
-      "description": "Rocket.Chat channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_channels": {
-          "default": [],
-          "description": "Allowed channel IDs (empty = all).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "server_url": {
-          "default": "",
-          "description": "Rocket.Chat server URL.",
-          "type": "string"
-        },
-        "token_env": {
-          "default": "ROCKETCHAT_TOKEN",
-          "description": "Env var name holding the auth token.",
-          "type": "string"
-        },
-        "user_id": {
-          "default": "",
-          "description": "User ID for the bot.",
-          "type": "string"
-        }
-      },
-      "type": "object"
     },
     "SanitizeConfig": {
       "description": "Configuration for channel input sanitization / prompt-injection detection.\n\nThe sanitizer is **enabled by default** (mode = \"block\"). To opt out set `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:\n\n```toml [sanitize] mode = \"block\"          # off | warn | block  (default: block) max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] # disable_input_sanitizer = true  # emergency opt-out ```",
@@ -8461,6 +7649,14 @@
         "command": {
           "description": "Command to execute (e.g., \"python3\", \"/usr/local/bin/my-adapter\").",
           "type": "string"
+        },
+        "default_agent": {
+          "default": null,
+          "description": "Default agent name for incoming messages on this sidecar channel.\n\nWhen set, seeds the `AgentRouter.channel_defaults` map at boot so inbound messages with no explicit binding route to this agent. This mirrors the `default_agent` field that lived on the per-channel in-process configs (`TelegramConfig`, `DiscordConfig`, …) before the sidecar migration (#5241 / #5294). Without this, the resolver falls through to the non-deterministic \"first available agent\" branch in `resolve_or_fallback`, which silently routes traffic to a different agent whenever a new agent is spawned.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "env": {
           "additionalProperties": {
@@ -9704,83 +8900,6 @@
           "default": "alloy",
           "description": "Voice: alloy, echo, fable, onyx, nova, shimmer. Default: \"alloy\".",
           "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "TwitchConfig": {
-      "description": "Twitch chat channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "channels": {
-          "default": [],
-          "description": "Twitch channels to join (without #).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nick": {
-          "default": "librefang",
-          "description": "Bot nickname.",
-          "type": "string"
-        },
-        "oauth_token_env": {
-          "default": "TWITCH_OAUTH_TOKEN",
-          "description": "Env var name holding the OAuth token.",
-          "type": "string"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
         }
       },
       "type": "object"
@@ -11100,7 +10219,6 @@
         }
       ],
       "default": {
-        "bluesky": null,
         "dingtalk": null,
         "discord": null,
         "email": null,
@@ -11112,14 +10230,10 @@
         "line": null,
         "matrix": null,
         "mattermost": null,
-        "nextcloud": null,
         "qq": null,
-        "reddit": null,
-        "rocketchat": null,
         "signal": null,
         "slack": null,
         "teams": null,
-        "twitch": null,
         "webex": null,
         "webhook": null,
         "wechat": null,

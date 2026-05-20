@@ -798,8 +798,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 }
             };
         }
-        ch!(discord);
-        ch!(slack);
         ch!(whatsapp);
         ch!(signal);
         ch!(matrix);
@@ -807,12 +805,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(teams);
         ch!(mattermost);
         ch!(google_chat);
-        ch!(twitch);
-        ch!(rocketchat);
         ch!(zulip);
         ch!(line);
         ch!(feishu);
-        ch!(nextcloud);
         ch!(webex);
         ch!(dingtalk);
         ch!(qq);
@@ -3424,7 +3419,7 @@ url = "https://search.example.com"
         ));
         assert!(!super::is_writable_config_path("default_model.api_key_env"));
         assert!(!super::is_writable_config_path(
-            "channels.slack.access_token_env"
+            "channels.matrix.access_token_env"
         ));
         assert!(!super::is_writable_config_path("default_model.client_id"));
         assert!(!super::is_writable_config_path(
@@ -3456,13 +3451,11 @@ url = "https://search.example.com"
         // depth-2 leaves under the same vendor stay open (per-field
         // toggles via the dashboard).
         assert!(!super::is_writable_config_path("channels.telegram"));
-        assert!(!super::is_writable_config_path("channels.discord"));
-        assert!(!super::is_writable_config_path("channels.slack"));
         assert!(!super::is_writable_config_path("channels.whatsapp"));
         assert!(!super::is_writable_config_path("channels.matrix"));
         assert!(!super::is_writable_config_path("channels.email"));
         assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.discord.enabled"));
+        assert!(super::is_writable_config_path("channels.matrix.enabled"));
 
         // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
         // peer redirect, threat model parallel to the round-4 removal

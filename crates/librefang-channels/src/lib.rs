@@ -31,8 +31,8 @@ pub use message_truncator::{
 // Individual channel adapters — feature-gated (alphabetical order)
 #[cfg(feature = "channel-dingtalk")]
 pub mod dingtalk;
-#[cfg(feature = "channel-discord")]
-pub mod discord;
+// discord migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.discord); no longer an in-process channel.
 #[cfg(feature = "channel-email")]
 pub mod email;
 #[cfg(feature = "channel-feishu")]
@@ -45,20 +45,14 @@ pub mod line;
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
-#[cfg(feature = "channel-nextcloud")]
-pub mod nextcloud;
 #[cfg(feature = "channel-qq")]
 pub mod qq;
-#[cfg(feature = "channel-rocketchat")]
-pub mod rocketchat;
 #[cfg(feature = "channel-signal")]
 pub mod signal;
-#[cfg(feature = "channel-slack")]
-pub mod slack;
+// slack migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.slack); no longer an in-process channel.
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-twitch")]
-pub mod twitch;
 #[cfg(feature = "channel-webex")]
 pub mod webex;
 #[cfg(feature = "channel-webhook")]

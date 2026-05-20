@@ -266,39 +266,38 @@ The Gotify sidecar connects to `wss://{server}/stream?token={client_token}` to r
 
 ## Nextcloud Talk
 
+Nextcloud Talk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.nextcloud`). The in-process `[channels.nextcloud]` config block was removed in the sidecar migration. Declare Nextcloud as a `[[sidecar_channels]]` entry instead.
+
 ### Prerequisites
 
 - A Nextcloud instance with the Talk app installed (see [Nextcloud Talk API docs](https://nextcloud-talk.readthedocs.io/))
 - An app password or bot user account
+- Python 3.8+ on the daemon host (the sidecar runs as `python3 -m librefang.sidecar.adapters.nextcloud`)
 
 ### Setup
 
-1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password, or create a dedicated bot user.
-2. Set environment variables:
+1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password (or create a dedicated bot user).
+2. Add the sidecar entry to your `config.toml`:
 
 ```bash
-export NEXTCLOUD_URL=https://nextcloud.example.com  # Environment variable
-export NEXTCLOUD_TOKEN=your-app-password
-librefang vault set NEXTCLOUD_URL             # Encrypted vault (recommended)
-librefang vault set NEXTCLOUD_TOKEN
-librefang config set-key nextcloud            # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+[[sidecar_channels]]
+name = "nextcloud"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.nextcloud"]
+channel_type = "nextcloud"
+[sidecar_channels.env]
+NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
+# NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
+# NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing key
+# NEXTCLOUD_POLL_INTERVAL_SECS = "3"          # optional, default 3, floor 1
 ```
 
-3. Add to config:
-
-```toml
-[channels.nextcloud]
-url_env = "NEXTCLOUD_URL"
-token_env = "NEXTCLOUD_TOKEN"
-default_agent = "assistant"
-```
-
+3. Put `NEXTCLOUD_TOKEN` (the app password) in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form.
 4. Restart the daemon.
 
 ### How It Works
 
-The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in configured conversations. Responses are posted back as chat messages through the Talk API.
+The sidecar polls `GET /ocs/v2.php/apps/spreed/api/v1/chat/<token>?lookIntoFuture=1` per room at the configured interval (default 3 s) using Bearer auth plus the mandatory `OCS-APIRequest: true` header. Slash-command bodies (`/cmd args`) become `Command` events; everything else is plain text. Outbound replies go through `POST /ocs/v2.php/apps/spreed/api/v1/chat/<token>` with a form-encoded body and thread correctly via the `replyTo` parameter when the inbound message lived inside a thread (improvement over the former Rust adapter, which never sent `replyTo`).
 
 ---
 

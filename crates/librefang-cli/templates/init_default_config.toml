@@ -177,14 +177,26 @@ debounce_ms = 500
 # TELEGRAM_BOT_TOKEN = "..."
 # # ALLOWED_USERS = "111,@alice"
 
-# [channels.discord]
-# bot_token_env = "DISCORD_BOT_TOKEN"
-# default_agent = "assistant"
+# Discord is now an out-of-process sidecar adapter — declare it as a
+# [[sidecar_channels]] block; the in-process channel was removed.
+# [[sidecar_channels]]
+# name = "discord"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.discord"]
+# channel_type = "discord"
+# [sidecar_channels.env]
+# DISCORD_BOT_TOKEN = "..."
 
-# [channels.slack]
-# bot_token_env = "SLACK_BOT_TOKEN"
-# app_token_env = "SLACK_APP_TOKEN"
-# default_agent = "assistant"
+# Slack is now an out-of-process sidecar adapter — declare it as a
+# [[sidecar_channels]] block; the in-process channel was removed.
+# [[sidecar_channels]]
+# name = "slack"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.slack"]
+# channel_type = "slack"
+# [sidecar_channels.env]
+# SLACK_APP_TOKEN = "xapp-..."
+# SLACK_BOT_TOKEN = "xoxb-..."
 
 # [channels.wechat]                   # Personal WeChat via iLink protocol
 # bot_token_env = "WECHAT_BOT_TOKEN"  # optional: skip QR login on restart

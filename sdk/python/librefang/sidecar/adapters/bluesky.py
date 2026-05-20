@@ -80,6 +80,11 @@ MAX_MESSAGE_LEN = 300
 POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
 MAX_BACKOFF_SECS = 60.0
+# Default fallback when Bluesky 429s without a `Retry-After` header.
+# AT Protocol's XRPC layer typically sends one (seconds form, alongside
+# `RateLimit-Reset` epoch); fall back to a sane wait so we don't busy-
+# loop at 1 s when the header is absent or unparseable.
+RETRY_AFTER_DEFAULT_SECS = 30.0
 # Sessions last ~2h on bsky.social; refresh 5 min before the 90-min
 # safety mark used by the Rust adapter.
 SESSION_LIFE_SECS = 5400
@@ -197,11 +202,28 @@ class BlueskyAdapter(SidecarAdapter):
 
     # ---- helpers -----------------------------------------------------
 
+    @staticmethod
+    def _response_headers(resp_or_err) -> dict:
+        """Pull headers off either a successful response or an HTTPError
+        and normalise keys to lowercase so callers can do
+        case-insensitive lookups (notably for ``Retry-After`` on 429)."""
+        hdrs = getattr(resp_or_err, "headers", None)
+        if hdrs is None:
+            return {}
+        try:
+            return {k.lower(): v for k, v in hdrs.items()}
+        except Exception:  # noqa: BLE001 — defensive against odd shims
+            return {}
+
     def _post_json(self, url: str, body: dict | None,
                    *, bearer: str | None = None,
-                   timeout: float = SEND_TIMEOUT_SECS) -> tuple[int, dict | None]:
-        """Issue an XRPC POST. Returns (status, parsed_json_body | None).
-        Raises HTTPError on transport failure. The body may be None for
+                   timeout: float = SEND_TIMEOUT_SECS,
+                   ) -> tuple[int, dict | None, dict]:
+        """Issue an XRPC POST. Returns
+        ``(status, parsed_json_body | None, response_headers)``. Response
+        header keys are normalised lowercase so callers can do
+        case-insensitive lookups (notably for ``Retry-After`` on 429 —
+        headers are returned on HTTPError too). The body may be None for
         the `refreshSession` endpoint which expects an empty POST body."""
         data = json.dumps(body).encode("utf-8") if body is not None else b""
         headers = {"Content-Type": "application/json"}
@@ -214,21 +236,24 @@ class BlueskyAdapter(SidecarAdapter):
             ) as resp:
                 status = getattr(resp, "status", 200)
                 raw = resp.read()
+                resp_hdrs = self._response_headers(resp)
                 if not raw:
-                    return status, None
+                    return status, None, resp_hdrs
                 try:
-                    return status, json.loads(raw.decode("utf-8"))
+                    return status, json.loads(raw.decode("utf-8")), resp_hdrs
                 except (ValueError, TypeError):
-                    return status, None
+                    return status, None, resp_hdrs
         except urllib.error.HTTPError as e:
+            resp_hdrs = self._response_headers(e)
             try:
                 err_body = json.loads(e.read().decode("utf-8"))
             except Exception:  # noqa: BLE001
                 err_body = None
-            return e.code, err_body
+            return e.code, err_body, resp_hdrs
 
     def _get_json(self, url: str, *, bearer: str | None = None,
-                  timeout: float = SEND_TIMEOUT_SECS) -> tuple[int, dict | None]:
+                  timeout: float = SEND_TIMEOUT_SECS,
+                  ) -> tuple[int, dict | None, dict]:
         headers = {}
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
@@ -239,18 +264,37 @@ class BlueskyAdapter(SidecarAdapter):
             ) as resp:
                 status = getattr(resp, "status", 200)
                 raw = resp.read()
+                resp_hdrs = self._response_headers(resp)
                 if not raw:
-                    return status, None
+                    return status, None, resp_hdrs
                 try:
-                    return status, json.loads(raw.decode("utf-8"))
+                    return status, json.loads(raw.decode("utf-8")), resp_hdrs
                 except (ValueError, TypeError):
-                    return status, None
+                    return status, None, resp_hdrs
         except urllib.error.HTTPError as e:
+            resp_hdrs = self._response_headers(e)
             try:
                 err_body = json.loads(e.read().decode("utf-8"))
             except Exception:  # noqa: BLE001
                 err_body = None
-            return e.code, err_body
+            return e.code, err_body, resp_hdrs
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the poller for more than a minute. We don't decode
+        the HTTP-date form or AT Protocol's ``RateLimit-Reset`` epoch —
+        XRPC's rate-limit replies use seconds in practice, and the
+        fallback covers any divergence."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
 
     # ---- session management ------------------------------------------
 
@@ -259,7 +303,20 @@ class BlueskyAdapter(SidecarAdapter):
         DID of the authenticated account; stores session state on self."""
         url = f"{self.service_url}/xrpc/com.atproto.server.createSession"
         body = {"identifier": self.identifier, "password": self.app_password}
-        status, resp = self._post_json(url, body)
+        status, resp, resp_hdrs = self._post_json(url, body)
+        if status == 429:
+            # Bluesky / PDS rate-limits createSession aggressively when
+            # a single IP racks up failed logins. Honour Retry-After then
+            # raise so the producer's outer backoff pauses before the
+            # next attempt — without this the verify-credentials retry
+            # loop would compound with the server-side window.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "bluesky 429 on createSession; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            raise RuntimeError("bluesky 429 — rate-limited")
         if status != 200 or not isinstance(resp, dict):
             raise RuntimeError(
                 f"bluesky createSession failed {status}: {resp!r}"
@@ -285,7 +342,20 @@ class BlueskyAdapter(SidecarAdapter):
             self._create_session()
             return
         url = f"{self.service_url}/xrpc/com.atproto.server.refreshSession"
-        status, resp = self._post_json(url, None, bearer=self._refresh_jwt)
+        status, resp, resp_hdrs = self._post_json(
+            url, None, bearer=self._refresh_jwt,
+        )
+        if status == 429:
+            # Refresh can also be throttled. Honour Retry-After and
+            # raise; the caller (`_get_token`) propagates this to the
+            # poll / send paths whose outer loops back off.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "bluesky 429 on refreshSession; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            raise RuntimeError("bluesky 429 — rate-limited")
         if status != 200 or not isinstance(resp, dict):
             log.info(
                 "bluesky refreshSession failed; re-creating session",
@@ -425,18 +495,36 @@ class BlueskyAdapter(SidecarAdapter):
         if last_seen_at:
             url += "&" + urllib.parse.urlencode({"seenAt": last_seen_at})
         token, _did = self._get_token()
-        status, body = self._get_json(url, bearer=token)
+        status, body, resp_hdrs = self._get_json(url, bearer=token)
         if status == 401:
             # Mirror Rust: clear session so next poll re-auths.
             self._access_jwt = None
             raise RuntimeError("bluesky 401 — session expired")
+        if status == 429:
+            # XRPC rate limit on listNotifications. Honour Retry-After
+            # and raise so `_producer_blocking`'s outer backoff pauses
+            # — the per-poll loop would otherwise keep probing inside
+            # the throttling window.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "bluesky 429 on listNotifications; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            raise RuntimeError("bluesky 429 — rate-limited")
         if status != 200 or not isinstance(body, dict):
             raise RuntimeError(f"bluesky listNotifications {status}: {body!r}")
         notifs = body.get("notifications")
         if not isinstance(notifs, list):
             return last_seen_at
         new_seen = last_seen_at
-        for notif in notifs:
+        # `listNotifications` returns notifications newest-first. Emit
+        # them oldest-first so a burst caught in one poll reaches the
+        # agent in conversation order; the high-water mark below is the
+        # max `indexedAt` and so is order-independent. The Rust adapter
+        # iterated the raw newest-first list and delivered such bursts
+        # backwards.
+        for notif in reversed(notifs):
             if not isinstance(notif, dict):
                 continue
             indexed = notif.get("indexedAt")
@@ -534,14 +622,28 @@ class BlueskyAdapter(SidecarAdapter):
                 "collection": "app.bsky.feed.post",
                 "record": record,
             }
-            status, resp = self._post_json(url, body, bearer=token)
+            status, resp, resp_hdrs = self._post_json(url, body, bearer=token)
             if status == 401:
                 # Token expired mid-batch: refresh once and retry this
                 # chunk. If it still fails we surface the error.
                 self._access_jwt = None
                 token, did = self._get_token()
                 body["repo"] = did
-                status, resp = self._post_json(url, body, bearer=token)
+                status, resp, resp_hdrs = self._post_json(
+                    url, body, bearer=token,
+                )
+            if status == 429:
+                # createRecord is rate-limited independently of auth.
+                # Honour Retry-After and raise; `suppress_error_responses`
+                # already prevents the raise from echoing as a public
+                # post.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "bluesky 429 on createRecord; sleeping",
+                    retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("bluesky 429 — rate-limited")
             if status >= 300:
                 raise RuntimeError(
                     f"bluesky createRecord {status}: {resp!r}"

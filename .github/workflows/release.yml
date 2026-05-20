@@ -2265,7 +2265,7 @@ jobs:
         # warning instead of failing the whole release. The .ipa still
         # landed on the GitHub Release in the prior step.
         continue-on-error: true
-        uses: Apple-Actions/upload-testflight-build@b72667704c7f5ecb2f1dddd131870b477d86a313 # v5.1.0
+        uses: Apple-Actions/upload-testflight-build@1ad58030672057aa084b4e96beb6f7a8c627f9e6 # v5.2.1
         with:
           app-path: ${{ steps.art.outputs.ipa }}
           issuer-id: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}

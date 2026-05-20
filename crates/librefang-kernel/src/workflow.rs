@@ -12115,6 +12115,9 @@ name = "topic"
             "B's pause is older — it must come first when sorting by `paused_at`. \
              A sort by `started_at` would put A first; that's the bug this test guards."
         );
-        assert_eq!(pending[1].0.id, run_a, "A's pause is newer — it must come second");
+        assert_eq!(
+            pending[1].0.id, run_a,
+            "A's pause is newer — it must come second"
+        );
     }
 }
