@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import email
 import os
+import ssl
 from email.message import EmailMessage
 
 import pytest
@@ -844,3 +845,54 @@ def test_schema_shape():
 
 def test_capabilities_text_only():
     assert em.EmailAdapter.capabilities == []
+
+
+# ---- TLS context construction (security-sensitive) -----------------
+
+
+def test_ssl_context_default_verifies_certs():
+    """Default context must enforce hostname + cert validation. The
+    presence of these knobs is the only guard between operator
+    laziness and a MITM-vulnerable mailbox."""
+    a = _adapter()
+    ctx = a._build_ssl_context()
+    import ssl as _ssl
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == _ssl.CERT_REQUIRED
+
+
+def test_ssl_context_accept_invalid_certs_disables_validation(caplog):
+    """`EMAIL_TLS_ACCEPT_INVALID_CERTS=1` is the documented dev escape
+    hatch — must produce an unverified context AND log a warning so
+    the risk doesn't go unnoticed (#4877)."""
+    a = _adapter(EMAIL_TLS_ACCEPT_INVALID_CERTS="1")
+    ctx = a._build_ssl_context()
+    import ssl as _ssl
+    # Unverified context: hostname check off, verify mode CERT_NONE.
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == _ssl.CERT_NONE
+
+
+def test_ssl_context_root_ca_path_keeps_validation_on(tmp_path, monkeypatch):
+    """`EMAIL_TLS_ROOT_CA_PATH` adds a custom CA on top of system roots
+    — hostname / chain / signature validation MUST stay on (#4877).
+    Verifies the factory call shape rather than building a real CA."""
+    # Capture what `create_default_context` was called with rather than
+    # standing up a self-signed CA fixture.
+    captured: dict = {}
+    real_factory = ssl.create_default_context
+
+    def _capturing_factory(*args, **kwargs):
+        captured["cafile"] = kwargs.get("cafile")
+        captured["called"] = True
+        # Return a real default context so downstream code stays happy.
+        return real_factory()
+
+    monkeypatch.setattr(ssl, "create_default_context", _capturing_factory)
+    fake_path = str(tmp_path / "test-ca.pem")
+    a = _adapter(EMAIL_TLS_ROOT_CA_PATH=fake_path)
+    ctx = a._build_ssl_context()
+    assert captured.get("cafile") == fake_path
+    # Validation stays ON.
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
