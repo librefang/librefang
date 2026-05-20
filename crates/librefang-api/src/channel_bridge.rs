@@ -265,8 +265,6 @@ use librefang_channels::zulip::ZulipAdapter;
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
-#[cfg(feature = "channel-reddit")]
-use librefang_channels::reddit::RedditAdapter;
 // Wave 4
 #[cfg(feature = "channel-nextcloud")]
 use librefang_channels::nextcloud::NextcloudAdapter;
@@ -1908,7 +1906,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "zulip" => find_channel_info!(zulip),
             // Wave 3
             "line" => find_channel_info!(line),
-            "reddit" => find_channel_info!(reddit),
             "feishu" => find_channel_info!(feishu),
             // Wave 4
             "nextcloud" => find_channel_info!(nextcloud),
@@ -2574,7 +2571,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(rocketchat, "channel-rocketchat", "Rocket.Chat");
     check_channel!(zulip, "channel-zulip", "Zulip");
     check_channel!(line, "channel-line", "LINE");
-    check_channel!(reddit, "channel-reddit", "Reddit");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
@@ -2987,30 +2983,6 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Reddit
-    #[cfg(feature = "channel-reddit")]
-    for rd_config in config.reddit.iter() {
-        if let Some(secret) = read_token(&rd_config.client_secret_env, "Reddit (secret)") {
-            if let Some(password) = read_token(&rd_config.password_env, "Reddit (password)") {
-                let adapter = Arc::new(
-                    RedditAdapter::new(
-                        rd_config.client_id.clone(),
-                        secret,
-                        rd_config.username.clone(),
-                        password,
-                        rd_config.subreddits.clone(),
-                    )
-                    .with_account_id(rd_config.account_id.clone()),
-                );
-                adapters.push((
-                    adapter,
-                    rd_config.default_agent.clone(),
-                    rd_config.account_id.clone(),
-                ));
-            }
-        }
-    }
-
     // Feishu/Lark (unified adapter)
     #[cfg(feature = "channel-feishu")]
     for fs_config in config.feishu.iter() {
@@ -3282,7 +3254,13 @@ pub async fn start_channel_bridge_with_config(
             sidecar_config,
             kernel.home_dir().to_path_buf(),
         ));
-        adapters.push((adapter, None, None));
+        // #5294 — propagate `default_agent` from the sidecar config so the
+        // router-population loop below seeds `AgentRouter.channel_defaults`
+        // for this channel. Without this, sidecar adapters fall through to
+        // the non-deterministic "first available agent" branch in
+        // `resolve_or_fallback`, silently routing traffic to whichever agent
+        // happens to be first in the registry iteration order.
+        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
     }
 
     if adapters.is_empty() {
@@ -4220,7 +4198,6 @@ mod tests {
         assert!(config.channels.zulip.is_none());
         // Wave 3
         assert!(config.channels.line.is_none());
-        assert!(config.channels.reddit.is_none());
         assert!(config.channels.feishu.is_none());
         // Wave 4
         assert!(config.channels.nextcloud.is_none());

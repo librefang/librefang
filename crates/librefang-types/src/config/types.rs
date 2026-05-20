@@ -2166,6 +2166,18 @@ pub struct SidecarChannelConfig {
     /// Channel type identifier (defaults to Custom(name)).
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Default agent name for incoming messages on this sidecar channel.
+    ///
+    /// When set, seeds the `AgentRouter.channel_defaults` map at boot so
+    /// inbound messages with no explicit binding route to this agent. This
+    /// mirrors the `default_agent` field that lived on the per-channel
+    /// in-process configs (`TelegramConfig`, `DiscordConfig`, …) before the
+    /// sidecar migration (#5241 / #5294). Without this, the resolver falls
+    /// through to the non-deterministic "first available agent" branch in
+    /// `resolve_or_fallback`, which silently routes traffic to a different
+    /// agent whenever a new agent is spawned.
+    #[serde(default)]
+    pub default_agent: Option<String>,
     /// Restart the subprocess automatically when it exits unexpectedly.
     #[serde(default = "default_sidecar_restart")]
     pub restart: bool,
@@ -6389,8 +6401,6 @@ pub struct ChannelsConfig {
     // Wave 3 — High-value channels
     /// LINE Messaging API configuration(s).
     pub line: OneOrMany<LineConfig>,
-    /// Reddit API configuration(s).
-    pub reddit: OneOrMany<RedditConfig>,
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
@@ -6474,7 +6484,6 @@ impl Default for ChannelsConfig {
             rocketchat: OneOrMany::default(),
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
-            reddit: OneOrMany::default(),
             feishu: OneOrMany::default(),
             nextcloud: OneOrMany::default(),
             webex: OneOrMany::default(),
@@ -7179,46 +7188,6 @@ impl Default for LineConfig {
             channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
             access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
             webhook_port: 8450,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Reddit API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct RedditConfig {
-    /// Reddit app client ID.
-    pub client_id: String,
-    /// Env var name holding the client secret.
-    pub client_secret_env: String,
-    /// Reddit bot username.
-    pub username: String,
-    /// Env var name holding the bot password.
-    pub password_env: String,
-    /// Subreddits to monitor.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub subreddits: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for RedditConfig {
-    fn default() -> Self {
-        Self {
-            client_id: String::new(),
-            client_secret_env: "REDDIT_CLIENT_SECRET".to_string(),
-            username: String::new(),
-            password_env: "REDDIT_PASSWORD".to_string(),
-            subreddits: vec![],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

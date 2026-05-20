@@ -282,25 +282,25 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `webhook_port` | u16 | `8450` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.reddit]`
+#### Reddit
+
+Reddit 由 Python sidecar 适配器（`librefang.sidecar.adapters.reddit`）提供，进程内 `[channels.reddit]` 配置块已在 sidecar 迁移中移除。请以 `[[sidecar_channels]]` 形式声明：
 
 ```toml
-[channels.reddit]
-client_id = ""
-client_secret_env = "REDDIT_CLIENT_SECRET"
-username = ""
-password_env = "REDDIT_PASSWORD"
-subreddits = []
+[[sidecar_channels]]
+name = "reddit"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.reddit"]
+channel_type = "reddit"
+[sidecar_channels.env]
+REDDIT_CLIENT_ID = "abc123"
+REDDIT_USERNAME = "librefang-bot"
+REDDIT_SUBREDDITS = "rust,programming"   # 逗号分隔
+# REDDIT_ACCOUNT_ID = "prod"              # 可选，用于多 Bot 路由
+# REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"   # 覆盖默认 User-Agent
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `client_id` | string | `""` | Reddit 应用客户端 ID。 |
-| `client_secret_env` | string | `"REDDIT_CLIENT_SECRET"` | 存放 Reddit 客户端密钥的环境变量。 |
-| `username` | string | `""` | Reddit Bot 用户名。 |
-| `password_env` | string | `"REDDIT_PASSWORD"` | 存放 Reddit Bot 密码的环境变量。 |
-| `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`REDDIT_CLIENT_SECRET` 和 `REDDIT_PASSWORD` 应放在 `~/.librefang/secrets.env` 中 —— 仪表盘的 Channels 页面会在你填写 Reddit 表单时自动写入。
 
 #### Mastodon
 

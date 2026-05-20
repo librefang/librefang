@@ -253,27 +253,10 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
         config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
     },
-    // ── Social (5) ──────────────────────────────────────────────────
-    ChannelMeta {
-        name: "reddit", display_name: "Reddit", icon: "RD",
-        description: "Reddit API bot adapter",
-        category: "social", difficulty: "Medium", setup_time: "~5 min",
-        quick_setup: "Paste your Client ID, Secret, and bot credentials",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "client_id", label: "Client ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "abc123def", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "client_secret_env", label: "Client Secret", field_type: FieldType::Secret, env_var: Some("REDDIT_CLIENT_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "username", label: "Bot Username", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang_bot", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Bot Password", field_type: FieldType::Secret, env_var: Some("REDDIT_PASSWORD"), required: true, placeholder: "password", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "subreddits", label: "Subreddits", field_type: FieldType::List, env_var: None, required: false, placeholder: "librefang, rust", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Reddit app at reddit.com/prefs/apps (script type)", "Copy Client ID and Secret", "Enter bot credentials below"],
-        config_template: "[channels.reddit]\nclient_id = \"\"\nclient_secret_env = \"REDDIT_CLIENT_SECRET\"\nusername = \"\"\npassword_env = \"REDDIT_PASSWORD\"",
-    },
-    // mastodon and bluesky migrated to out-of-process sidecar adapters
-    // (librefang.sidecar.adapters.{mastodon,bluesky} in the SDK package);
-    // no longer in-process channels.
+    // ── Social ──────────────────────────────────────────────────────
+    // mastodon, bluesky, and reddit migrated to out-of-process sidecar
+    // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
+    // the SDK package); no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
     ChannelMeta {
         name: "teams", display_name: "Microsoft Teams", icon: "MS",
@@ -508,7 +491,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "line" => config.line.is_some(),
-        "reddit" => config.reddit.is_some(),
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
@@ -775,6 +757,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Bluesky / AT Protocol adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.bluesky"],
+    },
+    SidecarCatalogEntry {
+        name: "reddit",
+        display_name: "Reddit",
+        description: "Reddit OAuth2 API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.reddit"],
     },
 ];
 
@@ -1321,10 +1310,6 @@ fn channel_config_values(
             .line
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "reddit" => config
-            .reddit
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
             .as_ref()
@@ -1376,7 +1361,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "line" => config.line.len(),
-        "reddit" => config.reddit.len(),
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
@@ -1421,7 +1405,6 @@ fn channel_instances_serialized(
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "line" => ser(&config.line),
-        "reddit" => ser(&config.reddit),
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),

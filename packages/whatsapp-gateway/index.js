@@ -369,6 +369,7 @@ function readWhatsAppConfig(configPath) {
     // set `[relay_intent].languages = ["en", "it", …]` in config.toml
     // to enable extra language packs.
     relay_intent_languages: ['en'],
+    api_key: '',
   };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
@@ -384,8 +385,12 @@ function readWhatsAppConfig(configPath) {
         Array.isArray(relay.languages) && relay.languages.length > 0
           ? relay.languages
           : defaults.relay_intent_languages,
+      // Root-level `api_key` is the kernel's shared bearer token. The kernel
+      // enforces it on `/api/*` endpoints when set; without it we get HTTP
+      // 401 "Invalid API key" and inbound messages never reach the agent.
+      api_key: typeof parsed?.api_key === 'string' ? parsed.api_key : defaults.api_key,
     };
-    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, stream_to_channel=${cfg.stream_to_channel}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}`);
+    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, stream_to_channel=${cfg.stream_to_channel}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}, api_key=${cfg.api_key ? '<set>' : '<empty>'}`);
     return cfg;
   } catch (err) {
     console.warn(`[gateway] Could not read ${configPath}: ${err.message} — using defaults/env vars`);
@@ -400,6 +405,18 @@ const tomlConfig = readWhatsAppConfig(CONFIG_PATH);
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const LIBREFANG_URL = (process.env.LIBREFANG_URL || 'http://127.0.0.1:4545').replace(/\/+$/, '');
+// Bearer token for the kernel REST API. Env override wins so deploys/tests
+// can rotate the key without touching config.toml. The kernel returns 401
+// "Invalid API key" on every `/api/*` call when its config has `api_key`
+// set but the gateway omits the `Authorization` header — silently breaking
+// the inbound-WhatsApp → kernel → agent forward chain.
+const LIBREFANG_API_KEY = process.env.LIBREFANG_API_KEY || tomlConfig.api_key || '';
+if (!LIBREFANG_API_KEY) {
+  console.warn('[gateway] LIBREFANG_API_KEY is empty — kernel may reject forwards with HTTP 401 if its config.toml has api_key set.');
+}
+function kernelAuthHeader() {
+  return LIBREFANG_API_KEY ? { Authorization: `Bearer ${LIBREFANG_API_KEY}` } : {};
+}
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || tomlConfig.default_agent;
 const AGENT_NAME = DEFAULT_AGENT;
 
@@ -1388,7 +1405,7 @@ function resolveAgentId() {
         port: url.port || 4545,
         path: url.pathname,
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
+        headers: { 'Accept': 'application/json', ...kernelAuthHeader() },
         timeout: 10_000,
       },
       (res) => {
@@ -2693,6 +2710,7 @@ async function uploadToLibreFang(agentId, buffer, contentType, filename) {
             'Content-Type': contentType,
             'X-Filename': filename,
             'Content-Length': buffer.length,
+            ...kernelAuthHeader(),
           },
           timeout: 60_000,
         },
@@ -2905,6 +2923,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payloadStr),
+          ...kernelAuthHeader(),
         },
         timeout: 120_000, // LLM calls can be slow
       },
@@ -2925,6 +2944,16 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
             }
             console.error('[gateway] Agent UUID still 404 after retry, giving up');
             return reject(new Error('Agent not found after retry'));
+          }
+
+          // Auth failure — kernel requires Bearer token but gateway sent
+          // wrong/missing one. Retry won't fix it; surface loudly so it's
+          // visible in `pm2 logs whatsapp-gateway` instead of dying silently
+          // while messages pile up unhandled.
+          if (res.statusCode === 401 || res.statusCode === 403) {
+            const authHint = LIBREFANG_API_KEY ? '<set>' : '<empty>';
+            console.error(`[gateway][CRITICAL] kernel rejected forward with HTTP ${res.statusCode} (LIBREFANG_API_KEY=${authHint}). Check root-level api_key in /data/config.toml matches LIBREFANG_API_KEY env / tomlConfig.api_key.`);
+            return reject(new Error(`Kernel auth rejected (${res.statusCode})`));
           }
 
           try {
@@ -3062,6 +3091,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payloadStr),
           Accept: 'text/event-stream',
+          ...kernelAuthHeader(),
         },
         timeout: 180_000, // streaming can take longer
       },

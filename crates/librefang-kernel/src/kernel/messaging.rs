@@ -2409,6 +2409,25 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
+            // #5227: stamp the chat-qualified scope derived via the same
+            // formula as `SessionId::for_sender_scope`. Adapters whose
+            // `channel` string already embeds the chat (WhatsApp gateway:
+            // `"whatsapp:<jid>"`) collapse to the bare channel; adapters
+            // that split the two across `channel = "telegram"` +
+            // `chat_id = "<chatId>"` (Telegram sidecar, Slack, Discord, …)
+            // gain a distinct scope per chat — required by the cross-chat
+            // memory-bleed filter in `auto_memorize` / `auto_retrieve` /
+            // `setup_recalled_memories`. Without this stamp those channels
+            // would share `sender_channel = "telegram"` across DM and
+            // group and the filter would be a no-op.
+            if let Some(scope) =
+                librefang_types::agent::compose_sender_scope(&ctx.channel, ctx.chat_id.as_deref())
+            {
+                manifest.metadata.insert(
+                    "sender_chat_scope".to_string(),
+                    serde_json::Value::String(scope),
+                );
+            }
             if !ctx.display_name.is_empty() {
                 manifest.metadata.insert(
                     "sender_display_name".to_string(),
