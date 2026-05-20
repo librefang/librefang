@@ -375,6 +375,30 @@ pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
+    // Reject path-traversal payloads on BOTH `name` and `hand` before
+    // letting either reach `Path::join`. Pre-fix the handler did
+    // `home.join("registry").join("skills").join(&req.name)` and
+    // `home.join("workspaces").join("hands").join(hand_id)` with no
+    // rejection of `..` / `/` / `\`, so a payload like
+    // `{"name":"../../etc/cron.daily/payload"}` would (a) leak FS
+    // existence via the `.exists()` probe (200 / 404 oracle) and (b)
+    // let `copy_dir_recursive` write outside `~/.librefang/skills/`
+    // (full filesystem write under the daemon UID). The sibling
+    // `uninstall_skill` at `librefang-skills/src/evolution.rs:1277`
+    // already hardens uninstall — this brings install in line. The
+    // validator below matches the project's strict pattern from
+    // `agent_templates.rs:113-124` (alphanumeric + `_` + `-`, ≤ 64
+    // chars, no leading `.`). (audit:
+    // skill-install-path-traversal)
+    if let Err(reason) = validate_skill_identifier(&req.name, "name") {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
+    if let Some(ref hand_id) = req.hand {
+        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
+            return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        }
+    }
+
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
@@ -854,6 +878,49 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 
     let total = skills.len();
     Json(serde_json::json!({ "skills": skills, "total": total }))
+}
+
+/// Path-traversal hardening for `install_skill` (audit:
+/// skill-install-path-traversal). Used on both `req.name` (joined
+/// onto `registry/skills/`) and `req.hand` (joined onto
+/// `workspaces/hands/`).
+///
+/// Contract:
+/// - non-empty, ≤ 64 chars (caps log noise and matches the project
+///   pattern from `agent_templates.rs::validate_template_name`)
+/// - characters limited to `[A-Za-z0-9_-]` — the strictest project
+///   convention; cannot contain `..`, `/`, `\`, or any platform
+///   path separator
+/// - first character must be alphanumeric — rejects `-foo` and
+///   `_foo` (option-arg / dotfile-style ambiguity) and `.foo`
+///   (leading-dot dotfile)
+///
+/// `field` is "name" or "hand" — used to scope the rejection
+/// message so the client knows which input was bad.
+fn validate_skill_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(format!(
+            "invalid skill {field}: must be 1-64 characters, got {} chars",
+            value.len()
+        ));
+    }
+    let all_safe = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !all_safe {
+        return Err(format!(
+            "invalid skill {field}: only [A-Za-z0-9_-] allowed (no path separators, dots, or other punctuation)"
+        ));
+    }
+    // First-char-alphanumeric rule (rejects leading `-` / `_` /
+    // `.`). `.empty()` is impossible here — we just bounded above.
+    let first = value.chars().next().expect("non-empty checked above");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "invalid skill {field}: must start with an alphanumeric character"
+        ));
+    }
+    Ok(())
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
@@ -7052,5 +7119,120 @@ service_account_env = \"SLACK_BOT_TOKEN\"
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("NEW_TOKEN"), "replacement must land: {raw}");
         assert!(!raw.contains("OLD"), "old value must be gone: {raw}");
+    }
+}
+
+#[cfg(test)]
+mod skill_identifier_validation {
+    //! Regression guards for the `skill-install-path-traversal` audit
+    //! item. `install_skill` joins both `req.name` and `req.hand`
+    //! onto filesystem paths (`registry/skills/<name>/`,
+    //! `workspaces/hands/<hand>/`), so a missing validator made the
+    //! handler an FS-existence oracle (200 vs 404) and a write
+    //! primitive (`copy_dir_recursive` outside `~/.librefang/skills/`).
+    //! These tests pin the accept / reject envelope of
+    //! `validate_skill_identifier`.
+    use super::validate_skill_identifier;
+
+    #[test]
+    fn accepts_simple_names() {
+        for ok in ["weather", "weather-v2", "a", "Abc_DEF-123", "skill_42"] {
+            assert!(
+                validate_skill_identifier(ok, "name").is_ok(),
+                "expected '{ok}' to validate",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dot_dot_traversal() {
+        let err = validate_skill_identifier("..", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_relative_traversal_payload() {
+        // The exploit literal from the audit doc.
+        let err =
+            validate_skill_identifier("../../../etc/cron.daily/payload", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_forward_slash() {
+        let err = validate_skill_identifier("foo/bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_backslash() {
+        let err = validate_skill_identifier("foo\\bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_leading_dot() {
+        let err = validate_skill_identifier(".hidden", "name").unwrap_err();
+        assert!(
+            err.contains("invalid skill name"),
+            "leading-dot dotfile must be rejected; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn rejects_leading_hyphen_and_underscore() {
+        for bad in ["-foo", "_foo"] {
+            let err = validate_skill_identifier(bad, "name").unwrap_err();
+            assert!(
+                err.contains("must start with"),
+                "leading non-alphanumeric '{bad}' must be rejected; got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty() {
+        let err = validate_skill_identifier("", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_too_long() {
+        let long = "a".repeat(65);
+        let err = validate_skill_identifier(&long, "name").unwrap_err();
+        assert!(err.contains("1-64"), "expected 1-64 length message; got {err:?}");
+    }
+
+    #[test]
+    fn rejects_non_ascii() {
+        // Unicode lookalikes (Cyrillic 'а' vs Latin 'a') would be a
+        // confusable-character attack vector. The validator is
+        // ASCII-only on purpose.
+        let err = validate_skill_identifier("\u{0430}weather", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_dots_inside_name() {
+        // `foo.bar` is rejected — dots have no place in skill ids
+        // (no extensions, no namespacing). Audit doc was explicit
+        // about leading-dot rejection; this extends to mid-string
+        // dots for defence in depth (path-normalisation edge cases
+        // with `./` segments).
+        let err = validate_skill_identifier("foo.bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn field_label_propagates_to_error_message() {
+        // When the validator is called on `hand`, the error must
+        // say "hand" so the client knows which payload field to
+        // fix. The handler relies on this to keep client errors
+        // actionable across both inputs.
+        let err = validate_skill_identifier("../oops", "hand").unwrap_err();
+        assert!(
+            err.contains("invalid skill hand"),
+            "expected 'hand' in message; got {err:?}",
+        );
     }
 }
