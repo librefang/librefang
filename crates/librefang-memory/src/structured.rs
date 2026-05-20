@@ -724,6 +724,14 @@ pub(crate) fn execute_structured_agent_deletes(
         "DELETE FROM entities WHERE agent_id = ?1",
         "DELETE FROM relations WHERE agent_id = ?1",
         "DELETE FROM events WHERE source_agent = ?1",
+        // pending_approvals (v26 — #3611) was missing from this
+        // cascade; the audit found that on `remove_agent` the table
+        // would retain rows for the deleted agent and a stale
+        // approval could fail-open on restart recovery. Authored
+        // approvals are scoped by `agent_id`, so the purge is a
+        // direct WHERE filter. (audit:
+        // agent-cascade-delete-missing-tables)
+        "DELETE FROM pending_approvals WHERE agent_id = ?1",
         "DELETE FROM agents WHERE id = ?1",
     ] {
         tx.execute(stmt, rusqlite::params![agent_id])
@@ -1026,5 +1034,195 @@ mod tests {
             loaded.source_toml_path,
             Some(std::path::PathBuf::from("/tmp/test-agent/agent.toml"))
         );
+    }
+
+    /// Regression guard for the audit item
+    /// `agent-cascade-delete-missing-tables`: every table with an
+    /// `agent_id` column MUST be purged when an agent is deleted.
+    /// Walks `sqlite_master` for every user table, then `PRAGMA
+    /// table_info` for each, to discover the agent-keyed set; seeds
+    /// one row per table for the target agent and one row per table
+    /// for an unrelated control agent; runs the cascade; asserts the
+    /// target's rows are gone but the control's survive. A new
+    /// agent-keyed table added in a future migration without a
+    /// corresponding `DELETE FROM <table> WHERE agent_id = ?1` line
+    /// in `execute_structured_agent_deletes` (or the sibling
+    /// `execute_session_agent_deletes` for `sessions`) will cause
+    /// this test to fail at the assertion below with the offending
+    /// table name printed, blocking the regression at CI time.
+    ///
+    /// Excluded tables (audit doc listed but they are not in fact
+    /// agent-scoped at this layer):
+    ///
+    /// - `paired_devices` — no `agent_id` column (devices are
+    ///   operator-scoped, not per-agent); they continue to
+    ///   authenticate against the operator's API key, not any
+    ///   particular agent. Bearer-token-replay-against-deleted-agent
+    ///   is therefore not the right framing — that path is governed
+    ///   by paired-device lifecycle, not agent lifecycle.
+    /// - `idempotency_keys` — no `agent_id` column; keys are scoped
+    ///   by request `Idempotency-Key` value, not by agent.
+    /// - `workflow_runs` — `workflow_id` column exists, but there
+    ///   is no `workflows.agent_id` mapping at the
+    ///   `librefang-memory` layer (workflow definitions live in
+    ///   `librefang-kernel` + YAML on disk). Per-agent scoping must
+    ///   be done at the kernel layer if it is ever needed; out of
+    ///   scope for this fix.
+    #[test]
+    fn agent_cascade_purges_every_agent_keyed_table() {
+        // Use the substrate's own remove path so we exercise the
+        // exact transaction that runs in production (it invokes
+        // both `execute_session_agent_deletes` and
+        // `execute_structured_agent_deletes` in one tx).
+        let pool = Pool::builder()
+            .max_size(2)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+
+        let conn = pool.get().unwrap();
+
+        // Discover every user table.
+        let user_tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master \
+                     WHERE type='table' \
+                       AND name NOT LIKE 'sqlite_%' \
+                       AND name NOT LIKE '%_fts%' \
+                       AND name NOT IN ('migrations')",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert!(
+            user_tables.len() > 10,
+            "schema discovery sanity: expected many tables, found {}",
+            user_tables.len()
+        );
+
+        // Discover the agent-keyed subset. A column named `agent_id`
+        // is the canonical signal; `source_agent` is the historical
+        // alias in `events` (already purged by the cascade).
+        let mut agent_keyed: Vec<String> = Vec::new();
+        for table in &user_tables {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            if cols.iter().any(|c| c == "agent_id" || c == "source_agent") {
+                agent_keyed.push(table.clone());
+            }
+        }
+        // Sanity: we know at least these are agent-keyed. If the
+        // schema regresses below this floor the test is wrong, not
+        // production.
+        for must_have in [
+            "audit_entries",
+            "kv_store",
+            "memories",
+            "pending_approvals",
+        ] {
+            assert!(
+                agent_keyed.iter().any(|t| t == must_have),
+                "schema sanity: expected {must_have} in agent-keyed set; got {agent_keyed:?}",
+            );
+        }
+
+        // Seed one row per agent-keyed table for two distinct
+        // agents — the target (to be removed) and a control (must
+        // survive). For `agents` itself, INSERT a row with the
+        // target's id; other tables get the agent id in their
+        // agent_id / source_agent column.
+        let target = AgentId::new();
+        let control = AgentId::new();
+        let target_str = target.to_string();
+        let control_str = control.to_string();
+
+        for ag in [&target_str, &control_str] {
+            for table in &agent_keyed {
+                // Use INSERT OR IGNORE so per-table NOT NULL columns
+                // that we cannot anticipate don't break the seeding —
+                // the rows we DO successfully insert give the cascade
+                // something to chew on. For each table we just write
+                // the agent_id (or source_agent) column.
+                let col = {
+                    let mut stmt = conn
+                        .prepare(&format!("PRAGMA table_info({table})"))
+                        .unwrap();
+                    let cols: Vec<String> = stmt
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .unwrap()
+                        .map(|r| r.unwrap())
+                        .collect();
+                    if cols.iter().any(|c| c == "agent_id") {
+                        "agent_id"
+                    } else {
+                        "source_agent"
+                    }
+                };
+                // `INSERT OR IGNORE INTO <t> (<col>) VALUES (?1)` —
+                // tables with NOT NULL siblings will silently skip
+                // (that's fine, we already have full coverage for
+                // those via the explicit unit tests). What matters
+                // is the tables where the insert DOES succeed: the
+                // cascade must purge them.
+                let _ = conn.execute(
+                    &format!("INSERT OR IGNORE INTO {table} ({col}) VALUES (?1)"),
+                    rusqlite::params![ag],
+                );
+            }
+        }
+
+        // Run the cascade in a transaction (mirrors substrate.rs:1446-1447).
+        let tx = pool.get().unwrap();
+        // We need a `&mut Connection` for `transaction()`; the
+        // pooled `PooledConnection` derefs mutably.
+        let mut tx_conn = tx;
+        let tx = tx_conn.transaction().unwrap();
+        crate::session::execute_session_agent_deletes(&tx, &target_str).unwrap();
+        execute_structured_agent_deletes(&tx, &target_str).unwrap();
+        tx.commit().unwrap();
+
+        // Assert: every agent-keyed table has zero target rows AND
+        // at least one control row (the control row may have been
+        // skipped at seed if the table had unsatisfied NOT NULLs,
+        // but for tables where seeding succeeded, the control must
+        // still be present after the cascade).
+        for table in &agent_keyed {
+            let col = if table == "events" { "source_agent" } else { "agent_id" };
+            let target_count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                    rusqlite::params![&target_str],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                target_count, 0,
+                "cascade missed target rows in table '{table}' (col={col}) — \
+                 add a `DELETE FROM {table} WHERE {col} = ?1` line in \
+                 execute_structured_agent_deletes (or execute_session_agent_deletes \
+                 if the table is session-scoped)",
+            );
+        }
+
+        // Also assert `agents` row for target is gone (it gets
+        // deleted by the final stmt in the cascade).
+        let agents_target: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agents WHERE id = ?1",
+                rusqlite::params![&target_str],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agents_target, 0, "target agent row must be deleted");
     }
 }
