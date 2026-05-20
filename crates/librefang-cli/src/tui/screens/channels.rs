@@ -89,15 +89,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN"],
         description: "LINE Messaging API adapter",
     },
-    // ── Social (5)
-    ChannelDef {
-        name: "reddit",
-        display_name: "Reddit",
-        category: "Social",
-        env_vars: &["REDDIT_CLIENT_SECRET", "REDDIT_PASSWORD"],
-        description: "Reddit API bot adapter",
-    },
-    // mastodon and bluesky migrated to sidecar adapters
+    // ── Social
+    // mastodon, bluesky, and reddit migrated to sidecar adapters
     // ── Enterprise (10)
     ChannelDef {
         name: "teams",

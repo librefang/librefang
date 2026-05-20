@@ -393,17 +393,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for rd in self.channels.reddit.iter() {
-            if std::env::var(&rd.client_secret_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Reddit configured but {} is not set",
-                    rd.client_secret_env
-                ));
-            }
-        }
         for fs in self.channels.feishu.iter() {
             if std::env::var(&fs.app_secret_env)
                 .unwrap_or_default()

@@ -6,38 +6,54 @@ use std::sync::{Arc, Mutex};
 
 type TaskPostCalls = Arc<Mutex<Vec<Option<String>>>>;
 type CronCreateCalls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+type CronListCalls = Arc<Mutex<Vec<String>>>;
+type CronCancelCalls = Arc<Mutex<Vec<String>>>;
 type TaskGetCalls = Arc<Mutex<Vec<String>>>;
 
 struct CapturedCalls {
     task_post: TaskPostCalls,
     cron_create: CronCreateCalls,
+    cron_list: CronListCalls,
+    cron_cancel: CronCancelCalls,
     task_get: TaskGetCalls,
 }
 
 struct CapturingKernel {
     task_post_calls: TaskPostCalls,
     cron_create_calls: CronCreateCalls,
+    cron_list_calls: CronListCalls,
+    cron_cancel_calls: CronCancelCalls,
     task_get_calls: TaskGetCalls,
     // When set, task_get returns Some(this) regardless of id; otherwise None.
     task_get_response: Mutex<Option<serde_json::Value>>,
+    // When set, cron_list returns this slice of "owned" jobs; otherwise an
+    // empty Vec.
+    cron_list_response: Mutex<Vec<serde_json::Value>>,
 }
 
 impl CapturingKernel {
     fn new() -> (Self, CapturedCalls) {
         let task_post = Arc::new(Mutex::new(Vec::new()));
         let cron_create = Arc::new(Mutex::new(Vec::new()));
+        let cron_list = Arc::new(Mutex::new(Vec::new()));
+        let cron_cancel = Arc::new(Mutex::new(Vec::new()));
         let task_get = Arc::new(Mutex::new(Vec::new()));
         let kernel = Self {
             task_post_calls: Arc::clone(&task_post),
             cron_create_calls: Arc::clone(&cron_create),
+            cron_list_calls: Arc::clone(&cron_list),
+            cron_cancel_calls: Arc::clone(&cron_cancel),
             task_get_calls: Arc::clone(&task_get),
             task_get_response: Mutex::new(None),
+            cron_list_response: Mutex::new(Vec::new()),
         };
         (
             kernel,
             CapturedCalls {
                 task_post,
                 cron_create,
+                cron_list,
+                cron_cancel,
                 task_get,
             },
         )
@@ -45,6 +61,10 @@ impl CapturingKernel {
 
     fn set_task_get_response(&self, value: Option<serde_json::Value>) {
         *self.task_get_response.lock().unwrap() = value;
+    }
+
+    fn set_cron_list_response(&self, jobs: Vec<serde_json::Value>) {
+        *self.cron_list_response.lock().unwrap() = jobs;
     }
 }
 
@@ -207,6 +227,28 @@ impl CronControl for CapturingKernel {
             .unwrap()
             .push((agent_id.to_string(), job_json));
         Ok("cron-id-1".to_string())
+    }
+
+    async fn cron_list(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        self.cron_list_calls
+            .lock()
+            .unwrap()
+            .push(agent_id.to_string());
+        Ok(self.cron_list_response.lock().unwrap().clone())
+    }
+
+    async fn cron_cancel(
+        &self,
+        job_id: &str,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        self.cron_cancel_calls
+            .lock()
+            .unwrap()
+            .push(job_id.to_string());
+        Ok(())
     }
 }
 
@@ -465,4 +507,123 @@ async fn test_task_status_missing_task_id_errors() {
         "task_status without task_id should error: {}",
         result.content
     );
+}
+
+// ============================================================================
+// cron_list / cron_cancel error-path coverage (#3576 first-slice migration).
+// `cron_create` happy paths are above; these tests round-trip the typed
+// `ToolError` variants the migrated submodule now returns, through the
+// stringifying dispatch boundary, so the user-facing wire string stays an
+// asserted contract while the typed shape is exercised end-to-end.
+// ============================================================================
+
+#[tokio::test]
+async fn test_cron_list_returns_serialized_jobs() {
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![
+        json!({"id": "cron-1", "schedule": "0 * * * *"}),
+        json!({"id": "cron-2", "schedule": "*/5 * * * *"}),
+    ]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("c1", "cron_list", &json!({}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "cron_list should succeed: {}",
+        result.content
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.content).expect("cron_list returns pretty JSON");
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+    assert_eq!(parsed[0]["id"], "cron-1");
+    let list_calls = calls.cron_list.lock().unwrap();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0], "agent-1");
+}
+
+#[tokio::test]
+async fn test_cron_cancel_succeeds_when_caller_owns_the_job() {
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "cron-99"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("c2", "cron_cancel", &json!({"job_id": "cron-99"}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "cron_cancel should succeed when caller owns the job: {}",
+        result.content
+    );
+    let cancel_calls = calls.cron_cancel.lock().unwrap();
+    assert_eq!(cancel_calls.len(), 1);
+    assert_eq!(cancel_calls[0], "cron-99");
+}
+
+#[tokio::test]
+async fn test_cron_cancel_unowned_job_renders_as_not_found() {
+    // Owned list does not contain the requested job_id — must surface as
+    // the `ToolError::NotFound` Display, *not* an "Internal error". The
+    // dispatch boundary stringifies; the contract this test pins is what
+    // the LLM (and operator logs) see on the wire.
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "cron-mine"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw(
+        "c3",
+        "cron_cancel",
+        &json!({"job_id": "cron-other-agents"}),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "cron_cancel on unowned job must error: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Cron job 'cron-other-agents' not found"),
+        "expected NotFound display, got: {}",
+        result.content
+    );
+    assert!(
+        cancel_was_never_called(&calls),
+        "cron_cancel must NOT reach the kernel when the caller doesn't own the job"
+    );
+}
+
+#[tokio::test]
+async fn test_cron_cancel_missing_job_id_renders_as_missing_parameter() {
+    // The dispatcher routes a JSON-typed Missing-parameter through the
+    // boundary; the rendered wire string is what the LLM sees and re-tries
+    // against, so we pin the exact Display.
+    let (kernel, _calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("c4", "cron_cancel", &json!({}), &ctx).await;
+
+    assert!(
+        result.is_error,
+        "cron_cancel without job_id must error: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Missing required parameter 'job_id'"),
+        "expected MissingParameter display, got: {}",
+        result.content
+    );
+}
+
+fn cancel_was_never_called(calls: &CapturedCalls) -> bool {
+    calls.cron_cancel.lock().unwrap().is_empty()
 }

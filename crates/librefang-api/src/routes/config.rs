@@ -811,7 +811,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(rocketchat);
         ch!(zulip);
         ch!(line);
-        ch!(reddit);
         ch!(feishu);
         ch!(nextcloud);
         ch!(webex);

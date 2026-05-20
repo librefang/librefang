@@ -96,7 +96,12 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
         .route(
             "/workflows/runs/{run_id}/operator",
-            axum::routing::post(operator_action_workflow_run),
+            axum::routing::get(inspect_workflow_operator_pause)
+                .post(operator_action_workflow_run),
+        )
+        .route(
+            "/workflows/operator/pending",
+            axum::routing::get(list_pending_operator_workflow_runs),
         )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
@@ -1674,9 +1679,21 @@ pub async fn resume_workflow_run(
 pub async fn operator_action_workflow_run(
     State(state): State<Arc<AppState>>,
     Path(run_id): Path<String>,
+    // Optional so the handler still compiles / works on installs that
+    // disable auth entirely; when auth is on, the middleware layer
+    // (see `is_public` in `middleware.rs`) rejects unauthenticated
+    // callers before we get here, so this Option is `Some` in
+    // production. The reason we still extract it: we want the
+    // operator's identity in the audit log on success, not just an
+    // anonymous "operator action accepted" event.
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use crate::workflow::OperatorAction;
+    let operator_name = api_user
+        .as_ref()
+        .map(|u| u.0.name.clone())
+        .unwrap_or_else(|| "<unauthenticated>".to_string());
 
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
@@ -1783,6 +1800,8 @@ pub async fn operator_action_workflow_run(
     // with `/resume` and avoids blocking the request on a long pipeline.
     let state_for_engine = state.clone();
     let state_for_send = state.clone();
+    let audit_action = action_str.clone();
+    let audit_operator = operator_name.clone();
     tokio::spawn(async move {
         let result = state_for_engine
             .kernel
@@ -1818,12 +1837,26 @@ pub async fn operator_action_workflow_run(
                 },
             )
             .await;
-        if let Err(e) = result {
-            tracing::warn!(
+        // Emit one structured event regardless of outcome so the audit
+        // trail records WHO did WHAT against WHICH run, not just the
+        // failures. Previously only `Err` produced a log line, which
+        // meant a successful approve / reject / edit was invisible to
+        // anyone tailing the daemon log or shipping audit events to a
+        // SIEM.
+        match result {
+            Ok(_) => tracing::info!(
                 run_id = %run_id,
+                operator = %audit_operator,
+                action = %audit_action,
+                "operator action applied to workflow run",
+            ),
+            Err(e) => tracing::warn!(
+                run_id = %run_id,
+                operator = %audit_operator,
+                action = %audit_action,
                 error = %e,
-                "Operator action resolution failed (or run rejected/failed)"
-            );
+                "operator action resolution failed (or run rejected/failed)",
+            ),
         }
     });
 
@@ -1834,6 +1867,110 @@ pub async fn operator_action_workflow_run(
             "state": "running",
         })),
     )
+}
+
+/// Render an [`OperatorPause`] paired with its run as the public JSON
+/// shape the dashboard consumes. Centralised so the single-run inspector
+/// and the worklist endpoint stay byte-identical per row — the dashboard
+/// caches by run id and switching between the two surfaces should never
+/// see a different shape for the same row.
+fn operator_pause_row_json(
+    run: &WorkflowRun,
+    pause: &crate::workflow::OperatorPause,
+) -> serde_json::Value {
+    let paused_at = match &run.state {
+        WorkflowRunState::Paused { paused_at, .. } => Some(paused_at.to_rfc3339()),
+        _ => None,
+    };
+    serde_json::json!({
+        "run_id": run.id.to_string(),
+        "workflow_id": run.workflow_id.to_string(),
+        "workflow_name": run.workflow_name,
+        "step_name": pause.step_name,
+        "operator_step_index": pause.operator_step_index,
+        "artifact": pause.artifact,
+        // Serialise actions through the existing serde derive so the wire
+        // shape matches what the POST endpoint accepts (snake_case verbs;
+        // `provide_input` carries the `field`).
+        "actions": pause.actions.iter()
+            .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
+            .collect::<Vec<_>>(),
+        "started_at": run.started_at.to_rfc3339(),
+        "paused_at": paused_at,
+    })
+}
+
+/// GET /api/workflows/runs/:run_id/operator — Inspect the operator pause
+/// on a paused run. Returns the artifact awaiting review and the actions
+/// the workflow author authorised at the step. Companion to the
+/// `POST .../operator` resolve endpoint — the dashboard hits this first to
+/// learn what action buttons to render and what text to show.
+///
+/// - 200 — `{run_id, workflow_id, workflow_name, step_name,
+///   operator_step_index, artifact, actions, started_at, paused_at}`
+/// - 400 — malformed run ID.
+/// - 404 — run not found.
+/// - 409 — run is not paused or not at an operator step (so the
+///   dashboard can render a "not awaiting operator review" hint instead
+///   of an empty button bar).
+pub async fn inspect_workflow_operator_pause(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    let engine = state.kernel.workflow_engine();
+    let pause = match engine.inspect_operator_pause(run_id).await {
+        Some(p) => p,
+        None => {
+            // Distinguish "run unknown" from "not an operator pause" so
+            // the dashboard surfaces a useful hint per status code.
+            if engine.get_run(run_id).await.is_none() {
+                return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                    .into_json_tuple();
+            }
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "not_operator_pause",
+                    "message": format!("Run '{run_id}' is not paused at an operator step"),
+                })),
+            );
+        }
+    };
+    let run = match engine.get_run(run_id).await {
+        Some(r) => r,
+        None => {
+            // Race window: the run vanished between the two reads.
+            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                .into_json_tuple();
+        }
+    };
+    (StatusCode::OK, Json(operator_pause_row_json(&run, &pause)))
+}
+
+/// GET /api/workflows/operator/pending — List every run currently paused
+/// at an operator step, oldest pause first. The dashboard renders this
+/// as a "pending operator reviews" worklist so a human operator does not
+/// have to fetch every run and filter client-side.
+///
+/// Returns `200` with a (possibly empty) array of rows in the same shape
+/// as the single-run GET endpoint.
+pub async fn list_pending_operator_workflow_runs(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let engine = state.kernel.workflow_engine();
+    let rows = engine.list_pending_operator_runs().await;
+    let body: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(run, pause)| operator_pause_row_json(run, pause))
+        .collect();
+    Json(body)
 }
 
 /// GET /api/workflows/:id/runs — List runs for a workflow.
