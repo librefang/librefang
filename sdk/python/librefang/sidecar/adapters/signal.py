@@ -124,6 +124,11 @@ from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    parse_retry_after as _parse_retry_after_impl,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
 
 SEND_TIMEOUT_SECS = 15.0
 POLL_TIMEOUT_SECS = 30.0
@@ -143,25 +148,15 @@ SEEN_MESSAGES_EVICT = 5_000
 
 DEFAULT_POLL_INTERVAL_SECS = 2.0
 
-
-def _split_csv(raw: str) -> list[str]:
-    """Comma-separated env-var → cleaned list of strings."""
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
-    """``Retry-After`` parser, floor 1 s, cap ``MAX_BACKOFF_SECS``."""
-    raw = resp_hdrs.get("retry-after")
-    if not raw:
-        return default_secs
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return default_secs
-    return min(max(v, 1.0), MAX_BACKOFF_SECS)
-
+    """Backwards-compat wrapper around
+    :func:`librefang.sidecar.common.parse_retry_after`."""
+    return _parse_retry_after_impl(
+        resp_hdrs,
+        default_secs=default_secs,
+        floor_secs=1.0,
+        max_secs=MAX_BACKOFF_SECS,
+    )
 
 def _is_private_or_loopback(addr: str) -> bool:
     """Mirror the Rust adapter's ``is_private_or_loopback`` at

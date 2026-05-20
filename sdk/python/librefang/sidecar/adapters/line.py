@@ -135,6 +135,11 @@ from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    parse_retry_after as _parse_retry_after_impl,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
 
 # LINE constants — mirror crate::line defaults.
 DEFAULT_API_BASE = "https://api.line.me"
@@ -164,40 +169,15 @@ RETRY_AFTER_DEFAULT_SECS = 30.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Chunk `text` into <= limit pieces, preferring newline splits.
-    Mirrors the shared Rust ``split_message`` helper."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        window = rest[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
-    """LINE's 429 response includes ``Retry-After`` (seconds).
-    Fall back to ``default_secs`` when missing/garbled. Floor 1 s,
-    capped at ``MAX_BACKOFF_SECS`` so a server bug can't pin the
-    loop for hours."""
-    raw = resp_hdrs.get("retry-after")
-    if not raw:
-        return default_secs
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return default_secs
-    return min(max(v, 1.0), MAX_BACKOFF_SECS)
-
+    """Backwards-compat wrapper around
+    :func:`librefang.sidecar.common.parse_retry_after`."""
+    return _parse_retry_after_impl(
+        resp_hdrs,
+        default_secs=default_secs,
+        floor_secs=1.0,
+        max_secs=MAX_BACKOFF_SECS,
+    )
 
 def verify_line_signature(secret: bytes, body: bytes, signature: str) -> bool:
     """Verify ``X-Line-Signature`` using HMAC-SHA256 with

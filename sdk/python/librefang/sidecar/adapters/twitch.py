@@ -103,6 +103,7 @@ from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import split_message as _split_message
 
 DEFAULT_HOST = "irc.chat.twitch.tv"
 DEFAULT_TLS_PORT = 6697
@@ -137,27 +138,6 @@ def _normalise_channel(value: str) -> str:
     so a config typo (``MyChannel``) still matches the JOIN reply."""
     s = value.strip().lstrip("#").rstrip("/")
     return s.lower()
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline
-    splits. Mirrors the Rust ``split_message`` helper used by every
-    channel adapter."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _parse_irc_tags(tag_blob: str) -> dict[str, str]:
     """Parse the IRCv3 ``@key=value;key2=value2`` tag block (without

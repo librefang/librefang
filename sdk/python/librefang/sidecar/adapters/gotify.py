@@ -51,6 +51,7 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import split_message as _split_message
 
 # Gotify caps individual messages at this length (matches the Rust adapter).
 MAX_MESSAGE_LEN = 65535
@@ -73,26 +74,6 @@ _OP_BIN = 0x2
 _OP_CLOSE = 0x8
 _OP_PING = 0x9
 _OP_PONG = 0xA
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Same shape as the ntfy / Rust ``split_message`` helper."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 class _WebSocketReader:
     """Minimal RFC 6455 client. Iterating yields each completed text

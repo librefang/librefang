@@ -38,6 +38,7 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import split_message as _split_message
 
 MAX_MESSAGE_LEN = 4096
 DEFAULT_SERVER_URL = "https://ntfy.sh"
@@ -49,27 +50,6 @@ MAX_BACKOFF_SECS = 60.0
 # typically sends one in seconds form; fall back to a sane wait so we
 # don't busy-loop at 1 s.
 RETRY_AFTER_DEFAULT_SECS = 30.0
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Mirrors the Rust `split_message` shared helper closely enough for
-    ntfy (which has no markup to keep intact)."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 class NtfyAdapter(SidecarAdapter):
     # ntfy has no typing/reaction/interactive/thread/streaming concept

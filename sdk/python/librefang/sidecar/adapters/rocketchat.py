@@ -97,6 +97,7 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import split_message as _split_message
 
 # Matches the Rust adapter's MAX_MESSAGE_LEN. Rocket.Chat's hard cap is
 # typically configured at 5000 by default and operator-tunable; 4096 is
@@ -123,26 +124,6 @@ HISTORY_COUNT = 50
 # enough to cover ts-collisions and overlapping fetches between polls.
 SEEN_MESSAGES_MAX = 10000
 SEEN_MESSAGES_EVICT = 5000
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Matches the Rust ``split_message`` helper used across channels."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _parse_channels(raw: str) -> list[str]:
     """Comma-separated channel id list. Strips whitespace and empty

@@ -37,6 +37,8 @@ os.environ.setdefault("REDDIT_SUBREDDITS", "rust")
 os.environ.setdefault("REDDIT_USER_AGENT", TEST_UA)
 from librefang.sidecar.adapters import reddit as ra  # noqa: E402
 
+from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+
 
 def _adapter(**env):
     defaults = {
@@ -277,80 +279,6 @@ def test_parse_returns_none_on_malformed():
 
 
 # ---- _FakeUrlopen scaffolding --------------------------------------
-
-
-class _HdrShim:
-    """Mimic the parts of ``email.message.Message`` that ``_http``
-    touches — only ``.items()``. urllib's real response headers are a
-    Message; tests want a dict shape, so wrap it."""
-
-    def __init__(self, hdrs: dict):
-        self._hdrs = hdrs or {}
-
-    def items(self):
-        return list(self._hdrs.items())
-
-
-class _FakeUrlopen:
-    """Capture urllib.request.urlopen calls and return scripted
-    responses. Each script entry is ``(status, body)`` or
-    ``(status, body, response_headers)``; the 2-tuple form keeps
-    older tests unchanged."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    def __call__(self, req, timeout=None):
-        body_bytes = req.data
-        try:
-            decoded = body_bytes.decode("utf-8") if body_bytes else None
-        except Exception:
-            decoded = None
-        self.calls.append({
-            "url": req.full_url,
-            "method": req.get_method(),
-            "headers": {k.lower(): v for k, v in req.header_items()},
-            "body_raw": decoded,
-        })
-        if not self.script:
-            raise AssertionError(
-                f"unexpected extra urlopen call to {req.full_url}"
-            )
-        entry = self.script.pop(0)
-        if len(entry) == 3:
-            status, body, resp_hdrs = entry
-        else:
-            status, body = entry
-            resp_hdrs = {}
-        if status >= 400:
-            raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim(resp_hdrs),
-                io.BytesIO(json.dumps(body or {}).encode("utf-8")),
-            )
-        if body is None:
-            payload = b""
-        elif isinstance(body, (dict, list)):
-            payload = json.dumps(body).encode("utf-8")
-        else:
-            payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
-
-
-class _FakeResp:
-    def __init__(self, status, body=b"", headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers if headers is not None else _HdrShim({})
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
 
 
 def _form(call_body: str) -> dict:

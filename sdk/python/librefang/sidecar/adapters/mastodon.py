@@ -64,6 +64,7 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import split_message as _split_message
 
 # Mastodon's default per-status length limit. Some instances configure
 # higher limits (1000–4000); override via MASTODON_MAX_MESSAGE_LEN.
@@ -78,26 +79,6 @@ DEFAULT_VISIBILITY = "unlisted"
 # require it — fall back to a sane wait so we don't busy-loop at 1 s.
 RETRY_AFTER_DEFAULT_SECS = 30.0
 _ALLOWED_VISIBILITIES = {"public", "unlisted", "private", "direct"}
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Matches the Rust ``split_message`` helper used across channels."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _strip_html_tags(value: str) -> str:
     """Strip HTML tags from a Mastodon status body and decode entities.

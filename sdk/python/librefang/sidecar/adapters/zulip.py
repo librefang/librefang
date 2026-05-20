@@ -128,6 +128,11 @@ from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    parse_retry_after as _parse_retry_after_impl,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
 
 # Zulip's official message-text ceiling. Mirrors the Rust adapter's
 # ``MAX_MESSAGE_LEN`` (crates/librefang-channels/src/zulip.rs:21).
@@ -157,35 +162,6 @@ SEEN_MESSAGES_EVICT = 5_000
 # no inbound context). Mirrors the Rust adapter's hard-coded
 # ``"LibreFang"`` at zulip.rs:463 for the same edge case.
 DEFAULT_STREAM_TOPIC = "LibreFang"
-
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Chunk ``text`` into <= limit pieces, preferring newline
-    splits. Mirrors the shared Rust ``split_message`` helper."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        window = rest[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
-def _split_csv(raw: str) -> list[str]:
-    """Comma-separated env-var → cleaned list. Strips whitespace,
-    drops empty entries. Order preserved."""
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
     """Zulip's 429 response carries ``Retry-After`` in seconds form.
     Falls back to ``default_secs`` when missing or garbled. Floor
