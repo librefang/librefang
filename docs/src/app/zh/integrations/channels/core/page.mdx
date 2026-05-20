@@ -144,18 +144,19 @@ librefang config set-key slack                # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-7. 添加到配置文件：
+7. 添加到配置文件（Slack 现为进程外 sidecar 适配器）：
 
 ```toml
-[channels.slack]
-bot_token_env = "SLACK_BOT_TOKEN"
-app_token_env = "SLACK_APP_TOKEN"
-default_agent = "ops"
+[[sidecar_channels]]
+name = "slack"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.slack"]
+channel_type = "slack"
 
-[channels.slack.overrides]
-# 可选：使用 Slack 原生 mrkdwn 格式
-# output_format = "slack_mrkdwn"
-# threading = true
+[sidecar_channels.env]
+SLACK_APP_TOKEN = "xapp-..."
+SLACK_BOT_TOKEN = "xoxb-..."
+# SLACK_FORCE_FLAT_REPLIES = "false"   # 设为 "true" 将回复以顶层消息发送
 ```
 
 8. 重启守护进程。
@@ -465,11 +466,11 @@ http://127.0.0.1:4545/
 
 ### 禁用自动拆分
 
-对仍为进程内适配器的渠道（Slack、Mattermost 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
+对仍为进程内适配器的渠道（Matrix、Mattermost 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
 
 ```toml
-[channels.slack]
+[channels.matrix]
 split_long_messages = false   # 截断而非拆分
 ```
 
-默认值为 `true`。Discord 与 Telegram sidecar 始终在 2 000 UTF-16 单元边界处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。
+默认值为 `true`。Discord、Slack 与 Telegram sidecar 始终在各自平台限制处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。

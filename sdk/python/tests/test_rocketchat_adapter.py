@@ -175,7 +175,9 @@ class _HdrShim:
 
 class _FakeUrlopen:
     """Capture urllib.request.urlopen calls and return scripted
-    responses. Script entry: ``(status, body)``."""
+    responses. Each script entry is ``(status, body)`` or
+    ``(status, body, response_headers)``; the 2-tuple form keeps
+    existing tests unchanged."""
 
     def __init__(self, script):
         self.script = list(script)
@@ -198,10 +200,14 @@ class _FakeUrlopen:
                 f"unexpected extra urlopen call to {req.full_url}"
             )
         entry = self.script.pop(0)
-        status, body = entry[0], entry[1]
+        if len(entry) == 3:
+            status, body, resp_hdrs = entry
+        else:
+            status, body = entry
+            resp_hdrs = {}
         if status >= 400:
             raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim({}),
+                req.full_url, status, "Error", _HdrShim(resp_hdrs),
                 io.BytesIO(json.dumps(body or {}).encode("utf-8")),
             )
         if body is None:
@@ -210,13 +216,14 @@ class _FakeUrlopen:
             payload = json.dumps(body).encode("utf-8")
         else:
             payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload)
+        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 class _FakeResp:
-    def __init__(self, status, body=b""):
+    def __init__(self, status, body=b"", headers=None):
         self.status = status
         self._body = body
+        self.headers = headers if headers is not None else _HdrShim({})
 
     def read(self):
         return self._body
@@ -437,18 +444,24 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     a = _adapter()
     a.own_username = "librefang-bot"
     a._room_watermarks["R1"] = "2026-01-01T00:00:00.000Z"
+    # Rocket.Chat's `channels.history` returns messages NEWEST-FIRST, so
+    # the scripted payload has m2 (ts ...06) ahead of m1 (ts ...05) the
+    # way the real API would. The adapter must re-order to chronological
+    # before emitting.
     fake = _FakeUrlopen([
         (200, {"messages": [
-            _msg(mid="m1", ts="2026-01-01T00:00:05.000Z"),
             _msg(mid="m2", ts="2026-01-01T00:00:06.000Z",
                  text="/cmd args"),
+            _msg(mid="m1", ts="2026-01-01T00:00:05.000Z"),
         ]}),
     ])
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
     emitted = []
     a._poll_once(emitted.append, ["R1"])
     assert len(emitted) == 2
+    # Emitted oldest-first despite the newest-first API order.
     assert emitted[0]["params"]["message_id"] == "m1"
+    assert emitted[1]["params"]["message_id"] == "m2"
     assert emitted[1]["params"]["content"] == {
         "Command": {"name": "cmd", "args": ["args"]},
     }
@@ -457,6 +470,32 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Both message ids tracked for dedupe.
     assert "m1" in a._seen_messages_set
     assert "m2" in a._seen_messages_set
+
+
+def test_poll_once_emits_in_chronological_order(monkeypatch):
+    """Regression: `channels.history` returns newest-first. A burst of
+    several messages caught in one poll must reach the agent oldest →
+    newest, not reversed. The Rust adapter (and the first cut of this
+    sidecar) iterated the raw newest-first array and delivered the burst
+    backwards."""
+    a = _adapter()
+    a.own_username = "librefang-bot"
+    a._room_watermarks["R1"] = "2026-01-01T00:00:00.000Z"
+    # API order: newest (m3) first, oldest (m1) last.
+    fake = _FakeUrlopen([
+        (200, {"messages": [
+            _msg(mid="m3", ts="2026-01-01T00:00:30.000Z", text="third"),
+            _msg(mid="m2", ts="2026-01-01T00:00:20.000Z", text="second"),
+            _msg(mid="m1", ts="2026-01-01T00:00:10.000Z", text="first"),
+        ]}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append, ["R1"])
+    assert [e["params"]["message_id"] for e in emitted] == ["m1", "m2", "m3"]
+    assert [e["params"]["content"]["Text"] for e in emitted] == [
+        "first", "second", "third",
+    ]
 
 
 def test_poll_once_dedupes_same_ts_repeats(monkeypatch):
@@ -485,7 +524,9 @@ def test_poll_once_dedupes_same_ts_repeats(monkeypatch):
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
     emitted = []
     a._poll_once(emitted.append, ["R1"])
-    assert [e["params"]["message_id"] for e in emitted] == ["m1", "m2"]
+    # Order is asserted by the chronological-order tests; here we only
+    # care that both same-ts ids are emitted exactly once.
+    assert sorted(e["params"]["message_id"] for e in emitted) == ["m1", "m2"]
     emitted.clear()
     a._poll_once(emitted.append, ["R1"])
     # Only the new m3 emits on the second poll.
@@ -787,3 +828,105 @@ def test_on_send_non_text_content_falls_back_to_placeholder(monkeypatch):
     )))
     body = json.loads(fake.calls[0]["body_raw"])
     assert "Unsupported content type" in body["text"]
+
+
+# ---- 429 / Retry-After (Rocket.Chat REST rate-limiting) ---------
+
+
+def test_retry_after_secs_parses_header_value():
+    """``Retry-After`` (seconds form) is parsed as a float and capped
+    at ``MAX_BACKOFF_SECS`` so a misreported value can't block the
+    poller for more than a minute."""
+    assert ra.RocketChatAdapter._retry_after_secs({"retry-after": "5"}) == 5.0
+    assert ra.RocketChatAdapter._retry_after_secs({"retry-after": "0.5"}) == 1.0
+    assert (
+        ra.RocketChatAdapter._retry_after_secs({"retry-after": "9999"})
+        == ra.MAX_BACKOFF_SECS
+    )
+
+
+def test_retry_after_secs_falls_back_when_absent_or_invalid():
+    """Without a ``Retry-After`` (or with an HTTP-date form we don't
+    decode), fall back to ``RETRY_AFTER_DEFAULT_SECS`` rather than
+    busy-looping at 1 s."""
+    assert (
+        ra.RocketChatAdapter._retry_after_secs({})
+        == ra.RETRY_AFTER_DEFAULT_SECS
+    )
+    assert (
+        ra.RocketChatAdapter._retry_after_secs(
+            {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"},
+        )
+        == ra.RETRY_AFTER_DEFAULT_SECS
+    )
+
+
+def test_verify_credentials_429_sleeps_retry_after_then_raises(monkeypatch):
+    """Rocket.Chat rate-limits unauthenticated / failed-auth probes;
+    the verify retry loop in `_producer_blocking` would otherwise
+    compound with the server-side window."""
+    a = _adapter()
+    fake = _FakeUrlopen([(429, {"error": "throttled"}, {"Retry-After": "3"})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._verify_credentials()
+    assert sleeps == [3.0]
+
+
+def test_verify_credentials_429_without_header_uses_default(monkeypatch):
+    """A 429 with no ``Retry-After`` falls back to
+    ``RETRY_AFTER_DEFAULT_SECS`` instead of busy-looping at 1 s."""
+    a = _adapter()
+    fake = _FakeUrlopen([(429, {"error": "throttled"})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._verify_credentials()
+    assert sleeps == [ra.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_list_joined_channels_429_sleeps_then_returns_empty(monkeypatch):
+    """Channel discovery is one-shot; the producer just retries on the
+    next pass, so a 429 here only needs to sleep — surfacing it as an
+    empty list (same as transport error) is enough."""
+    a = _adapter()
+    fake = _FakeUrlopen([(429, {"error": "throttled"}, {"Retry-After": "4"})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    out = a._list_joined_channels()
+    assert out == []
+    assert sleeps == [4.0]
+
+
+def test_poll_once_429_sleeps_retry_after_then_raises(monkeypatch):
+    """channels.history 429 must sleep the indicated interval and
+    raise so the outer backoff in `_producer_blocking` pauses before
+    the next pass — otherwise the per-room loop probes inside the
+    window and extends the throttling."""
+    a = _adapter()
+    a._room_watermarks["R1"] = ""
+    fake = _FakeUrlopen([(429, {"error": "throttled"}, {"Retry-After": "7"})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None, ["R1"])
+    assert sleeps == [7.0]
+
+
+def test_post_message_429_sleeps_retry_after_then_raises(monkeypatch):
+    """chat.postMessage is rate-limited independently of auth. A 429
+    here must sleep and raise; `suppress_error_responses=True` keeps
+    the raise from echoing as a public message."""
+    a = _adapter()
+    fake = _FakeUrlopen([(429, {"error": "throttled"}, {"Retry-After": "6"})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ra.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._post_message("R1", "hi", tmid=None)
+    assert sleeps == [6.0]

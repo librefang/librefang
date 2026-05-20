@@ -259,26 +259,6 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for sl in self.channels.slack.iter() {
-            if std::env::var(&sl.app_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Slack configured but {} is not set",
-                    sl.app_token_env
-                ));
-            }
-            if std::env::var(&sl.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Slack configured but {} is not set",
-                    sl.bot_token_env
-                ));
-            }
-        }
         for wa in self.channels.whatsapp.iter() {
             if std::env::var(&wa.access_token_env)
                 .unwrap_or_default()
@@ -375,14 +355,6 @@ impl KernelConfig {
             }
         }
         // Wave 4 channels
-        for nc in self.channels.nextcloud.iter() {
-            if std::env::var(&nc.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Nextcloud configured but {} is not set",
-                    nc.token_env
-                ));
-            }
-        }
         for wx in self.channels.webex.iter() {
             if std::env::var(&wx.bot_token_env)
                 .unwrap_or_default()

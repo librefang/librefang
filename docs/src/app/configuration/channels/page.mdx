@@ -86,24 +86,34 @@ DISCORD_BOT_TOKEN = "..."
 See [`[[sidecar_channels]]`](#sidecar_channels) below for all
 supervisor fields (restart, backoff, ready timeout, message buffer).
 
-#### `[channels.slack]`
+#### Slack (sidecar)
+
+Slack migrated to an out-of-process sidecar in v2026.5; declare it as a
+`[[sidecar_channels]]` block. The sidecar preserves the runtime semantics
+of the removed in-process adapter: Socket Mode WebSocket + Web API,
+`SLACK_ALLOWED_CHANNELS` filter (DMs exempt), thread-reply context,
+Block Kit interactive callbacks, eyes / check reactions, and multi-bot
+routing via `SLACK_ACCOUNT_ID`.
 
 ```toml
-[channels.slack]
-app_token_env = "SLACK_APP_TOKEN"
-bot_token_env = "SLACK_BOT_TOKEN"
-allowed_channels = []
-# account_id = "my-slack-bot"
+[[sidecar_channels]]
+name = "slack"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.slack"]
+channel_type = "slack"
+
+[sidecar_channels.env]
+SLACK_APP_TOKEN = "xapp-..."
+SLACK_BOT_TOKEN = "xoxb-..."
+# SLACK_ALLOWED_CHANNELS = "C0123,C0456"
+# SLACK_UNFURL_LINKS = "false"
+# SLACK_FORCE_FLAT_REPLIES = "false"
+# SLACK_REACTIONS = "true"
+# SLACK_ACCOUNT_ID = "workspace-prod"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_token_env` | string | `"SLACK_APP_TOKEN"` | Env var holding the Slack app-level token (`xapp-`) for Socket Mode. |
-| `bot_token_env` | string | `"SLACK_BOT_TOKEN"` | Env var holding the Slack bot token (`xoxb-`) for REST API. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+See [`[[sidecar_channels]]`](#sidecar_channels) below for all
+supervisor fields (restart, backoff, ready timeout, message buffer).
 
 #### `[channels.whatsapp]`
 
@@ -392,21 +402,23 @@ app_secret_env = "FEISHU_APP_SECRET"
 | `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nextcloud]`
+#### Nextcloud Talk
 
-```toml
-[channels.nextcloud]
-server_url = "https://nextcloud.example.com"
-token_env = "NEXTCLOUD_TOKEN"
-allowed_rooms = []
+Nextcloud Talk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.nextcloud`). The in-process `[channels.nextcloud]` block was removed in the sidecar migration. Declare Nextcloud as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "nextcloud"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.nextcloud"]
+channel_type = "nextcloud"
+[sidecar_channels.env]
+NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
+# NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
+# NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Nextcloud server URL. |
-| `token_env` | string | `"NEXTCLOUD_TOKEN"` | Env var holding the Nextcloud Talk auth token. |
-| `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`NEXTCLOUD_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form. Outbound replies thread via Talk's `replyTo` parameter (improvement over the former Rust adapter, which never sent `replyTo`).
 
 #### `[channels.webex]`
 

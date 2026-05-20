@@ -244,8 +244,6 @@ use librefang_channels::matrix::MatrixAdapter;
 use librefang_channels::mattermost::MattermostAdapter;
 #[cfg(feature = "channel-signal")]
 use librefang_channels::signal::SignalAdapter;
-#[cfg(feature = "channel-slack")]
-use librefang_channels::slack::SlackAdapter;
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
 #[cfg(feature = "channel-webhook")]
@@ -260,8 +258,6 @@ use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion}
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
 // Wave 4
-#[cfg(feature = "channel-nextcloud")]
-use librefang_channels::nextcloud::NextcloudAdapter;
 #[cfg(feature = "channel-webex")]
 use librefang_channels::webex::WebexAdapter;
 // Wave 5
@@ -1886,7 +1882,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
             "signal" => find_channel_info!(signal),
             "matrix" => find_channel_info!(matrix),
@@ -1899,7 +1894,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "line" => find_channel_info!(line),
             "feishu" => find_channel_info!(feishu),
             // Wave 4
-            "nextcloud" => find_channel_info!(nextcloud),
             "webex" => find_channel_info!(webex),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
@@ -2549,7 +2543,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(signal, "channel-signal", "Signal");
     check_channel!(matrix, "channel-matrix", "Matrix");
@@ -2562,7 +2555,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
-    check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
     check_channel!(webex, "channel-webex", "Webex");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
@@ -2585,36 +2577,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Slack
-    #[cfg(feature = "channel-slack")]
-    for sl_config in config.slack.iter() {
-        if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
-            if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
-                let base =
-                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone());
-                let Some(proxied) =
-                    apply_channel_proxy(base, sl_config.proxy.as_deref(), "Slack", |a, p| {
-                        a.with_proxy(p)
-                    })
-                else {
-                    continue;
-                };
-                let adapter = Arc::new(
-                    proxied
-                        .with_account_id(sl_config.account_id.clone())
-                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
-                        .with_unfurl_links(sl_config.unfurl_links)
-                        .with_backoff(sl_config.initial_backoff_secs, sl_config.max_backoff_secs),
-                );
-                adapters.push((
-                    adapter,
-                    sl_config.default_agent.clone(),
-                    sl_config.account_id.clone(),
-                ));
-            }
-        }
-    }
 
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     #[cfg(feature = "channel-whatsapp")]
@@ -3001,26 +2963,6 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Wave 4 ──────────────────────────────────────────────────
-
-    // Nextcloud Talk
-    #[cfg(feature = "channel-nextcloud")]
-    for nc_config in config.nextcloud.iter() {
-        if let Some(token) = read_token(&nc_config.token_env, "Nextcloud") {
-            let adapter = Arc::new(
-                NextcloudAdapter::new(
-                    nc_config.server_url.clone(),
-                    token,
-                    nc_config.allowed_rooms.clone(),
-                )
-                .with_account_id(nc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                nc_config.default_agent.clone(),
-                nc_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Webex
     #[cfg(feature = "channel-webex")]
@@ -4103,7 +4045,6 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());
         assert!(config.channels.signal.is_none());
         assert!(config.channels.matrix.is_none());
@@ -4116,7 +4057,6 @@ mod tests {
         assert!(config.channels.line.is_none());
         assert!(config.channels.feishu.is_none());
         // Wave 4
-        assert!(config.channels.nextcloud.is_none());
         assert!(config.channels.webex.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());

@@ -33,10 +33,8 @@ macro_rules! for_each_channel_field {
         $mac!(line, "line");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
-        $mac!(nextcloud, "nextcloud");
         $mac!(qq, "qq");
         $mac!(signal, "signal");
-        $mac!(slack, "slack");
         $mac!(teams, "teams");
         $mac!(webex, "webex");
         $mac!(webhook, "webhook");
@@ -45,6 +43,31 @@ macro_rules! for_each_channel_field {
         $mac!(whatsapp, "whatsapp");
         $mac!(zulip, "zulip");
     };
+}
+
+/// Resolve the `default_agent` name for a sidecar channel matching `channel`.
+///
+/// Sidecar channels (telegram / discord / slack / … after their migration
+/// out of `cfg.channels`) are not covered by [`for_each_channel_field!`], so
+/// [`resolve_channel_owner`](LibreFangKernel::resolve_channel_owner) would
+/// otherwise return `None` for them and the `channel_send` mirror (#4824)
+/// would silently stop working post-migration. A sidecar entry's effective
+/// channel name is its `channel_type` (falling back to `name`), mirroring how
+/// `channel_bridge` derives the `ChannelType`. The first matching entry that
+/// carries a non-empty `default_agent` wins — deterministic because
+/// `sidecar_channels` is an ordered `Vec`.
+fn sidecar_default_agent<'a>(
+    sidecar_channels: &'a [librefang_types::config::SidecarChannelConfig],
+    channel: &str,
+) -> Option<&'a str> {
+    sidecar_channels.iter().find_map(|entry| {
+        let entry_channel = entry.channel_type.as_deref().unwrap_or(entry.name.as_str());
+        if entry_channel == channel {
+            entry.default_agent.as_deref().filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    })
 }
 
 #[async_trait::async_trait]
@@ -407,6 +430,17 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
 
         crate::for_each_channel_field!(check);
 
+        // Sidecar channels live in `cfg.sidecar_channels`, not `cfg.channels`,
+        // so the macro above never matches them. Consult their `default_agent`
+        // (the same field that seeds inbound routing via
+        // `AgentRouter.channel_defaults`) so the #4824 `channel_send` mirror
+        // keeps resolving an owner after a channel moves to a sidecar.
+        if let Some(agent_name) = sidecar_default_agent(&cfg.sidecar_channels, channel) {
+            if let Some(registry_entry) = self.agents.registry.find_by_name(agent_name) {
+                return Some(registry_entry.id);
+            }
+        }
+
         None
     }
 }
@@ -443,10 +477,8 @@ mod tests {
             "line",
             "matrix",
             "mattermost",
-            "nextcloud",
             "qq",
             "signal",
-            "slack",
             "teams",
             "webex",
             "webhook",
@@ -470,5 +502,64 @@ mod tests {
             collected, sorted,
             "for_each_channel_field! expansion order is not alphabetically sorted"
         );
+    }
+
+    use super::sidecar_default_agent;
+    use librefang_types::config::SidecarChannelConfig;
+
+    /// Build a `SidecarChannelConfig` from a minimal JSON shape — `name` and
+    /// `command` are required; everything else (incl. the restart knobs) fills
+    /// from serde defaults. `SidecarChannelConfig` derives no `Default`.
+    fn sc(json: serde_json::Value) -> SidecarChannelConfig {
+        serde_json::from_value(json).expect("valid SidecarChannelConfig")
+    }
+
+    #[test]
+    fn sidecar_default_agent_matches_by_channel_type_then_name() {
+        // `channel_type` is the effective channel key when present.
+        let chans = vec![sc(serde_json::json!({
+            "name": "my-slack",
+            "command": "python3",
+            "channel_type": "slack",
+            "default_agent": "ops",
+        }))];
+        assert_eq!(sidecar_default_agent(&chans, "slack"), Some("ops"));
+        // No entry for "discord" → None.
+        assert_eq!(sidecar_default_agent(&chans, "discord"), None);
+
+        // Falls back to `name` when `channel_type` is absent.
+        let chans = vec![sc(serde_json::json!({
+            "name": "telegram",
+            "command": "python3",
+            "default_agent": "tg-bot",
+        }))];
+        assert_eq!(sidecar_default_agent(&chans, "telegram"), Some("tg-bot"));
+    }
+
+    #[test]
+    fn sidecar_default_agent_skips_entries_without_agent_and_is_first_match() {
+        let chans = vec![
+            // Matches the channel but carries no default_agent → skipped.
+            sc(serde_json::json!({
+                "name": "slack-a", "command": "python3", "channel_type": "slack",
+            })),
+            // First matching entry WITH an agent wins.
+            sc(serde_json::json!({
+                "name": "slack-b", "command": "python3", "channel_type": "slack",
+                "default_agent": "first",
+            })),
+            sc(serde_json::json!({
+                "name": "slack-c", "command": "python3", "channel_type": "slack",
+                "default_agent": "second",
+            })),
+        ];
+        assert_eq!(sidecar_default_agent(&chans, "slack"), Some("first"));
+
+        // An empty default_agent string is treated as unset.
+        let chans = vec![sc(serde_json::json!({
+            "name": "slack", "command": "python3", "channel_type": "slack",
+            "default_agent": "",
+        }))];
+        assert_eq!(sidecar_default_agent(&chans, "slack"), None);
     }
 }

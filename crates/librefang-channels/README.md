@@ -16,10 +16,10 @@ features explicitly when depending on this crate:
 
 - `all-channels` — every adapter, including heavy ones (matrix, IMAP,
   google-chat, …). Used by release CI.
-- Per-adapter: `channel-discord`, `channel-slack`, `channel-webhook`,
-  etc. ntfy, telegram, gotify, mastodon, bluesky, reddit, twitch, and
-  rocketchat migrated to sidecars — see
-  `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat}`
+- Per-adapter: `channel-slack`, `channel-webhook`,
+  etc. ntfy, telegram, gotify, mastodon, bluesky, reddit, twitch,
+  rocketchat, discord, and nextcloud migrated to sidecars — see
+  `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat,discord,nextcloud}`
   in the SDK.
 
 See `Cargo.toml` for the full feature list.

@@ -46,7 +46,11 @@ configured interval (default 2 s, matching the Rust adapter, with a
 floor of 1 s). On startup, ``GET /api/v1/me`` validates the token and
 discovers the bot's own username (also kept as a fallback self-skip
 key). Empty ``ROCKETCHAT_CHANNELS`` discovers joined channels via
-``GET /api/v1/channels.list.joined``. Slash-command bodies (``/cmd
+``GET /api/v1/channels.list.joined``. ``channels.history`` returns
+messages newest-first, so each poll batch is reversed to oldest-first
+before emitting — a burst caught in one poll reaches the agent in
+conversation order (the Rust adapter delivered such bursts backwards).
+Slash-command bodies (``/cmd
 args``) become ``Content.command``; everything else is plain
 ``Content.text``. Metadata carries ``sender_id``, ``sender_username``,
 ``room_id``, ``ts``, ``tmid`` (when inbound was inside a thread), and
@@ -104,6 +108,11 @@ DEFAULT_POLL_INTERVAL_SECS = 2
 MIN_POLL_INTERVAL_SECS = 1
 SEND_TIMEOUT_SECS = 15
 MAX_BACKOFF_SECS = 60.0
+# Default fallback when Rocket.Chat 429s without a `Retry-After`
+# header. The REST API's rate-limiter typically sends one (seconds
+# form), but it isn't required by the protocol, so we need a sane
+# fallback to avoid busy-looping at 1 s.
+RETRY_AFTER_DEFAULT_SECS = 30.0
 # How many channels to fetch in `channels.list.joined`. Matches Rust.
 LIST_JOINED_COUNT = 100
 # How many messages per `channels.history` poll. Matches Rust.
@@ -271,32 +280,59 @@ class RocketChatAdapter(SidecarAdapter):
         body: bytes | None = None,
         headers: dict | None = None,
         timeout: float = SEND_TIMEOUT_SECS,
-    ) -> tuple[int, dict | None, bytes]:
+    ) -> tuple[int, dict | None, bytes, dict]:
         """Issue an HTTP request and return
-        ``(status, parsed_json_or_None, raw_body)``. Captures HTTPError
-        and surfaces it via the status code so callers can branch on
-        401 / 4xx / 5xx without try/except."""
+        ``(status, parsed_json_or_None, raw_body, response_headers)``.
+        Response header keys are normalised to lowercase so callers can
+        do case-insensitive lookups (notably for ``Retry-After`` on
+        429). Captures HTTPError and surfaces it via the status code so
+        callers can branch on 401 / 4xx / 5xx without try/except
+        (response headers are still returned on HTTPError, which is
+        what makes ``Retry-After`` reachable after a 429)."""
         req = urllib.request.Request(
             url, data=body, headers=headers or {}, method=method,
         )
+        resp_headers: dict = {}
         try:
             with urllib.request.urlopen(  # noqa: S310 — configured URL
                 req, timeout=timeout,
             ) as resp:
                 status = getattr(resp, "status", 200)
                 raw = resp.read()
+                if resp.headers is not None:
+                    resp_headers = {
+                        k.lower(): v for k, v in resp.headers.items()
+                    }
         except urllib.error.HTTPError as e:
             status = e.code
             try:
                 raw = e.read()
             except Exception:  # noqa: BLE001
                 raw = b""
+            if e.headers is not None:
+                resp_headers = {k.lower(): v for k, v in e.headers.items()}
         if not raw:
-            return status, None, b""
+            return status, None, b"", resp_headers
         try:
-            return status, json.loads(raw.decode("utf-8")), raw
+            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
         except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw
+            return status, None, raw, resp_headers
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the poller for more than a minute. We don't support
+        the HTTP-date form — Rocket.Chat's REST rate-limiter uses
+        seconds in practice, and the fallback covers any divergence."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
 
     # ---- startup: validate credentials -------------------------------
 
@@ -306,7 +342,20 @@ class RocketChatAdapter(SidecarAdapter):
         an inbound message omits ``u._id``). Returns the username for
         logging."""
         url = f"{self.server_url}/api/v1/me"
-        status, resp, raw = self._http(url, headers=self._auth_headers())
+        status, resp, raw, resp_hdrs = self._http(
+            url, headers=self._auth_headers(),
+        )
+        if status == 429:
+            # Rocket.Chat rate-limits unauthenticated / failed-auth
+            # probes; honour Retry-After then raise so the verify
+            # retry loop doesn't compound with the server-side window.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "rocketchat 429 on /api/v1/me; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            raise RuntimeError("rocketchat 429 — rate-limited")
         if status != 200 or not isinstance(resp, dict):
             snippet = raw[:200].decode("utf-8", "replace")
             raise RuntimeError(
@@ -335,7 +384,7 @@ class RocketChatAdapter(SidecarAdapter):
             f"?count={LIST_JOINED_COUNT}"
         )
         try:
-            status, body, _raw = self._http(
+            status, body, _raw, resp_hdrs = self._http(
                 url, headers=self._auth_headers(),
             )
         except urllib.error.URLError as e:
@@ -343,6 +392,17 @@ class RocketChatAdapter(SidecarAdapter):
                 "rocketchat channels.list.joined transport error",
                 error=str(e),
             )
+            return []
+        if status == 429:
+            # Same REST rate-limiter can surface here. Sleep then
+            # return empty (matches the transport-error treatment) so
+            # the producer's next iteration retries discovery.
+            wait = self._retry_after_secs(resp_hdrs)
+            log.warn(
+                "rocketchat 429 on channels.list.joined; sleeping",
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
             return []
         if status != 200 or not isinstance(body, dict):
             log.warn(
@@ -470,7 +530,7 @@ class RocketChatAdapter(SidecarAdapter):
                 f"?{urllib.parse.urlencode(params)}"
             )
             try:
-                status, body, _raw = self._http(
+                status, body, _raw, resp_hdrs = self._http(
                     url, headers=self._auth_headers(),
                 )
             except urllib.error.URLError as e:
@@ -479,6 +539,19 @@ class RocketChatAdapter(SidecarAdapter):
                     room_id=room_id, error=str(e),
                 )
                 continue
+            if status == 429:
+                # Per-room poll rate-limited. Honour Retry-After then
+                # raise so the producer's outer backoff pauses before
+                # the next pass — without this the per-room loop would
+                # keep hammering the same endpoint inside the window
+                # and extend the throttling.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "rocketchat 429 on channels.history; sleeping",
+                    room_id=room_id, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("rocketchat 429 — rate-limited")
             if status == 401:
                 # Mirror reddit / bluesky: surface so the producer loop
                 # backs off and the next pass re-validates the token.
@@ -492,9 +565,15 @@ class RocketChatAdapter(SidecarAdapter):
             messages = body.get("messages")
             if not isinstance(messages, list):
                 continue
-
+            # `channels.history` returns messages newest-first
+            # (descending by `ts`). Emit them oldest-first so a burst of
+            # messages caught in one poll reaches the agent in
+            # conversation order. The Rust adapter iterated the raw
+            # newest-first array and delivered a multi-message poll
+            # backwards; this matches the chronological order
+            # nextcloud's Talk feed already yields.
             newest_ts = oldest
-            for msg in messages:
+            for msg in reversed(messages):
                 if not isinstance(msg, dict):
                     continue
                 msg_id = str(msg.get("_id") or "")
@@ -622,9 +701,21 @@ class RocketChatAdapter(SidecarAdapter):
             headers = self._auth_headers(
                 {"Content-Type": "application/json"},
             )
-            status, resp, raw = self._http(
+            status, resp, raw, resp_hdrs = self._http(
                 url, method="POST", body=body, headers=headers,
             )
+            if status == 429:
+                # chat.postMessage is rate-limited independently of
+                # auth. Honour Retry-After and raise;
+                # `suppress_error_responses=True` keeps the raise from
+                # echoing as a public message.
+                wait = self._retry_after_secs(resp_hdrs)
+                log.warn(
+                    "rocketchat 429 on chat.postMessage; sleeping",
+                    room_id=room_id, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("rocketchat 429 — rate-limited")
             if status >= 300:
                 snippet = raw[:200].decode("utf-8", "replace")
                 raise RuntimeError(

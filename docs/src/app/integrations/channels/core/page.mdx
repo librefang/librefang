@@ -158,18 +158,19 @@ librefang config set-key slack                # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-7. Add to config:
+7. Add to config (Slack is an out-of-process sidecar adapter):
 
 ```toml
-[channels.slack]
-bot_token_env = "SLACK_BOT_TOKEN"
-app_token_env = "SLACK_APP_TOKEN"
-default_agent = "ops"
+[[sidecar_channels]]
+name = "slack"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.slack"]
+channel_type = "slack"
 
-[channels.slack.overrides]
-# Optional: Slack-native mrkdwn formatting
-# output_format = "slack_mrkdwn"
-# threading = true
+[sidecar_channels.env]
+SLACK_APP_TOKEN = "xapp-..."
+SLACK_BOT_TOKEN = "xoxb-..."
+# SLACK_FORCE_FLAT_REPLIES = "false"   # set "true" to post replies as top-level messages
 ```
 
 8. Restart the daemon.
@@ -488,15 +489,16 @@ chunk ends in the middle of a character.
 
 ### Disabling Automatic Splitting
 
-For the still-in-process channels (Slack, Mattermost, …), set
+For the still-in-process channels (Matrix, Mattermost, …), set
 `split_long_messages = false` in the channel configuration to truncate
 rather than split long messages:
 
 ```toml
-[channels.slack]
+[channels.matrix]
 split_long_messages = false   # truncate instead of splitting
 ```
 
-The default is `true`. The Discord and Telegram sidecars always chunk
-at the 2 000 UTF-16-unit boundary — they own their own chunking
-inside the subprocess and the daemon-side knob does not reach them.
+The default is `true`. The Discord, Slack, and Telegram sidecars
+always chunk at their respective platform limits — they own their
+own chunking inside the subprocess and the daemon-side knob does
+not reach them.
