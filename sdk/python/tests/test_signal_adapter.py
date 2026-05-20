@@ -292,6 +292,18 @@ def test_is_private_or_loopback_classifier():
     assert not sg._is_private_or_loopback("2606:4700:4700::1111")
 
 
+def test_is_private_or_loopback_fails_closed_on_garbage():
+    """SSRF guard contract: any address string the classifier cannot
+    parse must be treated as private (default-deny). A future change
+    that lets `socket.getaddrinfo` hand back a scoped IPv6 literal
+    like ``fe80::1%eth0`` (which `ipaddress.ip_address` rejects) MUST
+    NOT slip through as 'public, allow'."""
+    assert sg._is_private_or_loopback("not-an-ip")
+    assert sg._is_private_or_loopback("")
+    assert sg._is_private_or_loopback("fe80::1%eth0")
+    assert sg._is_private_or_loopback("999.999.999.999")
+
+
 # ---- _parse_retry_after ----------------------------------------------
 
 

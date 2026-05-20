@@ -179,8 +179,14 @@ def _is_private_or_loopback(addr: str) -> bool:
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
-        # Not a literal IP — caller already DNS-resolved; defensive.
-        return False
+        # Not a literal IP. ``socket.getaddrinfo`` always hands back a
+        # well-formed IPv4 / IPv6 literal in production, so this path
+        # should be unreachable — but the SSRF guard's whole job is
+        # default-deny, so fail-CLOSED here. A future caller that
+        # forwards a non-IP string (e.g. an IPv6 scoped literal like
+        # ``fe80::1%eth0`` that ``ipaddress.ip_address`` can't parse)
+        # must NOT slip through as "public address, allow".
+        return True
     if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
         return True
     if isinstance(ip, ipaddress.IPv4Address):
