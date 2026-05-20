@@ -972,13 +972,13 @@ admin_role = "admin"
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None.
         // Matrix witness deleted by #5368; rotated to WhatsApp + Email +
-        // WeChat + DingTalk + Feishu — every remaining in-process
-        // channel struct that exposes `account_id`.
+        // WeChat + DingTalk — Feishu was migrated to a sidecar
+        // (#5380), so `FeishuConfig` is gone alongside the field on
+        // `ChannelsConfig`.
         assert!(WhatsAppConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());
         assert!(DingTalkConfig::default().account_id.is_none());
-        assert!(FeishuConfig::default().account_id.is_none());
     }
 
     #[test]
