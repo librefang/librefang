@@ -1624,8 +1624,9 @@ admin_role = "admin"
             # operator's intent was lost.
             defaul_agent = "research"
         "#;
-        let err = toml::from_str::<KernelConfig>(toml_src)
-            .expect_err("typo inside [[channels.whatsapp]] must be rejected by deny_unknown_fields");
+        let err = toml::from_str::<KernelConfig>(toml_src).expect_err(
+            "typo inside [[channels.whatsapp]] must be rejected by deny_unknown_fields",
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("defaul_agent") || msg.contains("unknown field"),

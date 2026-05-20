@@ -719,13 +719,8 @@ async fn channels_delete_instance_missing_signature_returns_400() {
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
-    let (status, body) = json_request(
-        &h,
-        Method::DELETE,
-        "/api/channels/matrix/instances/0",
-        None,
-    )
-    .await;
+    let (status, body) =
+        json_request(&h, Method::DELETE, "/api/channels/matrix/instances/0", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
         body["error"]["message"]
