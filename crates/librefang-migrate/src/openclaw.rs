@@ -3694,7 +3694,10 @@ mod tests {
         // discord, slack, signal, irc, mattermost all migrated to
         // sidecar adapters in v2026.5, plus imessage + bluebubbles
         // which the migrator always skips). That leaves 5 in-process
-        // imports: whatsapp, matrix, feishu, google_chat, msteams.
+        // imports — listed by destination-table name, since the JSON5
+        // keys `googlechat` / `msteams` are aliased to `google_chat` /
+        // `teams` on write: whatsapp, matrix, feishu, google_chat,
+        // teams.
         assert_eq!(channel_items.len(), 5);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
