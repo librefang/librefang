@@ -768,6 +768,17 @@ impl ProactiveMemoryStore {
         // intentionally skipped — user-level facts are global and SHOULD
         // dedupe against any prior copy regardless of which chat first
         // produced them.
+        //
+        // Forward-compat note: the only non-User levels the current
+        // extractor emits go through this filter, so cross-chat
+        // dedupe collisions are impossible today. If a future
+        // extractor starts emitting `MemoryLevel::Session` or
+        // `MemoryLevel::Workspace` facts in batches (rather than one
+        // at a time per agent invocation), the same post-filter
+        // pattern needs to apply at the new emission site, or two
+        // identical session-level facts produced in different chats
+        // could dedupe across them. Search for callers of
+        // `add_with_decision` when extending memory levels.
         if chat_scope_active && item.level != MemoryLevel::User {
             let want = chat_scope.unwrap();
             existing.retain(|frag| memory_scope_allows_recall(&frag.scope, &frag.metadata, want));

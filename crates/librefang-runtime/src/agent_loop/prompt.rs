@@ -493,6 +493,12 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             librefang_types::memory::memory_scope_allows_recall(&frag.scope, &frag.metadata, want)
         });
     }
+    // Truncate AFTER the scope filter, not before. The fetch widened
+    // to `recall_fetch_limit = max(MEMORY_RECALL_LIMIT*4, 50)` above
+    // specifically so the filter has something to throw away — capping
+    // here is what restores the prompt's expected `MEMORY_RECALL_LIMIT`
+    // window. When `chat_scope_active == false` the fetch was already
+    // capped at `MEMORY_RECALL_LIMIT`, making this `truncate` a no-op.
     memories.truncate(MEMORY_RECALL_LIMIT);
 
     // Fork turns skip auto_retrieve: (a) it would add memory fragments

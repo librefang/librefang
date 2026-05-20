@@ -434,13 +434,22 @@ pub async fn run_agent_loop(
         .and_then(|v| v.as_str())
         .map(String::from);
     // #5227: chat-qualified scope stamped by the kernel alongside
-    // `sender_channel`. Fall back to `sender_channel` for backward
-    // compatibility with any caller still synthesizing manifests
-    // without going through the kernel inject sites (tests, fuzzers,
-    // hot-path bypasses) — that fallback keeps the bare-channel
-    // behaviour the original #5227 fix already shipped, so the
-    // post-filter still applies on those paths even if it can't
-    // disambiguate group vs DM.
+    // `sender_channel`. Production callers go through `messaging.rs`
+    // (`compose_sender_scope` / `for_sender_scope`) which stamps both
+    // fields atomically; agents driven from channel adapters
+    // therefore always carry the disambiguated scope.
+    //
+    // Fall back to `sender_channel` for backward compatibility with
+    // any caller still synthesizing manifests without going through
+    // those kernel inject sites (tests, fuzzers, hot-path bypasses).
+    // The fallback keeps the bare-channel behaviour the original
+    // #5227 fix shipped: the post-filter still applies on those
+    // paths, but on split-channel adapters (telegram / slack / discord
+    // — where `sender_channel` is just the platform name and the chat
+    // id lives in a separate metadata field) the scope string is
+    // ambiguous between a group and a DM with the same peer. New
+    // call sites should always set `sender_chat_scope` explicitly;
+    // grep for `compose_sender_scope` for the canonical pattern.
     let sender_chat_scope: Option<String> = manifest
         .metadata
         .get("sender_chat_scope")
