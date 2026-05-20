@@ -4530,6 +4530,54 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     kernel.shutdown();
 }
 
+/// Regression guard for the houko review on #5286: the `peer_id`
+/// derivation in `execute_llm_agent` (agent_execution.rs ~340) omits the
+/// `!loop_opts.is_fork` clause that `send_message_full_inner` enforces
+/// in `messaging.rs`. The omission is safe only because forks NEVER
+/// reach `execute_llm_agent` — the fork path in
+/// `send_message_streaming_with_sender_and_opts` builds its own
+/// `LoopOptions { is_fork: true, .. }` and calls `agent_loop` directly,
+/// and the `LoopOptions` constructed *inside* `execute_llm_agent`
+/// hardcodes `is_fork: false`. This test pins both invariants by
+/// grepping the source so a future refactor that flips either side
+/// (e.g. routing forks through `execute_llm_agent`, or making `is_fork`
+/// in the local LoopOptions a parameter) trips the test and forces the
+/// author to also plumb the same skip into the peer_id match arm.
+#[test]
+fn test_execute_llm_agent_hardcodes_is_fork_false_for_peer_id_invariant() {
+    let src = include_str!("agent_execution.rs");
+
+    // Invariant 1: the local `LoopOptions` literal in execute_llm_agent
+    // hardcodes `is_fork: false`. If this string disappears the peer_id
+    // derivation a few hundred lines above needs the same guard the
+    // messaging.rs path has.
+    assert!(
+        src.contains("is_fork: false,"),
+        "execute_llm_agent must construct LoopOptions with `is_fork: false` \
+         hardcoded; if this changes, the peer_id derivation needs the \
+         `!loop_opts.is_fork` guard mirrored from send_message_full_inner."
+    );
+
+    // Invariant 2: there must be no `is_fork: true` literal in this
+    // file. Forks belong on the messaging.rs path.
+    assert!(
+        !src.contains("is_fork: true"),
+        "execute_llm_agent must not construct a fork-shaped LoopOptions; \
+         forks dispatch through send_message_streaming_with_sender_and_opts."
+    );
+
+    // Invariant 3: the comment block above the peer_id match arm must
+    // reference the fork invariant so future readers find the rationale
+    // without re-deriving it.
+    assert!(
+        src.contains("forks never reach `execute_llm_agent`"),
+        "the peer_id derivation comment must document why the \
+         `!loop_opts.is_fork` clause is omitted here; without that \
+         comment a future contributor will re-introduce the divergence \
+         houko flagged on #5286."
+    );
+}
+
 /// Default `LoopOptions` must have `parent_session_id == None`, and
 /// non-fork construction sites that don't set it explicitly inherit
 /// the default. The session resolver MUST refuse to read this field

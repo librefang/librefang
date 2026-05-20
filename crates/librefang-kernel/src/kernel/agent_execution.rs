@@ -373,6 +373,18 @@ impl LibreFangKernel {
         // above. Mirrors the channel-branch population in `send_message_full`
         // — see the comment there for the migration-v16 backstory. Canonical
         // / explicit-override paths keep `None`.
+        //
+        // `send_message_full_inner` adds a `!loop_opts.is_fork` clause to this
+        // match so forks keep `peer_id = None`. We deliberately omit it here:
+        // forks never reach `execute_llm_agent`. The fork dispatch path in
+        // `send_message_streaming_with_sender_and_opts` builds its own
+        // `LoopOptions { is_fork: true, .. }` (messaging.rs ~1724) and calls
+        // `agent_loop` directly, bypassing this function. Conversely, the
+        // `loop_opts` constructed below in this same function hardcodes
+        // `is_fork: false` — see the `LoopOptions { is_fork: false, .. }`
+        // literal further down. If a future refactor routes fork traffic
+        // through `execute_llm_agent`, plumb `is_fork` into this match
+        // (mirroring messaging.rs) so the same skip applies.
         let peer_id_for_new_session: Option<String> = match sender_context {
             Some(ctx)
                 if !ctx.channel.is_empty()

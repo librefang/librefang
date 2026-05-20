@@ -3497,6 +3497,8 @@ mod tests {
         let s4: Vec<Message> = Vec::new();
         assert_eq!(SessionStore::extract_text_content(&s4), legacy(&s4));
         assert_eq!(SessionStore::extract_text_content(&s4), "");
+    }
+
     /// Migration v16 added `sessions.peer_id` and
     /// `idx_sessions_peer(agent_id, peer_id)` for per-user isolation, but
     /// `save_session` never wrote the field. This is the regression guard:
