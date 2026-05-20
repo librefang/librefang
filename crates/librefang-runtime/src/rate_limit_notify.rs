@@ -537,7 +537,20 @@ pub async fn dispatch_via_kernel(
         .send_channel_message(channel, recipient, &rendered, None, account_id)
         .await
     {
-        Ok(_) => true,
+        Ok(_) => {
+            // houko #5311 finding 7: mirror the dispatched notification
+            // back into the channel-owning agent's inbound-routing
+            // session, the same way `tool_runner::channel::tool_channel_send`
+            // does for ordinary agent outbound (PR #4932). Without this
+            // mirror, after the quota resets the agent has no
+            // transcript record that the user was already pinged "I'm
+            // rate-limited" — risk of duplicate apology or contradictory
+            // narration on the very next turn. Best-effort: a mirror
+            // failure must not cancel the dispatch — the user already
+            // received the message — so we only log on no-op paths.
+            mirror_owner_notify_into_session(kernel, &manifest.name, channel, recipient, &rendered);
+            true
+        }
         Err(e) => {
             warn!(
                 agent = %manifest.name,
@@ -549,6 +562,61 @@ pub async fn dispatch_via_kernel(
             false
         }
     }
+}
+
+/// Mirror the rate-limit notification into the channel-owning agent's
+/// inbound-routing session so the agent's prompt context records that
+/// the user was already told "agent is rate-limited" — same JSON envelope
+/// shape used by `tool_runner::channel::mirror_channel_send_to_session`
+/// (#4824 decision 3 + #4932), keeping the data contract stable across
+/// both outbound paths.
+///
+/// Best-effort by design: any structural reason the mirror can't land
+/// (no owning agent configured, missing session metadata) degrades to a
+/// `debug!` log rather than a `warn!` — the user-visible dispatch has
+/// already succeeded.
+fn mirror_owner_notify_into_session(
+    kernel: &Arc<dyn KernelHandle>,
+    agent_name: &str,
+    channel: &str,
+    recipient: &str,
+    body: &str,
+) {
+    use librefang_types::agent::SessionId;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let Some(owner) = kernel.resolve_channel_owner(channel, recipient) else {
+        debug!(
+            agent = %agent_name,
+            channel = %channel,
+            recipient = %recipient,
+            "owner-notify mirror: no channel owner agent — skipping"
+        );
+        return;
+    };
+
+    // Mirror under the inbound routing session — the channel + recipient
+    // collapse to the same scope that handles inbound user turns.
+    let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
+
+    // JSON envelope (#4824): from = agent_name (the agent whose loop
+    // tripped the rate-limit), body = rendered template. Both fields
+    // JSON-escaped via `serde_json::to_string` to neutralise prompt
+    // injection through the body content.
+    let mirror_text = format!(
+        "{{\"mirror_from\":{},\"body\":{}}}",
+        serde_json::to_string(agent_name).unwrap_or_else(|_| "\"unknown\"".to_string()),
+        serde_json::to_string(body).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+
+    let msg = Message {
+        role: Role::User,
+        content: MessageContent::Text(mirror_text),
+        pinned: false,
+        timestamp: Some(Utc::now()),
+    };
+
+    kernel.append_to_session(session_id, owner, msg);
 }
 
 /// Synchronous date helper used by tests where mocking `Utc::now()` would
