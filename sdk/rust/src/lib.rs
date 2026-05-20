@@ -2200,6 +2200,18 @@ impl ModelsResource {
         .await
     }
 
+    pub async fn list_credential_pools(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/credential-pools".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn list_all_models(&self) -> Result<Value> {
         do_req(
             &self.client,

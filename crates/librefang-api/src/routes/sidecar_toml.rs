@@ -15,6 +15,7 @@ pub fn upsert_sidecar_block(
     command: &str,
     args: &[&str],
     env: &BTreeMap<String, String>,
+    managed_env_keys: &[&str],
 ) -> Result<(), String> {
     let original = fs::read_to_string(path).unwrap_or_default();
     let mut doc: DocumentMut = original
@@ -50,25 +51,46 @@ pub fn upsert_sidecar_block(
         cmd_present || args_present
     }
 
-    // Helper: write the keys the dashboard configure form owns. `name`
-    // and `channel_type` identify the block; `env` is the source of
-    // truth for non-secret env values, so it wholly replaces whatever
-    // was previously there (a key removed from the form must disappear).
-    // Operator-tuned supervision fields (`restart`, `restart_*`,
-    // `ready_timeout_secs`, `shutdown_grace_secs`, `message_buffer`,
-    // `overflow`, …) live on the same `[[sidecar_channels]]` table but
-    // are NOT touched here — they survive a save (codex review fix).
+    // Helper: apply the keys the dashboard configure form owns. `name`
+    // and `channel_type` identify the block. Within the `env` sub-table,
+    // only the **schema-managed** keys (those listed in `managed_env_keys`,
+    // the non-secret schema fields the form actually renders) are owned
+    // by the form; every other env key present in the existing block —
+    // operator hand-edits like `PYTHONPATH = "/custom"`, `HTTP_PROXY`,
+    // locale variables, or even a hand-edited `TELEGRAM_BOT_TOKEN` inline
+    // (legacy) — is preserved as-is across the save. Per managed key:
+    // form provides non-empty value ⇒ overwrite; form provides empty /
+    // absent ⇒ remove from the env table. Operator-tuned supervision
+    // fields (`restart`, `restart_*`, `ready_timeout_secs`,
+    // `shutdown_grace_secs`, `message_buffer`, `overflow`, …) live on
+    // the same `[[sidecar_channels]]` table but are NOT touched here —
+    // they survive a save.
     fn write_form_managed(
         block: &mut Table,
         name: &str,
         channel_type: &str,
         env: &BTreeMap<String, String>,
+        managed_env_keys: &[&str],
     ) {
         block["name"] = value(name);
         block["channel_type"] = value(channel_type);
-        let mut env_table = Table::new();
-        for (k, v) in env {
-            env_table[k] = value(v.clone());
+        // Start from the existing env table (clone it) so non-schema
+        // keys survive the rewrite. If it's missing or shaped wrong,
+        // fall back to a fresh empty table.
+        let mut env_table: Table = block
+            .get("env")
+            .and_then(|i| i.as_table())
+            .cloned()
+            .unwrap_or_default();
+        for key in managed_env_keys {
+            match env.get(*key) {
+                Some(v) if !v.is_empty() => {
+                    env_table[*key] = value(v.clone());
+                }
+                _ => {
+                    env_table.remove(key);
+                }
+            }
         }
         // Render as `[sidecar_channels.env]` (not dotted inline).
         env_table.set_implicit(false);
@@ -98,7 +120,7 @@ pub fn upsert_sidecar_block(
             if !command_or_args_present(existing) {
                 write_command_and_args_defaults(existing, command, args);
             }
-            write_form_managed(existing, name, channel_type, env);
+            write_form_managed(existing, name, channel_type, env, managed_env_keys);
             replaced = true;
             break;
         }
@@ -106,7 +128,7 @@ pub fn upsert_sidecar_block(
     if !replaced {
         let mut block = Table::new();
         write_command_and_args_defaults(&mut block, command, args);
-        write_form_managed(&mut block, name, channel_type, env);
+        write_form_managed(&mut block, name, channel_type, env, managed_env_keys);
         aot.push(block);
     }
 

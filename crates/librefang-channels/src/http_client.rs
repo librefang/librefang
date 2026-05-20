@@ -502,10 +502,10 @@ pub(crate) async fn fetch_url_bytes_unchecked(
 /// constant-time (the hand-rolled `for ... |= a ^ b` form risks being
 /// auto-vectorized into an early-exit `memcmp` by future compilers).
 ///
-/// Callers (`messenger`, `line`, `teams`, `viber`) are all behind
-/// `channel-*` feature flags, so this is dead code when none of them
-/// are enabled — the `#[allow]` keeps it available for any channel
-/// module that opts in without forcing a matching `cfg(any(...))` here.
+/// Callers (`line`, `teams`, …) are all behind `channel-*` feature
+/// flags, so this is dead code when none of them are enabled — the
+/// `#[allow]` keeps it available for any channel module that opts in
+/// without forcing a matching `cfg(any(...))` here.
 #[allow(dead_code)]
 pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;

@@ -392,8 +392,23 @@ struct SpawnCtx {
 ///
 /// Returns an empty `Vec` if the file is absent / unreadable — secrets.env
 /// is an optional convenience file, and a missing file is not an error.
-/// Format mirrors `librefang_extensions::dotenv`: `KEY=VAL` per line,
-/// comments (`#`) and blank lines ignored, no quoting / escapes.
+///
+/// # Contract
+///
+/// Tolerates the lightweight dotenv conventions an operator hand-editing
+/// `secrets.env` is likely to reach for:
+/// - Surrounding whitespace on the line, key, and value is trimmed.
+/// - One matched pair of outer single (`'`) or double (`"`) quotes
+///   around the value is stripped. Quotes that aren't both leading
+///   AND trailing (e.g. `KEY=a"b` or `KEY="abc`) are left as part of
+///   the value verbatim.
+/// - Blank lines and `#`-prefixed comments are skipped.
+///
+/// Does NOT process escape sequences (`\n`, `\t`, …) — that's a larger
+/// surface than this best-effort reader is meant to cover. If an
+/// operator needs escaped values they should set the env var via
+/// `crate::secrets_env::upsert_secret` (which writes a known shape) or
+/// export it from their shell.
 fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -407,13 +422,31 @@ fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
         }
         if let Some(eq) = trimmed.find('=') {
             let k = trimmed[..eq].trim();
-            let v = trimmed[eq + 1..].trim();
+            let v_raw = trimmed[eq + 1..].trim();
+            let v = strip_matching_outer_quotes(v_raw);
             if !k.is_empty() {
                 out.push((k.to_string(), v.to_string()));
             }
         }
     }
     out
+}
+
+/// If `s` begins and ends with the SAME ASCII single (`'`) or double
+/// (`"`) quote and has length ≥ 2, return the inner slice; otherwise
+/// return `s` unchanged. A lone quote at one end, or mismatched quote
+/// types (`"abc'`), are kept verbatim so we don't silently corrupt
+/// values that legitimately contain a single quote character.
+fn strip_matching_outer_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
 }
 
 /// Build the final environment for the child by layering, in order:
@@ -1508,6 +1541,66 @@ mod tests {
         let (platform_id, sender_meta) = derive_sidecar_sender_identity("topic-x", None);
         assert_eq!(platform_id, "topic-x");
         assert!(sender_meta.is_none());
+    }
+
+    // ── parse_secrets_env tolerance for hand-edited dotenv conventions ──
+
+    fn write_tmp_secrets(contents: &str) -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(f.path(), contents).expect("write secrets");
+        f
+    }
+
+    #[test]
+    fn parse_secrets_env_strips_double_quotes() {
+        let f = write_tmp_secrets("KEY=\"value\"\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_strips_single_quotes() {
+        let f = write_tmp_secrets("KEY='value'\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_keeps_internal_quotes() {
+        // Not a paired outer pair — the quote is in the middle of the
+        // value, so the contract says leave it verbatim.
+        let f = write_tmp_secrets("KEY=a\"b\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "a\"b".to_string())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_keeps_mismatched_outer_quotes() {
+        // `"abc'` — outer pair are different quote types, not a match.
+        let f = write_tmp_secrets("KEY=\"abc'\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "\"abc'".to_string())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_trims_whitespace() {
+        let f = write_tmp_secrets("  KEY = value  \n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_handles_empty_quoted_value() {
+        let f = write_tmp_secrets("KEY=\"\"\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn parse_secrets_env_skips_comments_and_blanks() {
+        let f = write_tmp_secrets("# a comment\n\nKEY=value\n");
+        let pairs = parse_secrets_env(f.path());
+        assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
     #[test]

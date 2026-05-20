@@ -1,12 +1,12 @@
 # 通道配置
 
-所有 45 个通道适配器的配置、每通道行为覆盖以及 Sidecar 通道集成。
+所有内嵌通道适配器的配置、每通道行为覆盖以及 Sidecar 通道集成。
 
 ---
 
 ### `[channels]`
 
-所有 45 个通道适配器均在 `[channels.<name>]` 下配置。每个通道采用 `Option<T>` 类型——省略该节将完全禁用该适配器。即使只写了节头（内容为空），也会以默认值启用该适配器。
+所有内嵌通道适配器均在 `[channels.<name>]` 下配置。每个通道采用 `Option<T>` 类型——省略该节将完全禁用该适配器。即使只写了节头（内容为空），也会以默认值启用该适配器。
 
 **通用通道字段：** 每个通道适配器除了自身特有的字段外，还支持以下通用字段：
 
@@ -198,28 +198,6 @@ allowed_channels = []
 | `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.irc]`
-
-```toml
-[channels.irc]
-server = "irc.libera.chat"
-port = 6667
-nick = "librefang"
-# password_env = "IRC_PASSWORD"
-channels = ["#librefang"]
-use_tls = false
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server` | string | `"irc.libera.chat"` | IRC 服务器主机名。 |
-| `port` | u16 | `6667` | IRC 服务器端口。 |
-| `nick` | string | `"librefang"` | Bot 昵称。 |
-| `password_env` | string 或 null | `null` | 存放服务器密码的环境变量（可选）。 |
-| `channels` | list of strings | `[]` | 要加入的 IRC 频道（例如 `["#librefang", "#general"]`）。 |
-| `use_tls` | bool | `false` | 是否使用 TLS 连接。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.google_chat]`
 
 ```toml
@@ -288,26 +266,6 @@ streams = []
 | `streams` | list of strings | `[]` | 监听的 Stream 名称列表。空列表 = 所有 Stream。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.xmpp]`
-
-```toml
-[channels.xmpp]
-jid = "bot@jabber.org"
-password_env = "XMPP_PASSWORD"
-server = ""
-port = 5222
-rooms = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `jid` | string | `""` | XMPP JID（例如 `"bot@jabber.org"`）。 |
-| `password_env` | string | `"XMPP_PASSWORD"` | 存放 XMPP 密码的环境变量。 |
-| `server` | string | `""` | XMPP 服务器主机名。为空时默认使用 JID 的域名。 |
-| `port` | u16 | `5222` | XMPP 服务器端口。 |
-| `rooms` | list of strings | `[]` | 要加入的 MUC（多人聊天）房间。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.line]`
 
 ```toml
@@ -324,87 +282,62 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 | `webhook_port` | u16 | `8450` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.viber]`
+#### Reddit
+
+Reddit 由 Python sidecar 适配器（`librefang.sidecar.adapters.reddit`）提供，进程内 `[channels.reddit]` 配置块已在 sidecar 迁移中移除。请以 `[[sidecar_channels]]` 形式声明：
 
 ```toml
-[channels.viber]
-auth_token_env = "VIBER_AUTH_TOKEN"
-webhook_url = ""
-# webhook_port = 8451  # 已弃用：Webhook 现共享 API 端口
+[[sidecar_channels]]
+name = "reddit"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.reddit"]
+channel_type = "reddit"
+[sidecar_channels.env]
+REDDIT_CLIENT_ID = "abc123"
+REDDIT_USERNAME = "librefang-bot"
+REDDIT_SUBREDDITS = "rust,programming"   # 逗号分隔
+# REDDIT_ACCOUNT_ID = "prod"              # 可选，用于多 Bot 路由
+# REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"   # 覆盖默认 User-Agent
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | 存放 Viber Bot 认证令牌的环境变量。 |
-| `webhook_url` | string | `""` | Viber Webhook 端点的公网 URL。 |
-| `webhook_port` | u16 | `8451` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`REDDIT_CLIENT_SECRET` 和 `REDDIT_PASSWORD` 应放在 `~/.librefang/secrets.env` 中 —— 仪表盘的 Channels 页面会在你填写 Reddit 表单时自动写入。
 
-#### `[channels.messenger]`
+#### Mastodon
+
+Mastodon 由 Python sidecar 适配器 (`librefang.sidecar.adapters.mastodon`) 提供。原 `[channels.mastodon]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.messenger]
-page_token_env = "MESSENGER_PAGE_TOKEN"
-verify_token_env = "MESSENGER_VERIFY_TOKEN"
-# webhook_port = 8452  # 已弃用：Webhook 现共享 API 端口
+[[sidecar_channels]]
+name = "mastodon"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mastodon"]
+channel_type = "mastodon"
+[sidecar_channels.env]
+MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_VISIBILITY = "unlisted"          # public | unlisted | private | direct
+# MASTODON_MAX_MESSAGE_LEN = "500"          # 实例若放宽限制可调高
+# MASTODON_ACCOUNT_ID = "prod"              # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | 存放 Facebook 页面访问令牌的环境变量。 |
-| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `webhook_port` | u16 | `8452` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`MASTODON_ACCESS_TOKEN`（OAuth bearer）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Mastodon 表单时会自动写入。sidecar 继承了原适配器的 SSE 主路径 + REST 轮询回退语义。
 
-#### `[channels.reddit]`
+#### Bluesky
+
+Bluesky 由 Python sidecar 适配器 (`librefang.sidecar.adapters.bluesky`) 提供。原 `[channels.bluesky]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.reddit]
-client_id = ""
-client_secret_env = "REDDIT_CLIENT_SECRET"
-username = ""
-password_env = "REDDIT_PASSWORD"
-subreddits = []
+[[sidecar_channels]]
+name = "bluesky"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.bluesky"]
+channel_type = "bluesky"
+[sidecar_channels.env]
+BLUESKY_IDENTIFIER = "mybot.bsky.social"
+# BLUESKY_SERVICE_URL = "https://bsky.social"   # 自定义 PDS
+# BLUESKY_ACCOUNT_ID = "prod"                   # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `client_id` | string | `""` | Reddit 应用客户端 ID。 |
-| `client_secret_env` | string | `"REDDIT_CLIENT_SECRET"` | 存放 Reddit 客户端密钥的环境变量。 |
-| `username` | string | `""` | Reddit Bot 用户名。 |
-| `password_env` | string | `"REDDIT_PASSWORD"` | 存放 Reddit Bot 密码的环境变量。 |
-| `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.mastodon]`
-
-```toml
-[channels.mastodon]
-instance_url = "https://mastodon.social"
-access_token_env = "MASTODON_ACCESS_TOKEN"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `instance_url` | string | `""` | Mastodon 实例 URL（例如 `"https://mastodon.social"`）。 |
-| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | 存放 Mastodon 访问令牌的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.bluesky]`
-
-```toml
-[channels.bluesky]
-identifier = "mybot.bsky.social"
-app_password_env = "BLUESKY_APP_PASSWORD"
-service_url = "https://bsky.social"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `identifier` | string | `""` | Bluesky 用户名或 DID。 |
-| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | 存放 Bluesky 应用密码的环境变量。 |
-| `service_url` | string | `"https://bsky.social"` | PDS（个人数据服务器）URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`BLUESKY_APP_PASSWORD` 写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Bluesky 表单时会自动写入。sidecar 每 5 秒轮询 `app.bsky.notification.listNotifications`，并通过内存 LRU 缓存（容量 200）将外发回复线程化关联到原通知。
 
 #### `[channels.feishu]`
 
@@ -420,20 +353,6 @@ app_secret_env = "FEISHU_APP_SECRET"
 | `app_id` | string | `""` | 飞书/Lark 应用 ID。 |
 | `app_secret_env` | string | `"FEISHU_APP_SECRET"` | 存放飞书应用密钥的环境变量。 |
 | `webhook_port` | u16 | `8453` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.revolt]`
-
-```toml
-[channels.revolt]
-bot_token_env = "REVOLT_BOT_TOKEN"
-api_url = "https://api.revolt.chat"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | 存放 Revolt Bot 令牌的环境变量。 |
-| `api_url` | string | `"https://api.revolt.chat"` | Revolt API 基础 URL。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.nextcloud]`
@@ -452,66 +371,6 @@ allowed_rooms = []
 | `allowed_rooms` | list of strings | `[]` | 监听的房间令牌列表。空列表 = 所有房间。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.guilded]`
-
-```toml
-[channels.guilded]
-bot_token_env = "GUILDED_BOT_TOKEN"
-server_ids = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | 存放 Guilded Bot 令牌的环境变量。 |
-| `server_ids` | list of strings | `[]` | 监听的服务器 ID 列表。空列表 = 所有服务器。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.keybase]`
-
-```toml
-[channels.keybase]
-username = ""
-paperkey_env = "KEYBASE_PAPERKEY"
-allowed_teams = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `username` | string | `""` | Keybase 用户名。 |
-| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | 存放 Keybase 纸钥匙的环境变量。 |
-| `allowed_teams` | list of strings | `[]` | 监听的团队名称列表。空列表 = 仅私聊。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.threema]`
-
-```toml
-[channels.threema]
-threema_id = ""
-secret_env = "THREEMA_SECRET"
-# webhook_port = 8454  # 已弃用：Webhook 现共享 API 端口
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `threema_id` | string | `""` | Threema Gateway ID。 |
-| `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
-| `webhook_port` | u16 | `8454` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.nostr]`
-
-```toml
-[channels.nostr]
-private_key_env = "NOSTR_PRIVATE_KEY"
-relays = ["wss://relay.damus.io"]
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | 存放 Nostr 私钥（nsec 或十六进制格式）的环境变量。 |
-| `relays` | list of strings | `["wss://relay.damus.io"]` | 要连接的 Nostr 中继 WebSocket URL 列表。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.webex]`
 
 ```toml
@@ -524,70 +383,6 @@ allowed_rooms = []
 |------|------|--------|------|
 | `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | 存放 Webex Bot 令牌的环境变量。 |
 | `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有房间。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.pumble]`
-
-```toml
-[channels.pumble]
-bot_token_env = "PUMBLE_BOT_TOKEN"
-# webhook_port = 8455  # 已弃用：Webhook 现共享 API 端口
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | 存放 Pumble Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8455` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.flock]`
-
-```toml
-[channels.flock]
-bot_token_env = "FLOCK_BOT_TOKEN"
-# webhook_port = 8456  # 已弃用：Webhook 现共享 API 端口
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | 存放 Flock Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8456` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.twist]`
-
-```toml
-[channels.twist]
-token_env = "TWIST_TOKEN"
-workspace_id = ""
-allowed_channels = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `token_env` | string | `"TWIST_TOKEN"` | 存放 Twist API 令牌的环境变量。 |
-| `workspace_id` | string | `""` | Twist 工作区 ID。 |
-| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.mumble]`
-
-```toml
-[channels.mumble]
-host = "mumble.example.com"
-port = 64738
-username = "librefang"
-password_env = "MUMBLE_PASSWORD"
-channel = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `host` | string | `""` | Mumble 服务器主机名。 |
-| `port` | u16 | `64738` | Mumble 服务器端口。 |
-| `username` | string | `"librefang"` | Bot 在 Mumble 中的用户名。 |
-| `password_env` | string | `"MUMBLE_PASSWORD"` | 存放 Mumble 服务器密码的环境变量。 |
-| `channel` | string | `""` | 要加入的 Mumble 频道。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.dingtalk]`
@@ -620,38 +415,6 @@ secret_env = "DINGTALK_SECRET"
 | `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.discourse]`
-
-```toml
-[channels.discourse]
-base_url = "https://forum.example.com"
-api_key_env = "DISCOURSE_API_KEY"
-api_username = "system"
-categories = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `base_url` | string | `""` | Discourse 论坛基础 URL。 |
-| `api_key_env` | string | `"DISCOURSE_API_KEY"` | 存放 Discourse API Key 的环境变量。 |
-| `api_username` | string | `"system"` | Discourse API 用户名。 |
-| `categories` | list of strings | `[]` | 要监控的分类标识（slug）。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.gitter]`
-
-```toml
-[channels.gitter]
-token_env = "GITTER_TOKEN"
-room_id = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `token_env` | string | `"GITTER_TOKEN"` | 存放 Gitter 认证令牌的环境变量。 |
-| `room_id` | string | `""` | 监听的 Gitter 房间 ID。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
 #### `[channels.ntfy]`
 
 ```toml
@@ -668,21 +431,22 @@ token_env = "NTFY_TOKEN"
 | `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.gotify]`
+#### Gotify
+
+Gotify 由 Python sidecar 适配器 (`librefang.sidecar.adapters.gotify`) 提供。原 `[channels.gotify]` 配置块已在 sidecar 迁移中移除，请改用 `[[sidecar_channels]]`：
 
 ```toml
-[channels.gotify]
-server_url = "https://gotify.example.com"
-app_token_env = "GOTIFY_APP_TOKEN"
-client_token_env = "GOTIFY_CLIENT_TOKEN"
+[[sidecar_channels]]
+name = "gotify"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.gotify"]
+channel_type = "gotify"
+[sidecar_channels.env]
+GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_ACCOUNT_ID = "prod"    # 可选，多 bot 路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Gotify 服务器 URL。 |
-| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | 存放 Gotify 应用令牌（用于发送消息）的环境变量。 |
-| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | 存放 Gotify 客户端令牌（通过 WebSocket 接收消息）的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`GOTIFY_APP_TOKEN`（出站发布）和 `GOTIFY_CLIENT_TOKEN`（入站 WebSocket 订阅）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Gotify 表单时会自动写入。
 
 #### `[channels.webhook]`
 
@@ -698,43 +462,6 @@ listen_port = 8460
 | `secret_env` | string | `"WEBHOOK_SECRET"` | 存放用于验证入站 Webhook 的 HMAC 签名密钥的环境变量。 |
 | `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
 | `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-
-#### `[channels.voice]`
-
-基于 WebSocket 的语音渠道，支持 STT（语音转文字）和 TTS（文字转语音）。
-
-```toml
-[channels.voice]
-api_key_env = "OPENAI_API_KEY"
-stt_url = "https://api.openai.com"
-tts_url = "https://api.openai.com"
-tts_voice = "alloy"
-# buffer_threshold = 32768
-# default_agent = "assistant"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `api_key_env` | string | `"OPENAI_API_KEY"` | 存放 STT/TTS 服务 API key 的环境变量名。 |
-| `stt_url` | string | `"https://api.openai.com"` | STT API 基础 URL（兼容 OpenAI Whisper）。 |
-| `tts_url` | string | `"https://api.openai.com"` | TTS API 基础 URL。 |
-| `tts_voice` | string | `"alloy"` | TTS 语音名称。可选：`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`。 |
-| `buffer_threshold` | usize | `32768` | 触发 STT 的音频缓冲区大小（字节）。 |
-| `default_agent` | string 或 null | `null` | 语音消息路由到的默认 Agent 名称。 |
-
-#### `[channels.linkedin]`
-
-```toml
-[channels.linkedin]
-access_token_env = "LINKEDIN_ACCESS_TOKEN"
-organization_id = ""
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | 存放 LinkedIn OAuth2 访问令牌的环境变量。 |
-| `organization_id` | string | `""` | LinkedIn 组织 ID，用于消息收发。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.qq]`

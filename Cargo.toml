@@ -65,14 +65,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
-# DO NOT upgrade to 0.32 until `tracing-opentelemetry` releases a version
-# that depends on opentelemetry 0.32 (current latest 0.32.1 still pins
-# opentelemetry = "0.31"). Mixing 0.32 here with tracing-opentelemetry
-# 0.32.1 leaves two copies of `opentelemetry::trace::Tracer` in the
-# tree and breaks `SdkTracer: Tracer` trait bounds in telemetry.rs.
-# dependabot bump #4947 violated this constraint and was reverted.
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+# Whole stack aligned on 0.32: `tracing-opentelemetry 0.33` now depends on
+# `opentelemetry 0.32` / `opentelemetry_sdk 0.32`, so the previous 0.31 pin
+# (kept by #4947's revert) is no longer needed. Dependabot bumped
+# `opentelemetry-otlp` to 0.32 (#5270) and `tracing-opentelemetry` to 0.33
+# (#5273) without simultaneously bumping `opentelemetry` /
+# `opentelemetry_sdk` / `opentelemetry-http`, which left two copies of
+# `opentelemetry::trace::Tracer` in the dep graph and broke
+# `SdkTracer: Tracer` in telemetry.rs. This commit completes the upgrade.
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
 # `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
@@ -80,15 +82,15 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # (rustls-platform-verifier 0.6 + 0.7, hyper-util, h2, …). We only ship
 # OTLP traces over gRPC (tonic), so the reqwest-based exporters are dead
 # weight. See #3679.
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
-tracing-opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
+tracing-opentelemetry = "0.33"
 # W3C trace-context HeaderInjector for outbound LLM HTTP requests. Pulled in
 # explicitly (not transitively via opentelemetry-otlp, which is built with
 # `default-features = false` to avoid its reqwest-based exporters — see the
-# note above). 0.31 aligns with `opentelemetry = "0.31"` and uses `http = 1`,
+# note above). 0.32 aligns with `opentelemetry = "0.32"` and uses `http = 1`,
 # matching the workspace `reqwest = "0.13"` http stack — no second http/reqwest
 # tree is introduced.
-opentelemetry-http = "0.31"
+opentelemetry-http = "0.32"
 
 # Prometheus metrics
 metrics = "0.24"
@@ -136,7 +138,7 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.6", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
@@ -211,7 +213,6 @@ aes = "0.9"
 cbc = "0.2"
 hmac = "0.12"
 hex = "0.4"
-k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -274,9 +275,6 @@ mailparse = "0.16"
 # Internationalization (i18n)
 fluent = "0.17"
 unic-langid = "0.9"
-
-# MQTT client
-rumqttc = "0.25"
 
 # Sync HTTP client (for registry sync without async runtime)
 ureq = "3"

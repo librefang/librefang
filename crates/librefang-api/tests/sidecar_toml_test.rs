@@ -22,6 +22,7 @@ fn appends_when_absent_preserves_existing_keys() {
         "python3",
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1,2")]),
+        &["ALLOWED_USERS"],
     )
     .unwrap();
 
@@ -50,6 +51,13 @@ fn replaces_existing_block_with_same_name() {
     )
     .unwrap();
 
+    // OBSOLETE and TELEGRAM_BOT_TOKEN are both schema-managed in this
+    // test's view of the world — the form clearing them should drop
+    // them from the env table. (TELEGRAM_BOT_TOKEN being inline in
+    // config.toml is a legacy / hand-edited situation; the real schema
+    // marks it as `secret` so it would NOT be schema-managed here.
+    // For this test we explicitly list it as managed to assert removal
+    // semantics for a clearing form.)
     upsert_sidecar_block(
         tmp.path(),
         "telegram",
@@ -57,17 +65,18 @@ fn replaces_existing_block_with_same_name() {
         "python3",
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1,2")]),
+        &["ALLOWED_USERS", "OBSOLETE", "TELEGRAM_BOT_TOKEN"],
     )
     .unwrap();
 
     let content = fs::read_to_string(tmp.path()).unwrap();
     assert!(
         !content.contains("OBSOLETE"),
-        "stale env keys must be replaced wholesale, not merged"
+        "schema-managed key cleared by form must be removed"
     );
     assert!(
         !content.contains("TELEGRAM_BOT_TOKEN"),
-        "token field is never in config.toml — goes to secrets.env"
+        "schema-managed key cleared by form must be removed"
     );
     assert!(content.contains("ALLOWED_USERS = \"1,2\""));
 }
@@ -94,6 +103,7 @@ fn does_not_touch_other_sidecar_blocks() {
         "python3",
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "99")]),
+        &["ALLOWED_USERS"],
     )
     .unwrap();
 
@@ -140,6 +150,7 @@ fn preserves_operator_tuned_fields_on_replace() {
         "python3",
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1")]),
+        &["ALLOWED_USERS", "OBSOLETE"],
     )
     .unwrap();
 
@@ -184,6 +195,7 @@ fn preserves_operator_custom_command_and_args_on_replace() {
         "python3", // catalog default — must NOT overwrite the venv path
         &["-m", "librefang.sidecar.adapters.telegram"], // catalog default — must NOT drop --debug
         &pairs(&[("ALLOWED_USERS", "1")]),
+        &["ALLOWED_USERS", "OLD"],
     )
     .unwrap();
 
@@ -196,7 +208,7 @@ fn preserves_operator_custom_command_and_args_on_replace() {
         content.contains("--debug"),
         "operator's extra args preserved: {content}"
     );
-    // env is still wholesale-replaced (form is source of truth).
+    // Schema-managed env keys are still cleared when the form clears them.
     assert!(!content.contains("OLD"));
     assert!(content.contains("ALLOWED_USERS = \"1\""));
 }
@@ -225,6 +237,7 @@ fn backfills_command_and_args_when_existing_block_is_a_stub() {
         "python3",
         &["-m", "librefang.sidecar.adapters.telegram"],
         &pairs(&[("ALLOWED_USERS", "1")]),
+        &["ALLOWED_USERS"],
     )
     .unwrap();
 
@@ -236,5 +249,100 @@ fn backfills_command_and_args_when_existing_block_is_a_stub() {
     assert!(
         content.contains("librefang.sidecar.adapters.telegram"),
         "stub block missing args was backfilled: {content}"
+    );
+}
+
+#[test]
+fn preserves_non_schema_env_keys_on_replace() {
+    // Operators sometimes hand-edit the `[sidecar_channels.env]` table
+    // with operational vars the schema doesn't know about — `PYTHONPATH`
+    // for a custom adapter import path, `HTTP_PROXY` for an outbound
+    // proxy, locale variables, even a legacy hand-edited
+    // `TELEGRAM_BOT_TOKEN` inline. The form only owns the keys it
+    // renders (the "schema-managed" set passed via `managed_env_keys`);
+    // every other key must survive the save untouched.
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         command = \"python3\"\n\
+         args = [\"-m\",\"librefang.sidecar.adapters.telegram\"]\n\
+         \n\
+         [sidecar_channels.env]\n\
+         PYTHONPATH = \"/custom\"\n\
+         HTTP_PROXY = \"http://p\"\n\
+         ALLOWED_USERS = \"old\"\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[("ALLOWED_USERS", "new")]),
+        // Schema-managed non-secret keys only — PYTHONPATH / HTTP_PROXY
+        // are intentionally absent and must be preserved.
+        &["ALLOWED_USERS", "TELEGRAM_CLEAR_DONE_REACTION"],
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("PYTHONPATH = \"/custom\""),
+        "non-schema key preserved across save: {content}"
+    );
+    assert!(
+        content.contains("HTTP_PROXY = \"http://p\""),
+        "non-schema key preserved across save: {content}"
+    );
+    assert!(
+        content.contains("ALLOWED_USERS = \"new\""),
+        "schema-managed value updated from form: {content}"
+    );
+}
+
+#[test]
+fn removes_schema_managed_env_keys_when_form_clears_them() {
+    // When the form omits a key it owns (managed_env_keys contains it
+    // but the env map does not, or the value is empty), the key must
+    // be removed from the env table. Non-schema keys are still preserved.
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         command = \"python3\"\n\
+         args = [\"-m\",\"librefang.sidecar.adapters.telegram\"]\n\
+         \n\
+         [sidecar_channels.env]\n\
+         PYTHONPATH = \"/custom\"\n\
+         ALLOWED_USERS = \"1,2\"\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[]), // form cleared ALLOWED_USERS
+        &["ALLOWED_USERS", "TELEGRAM_CLEAR_DONE_REACTION"],
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("PYTHONPATH"),
+        "non-schema key preserved when form has no value: {content}"
+    );
+    assert!(
+        !content.contains("ALLOWED_USERS"),
+        "schema-managed key removed when form cleared it: {content}"
     );
 }

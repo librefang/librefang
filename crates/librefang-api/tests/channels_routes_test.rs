@@ -71,6 +71,15 @@ static CHANNELS_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 /// fail-fast before reaching `librefang_home()` and are safe without
 /// the lock.
 struct DiskHomeGuard {
+    // `tmp` is held purely for RAII so the directory survives for the
+    // life of the guard. With kernel-authoritative home_dir resolution
+    // (codex review fixes #1/#7), tests no longer read disk from
+    // `tmp.path()` — they target `state.kernel.home_dir()` directly.
+    // We still set `LIBREFANG_HOME` to a sane tempdir so any code that
+    // happens to call `std::env::var("LIBREFANG_HOME")` (e.g. the
+    // kernel's `reload_config` path that mirrors production) doesn't
+    // see the developer's real `~/.librefang`.
+    #[allow(dead_code)]
     tmp: tempfile::TempDir,
     prev: Option<String>,
 }
@@ -84,10 +93,6 @@ impl DiskHomeGuard {
             std::env::set_var("LIBREFANG_HOME", tmp.path());
         }
         Self { tmp, prev }
-    }
-
-    fn home(&self) -> &Path {
-        self.tmp.path()
     }
 }
 
@@ -105,8 +110,17 @@ impl Drop for DiskHomeGuard {
 
 /// Write a `config.toml` containing one `[[channels.discord]]` per pair.
 /// Used by the disk-roundtrip tests below.
+///
+/// Pins `config_version` to the current value so the kernel's
+/// `load_config()` migration path doesn't kick in and rewrite the
+/// minimal fixture with a full canonical config dump on first read —
+/// that rewrite would clobber test seeds (e.g. drop the
+/// `bot_token_env = "..."` lines we want to assert against).
 fn write_discord_instances(home: &Path, instances: &[&str]) {
-    let mut content = String::new();
+    let mut content = format!(
+        "config_version = {}\n",
+        librefang_types::config::CONFIG_VERSION
+    );
     for env_name in instances {
         content.push_str("[[channels.discord]]\n");
         content.push_str(&format!("bot_token_env = \"{env_name}\"\n\n"));
@@ -735,7 +749,6 @@ async fn channels_delete_instance_missing_signature_returns_400() {
 async fn channels_update_instance_signature_mismatch_returns_409() {
     let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_discord_instances(guard.home(), &["TG_DISK_A"]);
 
     let h = boot_with_channels(ChannelsConfig {
         discord: OneOrMany(vec![DiscordConfig {
@@ -745,6 +758,15 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
         ..ChannelsConfig::default()
     })
     .await;
+    // Seed disk into the kernel's authoritative home_dir — the
+    // handlers resolve paths via `state.kernel.home_dir()` (codex
+    // review fixes #1/#7), so writing into `guard.home()` would miss.
+    // `DiskHomeGuard` is still held so any code that happens to call
+    // `std::env::var("LIBREFANG_HOME")` (e.g. the kernel's own
+    // `reload_config` path) sees a sane value.
+    let kernel_home = h._state.kernel.home_dir().to_path_buf();
+    write_discord_instances(&kernel_home, &["TG_DISK_A"]);
+    let _ = &guard; // keep the env guard alive for the whole test
 
     // PUT idx=0 with a deliberately stale signature. After #4865 the
     // handler re-reads disk, recomputes the signature for the current
@@ -778,7 +800,6 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
 async fn channels_delete_instance_signature_mismatch_returns_409() {
     let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_discord_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
 
     let h = boot_with_channels(ChannelsConfig {
         discord: OneOrMany(vec![
@@ -794,6 +815,9 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
         ..ChannelsConfig::default()
     })
     .await;
+    let kernel_home = h._state.kernel.home_dir().to_path_buf();
+    write_discord_instances(&kernel_home, &["TG_DISK_B", "TG_DISK_C"]);
+    let _ = &guard;
 
     let (status, body) = json_request(
         &h,
@@ -810,7 +834,7 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
     );
     // Disk must be untouched — both instances still present after the
     // rejected delete.
-    let raw = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    let raw = std::fs::read_to_string(kernel_home.join("config.toml")).expect("read config.toml");
     assert!(
         raw.contains("TG_DISK_B"),
         "rejected DELETE must leave instance 0 intact: {raw}"
@@ -825,7 +849,6 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
 async fn channels_update_instance_round_trips_real_signature() {
     let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_discord_instances(guard.home(), &["TG_DISK_D"]);
 
     let h = boot_with_channels(ChannelsConfig {
         discord: OneOrMany(vec![DiscordConfig {
@@ -835,6 +858,9 @@ async fn channels_update_instance_round_trips_real_signature() {
         ..ChannelsConfig::default()
     })
     .await;
+    let kernel_home = h._state.kernel.home_dir().to_path_buf();
+    write_discord_instances(&kernel_home, &["TG_DISK_D"]);
+    let _ = &guard;
 
     // GET the list to obtain the server-computed signature for the row
     // we're about to update.
@@ -867,7 +893,7 @@ async fn channels_update_instance_round_trips_real_signature() {
     );
 
     // Disk now reflects the new agent name.
-    let raw = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    let raw = std::fs::read_to_string(kernel_home.join("config.toml")).expect("read config.toml");
     assert!(
         raw.contains("default_agent = \"rotated\""),
         "PUT must have written the new field to disk: {raw}"
@@ -878,11 +904,6 @@ async fn channels_update_instance_round_trips_real_signature() {
 async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     let _lock = CHANNELS_PROCESS_LOCK.lock().await;
     let guard = DiskHomeGuard::new();
-    write_discord_instances(guard.home(), &["TG_LONELY"]);
-    // Prime `secrets.env` with the env var the instance is pointing at,
-    // so we can assert the cleanup loop actually removed it.
-    std::fs::write(guard.home().join("secrets.env"), "TG_LONELY=fake-token\n")
-        .expect("seed secrets.env");
 
     let h = boot_with_channels(ChannelsConfig {
         discord: OneOrMany(vec![DiscordConfig {
@@ -892,6 +913,13 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
         ..ChannelsConfig::default()
     })
     .await;
+    let kernel_home = h._state.kernel.home_dir().to_path_buf();
+    write_discord_instances(&kernel_home, &["TG_LONELY"]);
+    // Prime `secrets.env` with the env var the instance is pointing at,
+    // so we can assert the cleanup loop actually removed it.
+    std::fs::write(kernel_home.join("secrets.env"), "TG_LONELY=fake-token\n")
+        .expect("seed secrets.env");
+    let _ = &guard;
 
     let (_, list_body) =
         json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
@@ -916,13 +944,13 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
 
-    let cfg = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    let cfg = std::fs::read_to_string(kernel_home.join("config.toml")).expect("read config.toml");
     assert!(
         !cfg.contains("bot_token_env"),
         "cleared secret ref must be dropped from the rebuilt instance: {cfg}"
     );
     let secrets =
-        std::fs::read_to_string(guard.home().join("secrets.env")).expect("read secrets.env");
+        std::fs::read_to_string(kernel_home.join("secrets.env")).expect("read secrets.env");
     assert!(
         !secrets.contains("TG_LONELY"),
         "orphan env-var line must be scrubbed when no sibling references it: {secrets}"
@@ -937,8 +965,6 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     // user setup if they hand-edited secrets.env). Clearing one
     // instance's ref must NOT remove the env var, since the sibling
     // is still using it.
-    write_discord_instances(guard.home(), &["TG_SHARED", "TG_SHARED"]);
-    std::fs::write(guard.home().join("secrets.env"), "TG_SHARED=fake\n").expect("seed secrets.env");
 
     let h = boot_with_channels(ChannelsConfig {
         discord: OneOrMany(vec![
@@ -954,6 +980,10 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
         ..ChannelsConfig::default()
     })
     .await;
+    let kernel_home = h._state.kernel.home_dir().to_path_buf();
+    write_discord_instances(&kernel_home, &["TG_SHARED", "TG_SHARED"]);
+    std::fs::write(kernel_home.join("secrets.env"), "TG_SHARED=fake\n").expect("seed secrets.env");
+    let _ = &guard;
 
     let (_, list_body) =
         json_request(&h, Method::GET, "/api/channels/discord/instances", None).await;
@@ -976,7 +1006,7 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
 
     let secrets =
-        std::fs::read_to_string(guard.home().join("secrets.env")).expect("read secrets.env");
+        std::fs::read_to_string(kernel_home.join("secrets.env")).expect("read secrets.env");
     assert!(
         secrets.contains("TG_SHARED"),
         "shared env var must survive — sibling instance still references it: {secrets}"
@@ -1191,15 +1221,17 @@ async fn channels_list_discovery_rows_carry_form_fields_when_schema_cached() {
             name: "telegram".into(),
             display_name: "Telegram".into(),
             description: "Telegram Bot API adapter".into(),
-            fields: vec![librefang_api::routes::sidecar_describe::SidecarSchemaField {
-                key: "TELEGRAM_BOT_TOKEN".into(),
-                label: "Bot Token".into(),
-                field_type: "secret".into(),
-                required: true,
-                placeholder: "123:ABC".into(),
-                advanced: false,
-                options: None,
-            }],
+            fields: vec![
+                librefang_api::routes::sidecar_describe::SidecarSchemaField {
+                    key: "TELEGRAM_BOT_TOKEN".into(),
+                    label: "Bot Token".into(),
+                    field_type: "secret".into(),
+                    required: true,
+                    placeholder: "123:ABC".into(),
+                    advanced: false,
+                    options: None,
+                },
+            ],
         },
     )]);
 
@@ -1579,6 +1611,59 @@ async fn configure_sidecar_refuses_when_include_owns_sidecars() {
     assert!(
         !home.join("secrets.env").exists(),
         "secrets.env must not be created when the save is refused with 409"
+    );
+
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);
+}
+
+/// `included_files_with_sidecars` uses a substring match for
+/// `[[sidecar_channels]]` rather than parsing the included file's TOML.
+/// That conservative heuristic deliberately produces false positives —
+/// an included file that only MENTIONS the string in a comment will
+/// still trigger 409. This test documents that limitation: the
+/// alternative (full TOML parse of every included file) trades a
+/// minor operator surprise for a meaningful complexity / correctness
+/// cliff (the include resolver would need to mirror the kernel's
+/// recursive include + cycle-detection logic). 409 with the include
+/// path in the error message is a recoverable state — the operator
+/// either removes the comment or edits the included file directly,
+/// as the 409 message instructs.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_refuses_even_on_commented_sidecar_string() {
+    let _g = CHANNELS_PROCESS_LOCK.lock().await;
+    librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[(
+        "telegram",
+        telegram_schema_with_required_secret(),
+    )]);
+
+    let h = boot_with_temp_home().await;
+    let home = h.home_dir();
+    std::fs::write(home.join("config.toml"), "include = [\"docs.toml\"]\n").unwrap();
+    // The included file is otherwise empty — only a comment mentions
+    // the array header string.
+    std::fs::write(
+        home.join("docs.toml"),
+        "# example: [[sidecar_channels]] should look like this\n",
+    )
+    .unwrap();
+
+    let body = serde_json::json!({ "values": { "TELEGRAM_BOT_TOKEN": "x" } });
+    let (status, resp) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/sidecar/telegram/configure",
+        Some(body),
+    )
+    .await;
+    // Conservative: substring match triggers 409 even on a comment.
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "documented limitation: comment-mention triggers 409: {resp}"
+    );
+    assert!(
+        resp.to_string().contains("include"),
+        "error must mention the include shadow: {resp}"
     );
 
     librefang_api::routes::channels::__test_seed_sidecar_schema_cache(&[]);

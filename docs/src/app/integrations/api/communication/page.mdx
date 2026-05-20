@@ -6,7 +6,7 @@ Endpoints for channels, webhooks, integrations, MCP/A2A protocols, comms, pairin
 
 ### GET /api/channels
 
-List configured channel adapters and their status. Supports 44 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
+List configured channel adapters and their status. Supports the in-process adapter set (Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, and more) plus sidecar channels (Telegram, ntfy, Gotify, Mastodon, Bluesky, Reddit ship as Python sidecars in `librefang-sdk`).
 
 **Response** `200 OK`:
 

@@ -1280,11 +1280,17 @@ impl LibreFangKernel {
                 if pool_cfg.keys.is_empty() {
                     continue;
                 }
-                let mut key_priority_pairs = Vec::with_capacity(pool_cfg.keys.len());
+                // Carry the operator-facing label with each materialized
+                // credential so the snapshot endpoint never has to re-align
+                // labels positionally against the original config list
+                // (Codex #5260: a skipped env var would shift the labels
+                // onto the wrong key/cooldown row).
+                let mut labeled_keys: Vec<(String, String, u32)> =
+                    Vec::with_capacity(pool_cfg.keys.len());
                 for key_cfg in &pool_cfg.keys {
                     match std::env::var(&key_cfg.api_key_env) {
                         Ok(key) => {
-                            key_priority_pairs.push((key, key_cfg.priority));
+                            labeled_keys.push((key, key_cfg.label.clone(), key_cfg.priority));
                         }
                         Err(_) => {
                             warn!(
@@ -1296,7 +1302,7 @@ impl LibreFangKernel {
                         }
                     }
                 }
-                if key_priority_pairs.is_empty() {
+                if labeled_keys.is_empty() {
                     warn!(
                         provider = %pool_cfg.provider,
                         "Credential pool has no resolvable keys — skipping"
@@ -1315,7 +1321,7 @@ impl LibreFangKernel {
                         PoolStrategy::LeastUsed
                     }
                 };
-                let pool = librefang_llm_drivers::new_arc_pool(key_priority_pairs, strategy);
+                let pool = librefang_llm_drivers::new_arc_pool_with_labels(labeled_keys, strategy);
                 info!(
                     provider = %pool_cfg.provider,
                     strategy = ?pool_cfg.strategy,
