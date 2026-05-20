@@ -57,8 +57,6 @@ pub mod signal;
 pub mod slack;
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-twitch")]
-pub mod twitch;
 #[cfg(feature = "channel-webex")]
 pub mod webex;
 #[cfg(feature = "channel-webhook")]

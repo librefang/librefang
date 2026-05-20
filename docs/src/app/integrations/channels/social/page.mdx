@@ -140,35 +140,43 @@ The sidecar authenticates with `com.atproto.server.createSession` and refreshes 
 
 - A Twitch account and an OAuth token with chat permissions (from the [Twitch Developer Portal](https://dev.twitch.tv/docs/irc/))
 
+Twitch runs as an out-of-process Python sidecar adapter (`librefang.sidecar.adapters.twitch`, ships in `librefang-sdk`).
+
 ### Setup
 
 1. Register an application on the [Twitch Developer Console](https://dev.twitch.tv/console/apps).
 2. Generate an OAuth token with the `chat:read` and `chat:edit` scopes (use a tool like [twitchtokengenerator.com](https://twitchtokengenerator.com/)).
-3. Set environment variables:
-
-```bash
-export TWITCH_OAUTH_TOKEN=oauth:your-token    # Environment variable
-export TWITCH_NICK=your-bot-username
-export TWITCH_CHANNELS=channel1,channel2
-librefang vault set TWITCH_OAUTH_TOKEN        # Encrypted vault (recommended)
-librefang vault set TWITCH_NICK
-librefang vault set TWITCH_CHANNELS
-librefang config set-key twitch               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-4. Add to config:
+3. Open the dashboard Channels page, pick Twitch, and fill the form — the dashboard writes `TWITCH_OAUTH_TOKEN` to `~/.librefang/secrets.env` and the rest of the fields to the `[sidecar_channels.env]` table in `~/.librefang/config.toml`. Equivalent manual config:
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-nick_env = "TWITCH_NICK"
-channels = ["channel1", "channel2"]
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
 default_agent = "assistant"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # comma-separated, no '#'
+# TWITCH_ACCOUNT_ID = "prod"                # optional, multi-bot routing
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 20/30s for unmodded; 100 if bot is mod
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-5. Restart the daemon.
+4. Put the OAuth token in `~/.librefang/secrets.env`:
+
+```bash
+TWITCH_OAUTH_TOKEN=oauth:your-token
+```
+
+The `oauth:` prefix is auto-added if you leave it off. Restart the daemon.
+
+### Security — read before going live
+
+- **TLS is the default.** The sidecar connects to `irc.chat.twitch.tv:6697` and wraps the socket with `ssl.create_default_context()`. The previous in-process Rust adapter used plaintext port 6667, which leaked the OAuth token on every connect / reconnect — operators upgrading from a pre-migration release immediately get this fix.
+- **Per-message reply threading is enabled.** The sidecar requests the `twitch.tv/tags` capability so every inbound PRIVMSG carries an `@id` tag; outbound replies attach `@reply-parent-msg-id=<id>` so Twitch renders the bot's response threaded under the source message.
+- **Send rate-limiter.** Twitch's anti-spam logic drops a non-mod account from chat above 20 msgs / 30 s (100 / 30 s if mod). The sidecar throttles every PRIVMSG through an in-process token bucket. Operators with a mod-status bot can raise via `TWITCH_RATE_LIMIT_MSGS=100`; multi-process operators should still keep one process per account because the throttle is local-only.
 
 ### How It Works
 
-The Twitch adapter connects to Twitch's IRC gateway (`irc.chat.twitch.tv:6697` over TLS) and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as chat messages via the IRC protocol.
+The Twitch sidecar adapter holds a persistent TLS IRC connection to `irc.chat.twitch.tv:6697`, authenticates via `PASS oauth:<token>` / `NICK`, requests the `twitch.tv/tags twitch.tv/commands` capabilities, and joins every configured channel. It parses inbound PRIVMSG frames (including the IRCv3 `@`-tag block), surfaces the `@id` tag as `thread_id` for round-trip threading, dedupes by tag id, and routes `/cmd` / `!cmd` lines as Commands. Outbound `on_send` calls pass through the rate-limit bucket and emit PRIVMSG frames with the reply-parent tag when the daemon supplied a `thread_id`.

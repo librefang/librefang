@@ -1008,21 +1008,27 @@ webhook_port = 8444
 | `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.twitch]`
+#### Twitch
+
+Twitch is provided by the Python sidecar adapter (`librefang.sidecar.adapters.twitch`). The in-process `[channels.twitch]` config block was removed in the sidecar migration. Declare Twitch as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-channels = ["mychannel"]
-nick = "librefang"
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # comma-separated, no '#'
+# TWITCH_ACCOUNT_ID = "prod"                # optional, multi-bot routing
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 20/30s for unmodded; 100 if bot is mod
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | Env var holding the Twitch OAuth token. |
-| `channels` | list of strings | `[]` | Twitch channels to join (without `#` prefix). |
-| `nick` | string | `"librefang"` | Bot nickname in Twitch chat. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`TWITCH_OAUTH_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Twitch form. The `oauth:` prefix is auto-added if you leave it off.
+
+The sidecar defaults to TLS on `irc.chat.twitch.tv:6697` (the Rust adapter used plaintext 6667, which leaked the OAuth token on every connect). Plaintext is reachable only via `TWITCH_PLAINTEXT=1` for local mock listeners — never set it in production.
 
 #### `[channels.rocketchat]`
 
@@ -2679,7 +2685,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
 | Zulip | `api_key_env` |
-| Twitch | `oauth_token_env` |
 | Rocket.Chat | `token_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |

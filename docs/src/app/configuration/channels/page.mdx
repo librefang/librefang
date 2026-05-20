@@ -241,21 +241,25 @@ space_ids = []
 | `webhook_port` | u16 | `8444` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.twitch]`
+#### Twitch
+
+Twitch is provided by the Python sidecar adapter (`librefang.sidecar.adapters.twitch`). The in-process `[channels.twitch]` config block was removed in the sidecar migration. Declare Twitch as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-channels = ["mychannel"]
-nick = "librefang"
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # comma-separated, no '#'
+# TWITCH_ACCOUNT_ID = "prod"                # optional, multi-bot routing
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 20/30s for unmodded; 100 if bot is mod
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | Env var holding the Twitch OAuth token. |
-| `channels` | list of strings | `[]` | Twitch channels to join (without `#` prefix). |
-| `nick` | string | `"librefang"` | Bot nickname in Twitch chat. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`TWITCH_OAUTH_TOKEN` belongs in `~/.librefang/secrets.env`. The sidecar defaults to TLS on `irc.chat.twitch.tv:6697`; plaintext is reachable only via `TWITCH_PLAINTEXT=1` for local mock listeners.
 
 #### `[channels.rocketchat]`
 

@@ -347,17 +347,6 @@ impl KernelConfig {
                 warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
             }
         }
-        for tw in self.channels.twitch.iter() {
-            if std::env::var(&tw.oauth_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Twitch configured but {} is not set",
-                    tw.oauth_token_env
-                ));
-            }
-        }
         for rc in self.channels.rocketchat.iter() {
             if std::env::var(&rc.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(

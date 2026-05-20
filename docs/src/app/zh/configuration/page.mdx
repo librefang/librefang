@@ -1005,21 +1005,27 @@ webhook_port = 8444
 | `webhook_port` | u16 | `8444` | 入站 Webhook 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.twitch]`
+#### Twitch
+
+Twitch 由 Python sidecar 适配器 (`librefang.sidecar.adapters.twitch`) 提供。原 in-process `[channels.twitch]` 配置块已在 sidecar 迁移中移除。请改用 `[[sidecar_channels]]` 条目：
 
 ```toml
-[channels.twitch]
-oauth_token_env = "TWITCH_OAUTH_TOKEN"
-channels = ["mychannel"]
-nick = "librefang"
+[[sidecar_channels]]
+name = "twitch"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.twitch"]
+channel_type = "twitch"
+[sidecar_channels.env]
+TWITCH_NICK = "librefang-bot"
+TWITCH_CHANNELS = "channel1,channel2"      # 逗号分隔，不带 '#'
+# TWITCH_ACCOUNT_ID = "prod"                # 可选，多机器人路由
+# TWITCH_RATE_LIMIT_MSGS = "20"             # 非 mod 账号 20/30s；mod 可设为 100
+# TWITCH_RATE_LIMIT_SECS = "30"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | 存放 Twitch OAuth 令牌的环境变量。 |
-| `channels` | list of strings | `[]` | 要加入的 Twitch 频道（不带 `#` 前缀）。 |
-| `nick` | string | `"librefang"` | 在 Twitch 聊天中的 Bot 昵称。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`TWITCH_OAUTH_TOKEN` 写入 `~/.librefang/secrets.env`，Dashboard 的 Channels 页面填表后会自动写入。`oauth:` 前缀缺失时会自动补齐。
+
+Sidecar 默认通过 TLS 连接 `irc.chat.twitch.tv:6697`（原 Rust 适配器使用明文 6667，每次重连都会泄露 OAuth 令牌）。明文模式仅在 `TWITCH_PLAINTEXT=1` 下用于本地 mock 监听 — 生产环境严禁开启。
 
 #### `[channels.rocketchat]`
 
@@ -2675,7 +2681,6 @@ max_versions_per_agent = 50
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
 | Zulip | `api_key_env` |
-| Twitch | `oauth_token_env` |
 | Rocket.Chat | `token_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |

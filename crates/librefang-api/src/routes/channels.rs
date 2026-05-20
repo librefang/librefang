@@ -398,21 +398,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot in Admin > Users", "Generate a personal access token", "Enter URL, user ID, and token below"],
         config_template: "[channels.rocketchat]\nserver_url = \"\"\ntoken_env = \"ROCKETCHAT_TOKEN\"\nuser_id = \"\"",
     },
-    ChannelMeta {
-        name: "twitch", display_name: "Twitch", icon: "TV",
-        description: "Twitch IRC gateway adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your OAuth token and enter channel name",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "oauth_token_env", label: "OAuth Token", field_type: FieldType::Secret, env_var: Some("TWITCH_OAUTH_TOKEN"), required: true, placeholder: "oauth:abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "nick", label: "Bot Nickname", field_type: FieldType::Text, env_var: None, required: true, placeholder: "librefang", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "channels", label: "Channels (no #)", field_type: FieldType::List, env_var: None, required: true, placeholder: "mychannel", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Generate an OAuth token at twitchapps.com/tmi", "Enter token, nick, and channel below"],
-        config_template: "[channels.twitch]\noauth_token_env = \"TWITCH_OAUTH_TOKEN\"\nnick = \"librefang\"",
-    },
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -500,7 +485,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "zulip" => config.zulip.is_some(),
         "nextcloud" => config.nextcloud.is_some(),
         "rocketchat" => config.rocketchat.is_some(),
-        "twitch" => config.twitch.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -764,6 +748,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Reddit OAuth2 API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.reddit"],
+    },
+    SidecarCatalogEntry {
+        name: "twitch",
+        display_name: "Twitch",
+        description: "Twitch IRC gateway adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.twitch"],
     },
 ];
 
@@ -1294,10 +1285,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "twitch" => config
-            .twitch
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "rocketchat" => config
             .rocketchat
             .as_ref()
@@ -1370,7 +1357,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "zulip" => config.zulip.len(),
         "nextcloud" => config.nextcloud.len(),
         "rocketchat" => config.rocketchat.len(),
-        "twitch" => config.twitch.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1414,7 +1400,6 @@ fn channel_instances_serialized(
         "zulip" => ser(&config.zulip),
         "nextcloud" => ser(&config.nextcloud),
         "rocketchat" => ser(&config.rocketchat),
-        "twitch" => ser(&config.twitch),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),

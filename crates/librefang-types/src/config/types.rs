@@ -6392,8 +6392,6 @@ pub struct ChannelsConfig {
     pub mattermost: OneOrMany<MattermostConfig>,
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
-    /// Twitch chat configuration(s).
-    pub twitch: OneOrMany<TwitchConfig>,
     /// Rocket.Chat configuration(s).
     pub rocketchat: OneOrMany<RocketChatConfig>,
     /// Zulip configuration(s).
@@ -6480,7 +6478,6 @@ impl Default for ChannelsConfig {
             teams: OneOrMany::default(),
             mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            twitch: OneOrMany::default(),
             rocketchat: OneOrMany::default(),
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
@@ -7045,40 +7042,6 @@ impl Default for GoogleChatConfig {
             service_account_key_path: None,
             space_ids: vec![],
             webhook_port: 8444,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Twitch chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TwitchConfig {
-    /// Env var name holding the OAuth token.
-    pub oauth_token_env: String,
-    /// Twitch channels to join (without #).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub channels: Vec<String>,
-    /// Bot nickname.
-    pub nick: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TwitchConfig {
-    fn default() -> Self {
-        Self {
-            oauth_token_env: "TWITCH_OAUTH_TOKEN".to_string(),
-            channels: vec![],
-            nick: "librefang".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

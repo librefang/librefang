@@ -40,7 +40,6 @@ macro_rules! for_each_channel_field {
         $mac!(signal, "signal");
         $mac!(slack, "slack");
         $mac!(teams, "teams");
-        $mac!(twitch, "twitch");
         $mac!(webex, "webex");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
@@ -453,7 +452,6 @@ mod tests {
             "signal",
             "slack",
             "teams",
-            "twitch",
             "webex",
             "webhook",
             "wechat",

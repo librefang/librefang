@@ -161,14 +161,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["ROCKETCHAT_TOKEN"],
         description: "Rocket.Chat REST adapter",
     },
-    ChannelDef {
-        name: "twitch",
-        display_name: "Twitch",
-        category: "Developer",
-        env_vars: &["TWITCH_OAUTH_TOKEN"],
-        description: "Twitch IRC gateway adapter",
-    },
-    // ── Notifications — ntfy & gotify migrated to sidecar adapters
+    // ── Notifications — ntfy, gotify & twitch migrated to sidecar adapters
     ChannelDef {
         name: "webhook",
         display_name: "Webhook",

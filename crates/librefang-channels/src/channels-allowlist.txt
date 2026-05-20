@@ -35,7 +35,6 @@ sidecar
 signal
 slack
 teams
-twitch
 webex
 webhook
 wechat

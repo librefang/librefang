@@ -546,13 +546,6 @@ admin_role = "admin"
     }
 
     #[test]
-    fn test_twitch_config_defaults() {
-        let tw = TwitchConfig::default();
-        assert_eq!(tw.oauth_token_env, "TWITCH_OAUTH_TOKEN");
-        assert_eq!(tw.nick, "librefang");
-    }
-
-    #[test]
     fn test_rocketchat_config_defaults() {
         let rc = RocketChatConfig::default();
         assert_eq!(rc.token_env, "ROCKETCHAT_TOKEN");
@@ -573,7 +566,6 @@ admin_role = "admin"
                 teams: OneOrMany(vec![TeamsConfig::default()]),
                 mattermost: OneOrMany(vec![MattermostConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                twitch: OneOrMany(vec![TwitchConfig::default()]),
                 rocketchat: OneOrMany(vec![RocketChatConfig::default()]),
                 zulip: OneOrMany(vec![ZulipConfig::default()]),
                 ..Default::default()
@@ -585,7 +577,6 @@ admin_role = "admin"
         assert!(back.channels.teams.is_some());
         assert!(back.channels.mattermost.is_some());
         assert!(back.channels.google_chat.is_some());
-        assert!(back.channels.twitch.is_some());
         assert!(back.channels.rocketchat.is_some());
         assert!(back.channels.zulip.is_some());
     }
