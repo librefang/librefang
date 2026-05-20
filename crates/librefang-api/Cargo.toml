@@ -103,7 +103,6 @@ channel-google-chat = ["librefang-channels/channel-google-chat"]
 channel-zulip = ["librefang-channels/channel-zulip"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-line = ["librefang-channels/channel-line"]
-channel-webex = ["librefang-channels/channel-webex"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
@@ -126,7 +125,7 @@ all-channels = [
     "channel-teams", "channel-mattermost", "channel-google-chat",
     "channel-zulip",
     "channel-feishu", "channel-line",
-    "channel-webex", "channel-dingtalk",
+    "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
 ]
 
@@ -138,7 +137,7 @@ all-channels-no-email = [
     "channel-teams", "channel-mattermost", "channel-google-chat",
     "channel-zulip",
     "channel-feishu", "channel-line",
-    "channel-webex", "channel-dingtalk",
+    "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
 ]
 

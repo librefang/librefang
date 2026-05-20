@@ -257,9 +257,9 @@ use librefang_channels::zulip::ZulipAdapter;
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
-// Wave 4
-#[cfg(feature = "channel-webex")]
-use librefang_channels::webex::WebexAdapter;
+// Wave 4 — webex migrated to a sidecar
+// (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
+// routes/channels.rs.
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
@@ -1893,8 +1893,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // Wave 3
             "line" => find_channel_info!(line),
             "feishu" => find_channel_info!(feishu),
-            // Wave 4
-            "webex" => find_channel_info!(webex),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
             "webhook" => find_channel_info!(webhook),
@@ -2555,7 +2553,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
-    check_channel!(webex, "channel-webex", "Webex");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
     check_channel!(webhook, "channel-webhook", "Webhook");
@@ -2963,22 +2960,8 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Wave 4 ──────────────────────────────────────────────────
-
-    // Webex
-    #[cfg(feature = "channel-webex")]
-    for wx_config in config.webex.iter() {
-        if let Some(token) = read_token(&wx_config.bot_token_env, "Webex") {
-            let adapter = Arc::new(
-                WebexAdapter::new(token, wx_config.allowed_rooms.clone())
-                    .with_account_id(wx_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wx_config.default_agent.clone(),
-                wx_config.account_id.clone(),
-            ));
-        }
-    }
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // ── Wave 5 ──────────────────────────────────────────────────
 
@@ -4056,8 +4039,6 @@ mod tests {
         // Wave 3
         assert!(config.channels.line.is_none());
         assert!(config.channels.feishu.is_none());
-        // Wave 4
-        assert!(config.channels.webex.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.webhook.is_none());

@@ -31,7 +31,6 @@ qq
 sidecar
 signal
 teams
-webex
 webhook
 wechat
 wecom

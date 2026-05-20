@@ -125,7 +125,7 @@ The Google Chat adapter authenticates using a service account and receives messa
 
 ---
 
-## Webex
+## Webex (sidecar)
 
 ### Prerequisites
 
@@ -133,31 +133,37 @@ The Google Chat adapter authenticates using a service account and receives messa
 
 ### Setup
 
+Webex migrated to an out-of-process sidecar in v2026.5 (replaces the former in-process Rust adapter). The bot Bearer token belongs in `~/.librefang/secrets.env`, not `config.toml`.
+
 1. Go to [developer.webex.com](https://developer.webex.com/) and sign in.
 2. Navigate to **My Webex Apps** and create a new Bot.
 3. Copy the bot access token.
-4. Set the environment variable:
+4. Save the token in `~/.librefang/secrets.env` (the dashboard's Channels page does this for you):
 
 ```bash
-export WEBEX_BOT_TOKEN=your-webex-bot-token   # Environment variable
-librefang vault set WEBEX_BOT_TOKEN           # Encrypted vault (recommended)
-librefang config set-key webex                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+WEBEX_BOT_TOKEN=your-webex-bot-token
 ```
 
-5. Add to config:
+5. Declare the sidecar in `config.toml`:
 
-```toml
-[channels.webex]
-token_env = "WEBEX_BOT_TOKEN"
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
 default_agent = "assistant"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # optional, empty = all rooms
+# WEBEX_ACCOUNT_ID = "org-prod"              # optional, multi-bot routing
 ```
 
 6. Restart the daemon.
 
 ### How It Works
 
-The Webex adapter registers a webhook with the Webex API to receive message events. Incoming messages are fetched via the Webex REST API using the message ID from the webhook payload, and responses are posted back through the messages endpoint.
+The Webex sidecar (`librefang.sidecar.adapters.webex`) connects to Cisco's Mercury WebSocket gateway for real-time message activity, then fetches the full message body via the Webex REST API (`GET /messages/<id>`). Outbound replies are posted via `POST /messages`, optionally with `parentId` set to thread under the originating message (improvement over the Rust adapter, which never sent `parentId`). 429 responses on either side honour the `Retry-After` header and retry once.
 
 ---
 

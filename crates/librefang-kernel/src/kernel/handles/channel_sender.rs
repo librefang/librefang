@@ -36,7 +36,6 @@ macro_rules! for_each_channel_field {
         $mac!(qq, "qq");
         $mac!(signal, "signal");
         $mac!(teams, "teams");
-        $mac!(webex, "webex");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
         $mac!(wecom, "wecom");
@@ -480,7 +479,6 @@ mod tests {
             "qq",
             "signal",
             "teams",
-            "webex",
             "webhook",
             "wechat",
             "wecom",

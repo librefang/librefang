@@ -121,7 +121,7 @@ Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 web
 
 ---
 
-## Webex
+## Webex (sidecar)
 
 ### 前置条件
 
@@ -129,31 +129,37 @@ Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 web
 
 ### 设置步骤
 
+Webex 已在 v2026.5 中迁移为 out-of-process sidecar（替换原 in-process Rust 适配器）。Bot Bearer 令牌存放在 `~/.librefang/secrets.env`，而不是 `config.toml`。
+
 1. 前往 [developer.webex.com](https://developer.webex.com/) 并登录。
 2. 导航到 **My Webex Apps** 并创建新 Bot。
 3. 复制 Bot 访问令牌。
-4. 设置环境变量：
+4. 将令牌写入 `~/.librefang/secrets.env`（仪表板的 Channels 页面会自动处理）：
 
 ```bash
-export WEBEX_BOT_TOKEN=your-webex-bot-token   # 环境变量
-librefang vault set WEBEX_BOT_TOKEN           # 加密金库（推荐）
-librefang config set-key webex                # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+WEBEX_BOT_TOKEN=your-webex-bot-token
 ```
 
-5. 添加到配置文件：
+5. 在 `config.toml` 中声明 sidecar：
 
-```toml
-[channels.webex]
-token_env = "WEBEX_BOT_TOKEN"
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
 default_agent = "assistant"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # 可选，留空 = 所有房间
+# WEBEX_ACCOUNT_ID = "org-prod"              # 可选，多机器人路由
 ```
 
 6. 重启守护进程。
 
 ### 工作原理
 
-Webex 适配器向 Webex API 注册 webhook 以接收消息事件。传入消息通过 webhook 负载中的消息 ID 使用 Webex REST API 获取，响应通过 messages 端点发送。
+Webex sidecar（`librefang.sidecar.adapters.webex`）连接 Cisco 的 Mercury WebSocket 网关接收实时消息活动，然后通过 Webex REST API（`GET /messages/<id>`）获取完整消息正文。出站回复通过 `POST /messages` 发送，可选地附带 `parentId` 以串入起源消息的线程（相对原 Rust 适配器从未发送 `parentId` 的改进）。两侧的 429 响应都遵循 `Retry-After` 头并重试一次。
 
 ---
 

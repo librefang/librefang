@@ -30,7 +30,6 @@ all-channels = [
     "channel-qq",
     "channel-signal",
     "channel-teams",
-    "channel-webex",
     "channel-webhook",
     "channel-wechat",
     "channel-wecom",
@@ -50,7 +49,6 @@ channel-google-chat = ["dep:rsa"]
 channel-zulip = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-line = []
-channel-webex = []
 channel-dingtalk = []
 channel-qq = []
 channel-wechat = []

@@ -272,20 +272,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Google Cloud project with Chat API", "Download service account JSON key", "Enter the path below"],
         config_template: "[channels.google_chat]\nservice_account_env = \"GOOGLE_CHAT_SERVICE_ACCOUNT\"",
     },
-    ChannelMeta {
-        name: "webex", display_name: "Webex", icon: "WX",
-        description: "Cisco Webex bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token from developer.webex.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("WEBEX_BOT_TOKEN"), required: true, placeholder: "NjI...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_rooms", label: "Allowed Rooms", field_type: FieldType::List, env_var: None, required: false, placeholder: "Y2lz...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot at developer.webex.com", "Copy the token", "Paste it below"],
-        config_template: "[channels.webex]\nbot_token_env = \"WEBEX_BOT_TOKEN\"",
-    },
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "feishu", display_name: "Feishu/Lark", icon: "FS",
         description: "Feishu/Lark Open Platform adapter",
@@ -414,7 +402,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "teams" => config.teams.is_some(),
         "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "webex" => config.webex.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
         "zulip" => config.zulip.is_some(),
@@ -716,6 +703,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Slack Socket Mode bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.slack"],
+    },
+    SidecarCatalogEntry {
+        name: "webex",
+        display_name: "Webex",
+        description: "Cisco Webex bot adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.webex"],
     },
 ];
 
@@ -1250,10 +1244,6 @@ fn channel_config_values(
             .feishu
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "webex" => config
-            .webex
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
             .as_ref()
@@ -1294,7 +1284,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "teams" => config.teams.len(),
         "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
-        "webex" => config.webex.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
         "zulip" => config.zulip.len(),
@@ -1333,7 +1322,6 @@ fn channel_instances_serialized(
         "teams" => ser(&config.teams),
         "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
-        "webex" => ser(&config.webex),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
         "zulip" => ser(&config.zulip),

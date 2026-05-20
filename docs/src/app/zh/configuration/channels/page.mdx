@@ -382,19 +382,23 @@ NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
 
 `NEXTCLOUD_TOKEN` 写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Nextcloud 表单时会自动写入。出站回复通过 Talk 的 `replyTo` 参数串入线程（相对原 Rust 适配器从未发送 `replyTo` 的改进）。
 
-#### `[channels.webex]`
+#### Webex (sidecar)
 
-```toml
-[channels.webex]
-bot_token_env = "WEBEX_BOT_TOKEN"
-allowed_rooms = []
+Webex 已在 v2026.5 中迁移为 out-of-process sidecar；请使用 `[[sidecar_channels]]` 块代替 `[channels.webex]`。
+
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # 可选，留空 = 所有房间
+# WEBEX_ACCOUNT_ID = "org-prod"              # 可选，多机器人路由键
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | 存放 Webex Bot 令牌的环境变量。 |
-| `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有房间。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`WEBEX_BOT_TOKEN` 写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Webex 表单时会自动写入。出站回复通过 Webex 的 `parentId` 参数串入线程（相对原 Rust 适配器从未发送 `parentId` 的改进）。
 
 #### `[channels.dingtalk]`
 

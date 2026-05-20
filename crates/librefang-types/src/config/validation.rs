@@ -355,17 +355,8 @@ impl KernelConfig {
             }
         }
         // Wave 4 channels
-        for wx in self.channels.webex.iter() {
-            if std::env::var(&wx.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Webex configured but {} is not set",
-                    wx.bot_token_env
-                ));
-            }
-        }
+        // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 5 channels
         for dt in self.channels.dingtalk.iter() {
             use super::DingTalkReceiveMode;

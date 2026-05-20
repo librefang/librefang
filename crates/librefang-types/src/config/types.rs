@@ -6399,8 +6399,8 @@ pub struct ChannelsConfig {
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
-    /// Webex bot configuration(s).
-    pub webex: OneOrMany<WebexConfig>,
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // Wave 5 — Niche & differentiating channels
     /// DingTalk robot configuration(s).
     pub dingtalk: OneOrMany<DingTalkConfig>,
@@ -6474,7 +6474,6 @@ impl Default for ChannelsConfig {
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
             feishu: OneOrMany::default(),
-            webex: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
             webhook: OneOrMany::default(),
@@ -7131,37 +7130,8 @@ impl Default for WeChatConfig {
 }
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
-
-/// Webex bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WebexConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Room IDs to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WebexConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "WEBEX_BOT_TOKEN".to_string(),
-            allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// webex migrated to a sidecar (librefang.sidecar.adapters.webex); see
+// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 // ── Wave 5 channel configs ─────────────────────────────────────────
 

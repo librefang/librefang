@@ -1198,19 +1198,23 @@ NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
 
 `NEXTCLOUD_TOKEN` (the app password / OAuth bearer) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form.
 
-#### `[channels.webex]`
+#### Webex (sidecar)
 
-```toml
-[channels.webex]
-bot_token_env = "WEBEX_BOT_TOKEN"
-allowed_rooms = []
+Webex migrated to an out-of-process sidecar in v2026.5; declare it as a `[[sidecar_channels]]` block instead of `[channels.webex]`.
+
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # optional, empty = all rooms
+# WEBEX_ACCOUNT_ID = "org-prod"              # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
-| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`WEBEX_BOT_TOKEN` (the bot Bearer token from `developer.webex.com`) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form.
 
 #### `[channels.dingtalk]`
 
@@ -2676,7 +2680,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
 | `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
-| `WEBEX_BOT_TOKEN` | Webex | Webex bot token. |
+| `WEBEX_BOT_TOKEN` | Webex (sidecar) | Webex bot Bearer token (`librefang.sidecar.adapters.webex`). |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble bot token. |
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
 | `TWIST_TOKEN` | Twist | Twist API token. |
@@ -2723,7 +2727,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Guilded | `bot_token_env` |
 | Keybase | `paperkey_env` |
 | Threema | `secret_env` |
-| Webex | `bot_token_env` |
 | Pumble | `bot_token_env` |
 | Flock | `bot_token_env` |
 | Twist | `token_env` |

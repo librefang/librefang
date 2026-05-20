@@ -420,19 +420,23 @@ NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
 
 `NEXTCLOUD_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form. Outbound replies thread via Talk's `replyTo` parameter (improvement over the former Rust adapter, which never sent `replyTo`).
 
-#### `[channels.webex]`
+#### Webex (sidecar)
 
-```toml
-[channels.webex]
-bot_token_env = "WEBEX_BOT_TOKEN"
-allowed_rooms = []
+Webex migrated to an out-of-process sidecar in v2026.5; declare it as a `[[sidecar_channels]]` block instead of `[channels.webex]`.
+
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # optional, empty = all rooms
+# WEBEX_ACCOUNT_ID = "org-prod"              # optional, multi-bot routing
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
-| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`WEBEX_BOT_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form. Outbound replies thread via Webex's `parentId` parameter (improvement over the former Rust adapter, which never sent `parentId`).
 
 #### `[channels.dingtalk]`
 

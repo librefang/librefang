@@ -40,9 +40,10 @@ struct ChannelDef {
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
     // ── Messaging
-    // discord and slack migrated to out-of-process sidecar adapters
-    // (librefang.sidecar.adapters.{discord,slack}); see the channels
-    // page in the dashboard / SIDECAR_CATALOG in routes/channels.rs.
+    // discord, slack, and webex migrated to out-of-process sidecar
+    // adapters (librefang.sidecar.adapters.{discord,slack,webex}); see
+    // the channels page in the dashboard / SIDECAR_CATALOG in
+    // routes/channels.rs.
     ChannelDef {
         name: "whatsapp",
         display_name: "WhatsApp",
@@ -102,13 +103,9 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["GOOGLE_CHAT_SERVICE_ACCOUNT"],
         description: "Google Chat service account adapter",
     },
-    ChannelDef {
-        name: "webex",
-        display_name: "Webex",
-        category: "Enterprise",
-        env_vars: &["WEBEX_BOT_TOKEN"],
-        description: "Cisco Webex bot adapter",
-    },
+    // webex migrated to a sidecar
+    // (librefang.sidecar.adapters.webex); see the channels page in the
+    // dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "feishu",
         display_name: "Feishu/Lark",
