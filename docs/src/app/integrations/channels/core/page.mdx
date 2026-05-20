@@ -362,33 +362,40 @@ The Rust adapter delivered `Image`, `Voice`, `Video`, `Audio`, `Animation`, `Fil
 
 ---
 
-## Matrix
+## Matrix (sidecar)
+
+Matrix migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.matrix`).
 
 ### Prerequisites
 
-- A Matrix homeserver account and access token
+- A Matrix homeserver account and access token (Element-issued token works).
+- Python 3 + the `librefang` SDK (`pip install -e sdk/python`).
 
 ### Setup
 
-1. Create a bot account on your Matrix homeserver.
-2. Generate an access token.
-3. Set the environment variable:
+1. Create a bot account on your Matrix homeserver (or use an existing one).
+2. Generate an access token (Element settings → Help & About → Access Token, or `POST /_matrix/client/v3/login`).
+3. Put the token in `~/.librefang/secrets.env`:
 
 ```bash
-export MATRIX_TOKEN=your-token                # Environment variable
-librefang vault set MATRIX_TOKEN              # Encrypted vault (recommended)
-librefang config set-key matrix               # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+MATRIX_ACCESS_TOKEN=syt_...
 ```
 
-4. Add to config:
+4. Declare the sidecar in `~/.librefang/config.toml`:
 
 ```toml
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-access_token_env = "MATRIX_TOKEN"
-user_id = "@librefang-bot:matrix.org"
+[[sidecar_channels]]
+name = "matrix"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.matrix"]
+channel_type = "matrix"
 default_agent = "assistant"
+[sidecar_channels.env]
+MATRIX_HOMESERVER_URL = "https://matrix.org"
+MATRIX_USER_ID = "@librefang-bot:matrix.org"
+# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # optional
+# MATRIX_ACCOUNT_ID = "prod-bot"                             # optional
+# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # optional, default 50 MiB
 ```
 
 5. Invite the bot to the rooms you want it to monitor.
@@ -396,7 +403,7 @@ default_agent = "assistant"
 
 ### How It Works
 
-The Matrix adapter uses the Matrix Client-Server API. It syncs with the homeserver using long-polling (`/sync` with a timeout) and processes new messages from joined rooms. Responses are sent via the `/rooms/{roomId}/send` endpoint.
+The sidecar polls `GET /_matrix/client/v3/sync` with the bot's access token, 30 s server timeout, `since` cursor for incremental delivery. Inbound `m.room.message` events (`m.text` / `m.notice` / `m.emote` / `m.image` / `m.file` / `m.audio` / `m.video`) are emitted to the kernel; outbound replies use `PUT /_matrix/client/v3/rooms/{room}/send/{type}/{txn}`. Markdown is rendered to Matrix's HTML subset for `formatted_body`; `m.thread` and `m.replace` (edit) relations are wired through so threaded replies and streaming edits work out of the box.
 
 ---
 
@@ -500,16 +507,16 @@ chunk ends in the middle of a character.
 
 ### Disabling Automatic Splitting
 
-For the still-in-process channels (Matrix, Mattermost, …), set
+For the still-in-process channels (Email, WhatsApp, …), set
 `split_long_messages = false` in the channel configuration to truncate
 rather than split long messages:
 
 ```toml
-[channels.matrix]
+[channels.email]
 split_long_messages = false   # truncate instead of splitting
 ```
 
-The default is `true`. The Discord, Slack, and Telegram sidecars
-always chunk at their respective platform limits — they own their
-own chunking inside the subprocess and the daemon-side knob does
-not reach them.
+The default is `true`. The sidecar channels (Matrix, Discord, Slack,
+Telegram, …) always chunk at their respective platform limits — they
+own their own chunking inside the subprocess and the daemon-side knob
+does not reach them.

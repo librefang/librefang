@@ -931,23 +931,25 @@ SIGNAL_NUMBER  = "+15555550100"
 
 Sidecar 沿用 Rust 适配器相同的 SSRF 保护：`SIGNAL_API_URL` 必须解析到公网地址，除非显式设置 `SIGNAL_ALLOW_LOCAL=1`。可选的 `SIGNAL_API_KEY` 写入 `~/.librefang/secrets.env`。
 
-#### `[channels.matrix]`
+#### Matrix（Sidecar）
+
+Matrix 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.matrix`），通过 Matrix Client-Server API 的 `/sync` 长轮询对接 homeserver。原有 `[channels.matrix]` 块不再识别 —— 改为声明 `[[sidecar_channels]]`：
 
 ```toml
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-user_id = "@librefang:matrix.org"
-access_token_env = "MATRIX_ACCESS_TOKEN"
-allowed_rooms = []
+[[sidecar_channels]]
+name = "matrix"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.matrix"]
+channel_type = "matrix"
+[sidecar_channels.env]
+MATRIX_HOMESERVER_URL = "https://matrix.org"
+MATRIX_USER_ID = "@librefang:matrix.org"
+# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # 可选
+# MATRIX_ACCOUNT_ID = "prod-bot"                             # 可选
+# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # 可选，默认 50 MiB
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `homeserver_url` | string | `"https://matrix.org"` | Matrix 家服务器 URL。 |
-| `user_id` | string | `""` | Bot 用户 ID（例如 `"@librefang:matrix.org"`）。 |
-| `access_token_env` | string | `"MATRIX_ACCESS_TOKEN"` | 存放 Matrix 访问令牌的环境变量。 |
-| `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有已加入的房间。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+密钥放在 `~/.librefang/secrets.env`：`MATRIX_ACCESS_TOKEN`（Bot 在 homeserver 上的 access token，与 Element 一致）。
 
 #### `[channels.email]`
 

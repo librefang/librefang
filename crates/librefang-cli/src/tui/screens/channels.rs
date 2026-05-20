@@ -54,13 +54,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     },
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    ChannelDef {
-        name: "matrix",
-        display_name: "Matrix",
-        category: "Messaging",
-        env_vars: &["MATRIX_ACCESS_TOKEN"],
-        description: "Matrix/Element adapter",
-    },
+    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     ChannelDef {
         name: "email",
         display_name: "Email",

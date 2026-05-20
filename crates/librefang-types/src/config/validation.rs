@@ -270,17 +270,8 @@ impl KernelConfig {
                 ));
             }
         }
-        for mx in self.channels.matrix.iter() {
-            if std::env::var(&mx.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Matrix configured but {} is not set",
-                    mx.access_token_env
-                ));
-            }
-        }
+        // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+        // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
         for em in self.channels.email.iter() {
             if std::env::var(&em.password_env)
                 .unwrap_or_default()

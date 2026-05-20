@@ -72,6 +72,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 DEFAULT_SERVICE_URL = "https://bsky.social"
 # Bluesky post length cap (graphemes per spec; we approximate with
@@ -79,38 +84,12 @@ DEFAULT_SERVICE_URL = "https://bsky.social"
 MAX_MESSAGE_LEN = 300
 POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when Bluesky 429s without a `Retry-After` header.
-# AT Protocol's XRPC layer typically sends one (seconds form, alongside
-# `RateLimit-Reset` epoch); fall back to a sane wait so we don't busy-
-# loop at 1 s when the header is absent or unparseable.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 # Sessions last ~2h on bsky.social; refresh 5 min before the 90-min
 # safety mark used by the Rust adapter.
 SESSION_LIFE_SECS = 5400
 SESSION_REFRESH_BUFFER_SECS = 300
 # Thread-context cache size. 200 entries × ~200 B = ~40 KB, negligible.
 THREAD_CACHE_MAX = 200
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Same shape as the ntfy / mastodon / Rust ``split_message`` helper."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 class _LruCache:
     """Tiny fixed-size LRU. OrderedDict-backed: re-insert on get to mark

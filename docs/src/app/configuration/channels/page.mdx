@@ -163,23 +163,25 @@ SIGNAL_NUMBER  = "+15555550100"
 
 The sidecar enforces the same SSRF guard as the Rust adapter — `SIGNAL_API_URL` must resolve to a public address unless `SIGNAL_ALLOW_LOCAL=1` is set. Optional `SIGNAL_API_KEY` belongs in `~/.librefang/secrets.env`.
 
-#### `[channels.matrix]`
+#### Matrix (sidecar)
+
+Matrix migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.matrix`). The sidecar polls `/sync` on the configured homeserver via the Client-Server API. An existing `[channels.matrix]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-user_id = "@librefang:matrix.org"
-access_token_env = "MATRIX_ACCESS_TOKEN"
-allowed_rooms = []
+[[sidecar_channels]]
+name = "matrix"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.matrix"]
+channel_type = "matrix"
+[sidecar_channels.env]
+MATRIX_HOMESERVER_URL = "https://matrix.org"
+MATRIX_USER_ID = "@librefang:matrix.org"
+# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # optional
+# MATRIX_ACCOUNT_ID = "prod-bot"                             # optional
+# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # optional, default 50 MiB
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `homeserver_url` | string | `"https://matrix.org"` | Matrix homeserver URL. |
-| `user_id` | string | `""` | Bot user ID (e.g., `"@librefang:matrix.org"`). |
-| `access_token_env` | string | `"MATRIX_ACCESS_TOKEN"` | Env var holding the Matrix access token. |
-| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all joined rooms. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Secret via `~/.librefang/secrets.env`: `MATRIX_ACCESS_TOKEN` (the bot's access token from the homeserver — same shape Element uses).
 
 #### `[channels.email]`
 

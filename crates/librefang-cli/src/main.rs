@@ -7997,7 +7997,6 @@ fn cmd_channel_list() {
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
         ("whatsapp", "WA_ACCESS_TOKEN"),
-        ("matrix", "MATRIX_TOKEN"),
         ("email", "EMAIL_PASSWORD"),
     ];
 
@@ -8039,7 +8038,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let channel_list = [
                 ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
-                ("matrix", "Matrix homeserver"),
             ];
 
             for (i, (name, desc)) in channel_list.iter().enumerate() {
@@ -8142,41 +8140,10 @@ fn cmd_channel_setup(channel: Option<&str>) {
         // (librefang.sidecar.adapters.signal) in v2026.5; the in-process
         // wizard arm was removed. Configure via [[sidecar_channels]] in
         // config.toml or through the dashboard's channel configure page.
-        "matrix" => {
-            ui::section(&i18n::t("section-setup-matrix"));
-            ui::blank();
-            println!("  1. Create a bot account on your Matrix homeserver");
-            println!("     (e.g., register @librefang-bot:matrix.org)");
-            println!("  2. Obtain an access token:");
-            println!("     curl -X POST https://matrix.org/_matrix/client/r0/login \\");
-            println!("       -d '{{\"type\":\"m.login.password\",\"user\":\"librefang-bot\",\"password\":\"...\"}}'");
-            println!("     Copy the access_token from the response.");
-            println!("  3. Invite the bot to rooms you want it to monitor.");
-            ui::blank();
-
-            let homeserver = prompt_input("  Homeserver URL [https://matrix.org]: ");
-            let homeserver = if homeserver.is_empty() {
-                "https://matrix.org".to_string()
-            } else {
-                homeserver
-            };
-            let token = prompt_input("  Access token: ");
-
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("matrix", config_block);
-
-            let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
-            if !token.is_empty() {
-                match dotenv::save_env_key("MATRIX_ACCESS_TOKEN", &token) {
-                    Ok(()) => ui::success(&i18n::t("channel-token-saved")),
-                    Err(_) => println!("    export MATRIX_ACCESS_TOKEN={token}"),
-                }
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Matrix")]));
-            notify_daemon_restart();
-        }
+        // matrix was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.matrix); the in-process wizard
+        // arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
         other => {
             ui::error_with_fix(
                 &i18n::t_args("channel-unknown", &[("name", other)]),

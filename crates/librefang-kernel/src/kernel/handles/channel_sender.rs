@@ -30,7 +30,6 @@ macro_rules! for_each_channel_field {
         $mac!(email, "email");
         $mac!(feishu, "feishu");
         $mac!(google_chat, "google_chat");
-        $mac!(matrix, "matrix");
         $mac!(teams, "teams");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
@@ -468,7 +467,6 @@ mod tests {
             "email",
             "feishu",
             "google_chat",
-            "matrix",
             "teams",
             "webhook",
             "wechat",

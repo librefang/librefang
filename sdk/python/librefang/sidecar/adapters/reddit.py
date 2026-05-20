@@ -119,6 +119,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    split_message as _split_message,
+)
+from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 DEFAULT_API_BASE = "https://oauth.reddit.com"
@@ -134,7 +139,6 @@ MAX_MESSAGE_LEN = 10000
 DEFAULT_POLL_INTERVAL_SECS = 30
 MIN_POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
 # Refresh OAuth tokens 5 minutes before expiry.
 TOKEN_REFRESH_BUFFER_SECS = 300
 # Cap the dedupe set; oldest half is evicted on overflow.
@@ -180,26 +184,6 @@ def _normalise_subreddit(value: str) -> str:
     if s.startswith("r/"):
         s = s[2:]
     return s.strip("/")
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Matches the Rust ``split_message`` helper used across channels."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _parse_reddit_comment(comment: dict, own_username: str) -> dict | None:
     """Parse a Reddit comment JSON object into a ``message`` event.
@@ -387,8 +371,9 @@ class RedditAdapter(SidecarAdapter):
         # Dedupe set for already-seen comment IDs. Capped by
         # SEEN_COMMENTS_MAX with crude oldest-half eviction (matches
         # the Rust adapter's eviction policy).
-        self._seen_comments: list[str] = []
-        self._seen_comments_set: set[str] = set()
+        self._seen = _SeenSet(
+            max_size=SEEN_COMMENTS_MAX, evict=SEEN_COMMENTS_EVICT,
+        )
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -555,18 +540,8 @@ class RedditAdapter(SidecarAdapter):
     # ---- inbound: poll new comments per subreddit --------------------
 
     def _mark_seen(self, comment_id: str) -> None:
-        """Track a comment ID with crude oldest-half eviction on
-        overflow. Mirrors the Rust adapter's eviction (it sorted by
-        insertion order via HashMap iteration; we use an explicit
-        list so the eviction is deterministic)."""
-        if comment_id in self._seen_comments_set:
-            return
-        self._seen_comments.append(comment_id)
-        self._seen_comments_set.add(comment_id)
-        if len(self._seen_comments) > SEEN_COMMENTS_MAX:
-            to_drop = self._seen_comments[:SEEN_COMMENTS_EVICT]
-            self._seen_comments = self._seen_comments[SEEN_COMMENTS_EVICT:]
-            self._seen_comments_set.difference_update(to_drop)
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(comment_id)
 
     def _poll_once(self, emit) -> None:
         """Poll every configured subreddit once. Errors per-subreddit
@@ -643,7 +618,7 @@ class RedditAdapter(SidecarAdapter):
                         child.get("data"), dict,
                     ) else ""
                 )
-                if not comment_id or comment_id in self._seen_comments_set:
+                if not comment_id or comment_id in self._seen.ids:
                     continue
                 ev = _parse_reddit_comment(child, self.own_username)
                 if ev is None:

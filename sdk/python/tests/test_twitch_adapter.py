@@ -454,11 +454,11 @@ def test_mark_seen_evicts_at_cap():
     for i in range(ta.SEEN_IDS_MAX + 5):
         a._mark_seen(f"id-{i}")
     # After eviction: size should be (SEEN_IDS_MAX + 5) - SEEN_IDS_EVICT.
-    assert len(a._seen_ids) == ta.SEEN_IDS_MAX + 5 - ta.SEEN_IDS_EVICT
+    assert len(a._seen.ids) == ta.SEEN_IDS_MAX + 5 - ta.SEEN_IDS_EVICT
     # The oldest IDs were dropped.
-    assert "id-0" not in a._seen_ids_set
+    assert "id-0" not in a._seen.ids
     # Recent IDs are retained.
-    assert f"id-{ta.SEEN_IDS_MAX + 4}" in a._seen_ids_set
+    assert f"id-{ta.SEEN_IDS_MAX + 4}" in a._seen.ids
 
 
 def test_mark_seen_idempotent():
@@ -466,9 +466,9 @@ def test_mark_seen_idempotent():
     grow the list."""
     a = _adapter()
     a._mark_seen("x")
-    n = len(a._seen_ids)
+    n = len(a._seen.ids)
     assert a._mark_seen("x") is False
-    assert len(a._seen_ids) == n
+    assert len(a._seen.ids) == n
 
 
 # ---- ready / capability flags -----------------------------------
