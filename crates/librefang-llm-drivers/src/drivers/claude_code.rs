@@ -732,19 +732,32 @@ struct ClaudeStreamEvent {
 /// (`librefang_runtime::rate_limit_notify::parse_rate_limit_message`) can
 /// parse to recover the precise reset timestamp. The format is intentionally
 /// machine-readable while still being human-readable in logs.
+///
+/// When the CLI did not report a concrete `resetsAt` we emit the human
+/// "Resets at unix unknown" string but **omit** the machine-readable
+/// `resets_at_unix=` token entirely. Emitting `resets_at_unix=0` would be
+/// parsed by `rate_limit_notify::parse_rate_limit_message` as a literal
+/// 1970-01-01 reset, which the owner-notify template would then render as
+/// "Reset alle 00:00" with a 56-year-old timestamp (houko #5311 finding 8).
 fn build_rate_limit_message(info: Option<&RateLimitInfo>, fallback_text: &str) -> String {
     let kind = info
         .and_then(|i| i.rate_limit_type.as_deref())
         .unwrap_or("unknown");
-    let resets_at = info.and_then(|i| i.resets_at).unwrap_or(0);
-    let iso = info
-        .and_then(|i| i.resets_at)
+    let resets_at_opt = info.and_then(|i| i.resets_at);
+    let resets_at_display = resets_at_opt
+        .map(|ts| ts.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let iso = resets_at_opt
         .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| "unknown".to_string());
+    let machine_marker = match resets_at_opt {
+        Some(ts) => format!("resets_at_unix={ts} "),
+        None => String::new(),
+    };
     format!(
-        "Claude Code rate limit ({kind}). Resets at unix {resets_at} (UTC ISO {iso}). \
-         resets_at_unix={resets_at} rate_limit_type={kind} | {fallback_text}"
+        "Claude Code rate limit ({kind}). Resets at unix {resets_at_display} (UTC ISO {iso}). \
+         {machine_marker}rate_limit_type={kind} | {fallback_text}"
     )
     .trim()
     .to_string()
@@ -1481,18 +1494,31 @@ impl LlmDriver for ClaudeCodeDriver {
                 stderr = %stderr_text,
                 "Claude Code CLI streaming subprocess exited with error"
             );
-            // If the stream captured a `rate_limit_event` with a precise
-            // resets_at timestamp, prefer that over the text-pattern
-            // heuristic — it gives the owner-notify path a real
-            // wall-clock reset to render. The CLI emits `status="allowed"`
-            // on healthy events too, so we surface a structured
-            // RateLimited even when only the timestamp is available; the
-            // exit-with-error itself is the signal that the quota
-            // actually blocked us.
-            if last_rate_limit_info
+            // If the stream captured a `rate_limit_event` whose status
+            // marks the quota as actually blocked/throttled, prefer that
+            // over the text-pattern heuristic — it gives the owner-notify
+            // path a real wall-clock reset to render. The CLI emits
+            // `status="allowed"` on healthy events too (see
+            // `SAMPLE_RATE_LIMIT_EVENT`), so gating purely on
+            // `resets_at.is_some()` would misclassify any subsequent
+            // unrelated non-success exit (network drop, subprocess crash,
+            // transient CLI bug) on the same session as "rate-limited" —
+            // pinging the owner with a fabricated reset they'd wait
+            // against (houko #5311 finding 1). We require both an
+            // explicit blocked/throttled status AND a concrete reset
+            // timestamp before classifying as RateLimited.
+            let throttled_status = last_rate_limit_info
                 .as_ref()
-                .and_then(|i| i.resets_at)
-                .is_some()
+                .map(|i| {
+                    let s = i.status.to_ascii_lowercase();
+                    s == "blocked" || s == "throttled" || s == "exhausted"
+                })
+                .unwrap_or(false);
+            if throttled_status
+                && last_rate_limit_info
+                    .as_ref()
+                    .and_then(|i| i.resets_at)
+                    .is_some()
             {
                 let info = last_rate_limit_info.as_ref();
                 let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1694,6 +1720,34 @@ mod tests {
         assert!(
             msg.contains("UTC ISO"),
             "expected human ISO marker in {msg:?}"
+        );
+    }
+
+    #[test]
+    fn build_rate_limit_message_omits_zero_marker_when_resets_at_missing() {
+        // houko #5311 finding 8: when the CLI exit does not embed a concrete
+        // `resetsAt` we must NOT emit `resets_at_unix=0` — downstream
+        // `parse_rate_limit_message` would happily parse `0` and render
+        // "Reset alle 00:00 / 1970-01-01 UTC" at the owner.
+        let info = RateLimitInfo {
+            status: "blocked".to_string(),
+            resets_at: None,
+            rate_limit_type: Some("five_hour".to_string()),
+        };
+        let msg = build_rate_limit_message(Some(&info), "stderr=ambiguous");
+        assert!(
+            !msg.contains("resets_at_unix="),
+            "must omit machine marker when resets_at is None, got {msg:?}"
+        );
+        assert!(
+            msg.contains("Resets at unix unknown"),
+            "expected human 'unknown' marker in {msg:?}"
+        );
+        // No info at all → same property.
+        let none_msg = build_rate_limit_message(None, "stderr=ambiguous");
+        assert!(
+            !none_msg.contains("resets_at_unix="),
+            "must omit machine marker when info is None, got {none_msg:?}"
         );
     }
 
