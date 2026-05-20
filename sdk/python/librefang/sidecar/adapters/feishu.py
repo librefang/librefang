@@ -95,7 +95,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from base64 import b64decode, urlsafe_b64decode
+from base64 import b64decode
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Callable, Optional
@@ -105,7 +105,6 @@ from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
     MAX_BACKOFF_SECS,
     http_request as _http_request,
-    parse_retry_after as _parse_retry_after,
     split_message as _split_message,
 )
 from librefang.sidecar.ws import WebSocketClient as _WebSocketClient
@@ -1328,7 +1327,11 @@ class FeishuAdapter(SidecarAdapter):
             if isinstance(ping_cfg, (int, float)) and ping_cfg > 0:
                 ping_secs = float(ping_cfg)
 
-            log.info("feishu ws connecting", url=ws_url[:64])
+            # Log only the host, never the full URL. Feishu's gateway
+            # URLs carry a session signature in the query string; even
+            # short-lived, it doesn't belong in operator logs.
+            ws_host = urllib.parse.urlparse(ws_url).hostname or "<unknown>"
+            log.info("feishu ws connecting", host=ws_host)
             try:
                 with self._make_ws(ws_url) as ws:
                     backoff = WS_INITIAL_BACKOFF_SECS
@@ -1442,11 +1445,19 @@ class FeishuAdapter(SidecarAdapter):
         try:
             srv = HTTPServer(("0.0.0.0", self.webhook_port), handler_cls)
         except OSError as e:
+            # Bind failure inside the runtime loop — surface as a
+            # regular exception so the runtime's producer-crash wrapper
+            # (see runtime.py) can log + cleanly exit with non-zero
+            # status. SystemExit raised from inside the event loop
+            # bypasses the cleanup path on older Pythons.
             log.error(
                 "feishu webhook bind failed",
                 port=self.webhook_port, error=str(e),
             )
-            raise SystemExit(2) from e
+            raise RuntimeError(
+                f"feishu webhook bind failed on port "
+                f"{self.webhook_port}: {e}",
+            ) from e
         self._http_server = srv
         log.info("feishu webhook listening", port=self.webhook_port)
         try:
