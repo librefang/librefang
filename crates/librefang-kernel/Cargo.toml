@@ -55,6 +55,11 @@ tera = { workspace = true }
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
 sha2 = { workspace = true }
+# Used by the boot-time LIBREFANG_STATE_SECRET shape validator
+# (audit: state-secret-default-random) — mirrors the 32-byte base64
+# contract enforced by librefang_extensions::vault::decode_master_key
+# without taking a fresh dep on the extensions crate.
+base64 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

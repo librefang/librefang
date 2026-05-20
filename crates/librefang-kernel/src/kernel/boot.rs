@@ -127,6 +127,42 @@ impl LibreFangKernel {
             }
         }
 
+        // OAuth state-token HMAC key sanity check (audit:
+        // state-secret-default-random).
+        //
+        // The `state_signing_key` LazyLock in `librefang-api/src/oauth.rs`
+        // falls back to `Uuid::new_v4()` when `LIBREFANG_STATE_SECRET`
+        // is unset — that is fine for unit tests (no IdP round-trip)
+        // but actively wrong for any deployment that handles real OIDC:
+        //
+        // 1. The key is per-process random, so every daemon restart
+        //    invalidates all in-flight `state` cookies — users mid-login
+        //    see "Invalid or expired state parameter" with no operator
+        //    signal as to why.
+        // 2. Multi-replica posture (the documented Cloudflare Tunnel /
+        //    reverse-proxy setup with `trusted_proxies`) is silently
+        //    broken: each replica signs with its own UUID, so a callback
+        //    routed to a different node from the auth-start node rejects
+        //    every legitimate user.
+        //
+        // Refuse to boot when `external_auth.enabled = true` and the env
+        // var is missing or malformed. Contract mirrors LIBREFANG_VAULT_KEY:
+        // base64-decoded value must be exactly 32 bytes (HMAC-SHA256
+        // security baseline). Generate one with `openssl rand -base64 32`.
+        if config.external_auth.enabled {
+            if let Err(e) = validate_state_secret_env() {
+                return Err(LibreFangError::BootFailed(format!(
+                    "[external_auth] is enabled but LIBREFANG_STATE_SECRET is {e}. \
+                     Set it to a base64-encoded 32-byte key shared across all \
+                     replicas — `openssl rand -base64 32` produces a value of \
+                     the right shape. Without this, OAuth `state` HMAC \
+                     verification fails across restarts and between replicas, \
+                     locking out legitimate users mid-login."
+                ))
+                .into());
+            }
+        }
+
         match config.mode {
             KernelMode::Stable => {
                 info!("Booting LibreFang kernel in STABLE mode — conservative defaults enforced");
@@ -2443,6 +2479,43 @@ system_prompt = "You are a helpful assistant."
 /// The provider prefix is honoured **only when the LHS is a registered
 /// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
 /// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
+/// Pure validator for the `LIBREFANG_STATE_SECRET` shape — `None`
+/// means env unset; otherwise the raw env value is checked for base64
+/// decodability and a 32-byte payload.
+///
+/// Mirrors the `LIBREFANG_VAULT_KEY` contract enforced by
+/// `librefang_extensions::vault::decode_master_key` — same length, same
+/// encoding — so operators can use one `openssl rand -base64 32` for
+/// both keys (different values, same shape).
+///
+/// Separated from the env-var read so it is exercised directly in
+/// `state_secret_validation` tests without the global-env-mutation
+/// race that would otherwise force the suite serial.
+/// (audit: state-secret-default-random)
+fn validate_state_secret_value(raw: Option<&str>) -> Result<(), String> {
+    use base64::Engine as _;
+    let value = raw.ok_or_else(|| "unset".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|e| format!("not base64: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "the wrong length (got {} bytes, expected 32)",
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Env-reader wrapper used by `Kernel::open`. Always reads
+/// `LIBREFANG_STATE_SECRET` at the moment of boot — re-reading per
+/// boot (rather than at LazyLock init) lets a single test process
+/// boot multiple kernels with different env-var states, which the
+/// existing integration suites rely on.
+fn validate_state_secret_env() -> Result<(), String> {
+    validate_state_secret_value(std::env::var("LIBREFANG_STATE_SECRET").ok().as_deref())
+}
+
 /// but where `google` is not a separate registered provider — the model id
 /// belongs to the OpenRouter provider verbatim).
 ///
@@ -2614,5 +2687,78 @@ mod extraction_model_tests {
         );
         assert_eq!(p, "anthropic");
         assert_eq!(m, "weird/model");
+    }
+}
+
+#[cfg(test)]
+mod state_secret_validation {
+    //! Regression guards for the `state-secret-default-random` audit
+    //! item. `Kernel::open` refuses to boot when
+    //! `external_auth.enabled = true` but `LIBREFANG_STATE_SECRET` is
+    //! missing or doesn't decode to exactly 32 bytes of base64 — same
+    //! shape contract as `LIBREFANG_VAULT_KEY`. The pure
+    //! `validate_state_secret_value` mirror of that check lets us pin
+    //! the accept/reject envelope without touching global env state.
+    use super::validate_state_secret_value;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn unset_env_is_rejected_with_unset() {
+        assert_eq!(validate_state_secret_value(None), Err("unset".to_string()));
+    }
+
+    #[test]
+    fn well_shaped_32_byte_secret_is_accepted() {
+        let key = b64(&[7u8; 32]);
+        assert!(validate_state_secret_value(Some(&key)).is_ok());
+    }
+
+    #[test]
+    fn well_shaped_secret_with_surrounding_whitespace_is_accepted() {
+        // Trailing newlines / spaces are a common shell-injection
+        // ergonomic (e.g. `export X=$(openssl rand ...)` keeping a
+        // newline). `.trim()` in the validator handles it.
+        let key = format!("\n  {}\n  ", b64(&[9u8; 32]));
+        assert!(validate_state_secret_value(Some(&key)).is_ok());
+    }
+
+    #[test]
+    fn non_base64_is_rejected_with_decode_error() {
+        let err = validate_state_secret_value(Some("not!base64!?")).unwrap_err();
+        assert!(
+            err.starts_with("not base64:"),
+            "expected 'not base64: …', got {err:?}",
+        );
+    }
+
+    #[test]
+    fn shorter_than_32_bytes_is_rejected_with_length_message() {
+        let key = b64(&[1u8; 16]);
+        let err = validate_state_secret_value(Some(&key)).unwrap_err();
+        assert_eq!(err, "the wrong length (got 16 bytes, expected 32)");
+    }
+
+    #[test]
+    fn longer_than_32_bytes_is_rejected_with_length_message() {
+        let key = b64(&[1u8; 48]);
+        let err = validate_state_secret_value(Some(&key)).unwrap_err();
+        assert_eq!(err, "the wrong length (got 48 bytes, expected 32)");
+    }
+
+    #[test]
+    fn empty_string_is_rejected_with_decode_error() {
+        // An explicit empty value is different from "unset" — the env
+        // var IS set, but to nothing. base64-decode of "" yields zero
+        // bytes which fails the length check; either error class is
+        // valid as long as boot is refused.
+        let err = validate_state_secret_value(Some("")).unwrap_err();
+        assert!(
+            err.starts_with("the wrong length") || err.starts_with("not base64"),
+            "expected length-or-decode rejection on empty string; got {err:?}",
+        );
     }
 }
