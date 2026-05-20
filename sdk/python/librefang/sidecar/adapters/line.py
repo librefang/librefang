@@ -135,6 +135,14 @@ from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    http_request as _http_request,
+    MAX_BACKOFF_SECS,
+    parse_retry_after as _parse_retry_after_impl,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
+    split_message as _split_message,
+)
 
 # LINE constants — mirror crate::line defaults.
 DEFAULT_API_BASE = "https://api.line.me"
@@ -148,14 +156,6 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 DEFAULT_BIND_HOST = "0.0.0.0"
 
 SEND_TIMEOUT_SECS = 15.0
-MAX_BACKOFF_SECS = 60.0
-
-# Default fallback when LINE 429s without a parseable ``Retry-After``
-# header. Mirrors the rocketchat / nextcloud / mastodon / webex
-# sidecars (#5303); 30 s is conservative enough that we don't
-# immediately re-hit the bruteforce throttle.
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 # Bounded dedupe cap on ``message.id`` (Improvement #2). Same policy
 # as reddit / rocketchat / nextcloud / webex. ``MAX`` is the
 # high-water mark; when reached, evict the oldest ``EVICT`` entries
@@ -164,40 +164,15 @@ RETRY_AFTER_DEFAULT_SECS = 30.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Chunk `text` into <= limit pieces, preferring newline splits.
-    Mirrors the shared Rust ``split_message`` helper."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        window = rest[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
-    """LINE's 429 response includes ``Retry-After`` (seconds).
-    Fall back to ``default_secs`` when missing/garbled. Floor 1 s,
-    capped at ``MAX_BACKOFF_SECS`` so a server bug can't pin the
-    loop for hours."""
-    raw = resp_hdrs.get("retry-after")
-    if not raw:
-        return default_secs
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return default_secs
-    return min(max(v, 1.0), MAX_BACKOFF_SECS)
-
+    """Backwards-compat wrapper around
+    :func:`librefang.sidecar.common.parse_retry_after`."""
+    return _parse_retry_after_impl(
+        resp_hdrs,
+        default_secs=default_secs,
+        floor_secs=1.0,
+        max_secs=MAX_BACKOFF_SECS,
+    )
 
 def verify_line_signature(secret: bytes, body: bytes, signature: str) -> bool:
     """Verify ``X-Line-Signature`` using HMAC-SHA256 with
@@ -393,9 +368,7 @@ class LineAdapter(SidecarAdapter):
         self.api_base = os.environ.get("LINE_API_BASE", "").strip() or DEFAULT_API_BASE
 
         # Improvement #2: bounded dedupe on inbound message.id.
-        self._seen_ids: set[str] = set()
-        self._seen_order: list[str] = []
-        self._seen_lock = threading.Lock()
+        self._seen = _SeenSet(max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT)
 
         # Set by ``produce`` so ``on_shutdown`` can release the
         # listening socket cleanly.
@@ -421,58 +394,17 @@ class LineAdapter(SidecarAdapter):
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
     ) -> tuple[int, Any, bytes, dict]:
-        """One-shot HTTP request. Returns
-        ``(status, parsed_json_or_None, raw_bytes, response_headers)``.
-        Response headers are lower-cased so 429 ``Retry-After`` can be
-        looked up uniformly regardless of server casing."""
-        req = urllib.request.Request(
-            url, data=body, headers=headers or {}, method=method,
+        """Thin wrapper around :func:`librefang.sidecar.common.http_request`."""
+        return _http_request(
+            url, method=method, body=body, headers=headers,
+            timeout=timeout,
         )
-        resp_headers: dict = {}
-        try:
-            with urllib.request.urlopen(  # noqa: S310 — configured URL
-                req, timeout=timeout,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                raw = resp.read()
-                if resp.headers is not None:
-                    resp_headers = {
-                        k.lower(): v for k, v in resp.headers.items()
-                    }
-        except urllib.error.HTTPError as e:
-            status = e.code
-            try:
-                raw = e.read()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if e.headers is not None:
-                resp_headers = {k.lower(): v for k, v in e.headers.items()}
-        if not raw:
-            return status, None, b"", resp_headers
-        try:
-            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw, resp_headers
 
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, message_id: str) -> bool:
-        """Return True iff ``message_id`` is freshly seen (i.e. emit it).
-        Maintains a bounded LRU-ish set keyed on inbound
-        ``message.id``. Improvement #2."""
-        if not message_id:
-            return True
-        with self._seen_lock:
-            if message_id in self._seen_ids:
-                return False
-            self._seen_ids.add(message_id)
-            self._seen_order.append(message_id)
-            if len(self._seen_order) > SEEN_MESSAGES_MAX:
-                drop = self._seen_order[:SEEN_MESSAGES_EVICT]
-                self._seen_order = self._seen_order[SEEN_MESSAGES_EVICT:]
-                for k in drop:
-                    self._seen_ids.discard(k)
-            return True
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(message_id)
 
     # ---- REST: auth + outbound send ---------------------------------
 

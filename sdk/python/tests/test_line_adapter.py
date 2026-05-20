@@ -24,77 +24,10 @@ os.environ.setdefault("LINE_CHANNEL_SECRET", "test-secret")
 os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test-access-token")
 from librefang.sidecar.adapters import line as la  # noqa: E402
 
+from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
-
-
-class _HdrShim:
-    def __init__(self, hdrs):
-        self._hdrs = hdrs or {}
-
-    def items(self):
-        return list(self._hdrs.items())
-
-
-class _FakeResp:
-    def __init__(self, status, body=b"", headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers if headers is not None else _HdrShim({})
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-
-class _FakeUrlopen:
-    """Drop-in replacement for ``urllib.request.urlopen`` driven by a
-    pre-baked script of ``(status, body[, headers])`` tuples."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    def __call__(self, req, timeout=None):
-        body_bytes = req.data
-        try:
-            decoded = body_bytes.decode("utf-8") if body_bytes else None
-        except Exception:  # noqa: BLE001
-            decoded = None
-        self.calls.append({
-            "url": req.full_url,
-            "method": req.get_method(),
-            "headers": {k.lower(): v for k, v in req.header_items()},
-            "body_raw": decoded,
-            "timeout": timeout,
-        })
-        if not self.script:
-            raise AssertionError(
-                f"unexpected extra urlopen call to {req.full_url}"
-            )
-        entry = self.script.pop(0)
-        if len(entry) == 3:
-            status, body, resp_hdrs = entry
-        else:
-            status, body = entry
-            resp_hdrs = {}
-        if status >= 400:
-            raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim(resp_hdrs),
-                io.BytesIO(json.dumps(body or {}).encode("utf-8")),
-            )
-        if body is None:
-            payload = b""
-        elif isinstance(body, (dict, list)):
-            payload = json.dumps(body).encode("utf-8")
-        else:
-            payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 def _adapter(**env):
@@ -483,7 +416,7 @@ def test_mark_seen_empty_id_returns_true_no_state_change():
     a = _adapter()
     assert a._mark_seen("") is True
     # Empty id must not be retained.
-    assert "" not in a._seen_ids
+    assert "" not in a._seen.ids
 
 
 def test_mark_seen_eviction_at_cap(monkeypatch):
@@ -496,11 +429,11 @@ def test_mark_seen_eviction_at_cap(monkeypatch):
     for i in range(11):  # 11 > MAX = 10, triggers eviction
         a._mark_seen(f"m-{i}")
     # First 4 should have been evicted.
-    assert "m-0" not in a._seen_ids
-    assert "m-3" not in a._seen_ids
+    assert "m-0" not in a._seen.ids
+    assert "m-3" not in a._seen.ids
     # The remainder are still there.
-    assert "m-4" in a._seen_ids
-    assert "m-10" in a._seen_ids
+    assert "m-4" in a._seen.ids
+    assert "m-10" in a._seen.ids
 
 
 # ---- _validate_token -------------------------------------------------
@@ -751,7 +684,7 @@ def test_handle_webhook_skips_non_message_event_without_dedupe_entry():
     status = a._handle_webhook_body(body, sig, emitted.append)
     assert status == 200
     assert emitted == []
-    assert a._seen_ids == set()
+    assert a._seen.ids == set()
 
 
 def test_handle_webhook_account_id_injected_into_metadata(monkeypatch):

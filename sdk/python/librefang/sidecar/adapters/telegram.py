@@ -62,6 +62,7 @@ import uuid
 
 from librefang.sidecar import Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import MAX_BACKOFF_SECS
 
 LONGPOLL_SERVER_SECS = 30
 LONGPOLL_CLIENT_SECS = 35
@@ -75,7 +76,6 @@ RETRY_AFTER_DEFAULT_SECS = 2
 # / DNS failures (#5111). Matches the convention every other polling
 # sidecar (bluesky / discord / line / mastodon / mattermost /
 # nextcloud / ntfy / reddit / rocketchat / twitch) settled on.
-MAX_BACKOFF_SECS = 60.0
 PARSE_MODE_HTML = "HTML"
 # Max bytes downloaded for the private-URL → multipart fallback.
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024

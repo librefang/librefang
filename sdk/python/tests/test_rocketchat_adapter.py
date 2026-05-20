@@ -30,6 +30,8 @@ os.environ.setdefault("ROCKETCHAT_TOKEN", "test-token")
 os.environ.setdefault("ROCKETCHAT_USER_ID", "BOT_UID")
 from librefang.sidecar.adapters import rocketchat as ra  # noqa: E402
 
+from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+
 
 def _adapter(**env):
     defaults = {
@@ -163,76 +165,6 @@ def test_split_message_4096_cap_matches_rust():
 
 
 # ---- _FakeUrlopen scaffolding --------------------------------------
-
-
-class _HdrShim:
-    def __init__(self, hdrs: dict):
-        self._hdrs = hdrs or {}
-
-    def items(self):
-        return list(self._hdrs.items())
-
-
-class _FakeUrlopen:
-    """Capture urllib.request.urlopen calls and return scripted
-    responses. Each script entry is ``(status, body)`` or
-    ``(status, body, response_headers)``; the 2-tuple form keeps
-    existing tests unchanged."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    def __call__(self, req, timeout=None):
-        body_bytes = req.data
-        try:
-            decoded = body_bytes.decode("utf-8") if body_bytes else None
-        except Exception:
-            decoded = None
-        self.calls.append({
-            "url": req.full_url,
-            "method": req.get_method(),
-            "headers": {k.lower(): v for k, v in req.header_items()},
-            "body_raw": decoded,
-        })
-        if not self.script:
-            raise AssertionError(
-                f"unexpected extra urlopen call to {req.full_url}"
-            )
-        entry = self.script.pop(0)
-        if len(entry) == 3:
-            status, body, resp_hdrs = entry
-        else:
-            status, body = entry
-            resp_hdrs = {}
-        if status >= 400:
-            raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim(resp_hdrs),
-                io.BytesIO(json.dumps(body or {}).encode("utf-8")),
-            )
-        if body is None:
-            payload = b""
-        elif isinstance(body, (dict, list)):
-            payload = json.dumps(body).encode("utf-8")
-        else:
-            payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
-
-
-class _FakeResp:
-    def __init__(self, status, body=b"", headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers if headers is not None else _HdrShim({})
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
 
 
 def _msg(
@@ -468,8 +400,8 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Watermark advanced to the newest ts seen.
     assert a._room_watermarks["R1"] == "2026-01-01T00:00:06.000Z"
     # Both message ids tracked for dedupe.
-    assert "m1" in a._seen_messages_set
-    assert "m2" in a._seen_messages_set
+    assert "m1" in a._seen.ids
+    assert "m2" in a._seen.ids
 
 
 def test_poll_once_emits_in_chronological_order(monkeypatch):
@@ -548,7 +480,7 @@ def test_poll_once_self_skipped(monkeypatch):
     a._poll_once(emitted.append, ["R1"])
     assert [e["params"]["message_id"] for e in emitted] == ["m2"]
     # Even self-skipped m1 is still marked seen so we don't reparse it.
-    assert "m1" in a._seen_messages_set
+    assert "m1" in a._seen.ids
 
 
 def test_poll_once_injects_account_id(monkeypatch):
@@ -639,24 +571,24 @@ def test_seen_messages_capacity_eviction():
     a = _adapter()
     for i in range(ra.SEEN_MESSAGES_MAX + 1):
         a._mark_seen(f"m{i}")
-    assert "m0" not in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_EVICT - 1}" not in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_EVICT}" in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_MAX}" in a._seen_messages_set
-    assert len(a._seen_messages) == len(a._seen_messages_set)
+    assert "m0" not in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_EVICT - 1}" not in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_EVICT}" in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_MAX}" in a._seen.ids
+    assert len(a._seen.order) == len(a._seen.ids)
 
 
 def test_seen_messages_idempotent_mark():
     a = _adapter()
     a._mark_seen("x")
     a._mark_seen("x")
-    assert a._seen_messages.count("x") == 1
+    assert a._seen.order.count("x") == 1
 
 
 def test_seen_messages_empty_id_ignored():
     a = _adapter()
     a._mark_seen("")
-    assert a._seen_messages == []
+    assert a._seen.order == []
 
 
 # ---- _post_message: outbound + threading --------------------------

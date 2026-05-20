@@ -161,22 +161,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     },
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "matrix", display_name: "Matrix", icon: "MX",
-        description: "Matrix/Element bot via homeserver",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your access token and homeserver URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("MATRIX_ACCESS_TOKEN"), required: true, placeholder: "syt_...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "homeserver_url", label: "Homeserver URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://matrix.org", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "user_id", label: "Bot User ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "@librefang:matrix.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_rooms", label: "Allowed Room IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "!abc:matrix.org", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot account on your homeserver", "Generate an access token", "Paste token and homeserver URL below"],
-        config_template: "[channels.matrix]\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\nhomeserver_url = \"https://matrix.org\"",
-    },
+    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "email", display_name: "Email", icon: "EM",
         description: "IMAP/SMTP email adapter",
@@ -331,7 +317,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
         "whatsapp" => config.whatsapp.is_some(),
-        "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
@@ -674,6 +659,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "QQ Bot API v2 WebSocket + REST adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.qq"],
+    },
+    SidecarCatalogEntry {
+        name: "matrix",
+        display_name: "Matrix",
+        description: "Matrix Client-Server API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.matrix"],
     },
 ];
 
@@ -1172,10 +1164,6 @@ fn channel_config_values(
             .whatsapp
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "matrix" => config
-            .matrix
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "email" => config
             .email
             .as_ref()
@@ -1221,7 +1209,6 @@ fn channel_config_values(
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
         "whatsapp" => config.whatsapp.len(),
-        "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
@@ -1254,7 +1241,6 @@ fn channel_instances_serialized(
     }
     match name {
         "whatsapp" => ser(&config.whatsapp),
-        "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
@@ -1734,7 +1720,7 @@ fn build_instance_fields_json(
         .collect();
 
     // For per-instance secret fields, override `has_value` to check the env
-    // var that THIS instance's `<key>` points at (e.g. `MATRIX_ACCESS_TOKEN_2`)
+    // var that THIS instance's `<key>` points at (e.g. `WHATSAPP_ACCESS_TOKEN_2`)
     // instead of the field schema's default env var. Without this, every
     // instance would report the same `has_value` derived from the default
     // env var, defeating the purpose of multiple instances.
@@ -1760,7 +1746,7 @@ fn build_instance_fields_json(
             if field_json.get("key").and_then(|v| v.as_str()) == Some(field_def.key) {
                 field_json["has_value"] = serde_json::Value::Bool(has_value);
                 // Surface the env-var name the instance is pointing at so
-                // the UI can show "MATRIX_ACCESS_TOKEN_2" next to the secret
+                // the UI can show "WHATSAPP_ACCESS_TOKEN_2" next to the secret
                 // field — otherwise the user can't tell instances apart.
                 field_json["env_var"] = serde_json::Value::String(pointed_env_name.to_string());
             }
@@ -3094,12 +3080,12 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Matrix requires MATRIX_ACCESS_TOKEN. With it unset we must
+        // WhatsApp requires WHATSAPP_ACCESS_TOKEN. With it unset we must
         // surface a 412 — NOT a 200 with a "status: error" body, which
         // silently passes dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("MATRIX_ACCESS_TOKEN");
+        let _g = EnvGuard::unset("WHATSAPP_ACCESS_TOKEN");
 
-        let resp = test_channel(Path("matrix".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3115,9 +3101,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("MATRIX_ACCESS_TOKEN", "syt-test-not-real");
+        let _g = EnvGuard::set("WHATSAPP_ACCESS_TOKEN", "syt-test-not-real");
 
-        let resp = test_channel(Path("matrix".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3144,7 +3130,11 @@ mod instance_helper_tests {
     use super::*;
 
     fn matrix_meta() -> &'static ChannelMeta {
-        find_channel_meta("matrix").expect("matrix is in the registry")
+        // Matrix migrated to a sidecar in v2026.5; rotate to whatsapp
+        // (still in-process, still uses `access_token_env`) so the
+        // resolve_secret_env_overrides + instance_signature unit tests
+        // keep a real ChannelMeta witness.
+        find_channel_meta("whatsapp").expect("whatsapp is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
@@ -3159,7 +3149,7 @@ mod instance_helper_tests {
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
             overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MATRIX_ACCESS_TOKEN"),
+            Some("WHATSAPP_ACCESS_TOKEN"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -3173,13 +3163,13 @@ mod instance_helper_tests {
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("MATRIX_ACCESS_TOKEN"),
-            inst_with_env("MATRIX_ACCESS_TOKEN_3"),
+            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
+            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
             overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MATRIX_ACCESS_TOKEN_2"),
+            Some("WHATSAPP_ACCESS_TOKEN_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -3192,13 +3182,13 @@ mod instance_helper_tests {
     fn resolve_overrides_preserves_existing_env_name_on_update() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("MATRIX_ACCESS_TOKEN"),
-            inst_with_env("MY_CUSTOM_MX_TOKEN"),
+            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
+            inst_with_env("MY_CUSTOM_WA_TOKEN"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
             overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_MX_TOKEN"),
+            Some("MY_CUSTOM_WA_TOKEN"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -3212,16 +3202,16 @@ mod instance_helper_tests {
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("MATRIX_ACCESS_TOKEN"),
+            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("MATRIX_ACCESS_TOKEN_3"),
+            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
             overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MATRIX_ACCESS_TOKEN_2")
+            Some("WHATSAPP_ACCESS_TOKEN_2")
         );
     }
 

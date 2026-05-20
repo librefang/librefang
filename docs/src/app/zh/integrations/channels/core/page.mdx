@@ -348,41 +348,48 @@ Rust 适配器原本支持把 `Image`、`Voice`、`Video`、`Audio`、`Animation
 
 ---
 
-## Matrix
+## Matrix（Sidecar）
+
+Matrix 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.matrix`）。
 
 ### 前置条件
 
-- 一个 Matrix homeserver 账户和访问令牌
+- 一个 Matrix homeserver 账户和访问令牌（Element 发的 token 即可）。
+- Python 3 + `librefang` SDK（`pip install -e sdk/python`）。
 
 ### 设置步骤
 
-1. 在你的 Matrix homeserver 上创建一个 Bot 账户。
-2. 生成访问令牌。
-3. 设置环境变量：
+1. 在 homeserver 上创建（或选用已有）Bot 账户。
+2. 生成访问令牌（Element 设置 → 帮助与关于 → 访问令牌；或 `POST /_matrix/client/v3/login`）。
+3. 把 token 写入 `~/.librefang/secrets.env`：
 
 ```bash
-export MATRIX_TOKEN=your-token                # 环境变量
-librefang vault set MATRIX_TOKEN              # 加密金库（推荐）
-librefang config set-key matrix               # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+MATRIX_ACCESS_TOKEN=syt_...
 ```
 
-4. 添加到配置文件：
+4. 在 `~/.librefang/config.toml` 中声明 sidecar：
 
 ```toml
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-access_token_env = "MATRIX_TOKEN"
-user_id = "@librefang-bot:matrix.org"
+[[sidecar_channels]]
+name = "matrix"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.matrix"]
+channel_type = "matrix"
 default_agent = "assistant"
+[sidecar_channels.env]
+MATRIX_HOMESERVER_URL = "https://matrix.org"
+MATRIX_USER_ID = "@librefang-bot:matrix.org"
+# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # 可选
+# MATRIX_ACCOUNT_ID = "prod-bot"                             # 可选
+# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # 可选，默认 50 MiB
 ```
 
-5. 将 Bot 邀请到你希望它监控的房间。
+5. 把 Bot 邀请到你希望它监控的房间。
 6. 重启守护进程。
 
 ### 工作原理
 
-Matrix 适配器使用 Matrix Client-Server API。它通过长轮询（带超时的 `/sync`）与 homeserver 同步，处理已加入房间中的新消息。响应通过 `/rooms/{roomId}/send` 端点发送。
+Sidecar 用 Bot 的 access token 长轮询 `GET /_matrix/client/v3/sync`（30 s server timeout、`since` 游标增量交付）。入站 `m.room.message`（`m.text` / `m.notice` / `m.emote` / `m.image` / `m.file` / `m.audio` / `m.video`）转发给内核；出站回复走 `PUT /_matrix/client/v3/rooms/{room}/send/{type}/{txn}`。Markdown 会渲染成 Matrix 子集 HTML 放进 `formatted_body`；`m.thread` 和 `m.replace`（edit）关系都串好了，所以线程回复和流式 edit 直接能用。
 
 ---
 
@@ -477,11 +484,11 @@ http://127.0.0.1:4545/
 
 ### 禁用自动拆分
 
-对仍为进程内适配器的渠道（Matrix、Mattermost 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
+对仍为进程内适配器的渠道（Email、WhatsApp 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
 
 ```toml
-[channels.matrix]
+[channels.email]
 split_long_messages = false   # 截断而非拆分
 ```
 
-默认值为 `true`。Discord、Slack 与 Telegram sidecar 始终在各自平台限制处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。
+默认值为 `true`。Sidecar 渠道（Matrix、Discord、Slack、Telegram 等）始终在各自平台限制处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。

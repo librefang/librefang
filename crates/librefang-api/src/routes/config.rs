@@ -799,7 +799,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             };
         }
         ch!(whatsapp);
-        ch!(matrix);
         ch!(email);
         ch!(teams);
         ch!(google_chat);
@@ -3413,7 +3412,7 @@ url = "https://search.example.com"
         ));
         assert!(!super::is_writable_config_path("default_model.api_key_env"));
         assert!(!super::is_writable_config_path(
-            "channels.matrix.access_token_env"
+            "channels.whatsapp.access_token_env"
         ));
         assert!(!super::is_writable_config_path("default_model.client_id"));
         assert!(!super::is_writable_config_path(
@@ -3446,10 +3445,9 @@ url = "https://search.example.com"
         // toggles via the dashboard).
         assert!(!super::is_writable_config_path("channels.telegram"));
         assert!(!super::is_writable_config_path("channels.whatsapp"));
-        assert!(!super::is_writable_config_path("channels.matrix"));
         assert!(!super::is_writable_config_path("channels.email"));
         assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.matrix.enabled"));
+        assert!(super::is_writable_config_path("channels.whatsapp.enabled"));
 
         // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
         // peer redirect, threat model parallel to the round-4 removal

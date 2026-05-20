@@ -92,7 +92,6 @@ telemetry = [
 ]
 
 # Individual channel features — forwarded to librefang-channels
-channel-matrix = ["librefang-channels/channel-matrix"]
 channel-email = ["librefang-channels/channel-email"]
 channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
@@ -115,7 +114,6 @@ core-channels = [
 ]
 
 all-channels = [
-    "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-feishu",
@@ -126,7 +124,6 @@ all-channels = [
 # All channels except email — used for Android targets where rustls-connector's
 # rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
 all-channels-no-email = [
-    "channel-matrix",
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
     "channel-feishu",
@@ -136,7 +133,6 @@ all-channels-no-email = [
 
 # Mini: a small core set of channels
 mini = [
-    "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
 ]

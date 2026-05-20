@@ -103,6 +103,11 @@ from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    split_message as _split_message,
+)
+from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_HOST = "irc.chat.twitch.tv"
 DEFAULT_TLS_PORT = 6697
@@ -128,36 +133,12 @@ SEEN_IDS_EVICT = 512
 READ_TIMEOUT_SECS = 30.0
 # Reconnect backoff bounds.
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-
 def _normalise_channel(value: str) -> str:
     """Strip whitespace, leading ``#``, and trailing slashes. Twitch
     channels are lowercase ASCII by convention; we coerce to lower
     so a config typo (``MyChannel``) still matches the JOIN reply."""
     s = value.strip().lstrip("#").rstrip("/")
     return s.lower()
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline
-    splits. Mirrors the Rust ``split_message`` helper used by every
-    channel adapter."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _parse_irc_tags(tag_blob: str) -> dict[str, str]:
     """Parse the IRCv3 ``@key=value;key2=value2`` tag block (without
@@ -423,10 +404,10 @@ class TwitchAdapter(SidecarAdapter):
         self._writer_lock = threading.Lock()
         self._stop = threading.Event()
 
-        # Dedupe set for already-seen message ids. Capped with
-        # crude oldest-half eviction.
-        self._seen_ids: list[str] = []
-        self._seen_ids_set: set[str] = set()
+        # Dedupe set for already-seen message ids. Twitch's tighter
+        # cap (1024/512 vs the global 10000/5000) because IRC chat
+        # is high-churn and we only need ~last-minute coverage.
+        self._seen = _SeenSet(max_size=SEEN_IDS_MAX, evict=SEEN_IDS_EVICT)
 
     # ---- transport ---------------------------------------------------
 
@@ -489,19 +470,8 @@ class TwitchAdapter(SidecarAdapter):
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, msg_id: str) -> bool:
-        """Return True if `msg_id` is fresh; False if we've seen it.
-        Crude oldest-half eviction at the cap."""
-        if not msg_id:
-            return True
-        if msg_id in self._seen_ids_set:
-            return False
-        self._seen_ids.append(msg_id)
-        self._seen_ids_set.add(msg_id)
-        if len(self._seen_ids) > SEEN_IDS_MAX:
-            to_drop = self._seen_ids[:SEEN_IDS_EVICT]
-            self._seen_ids = self._seen_ids[SEEN_IDS_EVICT:]
-            self._seen_ids_set.difference_update(to_drop)
-        return True
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(msg_id)
 
     # ---- inbound: read loop on a worker thread ------------------------
 
