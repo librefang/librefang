@@ -25,7 +25,6 @@ email
 feishu
 google_chat
 matrix
-qq
 sidecar
 teams
 webhook

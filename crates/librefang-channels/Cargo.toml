@@ -25,7 +25,6 @@ all-channels = [
     "channel-feishu",
     "channel-google-chat",
     "channel-matrix",
-    "channel-qq",
     "channel-teams",
     "channel-webhook",
     "channel-wechat",
@@ -42,7 +41,6 @@ channel-teams = []
 channel-google-chat = ["dep:rsa"]
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-dingtalk = []
-channel-qq = []
 channel-wechat = []
 channel-wecom = ["dep:aes", "dep:cbc"]
 

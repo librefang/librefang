@@ -323,21 +323,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: set Callback Token and EncodingAESKey, then configure the displayed Callback URL in WeCom admin"],
         config_template: "[channels.wecom]\nbot_id = \"\"\nsecret_env = \"WECOM_BOT_SECRET\"\nmode = \"websocket\"",
     },
-    ChannelMeta {
-        name: "qq", display_name: "QQ Bot", icon: "QQ",
-        description: "QQ Bot API v2 — guild, group, and DM adapter",
-        category: "messaging", difficulty: "Medium", setup_time: "~5 min",
-        quick_setup: "Enter your App ID and set QQ_BOT_APP_SECRET env var",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "102xxxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("QQ_BOT_APP_SECRET"), required: true, placeholder: "secret", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "12345, 67890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Register a QQ Bot at q.qq.com", "Get App ID and App Secret", "Set QQ_BOT_APP_SECRET environment variable"],
-        config_template: "[channels.qq]\napp_id = \"\"\napp_secret_env = \"QQ_BOT_APP_SECRET\"",
-    },
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG below.
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
@@ -353,7 +340,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
-        "qq" => config.qq.is_some(),
         _ => false,
     }
 }
@@ -681,6 +667,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "signal-cli REST API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.signal"],
+    },
+    SidecarCatalogEntry {
+        name: "qq",
+        display_name: "QQ Bot",
+        description: "QQ Bot API v2 WebSocket + REST adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.qq"],
     },
 ];
 
@@ -1215,10 +1208,6 @@ fn channel_config_values(
             .wecom
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "qq" => config
-            .qq
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -1241,7 +1230,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
-        "qq" => config.qq.len(),
         _ => 0,
     }
 }
@@ -1275,7 +1263,6 @@ fn channel_instances_serialized(
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),
-        "qq" => ser(&config.qq),
         _ => Vec::new(),
     }
 }

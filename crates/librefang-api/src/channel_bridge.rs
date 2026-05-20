@@ -261,8 +261,8 @@ use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion}
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
-#[cfg(feature = "channel-qq")]
-use librefang_channels::qq::QqAdapter;
+// qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+// see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-wechat")]
 use librefang_channels::wechat::WeChatAdapter;
 #[cfg(feature = "channel-wecom")]
@@ -2544,7 +2544,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
-    check_channel!(qq, "channel-qq", "QQ");
     check_channel!(webhook, "channel-webhook", "Webhook");
 
     // Sidecar channels (always available, not feature-gated)
@@ -2928,25 +2927,8 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // QQ
-    #[cfg(feature = "channel-qq")]
-    for qq_config in config.qq.iter() {
-        if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
-            let adapter = Arc::new(
-                QqAdapter::new(
-                    qq_config.app_id.clone(),
-                    secret,
-                    qq_config.allowed_users.clone(),
-                )
-                .with_account_id(qq_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                qq_config.default_agent.clone(),
-                qq_config.account_id.clone(),
-            ));
-        }
-    }
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Webhook
     #[cfg(feature = "channel-webhook")]

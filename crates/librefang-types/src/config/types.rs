@@ -6401,8 +6401,8 @@ pub struct ChannelsConfig {
     // Wave 5 — Niche & differentiating channels
     /// DingTalk robot configuration(s).
     pub dingtalk: OneOrMany<DingTalkConfig>,
-    /// QQ Bot API v2 configuration(s).
-    pub qq: OneOrMany<QqConfig>,
+    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
     /// WeChat personal account (iLink) configuration(s).
@@ -6468,7 +6468,6 @@ impl Default for ChannelsConfig {
             google_chat: OneOrMany::default(),
             feishu: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
-            qq: OneOrMany::default(),
             webhook: OneOrMany::default(),
             wechat: OneOrMany::default(),
             wecom: OneOrMany::default(),
@@ -7042,39 +7041,9 @@ impl Default for DingTalkConfig {
     }
 }
 
-/// QQ Bot API v2 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct QqConfig {
-    /// QQ Bot application ID.
-    pub app_id: String,
-    /// Env var name holding the app secret (NOT the secret itself).
-    pub app_secret_env: String,
-    /// QQ user IDs allowed to interact (empty = allow all).
-    #[serde(default)]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for QqConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_secret_env: "QQ_BOT_APP_SECRET".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// qq migrated to a sidecar (librefang.sidecar.adapters.qq); the
+// in-process `QqConfig` + `[channels.qq]` block were removed in this
+// migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Generic webhook channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

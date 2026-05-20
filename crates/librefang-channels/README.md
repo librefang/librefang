@@ -18,9 +18,9 @@ features explicitly when depending on this crate:
   google-chat, …). Used by release CI.
 - Per-adapter: `channel-webhook`, `channel-matrix`, etc. ntfy,
   telegram, gotify, mastodon, bluesky, reddit, twitch, rocketchat,
-  discord, nextcloud, slack, webex, line, zulip, mattermost, and
-  signal migrated to sidecars — see
-  `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat,discord,nextcloud,slack,webex,line,zulip,mattermost,signal}`
+  discord, nextcloud, slack, webex, line, zulip, mattermost, signal,
+  and qq migrated to sidecars — see
+  `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat,discord,nextcloud,slack,webex,line,zulip,mattermost,signal,qq}`
   in the SDK.
 
 See `Cargo.toml` for the full feature list.

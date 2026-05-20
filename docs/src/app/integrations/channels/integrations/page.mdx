@@ -120,42 +120,45 @@ In **webhook mode**, the adapter receives messages via HTTP callback on the shar
 
 ---
 
-## QQ
+## QQ (sidecar)
+
+QQ migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.qq`).
 
 ### Prerequisites
 
-- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/)
-- An App ID and token
+- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/) with App ID and App Secret.
+- Python 3 + the `librefang` SDK (`pip install -e sdk/python`).
 
 ### Setup
 
-1. Go to the [QQ Bot Platform](https://bot.q.qq.com/) and register a bot application.
-2. Note the App ID and token.
-3. Set environment variables:
+1. Register a bot on the QQ Open Platform and note the `App ID` + `App Secret`.
+2. Put the secret in `~/.librefang/secrets.env`:
 
 ```bash
-export QQ_APP_ID=your-app-id                 # Environment variable
-export QQ_TOKEN=your-bot-token
-librefang vault set QQ_APP_ID                # Encrypted vault (recommended)
-librefang vault set QQ_TOKEN
-librefang config set-key qq                   # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+QQ_APP_SECRET=your-app-secret
 ```
 
-4. Add to config:
+3. Declare the sidecar in `~/.librefang/config.toml`:
 
 ```toml
-[channels.qq]
-app_id_env = "QQ_APP_ID"
-token_env = "QQ_TOKEN"
+[[sidecar_channels]]
+name = "qq"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.qq"]
+channel_type = "qq"
 default_agent = "assistant"
+[sidecar_channels.env]
+QQ_APP_ID = "your-app-id"
+# QQ_ALLOWED_USERS = "openid-1,openid-2"   # optional
+# QQ_ACCOUNT_ID = "prod-bot"               # optional
+# QQ_INTENTS = "1073746435"                # optional bitmask override
 ```
 
-5. Restart the daemon.
+4. Restart the daemon.
 
 ### How It Works
 
-The QQ adapter connects to the QQ Bot API via WebSocket for real-time message delivery. It authenticates using the app credentials, listens for message events in authorized guilds and channels, and sends responses through the QQ Bot REST API.
+The sidecar fetches an access token from `https://bots.qq.com/app/getAppAccessToken`, discovers the WebSocket gateway via `GET /gateway`, then maintains a persistent WS connection through the HELLO → IDENTIFY → READY handshake with periodic heartbeats. Inbound `MESSAGE_CREATE` / `AT_MESSAGE_CREATE` / `DIRECT_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` dispatch events are surfaced to the kernel; outbound replies use `POST {api_base}{reply_endpoint}` with the inbound `msg_id` as the passive-reply target.
 
 ---
 

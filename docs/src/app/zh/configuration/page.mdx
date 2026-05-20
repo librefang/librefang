@@ -346,9 +346,13 @@ channel_type = "slack"
 SLACK_APP_TOKEN = "xapp-..."
 SLACK_BOT_TOKEN = "xoxb-..."
 
-# [channels.qq]
-# app_id = "your-app-id"
-# app_secret_env = "QQ_BOT_APP_SECRET"
+# [[sidecar_channels]]
+# name = "qq"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.qq"]
+# channel_type = "qq"
+# [sidecar_channels.env]
+# QQ_APP_ID = "your-app-id"
 
 # [channels.wecom]
 # bot_id = "YOUR_BOT_ID"
@@ -1293,27 +1297,24 @@ listen_port = 8460
 | `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.qq]`
+#### QQ Bot（Sidecar）
 
-使用 QQ 机器人开放平台官方 API 的 QQ Bot 通道适配器。
+QQ 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.qq`），通过 WebSocket（网关）+ REST（token + 出站）与 QQ 开放平台通信。原有 `[channels.qq]` 块不再识别 —— 改为声明 `[[sidecar_channels]]`：
 
 ```toml
-[channels.qq]
-app_id = "your-app-id"
-app_secret_env = "QQ_BOT_APP_SECRET"
-allowed_users = []
-# default_agent = "assistant"
-# account_id = "my-qq-bot"
+[[sidecar_channels]]
+name = "qq"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.qq"]
+channel_type = "qq"
+[sidecar_channels.env]
+QQ_APP_ID = "your-app-id"
+# QQ_ALLOWED_USERS = "openid-1,openid-2"   # 可选
+# QQ_ACCOUNT_ID = "prod-bot"               # 可选
+# QQ_INTENTS = "1073746435"                # 可选，覆盖 intents bitmask
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | string | `""` | 在 QQ 开放平台注册的 QQ Bot 应用 ID。 |
-| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | 存放 QQ Bot 应用密钥的环境变量。实际密钥绝不存储在配置中。 |
-| `allowed_users` | list of strings | `[]` | 允许交互的 QQ 用户 ID 列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+密钥放在 `~/.librefang/secrets.env`：`QQ_APP_SECRET`（QQ 开放平台控制台里的 `clientSecret`）。
 
 #### `[channels.wecom]`
 
