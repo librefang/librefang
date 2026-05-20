@@ -63,7 +63,6 @@ from typing import Any, Callable, Optional
 from .. import logging as log
 from .. import protocol
 from ..common import (
-    MAX_BACKOFF_SECS,
     SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
@@ -371,6 +370,14 @@ class WeComAdapter(SidecarAdapter):
         # string ready for `ws.send_text`.
         self._send_queue: "queue.Queue[str]" = queue.Queue()
 
+        # Shutdown signal — set by ``on_shutdown`` so the producer
+        # thread (running inside ``loop.run_in_executor``) can break
+        # out of its reconnect loop. Without this the executor thread
+        # outlives the asyncio loop on a clean ``Shutdown`` command;
+        # the runtime cancels the Future but Python threads can't be
+        # cancelled from the outside.
+        self._shutdown = threading.Event()
+
     # ---- dedupe shim --------------------------------------------------
 
     def _mark_seen(self, req_id: Optional[str]) -> bool:
@@ -423,7 +430,7 @@ class WeComAdapter(SidecarAdapter):
         next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECS
         subscribed = False
 
-        while True:
+        while not self._shutdown.is_set():
             now = time.monotonic()
             if now >= next_heartbeat:
                 try:
@@ -541,7 +548,7 @@ class WeComAdapter(SidecarAdapter):
 
     def _producer_blocking(self, emit: Callable[[dict], None]) -> None:
         backoff = INITIAL_BACKOFF_SECS
-        while True:
+        while not self._shutdown.is_set():
             try:
                 log.info("wecom ws connecting", url=self.ws_url)
                 with self._make_ws(self.ws_url) as ws:
@@ -549,9 +556,16 @@ class WeComAdapter(SidecarAdapter):
                 # Clean session end → reset backoff for next reconnect.
                 backoff = INITIAL_BACKOFF_SECS
             except Exception as e:  # noqa: BLE001 — transport varies
+                if self._shutdown.is_set():
+                    return
                 log.warn("wecom ws error; backing off",
                          error=str(e), delay=backoff)
-                time.sleep(backoff)
+                # Use Event.wait so shutdown interrupts the backoff
+                # instead of blocking the executor thread for up to
+                # WECOM_MAX_BACKOFF_SECS while the runtime tries to
+                # exit cleanly.
+                if self._shutdown.wait(backoff):
+                    return
                 backoff = min(backoff * 2.0, WECOM_MAX_BACKOFF_SECS)
 
     # ---- public sidecar surface --------------------------------------
@@ -559,6 +573,13 @@ class WeComAdapter(SidecarAdapter):
     async def produce(self, emit: Callable[[dict], None]) -> None:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._producer_blocking, emit)
+
+    async def on_shutdown(self) -> None:
+        # Wake the producer thread out of its reconnect backoff /
+        # session loop. Without this the runtime's task cancel hits
+        # only the awaited Future; the executor's Python thread keeps
+        # running until the next socket read tick.
+        self._shutdown.set()
 
     async def on_send(self, cmd) -> None:
         # The inbound message_id (== wecom req_id) is the bridge's
