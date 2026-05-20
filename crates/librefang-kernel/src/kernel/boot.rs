@@ -182,6 +182,30 @@ impl LibreFangKernel {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| LibreFangError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
+        // SECURITY: restrict the data dir to the running user (Unix).
+        // Without this, the directory inherits the umask (typically
+        // `0755`), so any local UID can `ls ~/.librefang/` and read
+        // anything that hasn't itself been chmod'd. Mirrors the
+        // `0o600` pattern already in use in
+        // `librefang-migrate/src/openclaw.rs:655` for `secrets.env` —
+        // the project knows the convention; it just wasn't applied
+        // here. (audit: sqlite-file-permissions)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(
+                &config.data_dir,
+                std::fs::Permissions::from_mode(0o700),
+            ) {
+                tracing::warn!(
+                    data_dir = %config.data_dir.display(),
+                    error = %e,
+                    "failed to chmod 0700 on data_dir — \
+                     local users on the same host may be able to list it",
+                );
+            }
+        }
+
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
@@ -208,6 +232,20 @@ impl LibreFangKernel {
             config.memory.pool_size,
         )
         .map_err(|e| LibreFangError::BootFailed(format!("Memory init failed: {e}")))?;
+
+        // SECURITY: restrict the SQLite files to the running user
+        // (Unix). `SqliteConnectionManager::file` creates the .db
+        // following the umask (typically 0644 → world-readable); WAL
+        // and SHM sibling files inherit the same. The DB carries
+        // session history, kv_store agent state, audit entries, OAuth
+        // nonces, TOTP used codes, and `paired_devices.api_key_hash`
+        // — anything readable to a local UID is a credential leak on
+        // shared hosts. `run_migrations` runs inside
+        // `open_with_pool_size` before we get here, so librefang.db
+        // (+ -wal + -shm) exist and are safe to chmod by now. The
+        // same files back `PromptStore::new_with_path` below, so one
+        // chmod covers both pools. (audit: sqlite-file-permissions)
+        harden_sqlite_files(&db_path);
 
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
@@ -2444,6 +2482,47 @@ system_prompt = "You are a helpful assistant."
 /// The provider prefix is honoured **only when the LHS is a registered
 /// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
 /// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
+/// Restrict the SQLite primary file and its `-wal` / `-shm` siblings
+/// to `0o600` (Unix). No-op on non-Unix platforms.
+///
+/// Tolerates `NotFound` silently (the WAL / SHM sibling files may not
+/// exist yet if no write has flushed them by the time this is called)
+/// and logs but does not fail on other errors — the operator can fix
+/// permissions out of band and refusing to boot would be worse than
+/// running with a logged warning.
+///
+/// Extracted from `Kernel::open` so it is exercised independently in
+/// the `sqlite_permissions_hardening` tests below. (audit:
+/// sqlite-file-permissions)
+#[cfg(unix)]
+fn harden_sqlite_files(db_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = db_path.to_path_buf();
+        if !suffix.is_empty() {
+            let stem = p.file_name().map(|n| n.to_owned()).unwrap_or_default();
+            let mut new_name = stem;
+            new_name.push(suffix);
+            p.set_file_name(new_name);
+        }
+        match std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    path = %p.display(),
+                    error = %e,
+                    "failed to chmod 0600 on SQLite file — \
+                     local users on the same host may be able to read it",
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_sqlite_files(_db_path: &Path) {}
+
 /// but where `google` is not a separate registered provider — the model id
 /// belongs to the OpenRouter provider verbatim).
 ///
@@ -2615,5 +2694,97 @@ mod extraction_model_tests {
         );
         assert_eq!(p, "anthropic");
         assert_eq!(m, "weird/model");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sqlite_permissions_hardening {
+    //! Regression guards for the `sqlite-file-permissions` audit item.
+    //! `librefang.db` (+ `-wal` + `-shm`) carry session history,
+    //! `kv_store` agent state, audit entries, OAuth nonces, TOTP used
+    //! codes, and `paired_devices.api_key_hash` — any local UID
+    //! reading these is a credential / replay leak on shared hosts.
+    //! `harden_sqlite_files` is invoked from `Kernel::open` after
+    //! `MemorySubstrate::open_with_pool_size`; these tests pin the
+    //! contract that it (a) chmods every file it finds to exactly
+    //! `0600`, (b) tolerates `NotFound` so a missing `-wal` / `-shm`
+    //! does not derail boot, and (c) leaves unrelated files alone.
+
+    use super::harden_sqlite_files;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn chmods_all_three_sqlite_files_to_0600_when_all_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("librefang.db");
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = db.clone();
+            if !suffix.is_empty() {
+                let mut name = p.file_name().unwrap().to_owned();
+                name.push(suffix);
+                p.set_file_name(name);
+            }
+            std::fs::write(&p, b"x").unwrap();
+            // Start with deliberately permissive perms so the post
+            // assertion is meaningful — if the harden helper were a
+            // no-op this would still read 0644 (umask default).
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        harden_sqlite_files(&db);
+
+        assert_eq!(mode(&db), 0o600, "primary .db must be 0600");
+        let wal = db.with_file_name(format!(
+            "{}-wal",
+            db.file_name().unwrap().to_string_lossy()
+        ));
+        let shm = db.with_file_name(format!(
+            "{}-shm",
+            db.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(mode(&wal), 0o600, "-wal must be 0600");
+        assert_eq!(mode(&shm), 0o600, "-shm must be 0600");
+    }
+
+    #[test]
+    fn tolerates_missing_wal_and_shm_siblings() {
+        // Open-with-no-write case: librefang.db exists (the PRAGMA
+        // handshake creates it) but neither -wal nor -shm exist yet.
+        // The hardener must not panic or fail.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("librefang.db");
+        std::fs::write(&db, b"x").unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        harden_sqlite_files(&db);
+
+        assert_eq!(mode(&db), 0o600);
+    }
+
+    #[test]
+    fn does_not_touch_unrelated_files_in_the_same_dir() {
+        // The hardener targets specific siblings only — a config.toml
+        // or a journal in the same directory must keep its existing
+        // mode untouched, not get accidentally clamped.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("librefang.db");
+        let unrelated = dir.path().join("config.toml");
+        std::fs::write(&db, b"x").unwrap();
+        std::fs::write(&unrelated, b"y").unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        harden_sqlite_files(&db);
+
+        assert_eq!(mode(&db), 0o600);
+        assert_eq!(
+            mode(&unrelated),
+            0o644,
+            "harden_sqlite_files must only touch <name> / <name>-wal / <name>-shm",
+        );
     }
 }
