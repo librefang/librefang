@@ -624,9 +624,16 @@ class EmailAdapter(SidecarAdapter):
         msg["Subject"] = subject
         msg["Date"] = email.utils.formatdate(localtime=True)
         # Generate a unique Message-ID for our outbound so the
-        # downstream MUA can thread our replies too.
+        # downstream MUA can thread our replies too. Strip any
+        # display-name + angle brackets from from_address before
+        # extracting the domain — otherwise a `"Name" <bot@host>`
+        # value produces a Message-ID of `<unique@host>>` (the
+        # trailing `>` slipping through), which some servers reject
+        # as malformed.
+        bare_addr = extract_email_addr(self.from_address)
+        domain = bare_addr.rsplit("@", 1)[-1] if "@" in bare_addr else ""
         msg["Message-ID"] = email.utils.make_msgid(
-            domain=self.from_address.rsplit("@", 1)[-1] or "librefang.local",
+            domain=domain or "librefang.local",
         )
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to

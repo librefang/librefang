@@ -768,6 +768,31 @@ async def test_on_send_unsupported_content_drops(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_on_send_message_id_domain_extracted_from_bracketed_username(monkeypatch):
+    """If EMAIL_USERNAME is `"Bot" <bot@host>`, the outbound
+    Message-ID must use `host` as the domain — NOT `host>` (the
+    naive rsplit result, which produces a malformed
+    `<unique@host>>` token that some servers reject)."""
+    monkeypatch.setattr(em.smtplib, "SMTP", _FakeSMTP)
+    a = _adapter(EMAIL_USERNAME='"Bot Name" <bot@example.com>')
+    from librefang.sidecar.protocol import Send
+    cmd = Send(
+        channel_id="alice@test", text="hi",
+        content={"Text": "hi"}, thread_id=None, user={},
+    )
+    await a.on_send(cmd)
+    msg = _FakeSMTP.sent[0]
+    mid = str(msg["Message-ID"])
+    # Strict: domain part has no `>` leakage. Format `<unique@domain>`
+    assert mid.startswith("<")
+    assert mid.endswith(">")
+    inner = mid[1:-1]
+    assert "@" in inner
+    domain = inner.rsplit("@", 1)[1]
+    assert domain == "example.com", f"Message-ID domain = {domain!r}"
+
+
+@pytest.mark.asyncio
 async def test_on_send_refuses_plaintext_when_starttls_missing(monkeypatch):
     """A server that doesn't advertise STARTTLS on a non-465 port
     must NOT receive credentials over the plain socket. Mirror
