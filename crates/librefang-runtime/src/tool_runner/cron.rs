@@ -11,15 +11,27 @@ use super::require_kernel_typed;
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
-/// Build the `ToolError` returned when the dispatcher didn't attribute a
-/// caller agent id. This is an internal wiring / invariant violation — the
-/// LLM cannot recover from it, and bucketing it under `Unavailable` would lie
-/// about the missing kernel-handle subsystem case (which IS user-visible at
-/// 503). `Internal` is the honest mapping.
-fn caller_agent_id_missing(tool: &str) -> ToolError {
-    ToolError::Internal(format!(
-        "caller agent id missing — dispatcher did not attribute the {tool} call"
-    ))
+/// Build the `ToolError` returned when no caller agent id reaches a cron tool.
+///
+/// Two legitimate dispatchers feed these tools:
+///   * The direct agent-loop dispatcher always attributes a caller — `None`
+///     here is a wiring bug, but the LLM cannot recover from it either way.
+///   * The MCP HTTP route (`/mcp`) intentionally passes `None` when the
+///     `X-LibreFang-Agent-Id` header is missing or names an unknown agent;
+///     external clients are expected to receive a user-recoverable error.
+///
+/// `MissingParameter("agent_id")` is the honest user-facing mapping for the
+/// second case (lifts to `LibreFangError::InvalidInput` → HTTP 400) and is
+/// not worse than `Internal` for the first: in both cases the immediate LLM
+/// turn cannot patch the wiring. The tool name (and the fact that it dropped
+/// attribution) is preserved on the operator-facing tracing channel so a
+/// real direct-loop regression can still be traced.
+fn caller_agent_id_missing(tool: &'static str) -> ToolError {
+    tracing::warn!(
+        tool,
+        "caller agent_id missing — surfaced as MissingParameter to the LLM"
+    );
+    ToolError::MissingParameter("agent_id")
 }
 
 pub(super) async fn tool_cron_create(
@@ -125,18 +137,22 @@ mod tests {
     }
 
     #[test]
-    fn caller_agent_id_missing_renders_as_internal_with_tool_name() {
-        // Not `Unavailable` — that would lie about a missing subsystem.
-        // The dispatcher failed to attribute the call; `Internal` is the
-        // honest bucket and the rendered message carries the tool name so
-        // operators can trace which call site dropped the attribution.
+    fn caller_agent_id_missing_surfaces_as_missing_parameter() {
+        // The MCP HTTP route (`/mcp`) legitimately passes `None` when the
+        // `X-LibreFang-Agent-Id` header is missing — that is a user-input
+        // gap, not a server bug, so the variant must lift to InvalidInput
+        // (400) rather than Internal (500) at the LibreFangError boundary.
+        // Operators still see which tool dropped attribution via the
+        // tracing `warn!` next to the constructor.
         let e = caller_agent_id_missing("cron_create");
-        match e {
-            ToolError::Internal(msg) => assert!(
-                msg.contains("cron_create"),
-                "message must name the tool, got {msg:?}"
-            ),
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(
+            matches!(e, ToolError::MissingParameter("agent_id")),
+            "expected MissingParameter(\"agent_id\"), got {e:?}"
+        );
+        assert!(
+            e.to_string().contains("agent_id"),
+            "rendered message must surface the parameter name, got {}",
+            e
+        );
     }
 }

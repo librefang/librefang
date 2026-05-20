@@ -10088,13 +10088,15 @@ fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::DocumentMut {
     if content.trim().is_empty() {
         return toml_edit::DocumentMut::new();
     }
-    content.parse::<toml_edit::DocumentMut>().unwrap_or_else(|e| {
-        ui::error_with_fix(
-            &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
-            &i18n::t("config-parse-fix-alt"),
-        );
-        std::process::exit(1);
-    })
+    content
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap_or_else(|e| {
+            ui::error_with_fix(
+                &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
+                &i18n::t("config-parse-fix-alt"),
+            );
+            std::process::exit(1);
+        })
 }
 
 fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
@@ -10128,7 +10130,9 @@ fn pool_lookup_doc_mut<'d>(
     // original file.
     let item = doc
         .entry("credential_pools")
-        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+        .or_insert(toml_edit::Item::ArrayOfTables(
+            toml_edit::ArrayOfTables::new(),
+        ));
     let arr = match item.as_array_of_tables_mut() {
         Some(a) => a,
         None => {
@@ -10156,7 +10160,10 @@ fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
             Ok(r) if r.status().is_success() => {
                 let body: serde_json::Value = r.json().unwrap_or_default();
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
                     return;
                 }
                 print_pool_summary_human(&body);
@@ -10247,10 +10254,7 @@ fn print_pool_summary_human(body: &serde_json::Value) {
     let pools = match body.as_array() {
         Some(a) if !a.is_empty() => a,
         _ => {
-            println!(
-                "{}",
-                "No credential pools configured.".to_string().dimmed()
-            );
+            println!("{}", "No credential pools configured.".to_string().dimmed());
             println!();
             println!("Add one with:");
             println!(
@@ -10291,7 +10295,11 @@ fn print_pool_summary_human(body: &serde_json::Value) {
                             "exhausted".yellow().to_string()
                         }
                     } else if let Some(serde_json::Value::Number(n)) = cooldown {
-                        format!("{} {}", "cooldown".yellow(), format!("({}s left)", n).dimmed())
+                        format!(
+                            "{} {}",
+                            "cooldown".yellow(),
+                            format!("({}s left)", n).dimmed()
+                        )
                     } else {
                         "exhausted".yellow().to_string()
                     }
@@ -10301,9 +10309,7 @@ fn print_pool_summary_human(body: &serde_json::Value) {
                     "healthy".green().to_string()
                 };
 
-                let reqs_str = reqs
-                    .map(|r| format!(" requests={r}"))
-                    .unwrap_or_default();
+                let reqs_str = reqs.map(|r| format!(" requests={r}")).unwrap_or_default();
                 println!(
                     "    - [{label}] {key_display}  priority={pri}{reqs_str}  status={status}"
                 );
@@ -10419,10 +10425,7 @@ fn cmd_auth_pool_add(
                 new_key_tbl["label"] = toml_edit::value(label);
                 new_key_tbl["priority"] = toml_edit::value(priority as i64);
                 keys_arr.push(new_key_tbl);
-                pool_tbl.insert(
-                    "keys",
-                    toml_edit::Item::ArrayOfTables(keys_arr),
-                );
+                pool_tbl.insert("keys", toml_edit::Item::ArrayOfTables(keys_arr));
                 arr.push(pool_tbl);
             }
         }
@@ -10442,7 +10445,9 @@ fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_var: &str) 
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&format!("No credential pool configured for provider `{provider}`."));
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
+            ));
             std::process::exit(1);
         };
 
@@ -10509,7 +10514,9 @@ fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &st
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&format!("No credential pool configured for provider `{provider}`."));
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
+            ));
             std::process::exit(1);
         };
         let pool_tbl = arr.get_mut(i).expect("idx within bounds");
@@ -14562,8 +14569,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 # trailing comment before our edit
 "#;
-        let mut doc: toml_edit::DocumentMut =
-            original.parse().expect("fragment must parse");
+        let mut doc: toml_edit::DocumentMut = original.parse().expect("fragment must parse");
         // Insert a credential_pools entry the same way the CLI's add-on-no-pool
         // path does — building an ArrayOfTables and pushing one table into it.
         let item = doc
