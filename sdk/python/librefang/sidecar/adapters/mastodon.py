@@ -73,6 +73,10 @@ POLL_INTERVAL_SECS = 5
 MAX_BACKOFF_SECS = 60.0
 SEND_TIMEOUT_SECS = 15
 DEFAULT_VISIBILITY = "unlisted"
+# Default fallback when Mastodon 429s without a `Retry-After` header.
+# Most instances send one (seconds form), but the protocol does not
+# require it — fall back to a sane wait so we don't busy-loop at 1 s.
+RETRY_AFTER_DEFAULT_SECS = 30.0
 _ALLOWED_VISIBILITIES = {"public", "unlisted", "private", "direct"}
 
 
@@ -201,20 +205,72 @@ class MastodonAdapter(SidecarAdapter):
             h.update(extra)
         return h
 
+    @staticmethod
+    def _response_headers(resp_or_err) -> dict:
+        """Pull headers off either a successful response or an HTTPError
+        and normalise keys to lowercase so callers can do
+        case-insensitive lookups (notably for ``Retry-After`` on 429)."""
+        hdrs = getattr(resp_or_err, "headers", None)
+        if hdrs is None:
+            return {}
+        try:
+            return {k.lower(): v for k, v in hdrs.items()}
+        except Exception:  # noqa: BLE001 — defensive against odd shims
+            return {}
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the producer for more than a minute. We don't
+        decode the HTTP-date form — Mastodon's rate-limit replies use
+        seconds in practice, and the fallback covers any divergence."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
+
+    def _sleep_on_429_then_raise(self, resp_hdrs: dict, where: str) -> None:
+        """Common 429 handler: honour ``Retry-After`` then raise so the
+        producer's outer backoff pauses before its next pass. Without
+        the sleep the 1 s → 60 s exponential backoff would keep probing
+        inside the server-side rate-limit window and extend it."""
+        wait = self._retry_after_secs(resp_hdrs)
+        log.warn(
+            f"mastodon 429 on {where}; sleeping",
+            retry_after_secs=wait,
+        )
+        time.sleep(wait)
+        raise RuntimeError("mastodon 429 — rate-limited")
+
     def _verify_credentials(self) -> str:
         """Validate the token and discover the bot's own account id.
         Returns the username for logging. Raises on auth failure."""
         url = f"{self.instance_url}/api/v1/accounts/verify_credentials"
         req = urllib.request.Request(url, headers=self._auth_headers())
-        with urllib.request.urlopen(  # noqa: S310 — configured URL
-            req, timeout=SEND_TIMEOUT_SECS,
-        ) as resp:
-            status = getattr(resp, "status", 200)
-            if status != 200:
-                raise RuntimeError(
-                    f"verify_credentials HTTP {status}"
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status != 200:
+                    raise RuntimeError(
+                        f"verify_credentials HTTP {status}"
+                    )
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Mastodon rate-limits unauthenticated / failed-auth
+                # probes; the verify retry loop would otherwise compound
+                # with the server-side window.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "verify_credentials",
                 )
-            body = json.loads(resp.read().decode("utf-8"))
+            raise
         self.own_account_id = body.get("id") or ""
         return body.get("username") or "unknown"
 
@@ -276,7 +332,17 @@ class MastodonAdapter(SidecarAdapter):
         headers = self._auth_headers({"Accept": "text/event-stream"})
         req = urllib.request.Request(url, headers=headers)
         # No read timeout: SSE is a long-lived stream.
-        with urllib.request.urlopen(req) as resp:  # noqa: S310 — configured URL
+        try:
+            resp_cm = urllib.request.urlopen(req)  # noqa: S310 — configured URL
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Initial SSE subscribe rate-limited; honour Retry-After
+                # before the producer's reconnect path retries.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "SSE subscribe",
+                )
+            raise
+        with resp_cm as resp:
             status = getattr(resp, "status", 200)
             if status != 200:
                 raise RuntimeError(f"SSE HTTP {status}")
@@ -315,13 +381,22 @@ class MastodonAdapter(SidecarAdapter):
         if since_id:
             url += f"&since_id={urllib.parse.quote(since_id)}"
         req = urllib.request.Request(url, headers=self._auth_headers())
-        with urllib.request.urlopen(  # noqa: S310 — configured URL
-            req, timeout=SEND_TIMEOUT_SECS,
-        ) as resp:
-            status = getattr(resp, "status", 200)
-            if status != 200:
-                raise RuntimeError(f"poll HTTP {status}")
-            notifs = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status != 200:
+                    raise RuntimeError(f"poll HTTP {status}")
+                notifs = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Polling rate-limited; honour Retry-After then raise so
+                # the outer backoff pauses before the next poll pass.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "notifications poll",
+                )
+            raise
         if not isinstance(notifs, list):
             return since_id
         # Mastodon returns newest-first. Capture the first ID as the
@@ -451,6 +526,14 @@ class MastodonAdapter(SidecarAdapter):
                         raise RuntimeError(f"post HTTP {status}")
                     resp_body = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    # POST /statuses is rate-limited independently of
+                    # auth. Honour Retry-After and raise;
+                    # `suppress_error_responses=True` keeps the raise
+                    # from echoing as a public toot.
+                    self._sleep_on_429_then_raise(
+                        self._response_headers(e), "status POST",
+                    )
                 err_body = e.read().decode("utf-8", "replace")
                 raise RuntimeError(
                     f"mastodon post {e.code}: {err_body}"

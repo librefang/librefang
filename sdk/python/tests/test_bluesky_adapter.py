@@ -317,11 +317,25 @@ def test_split_message_hard_cut_when_no_newline():
 # ---- session: create / refresh ----------------------------------
 
 
+class _HdrShim:
+    """Mimic the parts of ``email.message.Message`` that the adapter
+    touches — only ``.items()``. urllib's real response headers are a
+    Message; tests want a dict shape, so wrap it."""
+
+    def __init__(self, hdrs: dict | None):
+        self._hdrs = hdrs or {}
+
+    def items(self):
+        return list(self._hdrs.items())
+
+
 class _FakeUrlopen:
     """Capture urllib.request.urlopen calls and return scripted
-    responses. Each call pops the next response from `script`."""
+    responses. Each script entry is ``(status, body)`` or
+    ``(status, body, response_headers)``; the 2-tuple form keeps
+    existing tests unchanged."""
 
-    def __init__(self, script: list[tuple[int, dict | None]]):
+    def __init__(self, script):
         self.script = list(script)
         self.calls: list[dict] = []
 
@@ -342,21 +356,27 @@ class _FakeUrlopen:
             raise AssertionError(
                 f"unexpected extra urlopen call to {req.full_url}"
             )
-        status, body = self.script.pop(0)
+        entry = self.script.pop(0)
+        if len(entry) == 3:
+            status, body, resp_hdrs = entry
+        else:
+            status, body = entry
+            resp_hdrs = {}
         if status >= 400:
             raise ba.urllib.error.HTTPError(
-                req.full_url, status, "Error", {},
+                req.full_url, status, "Error", _HdrShim(resp_hdrs),
                 io.BytesIO(json.dumps(body or {}).encode("utf-8")),
             )
         payload = (json.dumps(body).encode("utf-8")
                    if body is not None else b"")
-        return _FakeResp(status, payload)
+        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 class _FakeResp:
-    def __init__(self, status, body=b""):
+    def __init__(self, status, body=b"", headers=None):
         self.status = status
         self._body = body
+        self.headers = headers if headers is not None else _HdrShim({})
 
     def read(self):
         return self._body
@@ -677,3 +697,126 @@ def test_poll_once_emits_in_chronological_order(monkeypatch):
     ]
     # High-water mark = max indexedAt, order-independent.
     assert new_seen == "2026-05-19T10:00:30.000Z"
+
+
+# ---- 429 / Retry-After (XRPC rate-limiting) ---------------------
+
+
+def test_retry_after_secs_parses_header_value():
+    """``Retry-After`` (seconds form) is parsed as a float and capped
+    at ``MAX_BACKOFF_SECS`` so a misreported value can't block the
+    poller for more than a minute."""
+    assert ba.BlueskyAdapter._retry_after_secs({"retry-after": "5"}) == 5.0
+    assert ba.BlueskyAdapter._retry_after_secs({"retry-after": "0.5"}) == 1.0
+    assert (
+        ba.BlueskyAdapter._retry_after_secs({"retry-after": "9999"})
+        == ba.MAX_BACKOFF_SECS
+    )
+
+
+def test_retry_after_secs_falls_back_when_absent_or_invalid():
+    """Without a ``Retry-After`` (or with an unparseable HTTP-date /
+    ``RateLimit-Reset`` epoch we don't decode), fall back to
+    ``RETRY_AFTER_DEFAULT_SECS`` rather than busy-looping at 1 s."""
+    assert (
+        ba.BlueskyAdapter._retry_after_secs({})
+        == ba.RETRY_AFTER_DEFAULT_SECS
+    )
+    assert (
+        ba.BlueskyAdapter._retry_after_secs(
+            {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"},
+        )
+        == ba.RETRY_AFTER_DEFAULT_SECS
+    )
+
+
+def test_create_session_429_sleeps_retry_after_then_raises(monkeypatch):
+    """PDS rate-limits failed createSession aggressively from a single
+    IP. The sidecar must honour ``Retry-After`` here — otherwise the
+    producer's verify-credentials retry loop compounds with the server-
+    side block."""
+    a = _adapter()
+    fake = _FakeUrlopen([
+        (429, {"error": "RateLimitExceeded"}, {"Retry-After": "3"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ba.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._create_session()
+    assert sleeps == [3.0]
+
+
+def test_create_session_429_without_header_uses_default(monkeypatch):
+    """A 429 with no ``Retry-After`` falls back to
+    ``RETRY_AFTER_DEFAULT_SECS`` instead of busy-looping at 1 s."""
+    a = _adapter()
+    fake = _FakeUrlopen([(429, {"error": "RateLimitExceeded"})])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ba.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._create_session()
+    assert sleeps == [ba.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_refresh_session_429_sleeps_retry_after_then_raises(monkeypatch):
+    """``refreshSession`` is throttled on the same envelope as
+    ``createSession``; the sidecar honours ``Retry-After`` here too so
+    a token-near-expiry probe doesn't extend the throttling window."""
+    a = _adapter()
+    a._access_jwt = "old"
+    a._refresh_jwt = "refresh-token"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = 0.0
+    fake = _FakeUrlopen([
+        (429, {"error": "RateLimitExceeded"}, {"Retry-After": "4"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ba.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._refresh_session()
+    assert sleeps == [4.0]
+
+
+def test_poll_once_429_sleeps_retry_after_then_raises(monkeypatch):
+    """``listNotifications`` 429 must sleep the indicated interval and
+    raise so the outer backoff in `_producer_blocking` pauses before
+    the next pass — otherwise the poll loop probes inside the window
+    and extends the throttling."""
+    a = _adapter()
+    a.own_did = "did:plc:bot"
+    a._access_jwt = "access-1"
+    a._refresh_jwt = "refresh-1"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = ba.time.monotonic()
+    fake = _FakeUrlopen([
+        (429, {"error": "RateLimitExceeded"}, {"Retry-After": "7"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ba.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None, last_seen_at=None)
+    assert sleeps == [7.0]
+
+
+def test_post_status_429_sleeps_retry_after_then_raises(monkeypatch):
+    """``createRecord`` is rate-limited independently of auth. A 429
+    here must sleep and raise; `suppress_error_responses=True` keeps
+    the raise from echoing back as a public post."""
+    a = _adapter()
+    a._access_jwt = "access-1"
+    a._refresh_jwt = "refresh-1"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = ba.time.monotonic()
+    fake = _FakeUrlopen([
+        (429, {"error": "RateLimitExceeded"}, {"Retry-After": "6"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ba.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._post_status("hello", thread_id=None)
+    assert sleeps == [6.0]

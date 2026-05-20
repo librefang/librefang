@@ -255,12 +255,28 @@ def test_split_message_hard_cut_when_no_newline():
 # ---- _post_status: REST shape ------------------------------------
 
 
+class _HdrShim:
+    """Mimic the parts of ``email.message.Message`` that the adapter
+    touches — only ``.items()``. urllib's real response headers are a
+    Message; tests want a dict shape, so wrap it."""
+
+    def __init__(self, hdrs: dict | None):
+        self._hdrs = hdrs or {}
+
+    def items(self):
+        return list(self._hdrs.items())
+
+
 class _FakeUrlopen:
-    def __init__(self, status=200, reply_ids=None):
+    def __init__(self, status=200, reply_ids=None, error_headers=None):
         self.calls: list[dict] = []
         self.status = status
         self._reply_ids = list(reply_ids) if reply_ids else ["resp-1", "resp-2", "resp-3"]
         self._idx = 0
+        # When set, the HTTPError raised on `status >= 400` is given
+        # these response headers so the adapter's ``Retry-After``
+        # lookup is reachable.
+        self._error_headers = error_headers or {}
 
     def __call__(self, req, timeout=None):
         body = req.data
@@ -277,6 +293,12 @@ class _FakeUrlopen:
             "params": decoded_params,
             "timeout": timeout,
         })
+        if self.status >= 400:
+            raise ma.urllib.error.HTTPError(
+                req.full_url, self.status, "Error",
+                _HdrShim(self._error_headers),
+                io.BytesIO(b"{}"),
+            )
         idx = self._idx
         self._idx += 1
         rid = self._reply_ids[idx] if idx < len(self._reply_ids) else f"resp-{idx}"
@@ -284,9 +306,10 @@ class _FakeUrlopen:
 
 
 class _FakeResp:
-    def __init__(self, status, body=b"{}"):
+    def __init__(self, status, body=b"{}", headers=None):
         self.status = status
         self._body = body
+        self.headers = headers if headers is not None else _HdrShim({})
 
     def read(self):
         return self._body
@@ -353,10 +376,13 @@ def test_post_status_http_error_surfaced(monkeypatch):
 
 
 def test_post_status_5xx_surfaced(monkeypatch):
+    """A 5xx from `urlopen` raises HTTPError (real urllib behaviour),
+    which the adapter catches and re-raises as ``mastodon post <code>:
+    <body>`` — the producer's outer backoff then kicks in."""
     a = _adapter()
     fake = _FakeUrlopen(status=500)
     monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    with pytest.raises(RuntimeError, match=r"mastodon post 500"):
         a._post_status("hi", in_reply_to_id=None)
 
 
@@ -498,3 +524,103 @@ def test_poll_once_emits_in_chronological_order(monkeypatch):
     ]
     # High-water mark = newest id (notifs[0]), order-independent.
     assert newest == "n3"
+
+
+# ---- 429 / Retry-After (Mastodon rate limiting) ----------------
+
+
+def test_retry_after_secs_parses_header_value():
+    """``Retry-After`` (seconds form) is parsed as a float and capped
+    at ``MAX_BACKOFF_SECS`` so a misreported value can't block the
+    producer for more than a minute."""
+    assert ma.MastodonAdapter._retry_after_secs({"retry-after": "5"}) == 5.0
+    assert ma.MastodonAdapter._retry_after_secs({"retry-after": "0.5"}) == 1.0
+    assert (
+        ma.MastodonAdapter._retry_after_secs({"retry-after": "9999"})
+        == ma.MAX_BACKOFF_SECS
+    )
+
+
+def test_retry_after_secs_falls_back_when_absent_or_invalid():
+    """Without a ``Retry-After`` (or with an HTTP-date form we don't
+    decode), fall back to ``RETRY_AFTER_DEFAULT_SECS`` rather than
+    busy-looping at 1 s."""
+    assert (
+        ma.MastodonAdapter._retry_after_secs({})
+        == ma.RETRY_AFTER_DEFAULT_SECS
+    )
+    assert (
+        ma.MastodonAdapter._retry_after_secs(
+            {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"},
+        )
+        == ma.RETRY_AFTER_DEFAULT_SECS
+    )
+
+
+def test_verify_credentials_429_sleeps_retry_after_then_raises(monkeypatch):
+    """Mastodon rate-limits unauthenticated / failed-auth probes; the
+    verify retry loop in `_producer_blocking` would otherwise compound
+    with the server-side window."""
+    a = _adapter()
+    fake = _FakeUrlopen(status=429, error_headers={"Retry-After": "3"})
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ma.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._verify_credentials()
+    assert sleeps == [3.0]
+
+
+def test_verify_credentials_429_without_header_uses_default(monkeypatch):
+    """A 429 with no ``Retry-After`` falls back to
+    ``RETRY_AFTER_DEFAULT_SECS`` instead of busy-looping at 1 s."""
+    a = _adapter()
+    fake = _FakeUrlopen(status=429)
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ma.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._verify_credentials()
+    assert sleeps == [ma.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_poll_once_429_sleeps_retry_after_then_raises(monkeypatch):
+    """Polling /api/v1/notifications 429 must sleep and raise so the
+    outer backoff in `_producer_blocking` pauses before the next poll
+    pass — otherwise the poll loop probes inside the window and
+    extends the throttling."""
+    a = _adapter()
+    fake = _FakeUrlopen(status=429, error_headers={"Retry-After": "7"})
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ma.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._poll_once(lambda _: None, since_id=None)
+    assert sleeps == [7.0]
+
+
+def test_sse_loop_429_on_subscribe_sleeps_then_raises(monkeypatch):
+    """Initial SSE subscribe can be rate-limited like any other HTTP
+    call; honour Retry-After before the reconnect path retries."""
+    a = _adapter()
+    fake = _FakeUrlopen(status=429, error_headers={"Retry-After": "5"})
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ma.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._sse_loop(lambda _: None)
+    assert sleeps == [5.0]
+
+
+def test_post_status_429_sleeps_retry_after_then_raises(monkeypatch):
+    """POST /statuses is rate-limited independently of auth. A 429
+    here must sleep and raise; `suppress_error_responses=True` keeps
+    the raise from echoing as a public toot."""
+    a = _adapter()
+    fake = _FakeUrlopen(status=429, error_headers={"Retry-After": "6"})
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    sleeps: list = []
+    monkeypatch.setattr(ma.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._post_status("hi", in_reply_to_id=None)
+    assert sleeps == [6.0]
