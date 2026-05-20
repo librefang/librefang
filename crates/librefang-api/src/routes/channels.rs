@@ -3047,12 +3047,15 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // WhatsApp requires WHATSAPP_ACCESS_TOKEN. With it unset we must
-        // surface a 412 — NOT a 200 with a "status: error" body, which
-        // silently passes dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("WHATSAPP_ACCESS_TOKEN");
+        // Email requires EMAIL_PASSWORD. With it unset we must surface
+        // a 412 — NOT a 200 with a "status: error" body, which silently
+        // passes dashboard `fetch().ok` checks (#3507). Witness rotated
+        // from WhatsApp (whose ChannelMeta marked WHATSAPP_ACCESS_TOKEN
+        // as `required: false` after the QR-first redesign — the field
+        // is now an advanced Business-API fallback, not a precondition).
+        let _g = EnvGuard::unset("EMAIL_PASSWORD");
 
-        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("email".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3068,9 +3071,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("WHATSAPP_ACCESS_TOKEN", "syt-test-not-real");
+        let _g = EnvGuard::set("EMAIL_PASSWORD", "not-a-real-password");
 
-        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("email".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);

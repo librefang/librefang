@@ -3770,7 +3770,12 @@ mod tests {
         assert!(secrets.contains("TELEGRAM_BOT_TOKEN=123:ABC"));
         assert!(secrets.contains("DISCORD_BOT_TOKEN=discord-token-here"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
-        assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
+        // Matrix migrated to a sidecar (#5368) — the openclaw importer
+        // now records `[channels.matrix]` as a SkippedItem instead of
+        // migrating it, so MATRIX_ACCESS_TOKEN no longer lands in
+        // secrets.env (operator is expected to set it via the sidecar's
+        // `[sidecar_channels.env]` block / `~/.librefang/secrets.env`).
+        assert!(!secrets.contains("MATRIX_ACCESS_TOKEN="));
         // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted to
         // secrets.env; the migrator now skips IRC entirely with a warning.
         assert!(!secrets.contains("IRC_PASSWORD="));
@@ -4828,7 +4833,10 @@ mod tests {
         assert!(secrets.contains("DISCORD_BOT_TOKEN=discord-token-here"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb-slack"));
         assert!(secrets.contains("SLACK_APP_TOKEN=xapp-slack"));
-        assert!(secrets.contains("MATRIX_ACCESS_TOKEN=syt_matrix_token_xyz"));
+        // Matrix migrated to a sidecar (#5368) — `[channels.matrix]` is
+        // recorded as SkippedItem, not migrated, so MATRIX_ACCESS_TOKEN
+        // does not land in secrets.env.
+        assert!(!secrets.contains("MATRIX_ACCESS_TOKEN="));
         // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted.
         assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
@@ -4854,15 +4862,17 @@ mod tests {
         }
 
         // Secret items in report (was >=9 before IRC removal in v2026.5
-        // dropped IRC_PASSWORD; 8 is the post-removal floor).
+        // dropped IRC_PASSWORD; was >=8 after; matrix sidecar migration
+        // (#5368) then dropped MATRIX_ACCESS_TOKEN, so 7 is the current
+        // post-removal floor).
         let secret_count = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Secret)
             .count();
         assert!(
-            secret_count >= 8,
-            "expected >=8 Secret items, got {secret_count}"
+            secret_count >= 7,
+            "expected >=7 Secret items, got {secret_count}"
         );
     }
 
