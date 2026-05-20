@@ -46,19 +46,11 @@ mod tests {
     /// adapter that wires it through (#4795). Absent key must yield
     /// `None`; present key must round-trip the raw string. We do NOT
     /// validate the URL here — that's the adapter's job at init.
-    #[test]
-    fn test_channel_proxy_roundtrips() {
-        // Mattermost
-        let mm: MattermostConfig = toml::from_str(
-            r#"
-                server_url = "https://mm.example.com"
-                token_env = "MATTERMOST_TOKEN"
-                proxy = "http://127.0.0.1:8080"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(mm.proxy.as_deref(), Some("http://127.0.0.1:8080"));
-    }
+    // test_channel_proxy_roundtrips — Mattermost case removed in the
+    // sidecar migration. The remaining adapters that carry a `proxy`
+    // field already have their own dedicated round-trip tests
+    // alongside their config types; the original case only covered
+    // mattermost.
 
     #[test]
     fn test_validate_no_channels() {
@@ -444,12 +436,9 @@ admin_role = "admin"
         assert!(t.signature_required, "default-deny on Teams webhook");
     }
 
-    #[test]
-    fn test_mattermost_config_defaults() {
-        let m = MattermostConfig::default();
-        assert_eq!(m.token_env, "MATTERMOST_TOKEN");
-        assert!(m.server_url.is_empty());
-    }
+    // test_mattermost_config_defaults removed — mattermost migrated to
+    // a sidecar (librefang.sidecar.adapters.mattermost) and the
+    // in-process MattermostConfig was deleted.
 
     #[test]
     fn test_google_chat_config_defaults() {
@@ -459,20 +448,11 @@ admin_role = "admin"
     }
 
     #[test]
-    fn test_zulip_config_defaults() {
-        let z = ZulipConfig::default();
-        assert_eq!(z.api_key_env, "ZULIP_API_KEY");
-        assert!(z.bot_email.is_empty());
-    }
-
-    #[test]
     fn test_all_new_channel_configs_serde() {
         let config = KernelConfig {
             channels: ChannelsConfig {
                 teams: OneOrMany(vec![TeamsConfig::default()]),
-                mattermost: OneOrMany(vec![MattermostConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                zulip: OneOrMany(vec![ZulipConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
@@ -480,9 +460,7 @@ admin_role = "admin"
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let back: KernelConfig = toml::from_str(&toml_str).unwrap();
         assert!(back.channels.teams.is_some());
-        assert!(back.channels.mattermost.is_some());
         assert!(back.channels.google_chat.is_some());
-        assert!(back.channels.zulip.is_some());
     }
 
     #[test]
@@ -1655,10 +1633,10 @@ admin_role = "admin"
     fn well_formed_repeated_channel_table_still_parses_5130() {
         // Drift sentinel: deny_unknown_fields must not regress the
         // happy path. If a future refactor renames a field on
-        // WhatsAppConfig / MattermostConfig / McpServerConfigEntry
-        // without updating this fixture, the test will fail loudly.
-        // (DiscordConfig and SlackConfig were in this set originally;
-        // both were migrated to sidecars in v2026.5.)
+        // WhatsAppConfig / McpServerConfigEntry without updating this
+        // fixture, the test will fail loudly. (DiscordConfig,
+        // SlackConfig, and MattermostConfig were in this set
+        // originally; all three were migrated to sidecars in v2026.5.)
         let cfg: KernelConfig = toml::from_str(
             r#"
             [[channels.whatsapp]]
@@ -1668,10 +1646,6 @@ admin_role = "admin"
             webhook_port = 8443
             gateway_url_env = "WA_GATEWAY"
 
-            [[channels.mattermost]]
-            server_url = "https://mm.example.com"
-            token_env = "MM_TOKEN"
-
             [[mcp_servers]]
             name = "filesystem"
             timeout_secs = 30
@@ -1679,7 +1653,6 @@ admin_role = "admin"
         )
         .expect("well-formed repeated tables must still parse with deny_unknown_fields");
         assert_eq!(cfg.channels.whatsapp.len(), 1);
-        assert_eq!(cfg.channels.mattermost.len(), 1);
         assert_eq!(cfg.mcp_servers.len(), 1);
     }
 }

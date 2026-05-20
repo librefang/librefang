@@ -40,9 +40,11 @@ struct ChannelDef {
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
     // ── Messaging
-    // discord and slack migrated to out-of-process sidecar adapters
-    // (librefang.sidecar.adapters.{discord,slack}); see the channels
-    // page in the dashboard / SIDECAR_CATALOG in routes/channels.rs.
+    // discord, slack, webex, and line migrated to out-of-process
+    // sidecar adapters
+    // (librefang.sidecar.adapters.{discord,slack,webex,line}); see the
+    // channels page in the dashboard / SIDECAR_CATALOG in
+    // routes/channels.rs.
     ChannelDef {
         name: "whatsapp",
         display_name: "WhatsApp",
@@ -71,16 +73,12 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["EMAIL_PASSWORD"],
         description: "IMAP/SMTP email adapter",
     },
-    ChannelDef {
-        name: "line",
-        display_name: "LINE",
-        category: "Messaging",
-        env_vars: &["LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN"],
-        description: "LINE Messaging API adapter",
-    },
     // ── Social
     // mastodon, bluesky, and reddit migrated to sidecar adapters
     // ── Enterprise (10)
+    // mattermost migrated to a sidecar
+    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
+    // librefang-api/src/routes/channels.rs.
     ChannelDef {
         name: "teams",
         display_name: "Teams",
@@ -89,26 +87,15 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         description: "Microsoft Teams Bot Framework adapter",
     },
     ChannelDef {
-        name: "mattermost",
-        display_name: "Mattermost",
-        category: "Enterprise",
-        env_vars: &["MATTERMOST_TOKEN"],
-        description: "Mattermost WebSocket adapter",
-    },
-    ChannelDef {
         name: "google_chat",
         display_name: "Google Chat",
         category: "Enterprise",
         env_vars: &["GOOGLE_CHAT_SERVICE_ACCOUNT"],
         description: "Google Chat service account adapter",
     },
-    ChannelDef {
-        name: "webex",
-        display_name: "Webex",
-        category: "Enterprise",
-        env_vars: &["WEBEX_BOT_TOKEN"],
-        description: "Cisco Webex bot adapter",
-    },
+    // webex migrated to a sidecar
+    // (librefang.sidecar.adapters.webex); see the channels page in the
+    // dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "feishu",
         display_name: "Feishu/Lark",
@@ -128,14 +115,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         ],
         description: "DingTalk Robot API adapter (webhook or stream mode)",
     },
-    ChannelDef {
-        name: "zulip",
-        display_name: "Zulip",
-        category: "Enterprise",
-        env_vars: &["ZULIP_API_KEY"],
-        description: "Zulip event queue adapter",
-    },
-    // twitch, rocketchat & nextcloud migrated to sidecar adapters
+    // twitch, rocketchat, nextcloud & zulip migrated to sidecar adapters
     // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",

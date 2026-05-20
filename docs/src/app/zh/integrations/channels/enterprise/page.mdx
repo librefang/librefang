@@ -42,42 +42,45 @@ Teams 适配器使用 Microsoft Bot Framework v3 webhook 协议配合 OAuth2 令
 
 ---
 
-## Mattermost
+## Mattermost（Sidecar）
+
+Mattermost 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.mattermost`）。
 
 ### 前置条件
 
 - 一个 Mattermost 服务器（自托管或云版本），具备管理员权限
 - Bot 账户或个人访问令牌
+- Python 3 + `librefang` SDK（`pip install -e sdk/python`）
 
 ### 设置步骤
 
 1. 在 Mattermost 中，前往 **Integrations > Bot Accounts** 创建新 Bot，或前往 **Account Settings > Security > Personal Access Tokens** 生成令牌。
-2. 复制令牌。
-3. 设置环境变量：
+2. 复制令牌并写入 `~/.librefang/secrets.env`：
 
 ```bash
-export MATTERMOST_TOKEN=your-bot-token        # 环境变量
-export MATTERMOST_URL=https://mattermost.example.com
-librefang vault set MATTERMOST_TOKEN          # 加密金库（推荐）
-librefang vault set MATTERMOST_URL
-librefang config set-key mattermost           # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+MATTERMOST_TOKEN=your-bot-token
 ```
 
-4. 添加到配置文件：
+3. 在 `~/.librefang/config.toml` 中声明 sidecar：
 
 ```toml
-[channels.mattermost]
-token_env = "MATTERMOST_TOKEN"
-url_env = "MATTERMOST_URL"
+[[sidecar_channels]]
+name = "mattermost"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mattermost"]
+channel_type = "mattermost"
 default_agent = "ops"
+[sidecar_channels.env]
+MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_ALLOWED_CHANNELS = "ch-id-1,ch-id-2"    # 可选，空 = 全部
+# MATTERMOST_ACCOUNT_ID = "team-prod"                # 可选，多 Bot 路由
 ```
 
-5. 重启守护进程。
+4. 重启守护进程。
 
 ### 工作原理
 
-Mattermost 适配器通过 WebSocket 连接到 Mattermost 服务器接收实时事件，并使用 REST v4 API 发送消息。它监听新帖子事件并路由到配置的 Agent。
+Sidecar 通过 WebSocket 连接到 Mattermost 服务器（`wss://<host>/api/v4/websocket`），在握手完成后立即发送 `authentication_challenge`。订阅 `posted` 事件，按 `post.id` 去重后通过 stdio 推送给内核。出站消息使用 `POST /api/v4/posts`，并把入站的 `root_id` 透传回去，保证线程内回复仍留在原线程。
 
 ---
 
@@ -121,7 +124,7 @@ Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 web
 
 ---
 
-## Webex
+## Webex (sidecar)
 
 ### 前置条件
 
@@ -129,31 +132,37 @@ Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 web
 
 ### 设置步骤
 
+Webex 已在 v2026.5 中迁移为 out-of-process sidecar（替换原 in-process Rust 适配器）。Bot Bearer 令牌存放在 `~/.librefang/secrets.env`，而不是 `config.toml`。
+
 1. 前往 [developer.webex.com](https://developer.webex.com/) 并登录。
 2. 导航到 **My Webex Apps** 并创建新 Bot。
 3. 复制 Bot 访问令牌。
-4. 设置环境变量：
+4. 将令牌写入 `~/.librefang/secrets.env`（仪表板的 Channels 页面会自动处理）：
 
 ```bash
-export WEBEX_BOT_TOKEN=your-webex-bot-token   # 环境变量
-librefang vault set WEBEX_BOT_TOKEN           # 加密金库（推荐）
-librefang config set-key webex                # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+WEBEX_BOT_TOKEN=your-webex-bot-token
 ```
 
-5. 添加到配置文件：
+5. 在 `config.toml` 中声明 sidecar：
 
-```toml
-[channels.webex]
-token_env = "WEBEX_BOT_TOKEN"
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
 default_agent = "assistant"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # 可选，留空 = 所有房间
+# WEBEX_ACCOUNT_ID = "org-prod"              # 可选，多机器人路由
 ```
 
 6. 重启守护进程。
 
 ### 工作原理
 
-Webex 适配器向 Webex API 注册 webhook 以接收消息事件。传入消息通过 webhook 负载中的消息 ID 使用 Webex REST API 获取，响应通过 messages 端点发送。
+Webex sidecar（`librefang.sidecar.adapters.webex`）连接 Cisco 的 Mercury WebSocket 网关接收实时消息活动，然后通过 Webex REST API（`GET /messages/<id>`）获取完整消息正文。出站回复通过 `POST /messages` 发送，可选地附带 `parentId` 以串入起源消息的线程（相对原 Rust 适配器从未发送 `parentId` 的改进）。两侧的 429 响应都遵循 `Retry-After` 头并重试一次。
 
 ---
 
@@ -246,6 +255,8 @@ Sidecar 按配置间隔（默认 2 秒）通过 `X-Auth-Token` / `X-User-Id` 头
 
 ## Zulip
 
+Zulip 现在由 Python sidecar 适配器 `librefang.sidecar.adapters.zulip` 提供。原 in-process 的 `[channels.zulip]` 配置块在 sidecar 迁移中已移除。
+
 ### 前置条件
 
 - Zulip 服务器账户（云版或自托管版）
@@ -256,31 +267,29 @@ Sidecar 按配置间隔（默认 2 秒）通过 `X-Auth-Token` / `X-User-Id` 头
 1. 在 Zulip 中，前往 **Settings > Your bots**，点击 **Add a new bot**。
 2. 选择 **Generic bot** 类型并创建。
 3. 记录 Bot 的邮箱地址和 API 密钥。
-4. 设置环境变量：
+4. 在配置中声明 sidecar：
 
 ```bash
-export ZULIP_EMAIL=bot@example.zulipchat.com  # 环境变量
-export ZULIP_API_KEY=your-api-key
-export ZULIP_URL=https://example.zulipchat.com
-librefang vault set ZULIP_EMAIL               # 加密金库（推荐）
-librefang vault set ZULIP_API_KEY
-librefang vault set ZULIP_URL
-librefang config set-key zulip                # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # 可选；空 = 所有已订阅 Stream
+# ZULIP_ACCOUNT_ID = "prod"                   # 可选，多 Bot 路由 key
 ```
 
-5. 添加到配置文件：
+5. 将 Bot 的 API Key 写入 `~/.librefang/secrets.env`：
 
-```toml
-[channels.zulip]
-email_env = "ZULIP_EMAIL"
-api_key_env = "ZULIP_API_KEY"
-url_env = "ZULIP_URL"
-default_agent = "assistant"
+```bash
+ZULIP_API_KEY=your-api-key
 ```
 
 6. 重启守护进程。
 
 ### 工作原理
 
-Zulip 适配器使用 Zulip 的 event queue API 进行长轮询。它注册一个消息事件队列，然后持续轮询该队列获取新消息。响应通过 `messages` REST 端点发送。
+Sidecar 使用 Zulip 的 event queue API 进行长轮询。启动时调用 `GET /api/v1/users/me` 发现 Bot 的稳定 `user_id`，通过 `POST /api/v1/register`（按 `ZULIP_STREAMS` 收窄）注册事件队列，然后长轮询 `GET /api/v1/events` 直到关闭。入站消息按 Bot 自身 `user_id` 自跳（Bot 改名也不会破自跳），按 `message.id` 去重（`BAD_EVENT_QUEUE_ID` 重新注册也不会重发同一条消息）。出站响应走 `POST /api/v1/messages`，用 `cmd.thread_id` 作为目标 topic，所以回复始终留在原 topic。四条 REST 路径上的 429 都遵守 `Retry-After`。

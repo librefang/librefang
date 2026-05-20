@@ -224,21 +224,23 @@ allowed_tenants = []
 | `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.mattermost]`
+#### Mattermost (sidecar)
+
+Mattermost migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.mattermost`). An existing `[channels.mattermost]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.mattermost]
-server_url = "https://mattermost.example.com"
-token_env = "MATTERMOST_TOKEN"
-allowed_channels = []
+[[sidecar_channels]]
+name = "mattermost"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mattermost"]
+channel_type = "mattermost"
+[sidecar_channels.env]
+MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_ALLOWED_CHANNELS = "ch-id-1,ch-id-2"   # optional
+# MATTERMOST_ACCOUNT_ID = "team-prod"               # optional
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Mattermost server URL. |
-| `token_env` | string | `"MATTERMOST_TOKEN"` | Env var holding the Mattermost bot token. |
-| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`MATTERMOST_TOKEN` belongs in `~/.librefang/secrets.env`.
 
 #### `[channels.google_chat]`
 
@@ -295,39 +297,27 @@ ROCKETCHAT_USER_ID = "abc123"
 
 `ROCKETCHAT_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 
-#### `[channels.zulip]`
+#### Zulip
+
+Zulip is provided by the Python sidecar adapter (`librefang.sidecar.adapters.zulip`). The in-process `[channels.zulip]` config block was removed in the sidecar migration. Declare Zulip as a `[[sidecar_channels]]` entry instead — see the configuration reference's "Zulip" section above for the full block.
+
+#### LINE
+
+LINE is provided by the Python sidecar adapter (`librefang.sidecar.adapters.line`). The in-process `[channels.line]` config block was removed in the sidecar migration. Declare LINE as a `[[sidecar_channels]]` entry instead — the sidecar runs its **own** HTTP webhook server (no longer mounted on the LibreFang API port), so the URL you register at the LINE Developers Console is now `https://<your-sidecar-host>:<LINE_WEBHOOK_PORT><LINE_WEBHOOK_PATH>`:
 
 ```toml
-[channels.zulip]
-server_url = "https://zulip.example.com"
-bot_email = "bot@zulip.example.com"
-api_key_env = "ZULIP_API_KEY"
-streams = []
+[[sidecar_channels]]
+name = "line"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.line"]
+channel_type = "line"
+[sidecar_channels.env]
+LINE_WEBHOOK_PORT = "9090"
+# LINE_WEBHOOK_PATH = "/webhook"   # override the default path
+# LINE_ACCOUNT_ID = "production"   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Zulip server URL. |
-| `bot_email` | string | `""` | Bot email address registered in Zulip. |
-| `api_key_env` | string | `"ZULIP_API_KEY"` | Env var holding the Zulip API key. |
-| `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-#### `[channels.line]`
-
-```toml
-[channels.line]
-channel_secret_env = "LINE_CHANNEL_SECRET"
-access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
-# webhook_port = 8450  # Deprecated: webhooks now share the API port
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. **Required** — every inbound webhook must carry a matching `X-Line-Signature`; missing → 400, mismatched → 401. |
-| `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
-| `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Set both `LINE_CHANNEL_SECRET` (used to verify the inbound `X-Line-Signature` HMAC-SHA256 over the raw request body) and `LINE_CHANNEL_ACCESS_TOKEN` (Bearer auth on outbound `POST /v2/bot/message/push`) in `~/.librefang/secrets.env`.
 
 #### Reddit
 
@@ -420,19 +410,23 @@ NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
 
 `NEXTCLOUD_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form. Outbound replies thread via Talk's `replyTo` parameter (improvement over the former Rust adapter, which never sent `replyTo`).
 
-#### `[channels.webex]`
+#### Webex (sidecar)
 
-```toml
-[channels.webex]
-bot_token_env = "WEBEX_BOT_TOKEN"
-allowed_rooms = []
+Webex migrated to an out-of-process sidecar in v2026.5; declare it as a `[[sidecar_channels]]` block instead of `[channels.webex]`.
+
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # optional, empty = all rooms
+# WEBEX_ACCOUNT_ID = "org-prod"              # optional, multi-bot routing
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
-| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`WEBEX_BOT_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form. Outbound replies thread via Webex's `parentId` parameter (improvement over the former Rust adapter, which never sent `parentId`).
 
 #### `[channels.dingtalk]`
 

@@ -363,14 +363,14 @@ Complete table of all environment variables referenced by the configuration. Non
 | `EMAIL_PASSWORD` | Email | Email account password or app password. |
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
 | `TEAMS_SECURITY_TOKEN` | Teams | Outgoing webhook security token (base64) — HMAC-SHA256 key used to verify the `Authorization: HMAC <…>` header on every inbound activity. Production deployments should always set this. |
-| `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
+| `MATTERMOST_TOKEN` | Mattermost (sidecar) | Mattermost bot token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
-| `LINE_CHANNEL_SECRET` | LINE | LINE channel secret. |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE channel access token. |
+| `LINE_CHANNEL_SECRET` | LINE (sidecar) | LINE channel secret (`librefang.sidecar.adapters.line` — set in `~/.librefang/secrets.env`). |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE (sidecar) | LINE channel access token (sidecar adapter). |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit app client secret. |
 | `REDDIT_PASSWORD` | Reddit | Reddit bot account password. |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon access token. |
@@ -381,7 +381,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
 | `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
-| `WEBEX_BOT_TOKEN` | Webex | Webex bot token. |
+| `WEBEX_BOT_TOKEN` | Webex (sidecar) | Webex bot Bearer token (`librefang.sidecar.adapters.webex`). |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble bot token. |
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
 | `TWIST_TOKEN` | Twist | Twist API token. |

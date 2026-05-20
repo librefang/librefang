@@ -303,19 +303,8 @@ impl KernelConfig {
                 ));
             }
         }
-        for m in self.channels.mattermost.iter() {
-            if std::env::var(&m.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Mattermost configured but {} is not set",
-                    m.token_env
-                ));
-            }
-        }
-        for z in self.channels.zulip.iter() {
-            if std::env::var(&z.api_key_env).unwrap_or_default().is_empty() {
-                warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
-            }
-        }
+        // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+        // env-var presence is now validated inside the sidecar process.
         for gc in self.channels.google_chat.iter() {
             let has_env = !std::env::var(&gc.service_account_env)
                 .unwrap_or_default()
@@ -332,17 +321,8 @@ impl KernelConfig {
             }
         }
         // Wave 3 channels
-        for ln in self.channels.line.iter() {
-            if std::env::var(&ln.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "LINE configured but {} is not set",
-                    ln.access_token_env
-                ));
-            }
-        }
+        // line migrated to a sidecar (librefang.sidecar.adapters.line);
+        // env-var presence is now validated inside the sidecar process.
         for fs in self.channels.feishu.iter() {
             if std::env::var(&fs.app_secret_env)
                 .unwrap_or_default()
@@ -355,17 +335,8 @@ impl KernelConfig {
             }
         }
         // Wave 4 channels
-        for wx in self.channels.webex.iter() {
-            if std::env::var(&wx.bot_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Webex configured but {} is not set",
-                    wx.bot_token_env
-                ));
-            }
-        }
+        // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 5 channels
         for dt in self.channels.dingtalk.iter() {
             use super::DingTalkReceiveMode;

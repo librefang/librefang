@@ -207,21 +207,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Enable IMAP on your email account", "Generate an app password if using Gmail", "Fill in email, password, and hosts below"],
         config_template: "[channels.email]\nimap_host = \"imap.gmail.com\"\nsmtp_host = \"smtp.gmail.com\"\npassword_env = \"EMAIL_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "line", display_name: "LINE", icon: "LN",
-        description: "LINE Messaging API adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your Channel Secret and Access Token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "channel_secret_env", label: "Channel Secret", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "access_token_env", label: "Channel Access Token", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_ACCESS_TOKEN"), required: true, placeholder: "xyz789...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8450", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
-        config_template: "[channels.line]\nchannel_secret_env = \"LINE_CHANNEL_SECRET\"\naccess_token_env = \"LINE_CHANNEL_ACCESS_TOKEN\"",
-    },
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG below.
     // ── Social ──────────────────────────────────────────────────────
     // mastodon, bluesky, and reddit migrated to out-of-process sidecar
     // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
@@ -242,21 +229,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
         config_template: "[channels.teams]\napp_id = \"\"\napp_password_env = \"TEAMS_APP_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "mattermost", display_name: "Mattermost", icon: "MM",
-        description: "Mattermost WebSocket adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token and server URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://mattermost.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("MATTERMOST_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Allowed Channels", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123, def456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in System Console > Bot Accounts", "Copy the token", "Enter server URL and token below"],
-        config_template: "[channels.mattermost]\nserver_url = \"\"\ntoken_env = \"MATTERMOST_TOKEN\"",
-    },
+    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "google_chat", display_name: "Google Chat", icon: "GC",
         description: "Google Chat service account adapter",
@@ -272,20 +246,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a Google Cloud project with Chat API", "Download service account JSON key", "Enter the path below"],
         config_template: "[channels.google_chat]\nservice_account_env = \"GOOGLE_CHAT_SERVICE_ACCOUNT\"",
     },
-    ChannelMeta {
-        name: "webex", display_name: "Webex", icon: "WX",
-        description: "Cisco Webex bot adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token from developer.webex.com",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("WEBEX_BOT_TOKEN"), required: true, placeholder: "NjI...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_rooms", label: "Allowed Rooms", field_type: FieldType::List, env_var: None, required: false, placeholder: "Y2lz...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot at developer.webex.com", "Copy the token", "Paste it below"],
-        config_template: "[channels.webex]\nbot_token_env = \"WEBEX_BOT_TOKEN\"",
-    },
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "feishu", display_name: "Feishu/Lark", icon: "FS",
         description: "Feishu/Lark Open Platform adapter",
@@ -319,22 +281,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a robot in DingTalk", "Choose mode: webhook (needs public IP) or stream (no public IP needed)", "For webhook: copy token and signing secret", "For stream: copy App Key and App Secret from the app page"],
         config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
     },
-    ChannelMeta {
-        name: "zulip", display_name: "Zulip", icon: "ZL",
-        description: "Zulip event queue adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API key, server URL, and bot email",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://chat.zulip.org", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "bot_email", label: "Bot Email", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@zulip.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_key_env", label: "API Key", field_type: FieldType::Secret, env_var: Some("ZULIP_API_KEY"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "streams", label: "Streams", field_type: FieldType::List, env_var: None, required: false, placeholder: "general, dev", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Zulip Settings > Your Bots", "Copy the API key", "Enter server URL, bot email, and key below"],
-        config_template: "[channels.zulip]\nserver_url = \"\"\nbot_email = \"\"\napi_key_env = \"ZULIP_API_KEY\"",
-    },
+    // zulip migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.zulip in the SDK package);
+    // see SIDECAR_CATALOG below.
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -410,14 +359,10 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "signal" => config.signal.is_some(),
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
-        "line" => config.line.is_some(),
         "teams" => config.teams.is_some(),
-        "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "webex" => config.webex.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
-        "zulip" => config.zulip.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -519,9 +464,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "line" | "google_chat" | "webhook" | "wecom" => {
-            Some("/webhook")
-        }
+        "feishu" | "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
         _ => None,
     }
 }
@@ -716,6 +659,34 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Slack Socket Mode bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.slack"],
+    },
+    SidecarCatalogEntry {
+        name: "webex",
+        display_name: "Webex",
+        description: "Cisco Webex bot adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.webex"],
+    },
+    SidecarCatalogEntry {
+        name: "line",
+        display_name: "LINE",
+        description: "LINE Messaging API adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.line"],
+    },
+    SidecarCatalogEntry {
+        name: "zulip",
+        display_name: "Zulip",
+        description: "Zulip REST + event-queue long-poll adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.zulip"],
+    },
+    SidecarCatalogEntry {
+        name: "mattermost",
+        display_name: "Mattermost",
+        description: "Mattermost WebSocket + REST adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.mattermost"],
     },
 ];
 
@@ -1230,28 +1201,12 @@ fn channel_config_values(
             .teams
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "mattermost" => config
-            .mattermost
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "zulip" => config
-            .zulip
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "line" => config
-            .line
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "webex" => config
-            .webex
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
@@ -1290,14 +1245,10 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "signal" => config.signal.len(),
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
-        "line" => config.line.len(),
         "teams" => config.teams.len(),
-        "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
-        "webex" => config.webex.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
-        "zulip" => config.zulip.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1329,14 +1280,10 @@ fn channel_instances_serialized(
         "signal" => ser(&config.signal),
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
-        "line" => ser(&config.line),
         "teams" => ser(&config.teams),
-        "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
-        "webex" => ser(&config.webex),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
-        "zulip" => ser(&config.zulip),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),

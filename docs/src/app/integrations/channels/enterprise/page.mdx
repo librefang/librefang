@@ -46,42 +46,45 @@ The Teams adapter uses the Microsoft Bot Framework v3 webhook protocol with OAut
 
 ---
 
-## Mattermost
+## Mattermost (sidecar)
+
+Mattermost migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.mattermost`).
 
 ### Prerequisites
 
 - A Mattermost server (self-hosted or cloud) with admin access
 - A bot account or personal access token
+- Python 3 with the `librefang` SDK installed (`pip install -e sdk/python`)
 
 ### Setup
 
 1. In Mattermost, go to **Integrations > Bot Accounts** and create a new bot, or go to **Account Settings > Security > Personal Access Tokens** and generate a token.
-2. Copy the token.
-3. Set environment variables:
+2. Copy the token and add it to `~/.librefang/secrets.env`:
 
 ```bash
-export MATTERMOST_TOKEN=your-bot-token        # Environment variable
-export MATTERMOST_URL=https://mattermost.example.com
-librefang vault set MATTERMOST_TOKEN          # Encrypted vault (recommended)
-librefang vault set MATTERMOST_URL
-librefang config set-key mattermost           # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+MATTERMOST_TOKEN=your-bot-token
 ```
 
-4. Add to config:
+3. Declare the sidecar in `~/.librefang/config.toml`:
 
 ```toml
-[channels.mattermost]
-token_env = "MATTERMOST_TOKEN"
-url_env = "MATTERMOST_URL"
+[[sidecar_channels]]
+name = "mattermost"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mattermost"]
+channel_type = "mattermost"
 default_agent = "ops"
+[sidecar_channels.env]
+MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_ALLOWED_CHANNELS = "ch-id-1,ch-id-2"    # optional, empty = all
+# MATTERMOST_ACCOUNT_ID = "team-prod"                # optional, multi-bot routing
 ```
 
-5. Restart the daemon.
+4. Restart the daemon.
 
 ### How It Works
 
-The Mattermost adapter connects to the Mattermost server via WebSocket for real-time event delivery and uses the REST v4 API for sending messages. It listens for new post events and routes them to the configured agent.
+The sidecar connects to the Mattermost server over WebSocket (`wss://<host>/api/v4/websocket`) and sends an `authentication_challenge` immediately after the upgrade handshake. It subscribes to `posted` events, deduplicates on `post.id`, and emits messages to the kernel over its stdio channel. Outbound messages use `POST /api/v4/posts` with the inbound `root_id` round-tripped so threaded replies stay in their thread.
 
 ---
 
@@ -125,7 +128,7 @@ The Google Chat adapter authenticates using a service account and receives messa
 
 ---
 
-## Webex
+## Webex (sidecar)
 
 ### Prerequisites
 
@@ -133,31 +136,37 @@ The Google Chat adapter authenticates using a service account and receives messa
 
 ### Setup
 
+Webex migrated to an out-of-process sidecar in v2026.5 (replaces the former in-process Rust adapter). The bot Bearer token belongs in `~/.librefang/secrets.env`, not `config.toml`.
+
 1. Go to [developer.webex.com](https://developer.webex.com/) and sign in.
 2. Navigate to **My Webex Apps** and create a new Bot.
 3. Copy the bot access token.
-4. Set the environment variable:
+4. Save the token in `~/.librefang/secrets.env` (the dashboard's Channels page does this for you):
 
 ```bash
-export WEBEX_BOT_TOKEN=your-webex-bot-token   # Environment variable
-librefang vault set WEBEX_BOT_TOKEN           # Encrypted vault (recommended)
-librefang config set-key webex                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+WEBEX_BOT_TOKEN=your-webex-bot-token
 ```
 
-5. Add to config:
+5. Declare the sidecar in `config.toml`:
 
-```toml
-[channels.webex]
-token_env = "WEBEX_BOT_TOKEN"
+```bash
+[[sidecar_channels]]
+name = "webex"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webex"]
+channel_type = "webex"
 default_agent = "assistant"
+
+[sidecar_channels.env]
+# WEBEX_ALLOWED_ROOMS = "Y2lz...A,Y2lz...B"  # optional, empty = all rooms
+# WEBEX_ACCOUNT_ID = "org-prod"              # optional, multi-bot routing
 ```
 
 6. Restart the daemon.
 
 ### How It Works
 
-The Webex adapter registers a webhook with the Webex API to receive message events. Incoming messages are fetched via the Webex REST API using the message ID from the webhook payload, and responses are posted back through the messages endpoint.
+The Webex sidecar (`librefang.sidecar.adapters.webex`) connects to Cisco's Mercury WebSocket gateway for real-time message activity, then fetches the full message body via the Webex REST API (`GET /messages/<id>`). Outbound replies are posted via `POST /messages`, optionally with `parentId` set to thread under the originating message (improvement over the Rust adapter, which never sent `parentId`). 429 responses on either side honour the `Retry-After` header and retry once.
 
 ---
 
@@ -250,6 +259,8 @@ The sidecar polls `GET /api/v1/channels.history` per room at the configured inte
 
 ## Zulip
 
+Zulip is provided by the out-of-process Python sidecar adapter `librefang.sidecar.adapters.zulip`. The in-process `[channels.zulip]` block was removed in the sidecar migration.
+
 ### Prerequisites
 
 - A Zulip server account (cloud or self-hosted)
@@ -260,31 +271,29 @@ The sidecar polls `GET /api/v1/channels.history` per room at the configured inte
 1. In Zulip, go to **Settings > Your bots** and click **Add a new bot**.
 2. Choose **Generic bot** and create it.
 3. Note the bot's email address and API key.
-4. Set environment variables:
+4. Declare the sidecar in your config:
 
 ```bash
-export ZULIP_EMAIL=bot@example.zulipchat.com  # Environment variable
-export ZULIP_API_KEY=your-api-key
-export ZULIP_URL=https://example.zulipchat.com
-librefang vault set ZULIP_EMAIL               # Encrypted vault (recommended)
-librefang vault set ZULIP_API_KEY
-librefang vault set ZULIP_URL
-librefang config set-key zulip                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # optional; empty = all subscribed
+# ZULIP_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-5. Add to config:
+5. Put the bot's API key in `~/.librefang/secrets.env`:
 
-```toml
-[channels.zulip]
-email_env = "ZULIP_EMAIL"
-api_key_env = "ZULIP_API_KEY"
-url_env = "ZULIP_URL"
-default_agent = "assistant"
+```bash
+ZULIP_API_KEY=your-api-key
 ```
 
 6. Restart the daemon.
 
 ### How It Works
 
-The Zulip adapter uses Zulip's event queue API for long-polling. It registers an event queue for message events, then continuously polls the queue for new messages. Responses are sent via the `messages` REST endpoint.
+The sidecar uses Zulip's event queue API for long-polling. At startup it calls `GET /api/v1/users/me` to discover the bot's stable user id, registers an event queue via `POST /api/v1/register` (narrowed to the configured `ZULIP_STREAMS` if set), then long-polls `GET /api/v1/events` until shutdown. Inbound messages are filtered by the bot's own user id (so renames don't break self-skip) and deduped by `message.id` (so a `BAD_EVENT_QUEUE_ID` re-register can't re-emit). Outbound responses go through `POST /api/v1/messages`, using `cmd.thread_id` as the target topic so replies land in the originating topic. 429 responses on any of the four REST paths honour `Retry-After`.

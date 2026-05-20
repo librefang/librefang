@@ -30,18 +30,14 @@ macro_rules! for_each_channel_field {
         $mac!(email, "email");
         $mac!(feishu, "feishu");
         $mac!(google_chat, "google_chat");
-        $mac!(line, "line");
         $mac!(matrix, "matrix");
-        $mac!(mattermost, "mattermost");
         $mac!(qq, "qq");
         $mac!(signal, "signal");
         $mac!(teams, "teams");
-        $mac!(webex, "webex");
         $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
         $mac!(wecom, "wecom");
         $mac!(whatsapp, "whatsapp");
-        $mac!(zulip, "zulip");
     };
 }
 
@@ -474,18 +470,14 @@ mod tests {
             "email",
             "feishu",
             "google_chat",
-            "line",
             "matrix",
-            "mattermost",
             "qq",
             "signal",
             "teams",
-            "webex",
             "webhook",
             "wechat",
             "wecom",
             "whatsapp",
-            "zulip",
         ];
 
         assert_eq!(

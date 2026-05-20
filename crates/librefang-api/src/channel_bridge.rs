@@ -240,8 +240,8 @@ use librefang_channels::email::EmailAdapter;
 use librefang_channels::google_chat::GoogleChatAdapter;
 #[cfg(feature = "channel-matrix")]
 use librefang_channels::matrix::MatrixAdapter;
-#[cfg(feature = "channel-mattermost")]
-use librefang_channels::mattermost::MattermostAdapter;
+// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+// see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-signal")]
 use librefang_channels::signal::SignalAdapter;
 #[cfg(feature = "channel-teams")]
@@ -250,16 +250,14 @@ use librefang_channels::teams::TeamsAdapter;
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
 use librefang_channels::whatsapp::WhatsAppAdapter;
-#[cfg(feature = "channel-zulip")]
-use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
 #[cfg(feature = "channel-feishu")]
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
-#[cfg(feature = "channel-line")]
-use librefang_channels::line::LineAdapter;
-// Wave 4
-#[cfg(feature = "channel-webex")]
-use librefang_channels::webex::WebexAdapter;
+// line migrated to a sidecar (librefang.sidecar.adapters.line); see
+// SIDECAR_CATALOG in routes/channels.rs.
+// Wave 4 — webex migrated to a sidecar
+// (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
+// routes/channels.rs.
 // Wave 5
 #[cfg(feature = "channel-dingtalk")]
 use librefang_channels::dingtalk::DingTalkAdapter;
@@ -1887,14 +1885,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "matrix" => find_channel_info!(matrix),
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
-            "mattermost" => find_channel_info!(mattermost),
             "google_chat" => find_channel_info!(google_chat),
-            "zulip" => find_channel_info!(zulip),
             // Wave 3
-            "line" => find_channel_info!(line),
             "feishu" => find_channel_info!(feishu),
-            // Wave 4
-            "webex" => find_channel_info!(webex),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
             "webhook" => find_channel_info!(webhook),
@@ -2548,14 +2541,10 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(matrix, "channel-matrix", "Matrix");
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
-    check_channel!(mattermost, "channel-mattermost", "Mattermost");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(zulip, "channel-zulip", "Zulip");
-    check_channel!(line, "channel-line", "LINE");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
-    check_channel!(webex, "channel-webex", "Webex");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
     check_channel!(webhook, "channel-webhook", "Webhook");
@@ -2763,34 +2752,9 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Mattermost
-    #[cfg(feature = "channel-mattermost")]
-    for mm_config in config.mattermost.iter() {
-        if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
-            let base = MattermostAdapter::new(
-                mm_config.server_url.clone(),
-                token,
-                mm_config.allowed_channels.clone(),
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, mm_config.proxy.as_deref(), "Mattermost", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(mm_config.account_id.clone())
-                    .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                mm_config.default_agent.clone(),
-                mm_config.account_id.clone(),
-            ));
-        }
-    }
+    // mattermost migrated to a sidecar
+    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
+    // routes/channels.rs.
 
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
@@ -2823,46 +2787,12 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Zulip
-    #[cfg(feature = "channel-zulip")]
-    for z_config in config.zulip.iter() {
-        if let Some(api_key) = read_token(&z_config.api_key_env, "Zulip") {
-            let adapter = Arc::new(
-                ZulipAdapter::new(
-                    z_config.server_url.clone(),
-                    z_config.bot_email.clone(),
-                    api_key,
-                    z_config.streams.clone(),
-                )
-                .with_account_id(z_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                z_config.default_agent.clone(),
-                z_config.account_id.clone(),
-            ));
-        }
-    }
+    // zulip migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.zulip); no longer spawned here.
 
     // ── Wave 3 ──────────────────────────────────────────────────
-
-    // LINE
-    #[cfg(feature = "channel-line")]
-    for ln_config in config.line.iter() {
-        if let Some(secret) = read_token(&ln_config.channel_secret_env, "LINE (secret)") {
-            if let Some(token) = read_token(&ln_config.access_token_env, "LINE (token)") {
-                let adapter = Arc::new(
-                    LineAdapter::new(secret, token, ln_config.webhook_port)
-                        .with_account_id(ln_config.account_id.clone()),
-                );
-                adapters.push((
-                    adapter,
-                    ln_config.default_agent.clone(),
-                    ln_config.account_id.clone(),
-                ));
-            }
-        }
-    }
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // Feishu/Lark (unified adapter)
     #[cfg(feature = "channel-feishu")]
@@ -2963,22 +2893,8 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Wave 4 ──────────────────────────────────────────────────
-
-    // Webex
-    #[cfg(feature = "channel-webex")]
-    for wx_config in config.webex.iter() {
-        if let Some(token) = read_token(&wx_config.bot_token_env, "Webex") {
-            let adapter = Arc::new(
-                WebexAdapter::new(token, wx_config.allowed_rooms.clone())
-                    .with_account_id(wx_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wx_config.default_agent.clone(),
-                wx_config.account_id.clone(),
-            ));
-        }
-    }
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // ── Wave 5 ──────────────────────────────────────────────────
 
@@ -4050,14 +3966,9 @@ mod tests {
         assert!(config.channels.matrix.is_none());
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());
-        assert!(config.channels.mattermost.is_none());
         assert!(config.channels.google_chat.is_none());
-        assert!(config.channels.zulip.is_none());
         // Wave 3
-        assert!(config.channels.line.is_none());
         assert!(config.channels.feishu.is_none());
-        // Wave 4
-        assert!(config.channels.webex.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.webhook.is_none());

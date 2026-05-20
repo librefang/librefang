@@ -39,12 +39,12 @@ pub mod email;
 pub mod feishu;
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
-#[cfg(feature = "channel-line")]
-pub mod line;
+// line migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.line); no longer an in-process channel.
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
-#[cfg(feature = "channel-mattermost")]
-pub mod mattermost;
+// mattermost migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.mattermost); no longer an in-process channel.
 #[cfg(feature = "channel-qq")]
 pub mod qq;
 #[cfg(feature = "channel-signal")]
@@ -53,8 +53,8 @@ pub mod signal;
 // (librefang.sidecar.adapters.slack); no longer an in-process channel.
 #[cfg(feature = "channel-teams")]
 pub mod teams;
-#[cfg(feature = "channel-webex")]
-pub mod webex;
+// webex migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.webex); no longer an in-process channel.
 #[cfg(feature = "channel-webhook")]
 pub mod webhook;
 #[cfg(feature = "channel-wechat")]
@@ -63,5 +63,5 @@ pub mod wechat;
 pub mod wecom;
 #[cfg(feature = "channel-whatsapp")]
 pub mod whatsapp;
-#[cfg(feature = "channel-zulip")]
-pub mod zulip;
+// zulip migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.zulip); no longer an in-process channel.

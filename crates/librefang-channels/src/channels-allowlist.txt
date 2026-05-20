@@ -24,16 +24,12 @@ dingtalk
 email
 feishu
 google_chat
-line
 matrix
-mattermost
 qq
 sidecar
 signal
 teams
-webex
 webhook
 wechat
 wecom
 whatsapp
-zulip

@@ -362,14 +362,14 @@ max_versions_per_agent = 50
 | `MATRIX_ACCESS_TOKEN` | Matrix | Matrix 家服务器访问令牌。 |
 | `EMAIL_PASSWORD` | Email | 邮箱密码或应用专用密码。 |
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework 应用密码。 |
-| `MATTERMOST_TOKEN` | Mattermost | Mattermost Bot 令牌。 |
+| `MATTERMOST_TOKEN` | Mattermost（sidecar） | Mattermost Bot 令牌（sidecar 适配器 —— 写入 `~/.librefang/secrets.env`）。 |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth 令牌。 |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat 个人访问令牌（sidecar 适配器 —— 写入 `~/.librefang/secrets.env`）。 |
 | `ZULIP_API_KEY` | Zulip | Zulip Bot API Key。 |
 | `XMPP_PASSWORD` | XMPP | XMPP 账号密码。 |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
-| `LINE_CHANNEL_SECRET` | LINE | LINE Channel Secret。 |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE Channel Access Token。 |
+| `LINE_CHANNEL_SECRET` | LINE (sidecar) | LINE Channel Secret（`librefang.sidecar.adapters.line` —— 写入 `~/.librefang/secrets.env`）。 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE (sidecar) | LINE Channel Access Token（sidecar 适配器）。 |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit 应用客户端密钥。 |
 | `REDDIT_PASSWORD` | Reddit | Reddit Bot 账号密码。 |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon 访问令牌。 |
@@ -380,7 +380,7 @@ max_versions_per_agent = 50
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded Bot 令牌。 |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase 纸钥匙。 |
 | `THREEMA_SECRET` | Threema | Threema Gateway API 密钥。 |
-| `WEBEX_BOT_TOKEN` | Webex | Webex Bot 令牌。 |
+| `WEBEX_BOT_TOKEN` | Webex (sidecar) | Webex Bot Bearer 令牌（`librefang.sidecar.adapters.webex`）。 |
 | `PUMBLE_BOT_TOKEN` | Pumble | Pumble Bot 令牌。 |
 | `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
 | `TWIST_TOKEN` | Twist | Twist API 令牌。 |

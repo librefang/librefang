@@ -6,41 +6,46 @@ Messaging platform integrations, protocol adapters, and webhook-based channels.
 
 ## LINE
 
+LINE now ships as the `librefang.sidecar.adapters.line` Python sidecar (the in-process Rust adapter was removed in the sidecar migration). The sidecar runs **its own HTTP webhook server**, so the URL you register at the LINE Developers Console must point at the sidecar host/port, not the LibreFang API port.
+
 ### Prerequisites
 
 - A LINE Messaging API channel (from the [LINE Developers Console](https://developers.line.biz/en/docs/messaging-api/))
-- A publicly accessible webhook URL
+- The `librefang` Python SDK installed where the sidecar will run
+- A publicly accessible webhook URL pointing at the sidecar (typical pattern: an HTTPS reverse proxy in front of the sidecar's `LINE_WEBHOOK_PORT`)
 
 ### Setup
 
 1. Go to the [LINE Developers Console](https://developers.line.biz/console/) and create a new Messaging API channel.
 2. Note the **Channel Secret** and issue a **Channel Access Token**.
-3. Set environment variables:
+3. Set both secrets in `~/.librefang/secrets.env` (or via the dashboard's "Set API Key" button, which writes the same file):
 
 ```bash
-export LINE_CHANNEL_SECRET=your-secret        # Environment variable
-export LINE_ACCESS_TOKEN=your-access-token
-librefang vault set LINE_CHANNEL_SECRET       # Encrypted vault (recommended)
-librefang vault set LINE_ACCESS_TOKEN
-librefang config set-key line                 # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+LINE_CHANNEL_SECRET=your-secret
+LINE_CHANNEL_ACCESS_TOKEN=your-access-token
 ```
 
-4. Add to config:
+4. Declare the sidecar in `config.toml`:
 
 ```toml
-[channels.line]
-channel_secret_env = "LINE_CHANNEL_SECRET"
-access_token_env = "LINE_ACCESS_TOKEN"
+[[sidecar_channels]]
+name = "line"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.line"]
+channel_type = "line"
 default_agent = "assistant"
+[sidecar_channels.env]
+LINE_WEBHOOK_PORT = "9090"
+# LINE_WEBHOOK_PATH = "/webhook"
+# LINE_ACCOUNT_ID = "production"   # optional, multi-bot routing key
 ```
 
-5. In the LINE Developers Console, set the webhook URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/line/webhook`).
-6. Restart the daemon.
+5. In the LINE Developers Console, set the webhook URL to your sidecar host (e.g., `https://your-sidecar-host:9090/webhook`).
+6. Restart the daemon — the supervisor launches the sidecar, which validates the access token via `GET /v2/bot/info` at startup and then accepts inbound webhook POSTs.
 
 ### How It Works
 
-The LINE adapter registers webhook routes on the shared API server (default port 4545) to receive message events from LINE's Messaging API. Each request is verified using the channel secret's HMAC-SHA256 signature. Responses are sent via the LINE Reply API or Push API.
+The sidecar runs as a supervised subprocess of LibreFang. It serves a standalone HTTP webhook endpoint on `LINE_WEBHOOK_PORT` (default `9090`) and `LINE_WEBHOOK_PATH` (default `/webhook`), verifies every inbound POST's `X-Line-Signature` HMAC-SHA256 over the raw request body (missing → 400, mismatched → 401), and forwards parsed `message` events to the kernel via newline-delimited JSON-RPC over stdio. Outbound responses go through `POST /v2/bot/message/push` with the Bearer access token; 429 responses honour `Retry-After` and chunk-level fail-open keeps a single throttled chunk from dropping the rest of a multi-part reply.
 
 ---
 

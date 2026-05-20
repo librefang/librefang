@@ -6387,20 +6387,18 @@ pub struct ChannelsConfig {
     pub email: OneOrMany<EmailConfig>,
     /// Microsoft Teams configuration(s).
     pub teams: OneOrMany<TeamsConfig>,
-    /// Mattermost configuration(s).
-    pub mattermost: OneOrMany<MattermostConfig>,
+    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
-    /// Zulip configuration(s).
-    pub zulip: OneOrMany<ZulipConfig>,
     // Wave 3 — High-value channels
-    /// LINE Messaging API configuration(s).
-    pub line: OneOrMany<LineConfig>,
+    // line migrated to a sidecar (librefang.sidecar.adapters.line);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
-    /// Webex bot configuration(s).
-    pub webex: OneOrMany<WebexConfig>,
+    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // Wave 5 — Niche & differentiating channels
     /// DingTalk robot configuration(s).
     pub dingtalk: OneOrMany<DingTalkConfig>,
@@ -6469,12 +6467,8 @@ impl Default for ChannelsConfig {
             matrix: OneOrMany::default(),
             email: OneOrMany::default(),
             teams: OneOrMany::default(),
-            mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            zulip: OneOrMany::default(),
-            line: OneOrMany::default(),
             feishu: OneOrMany::default(),
-            webex: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
             webhook: OneOrMany::default(),
@@ -6810,57 +6804,10 @@ impl Default for TeamsConfig {
     }
 }
 
-/// Mattermost channel adapter configuration.
-//
-// `deny_unknown_fields` — see `WhatsAppConfig` for the rationale (#5130).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct MattermostConfig {
-    /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
-    pub server_url: String,
-    /// Env var name holding the bot token.
-    pub token_env: String,
-    /// Allowed channel IDs (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Initial backoff in seconds on WebSocket failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on WebSocket failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
-    /// adapter's REST client (#4795). Affects REST API calls only —
-    /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `WhatsAppConfig::proxy` for accepted
-    /// URL shapes and env-var interaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for MattermostConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "MATTERMOST_TOKEN".to_string(),
-            allowed_channels: vec![],
-            account_id: None,
-            default_agent: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-            proxy: None,
-        }
-    }
-}
+// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+// the in-process `MattermostConfig` + `[channels.mattermost]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 /// Google Chat channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -6901,77 +6848,13 @@ impl Default for GoogleChatConfig {
     }
 }
 
-/// Zulip channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ZulipConfig {
-    /// Zulip server URL.
-    pub server_url: String,
-    /// Bot email address.
-    pub bot_email: String,
-    /// Env var name holding the API key.
-    pub api_key_env: String,
-    /// Streams to listen in.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub streams: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for ZulipConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            bot_email: String::new(),
-            api_key_env: "ZULIP_API_KEY".to_string(),
-            streams: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// zulip migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.zulip); the in-process `ZulipConfig`
+// + `[channels.zulip]` block were removed in this migration.
 
 // ── Wave 3 channel configs ─────────────────────────────────────────
-
-/// LINE Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct LineConfig {
-    /// Env var name holding the channel secret.
-    pub channel_secret_env: String,
-    /// Env var name holding the channel access token.
-    pub access_token_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for LineConfig {
-    fn default() -> Self {
-        Self {
-            channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
-            access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
-            webhook_port: 8450,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// line migrated to a sidecar (librefang.sidecar.adapters.line); see
+// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Feishu/Lark Open Platform channel adapter configuration.
 ///
@@ -7131,37 +7014,8 @@ impl Default for WeChatConfig {
 }
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
-
-/// Webex bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WebexConfig {
-    /// Env var name holding the bot token.
-    pub bot_token_env: String,
-    /// Room IDs to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WebexConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "WEBEX_BOT_TOKEN".to_string(),
-            allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// webex migrated to a sidecar (librefang.sidecar.adapters.webex); see
+// SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 // ── Wave 5 channel configs ─────────────────────────────────────────
 
