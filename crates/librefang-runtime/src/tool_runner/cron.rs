@@ -1,19 +1,35 @@
 //! Low-level cron tools — direct KernelHandle::cron_* wrappers.
 //!
 //! For the natural-language `schedule_*` family see `tool_runner::schedule`.
+//!
+//! First module migrated from `Result<String, String>` to
+//! `Result<String, ToolError>` (#3576). See
+//! `docs/architecture/error-contracts.md` for the migration sequence.
 
-use super::require_kernel;
+use super::error::{ToolError, ToolResult};
+use super::require_kernel_typed;
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
+
+/// Build the `ToolError` returned when the dispatcher didn't attribute a
+/// caller agent id. This is an internal wiring / invariant violation — the
+/// LLM cannot recover from it, and bucketing it under `Unavailable` would lie
+/// about the missing kernel-handle subsystem case (which IS user-visible at
+/// 503). `Internal` is the honest mapping.
+fn caller_agent_id_missing(tool: &str) -> ToolError {
+    ToolError::Internal(format!(
+        "caller agent id missing — dispatcher did not attribute the {tool} call"
+    ))
+}
 
 pub(super) async fn tool_cron_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
     sender_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("Agent ID required for cron_create")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_create"))?;
     let mut job = input.clone();
     if let (Some(pid), Some(obj)) = (sender_id, job.as_object_mut()) {
         if !pid.is_empty() && !obj.contains_key("peer_id") {
@@ -25,44 +41,102 @@ pub(super) async fn tool_cron_create(
     }
     kh.cron_create(agent_id, job)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(ToolError::upstream)
 }
 
 pub(super) async fn tool_cron_list(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("Agent ID required for cron_list")?;
-    let jobs = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&jobs).map_err(|e| format!("Failed to serialize cron jobs: {e}"))
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_list"))?;
+    let jobs = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
+    // `?`-bubble via `From<serde_json::Error> for ToolError`, which preserves
+    // the underlying `serde_json::Error` on the `source()` chain rather than
+    // stringifying it.
+    Ok(serde_json::to_string_pretty(&jobs)?)
 }
 
 pub(super) async fn tool_cron_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     let job_id = input["job_id"]
         .as_str()
-        .ok_or("Missing 'job_id' parameter")?;
-    let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
+        .ok_or(ToolError::MissingParameter("job_id"))?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_cancel"))?;
     // Authorize: the caller may only cancel jobs that belong to them.
     // Otherwise an agent with the cron_cancel tool could delete any other
     // agent's jobs as long as it learns their UUID (via side-channel or
     // social engineering).
-    let owned = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
+    let owned = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
     let owns_job = owned.iter().any(|job| {
         job.get("id")
             .and_then(|v| v.as_str())
             .is_some_and(|id| id == job_id)
     });
     if !owns_job {
-        return Err(format!(
-            "Cron job '{job_id}' not found or not owned by this agent"
-        ));
+        // Collapse "not owned" and "doesn't exist" into one NotFound — see
+        // the variant doc on `ToolError::NotFound` for the side-channel
+        // rationale.
+        return Err(ToolError::NotFound {
+            kind: "Cron job",
+            id: job_id.to_string(),
+        });
     }
-    kh.cron_cancel(job_id).await.map_err(|e| e.to_string())?;
+    kh.cron_cancel(job_id).await.map_err(ToolError::upstream)?;
     Ok(format!("Cron job '{job_id}' cancelled."))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure unit tests for the validation / wiring boundary that runs
+    //! BEFORE any kernel call. Cases that require a live KernelHandle
+    //! round-trip (every `Ok` path, every `NotFound`/`Upstream` path that
+    //! depends on a kernel result) live in the integration test file
+    //! `tests/tool_runner_forwarding_task_cron.rs`, which has the full
+    //! `CapturingKernel` stub. Unit-test scope here is intentionally narrow
+    //! — exercising a sub-trait of `KernelHandle` would mean duplicating
+    //! the ~20-supertrait stub and would test the stub, not these fns.
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn cron_create_without_kernel_returns_unavailable() {
+        let r = tool_cron_create(&json!({}), None, Some("agent-a"), None).await;
+        match r {
+            Err(ToolError::Unavailable(cap)) => assert_eq!(cap, "Kernel handle"),
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_list_without_kernel_returns_unavailable() {
+        let r = tool_cron_list(None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn cron_cancel_without_kernel_returns_unavailable() {
+        let r = tool_cron_cancel(&json!({"job_id": "x"}), None, Some("agent-a")).await;
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[test]
+    fn caller_agent_id_missing_renders_as_internal_with_tool_name() {
+        // Not `Unavailable` — that would lie about a missing subsystem.
+        // The dispatcher failed to attribute the call; `Internal` is the
+        // honest bucket and the rendered message carries the tool name so
+        // operators can trace which call site dropped the attribution.
+        let e = caller_agent_id_missing("cron_create");
+        match e {
+            ToolError::Internal(msg) => assert!(
+                msg.contains("cron_create"),
+                "message must name the tool, got {msg:?}"
+            ),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
 }

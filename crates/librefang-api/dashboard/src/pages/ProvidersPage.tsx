@@ -5,7 +5,8 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
-import { useProviders, useProviderStatus } from "../lib/queries/providers";
+import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
+import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
 import { useModels } from "../lib/queries/models";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -1080,6 +1081,120 @@ const initialFilterState: FilterState = {
   sortOrder: "asc",
 };
 
+// ── Credential Pools section (#4965) ────────────────────────────────────────
+
+function strategyLabel(s: CredentialPoolStatus["strategy"]): string {
+  switch (s) {
+    case "fill_first":
+      return "fill first";
+    case "round_robin":
+      return "round robin";
+    case "least_used":
+      return "least used";
+    case "random":
+      return "random";
+  }
+}
+
+function formatCooldown(secs: number): string {
+  if (secs >= 3600) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  }
+  if (secs >= 60) {
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+  return `${secs}s`;
+}
+
+function CredentialKeyRow({ cred }: { cred: CredentialPoolKeySnapshot }) {
+  const cooldown = cred.cooldown_remaining_secs;
+  let statusBadge: React.ReactNode;
+  if (cred.is_exhausted) {
+    if (cooldown === "permanent") {
+      statusBadge = <Badge variant="error">invalid</Badge>;
+    } else if (typeof cooldown === "number") {
+      statusBadge = (
+        <Badge variant="warning">
+          cooldown {formatCooldown(cooldown)}
+        </Badge>
+      );
+    } else {
+      statusBadge = <Badge variant="warning">exhausted</Badge>;
+    }
+  } else {
+    statusBadge = <Badge variant="success">healthy</Badge>;
+  }
+  const label = cred.label?.trim() || "key";
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface px-3 py-2 text-xs">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-bold text-text-main truncate">{label}</span>
+        <span className="font-mono text-text-dim">{cred.key_hint}</span>
+        <span className="text-text-dim">priority {cred.priority}</span>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
+        <span className="text-text-dim">{cred.request_count.toLocaleString()} reqs</span>
+        {statusBadge}
+      </div>
+    </div>
+  );
+}
+
+function CredentialPoolCard({ pool }: { pool: CredentialPoolStatus }) {
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Key className="w-4 h-4 text-text-dim" />
+          <span className="font-bold text-text-main">{pool.provider}</span>
+          <Badge variant="info">{strategyLabel(pool.strategy)}</Badge>
+        </div>
+        <span className="text-xs text-text-dim">
+          {pool.available_count} / {pool.total_count} available
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {pool.credentials.map((c, idx) => (
+          <CredentialKeyRow key={`${pool.provider}-${idx}-${c.key_hint}`} cred={c} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function CredentialPoolsSection() {
+  const { data, isLoading, error } = useCredentialPools();
+
+  // Hide the section entirely when no pools are configured — it's a niche
+  // feature and the empty state would just add visual noise to the
+  // Providers page for the 99% of users who don't use it.
+  if (isLoading) return null;
+  if (error) return null;
+  if (!data || data.length === 0) return null;
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Key className="w-4 h-4 text-blue-500" />
+          <h3 className="text-sm font-bold text-text-main">Credential pools</h3>
+          <Badge variant="info">{data.length}</Badge>
+        </div>
+        <span className="text-[10px] text-text-dim font-mono">
+          configure in config.toml `[[credential_pools]]`
+        </span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {data.map((p) => (
+          <CredentialPoolCard key={p.provider} pool={p} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 // ── Main Page ────────────────────────────────────────────────────
 
 export function ProvidersPage() {
@@ -1326,6 +1441,11 @@ export function ProvidersPage() {
           </div>
         }
       />
+
+      {/* Credential pools (#4965) — visible only when at least one pool is
+          configured in config.toml. Read-only here; mutations live in the
+          `librefang auth pool …` CLI. */}
+      <CredentialPoolsSection />
 
       {/* Search & Controls */}
       <div className="flex flex-col sm:flex-row gap-3">

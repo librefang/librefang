@@ -185,6 +185,7 @@ use crate::types;
         routes::copilot_oauth_poll,
         routes::catalog_update,
         routes::catalog_status,
+        routes::list_credential_pools,
 
         // ── Channels ──
         routes::list_channels,

@@ -922,6 +922,18 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
+            // #5227: stamp the chat-qualified scope (same formula as
+            // `SessionId::for_sender_scope`). See `kernel::messaging::
+            // send_message_full_inner` for the rationale and the list of
+            // adapters that depend on this for cross-chat memory isolation.
+            if let Some(scope) =
+                librefang_types::agent::compose_sender_scope(&ctx.channel, ctx.chat_id.as_deref())
+            {
+                manifest.metadata.insert(
+                    "sender_chat_scope".to_string(),
+                    serde_json::Value::String(scope),
+                );
+            }
             if !ctx.display_name.is_empty() {
                 manifest.metadata.insert(
                     "sender_display_name".to_string(),

@@ -27,7 +27,7 @@ import {
   updateAgentTools,
   getAgentTemplateToml,
 } from "../http/client";
-import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import type { AgentSchedulePatch, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentKeys,
@@ -149,6 +149,7 @@ export function usePatchAgent() {
         model?: string;
         provider?: string;
         mcp_servers?: string[];
+        schedule?: AgentSchedulePatch;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {

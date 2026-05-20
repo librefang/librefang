@@ -16,10 +16,36 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Build the redacted hint for an API key. Returns `"****"` plus the last
+/// four characters (Unicode-safe — we count by `char`, never by byte
+/// boundary, so an exotic key containing multi-byte chars cannot panic the
+/// diagnostic path with an `is_char_boundary` slice error). API keys are
+/// expected to be ASCII in practice; this is defense-in-depth so a bad
+/// pool config never takes down the snapshot endpoint.
+fn redact_key_hint(api_key: &str) -> String {
+    // Collect the last four chars in original order without slicing on
+    // arbitrary byte offsets. `chars().count()` is O(n) on UTF-8 but key
+    // strings are short (typically < 200 bytes) so the cost is negligible
+    // and is paid only at snapshot time (diagnostics), never per-request.
+    let total = api_key.chars().count();
+    if total >= 4 {
+        let tail: String = api_key.chars().skip(total - 4).collect();
+        format!("****{tail}")
+    } else {
+        "****".to_string()
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Default cooldown duration after a 429 / 402 response.
+/// Default cooldown duration after a 429 rate-limit response.
 pub const DEFAULT_EXHAUSTED_TTL: Duration = Duration::from_secs(60 * 60); // 1 hour
+/// Default cooldown duration after a 402 credit-exhausted response.
+///
+/// Quota refresh windows are typically daily, so a longer cooldown avoids
+/// burning retries against a key the provider has already disowned for the
+/// current billing window. Issue #4965 specifies 24 hours.
+pub const DEFAULT_CREDIT_EXHAUSTED_TTL: Duration = Duration::from_secs(24 * 60 * 60); // 24 hours
 
 // ── Strategy ─────────────────────────────────────────────────────────────────
 
@@ -44,6 +70,13 @@ pub enum PoolStrategy {
 pub struct PooledCredential {
     /// The API key string.
     pub api_key: String,
+    /// Operator-facing label from `config.toml` (e.g. `"Primary"`, `"Backup"`).
+    /// Carried with the credential so the snapshot can attribute labels to
+    /// the right materialized key — never reconstruct by indexing into the
+    /// original config list, which loses alignment when boot skips a key
+    /// whose env var is unset (Codex #5260 review: "Do not match credential
+    /// labels by position").
+    pub label: String,
     /// Higher value = higher priority. Credentials are sorted descending by
     /// priority on pool creation.
     pub priority: u32,
@@ -57,13 +90,10 @@ pub struct PooledCredential {
 impl std::fmt::Debug for PooledCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact the API key so it is never printed in logs or panic messages.
-        let hint = if self.api_key.len() >= 4 {
-            format!("****{}", &self.api_key[self.api_key.len() - 4..])
-        } else {
-            "****".to_string()
-        };
+        let hint = redact_key_hint(&self.api_key);
         f.debug_struct("PooledCredential")
             .field("api_key", &hint)
+            .field("label", &self.label)
             .field("priority", &self.priority)
             .field("request_count", &self.request_count)
             .field("is_exhausted", &!self.is_available())
@@ -72,9 +102,10 @@ impl std::fmt::Debug for PooledCredential {
 }
 
 impl PooledCredential {
-    fn new(api_key: String, priority: u32) -> Self {
+    fn new(api_key: String, label: String, priority: u32) -> Self {
         Self {
             api_key,
+            label,
             priority,
             request_count: 0,
             exhausted_until: None,
@@ -98,6 +129,11 @@ impl PooledCredential {
 /// characters (prefixed by `****`) is included.
 #[derive(Debug, Clone)]
 pub struct CredentialSnapshot {
+    /// Operator-facing label from `config.toml` (e.g. `"Primary"`, `"Backup"`).
+    /// Empty string when the pool was built without labels (legacy callers /
+    /// tests). Always carried alongside the credential — never reconstructed
+    /// by positional indexing into the original config list (Codex #5260).
+    pub label: String,
     /// Redacted key hint, e.g. `"****abcd"`.
     pub key_hint: String,
     /// Higher value = higher priority.
@@ -106,20 +142,41 @@ pub struct CredentialSnapshot {
     pub request_count: u64,
     /// Whether this credential is currently exhausted (in cooldown).
     pub is_exhausted: bool,
+    /// Remaining cooldown in seconds when `is_exhausted = true`, else `None`.
+    /// `Some(u64::MAX)` indicates a permanently-marked key (auth failure).
+    pub cooldown_remaining_secs: Option<u64>,
 }
 
 impl CredentialSnapshot {
     fn from_credential(c: &PooledCredential) -> Self {
-        let hint = if c.api_key.len() >= 4 {
-            format!("****{}", &c.api_key[c.api_key.len() - 4..])
-        } else {
-            "****".to_string()
+        let hint = redact_key_hint(&c.api_key);
+        let now = Instant::now();
+        let (is_exhausted, cooldown) = match c.exhausted_until {
+            None => (false, None),
+            Some(until) => {
+                if now >= until {
+                    (false, None)
+                } else {
+                    let remaining = until.saturating_duration_since(now).as_secs();
+                    // mark_permanent uses Instant::now() + 100 years — any
+                    // value larger than a year is treated as permanent for
+                    // diagnostic purposes.
+                    let remaining = if remaining > 365 * 86400 {
+                        u64::MAX
+                    } else {
+                        remaining
+                    };
+                    (true, Some(remaining))
+                }
+            }
         };
         Self {
+            label: c.label.clone(),
             key_hint: hint,
             priority: c.priority,
             request_count: c.request_count,
-            is_exhausted: !c.is_available(),
+            is_exhausted,
+            cooldown_remaining_secs: cooldown,
         }
     }
 }
@@ -160,8 +217,10 @@ pub struct CredentialPool {
     /// All mutable state behind a single lock.
     inner: Mutex<CredentialPoolInner>,
     strategy: PoolStrategy,
-    /// How long an exhausted credential stays in cooldown.
+    /// How long a rate-limited (429) credential stays in cooldown.
     exhausted_ttl: Duration,
+    /// How long a credit-exhausted (402) credential stays in cooldown.
+    credit_exhausted_ttl: Duration,
 }
 
 impl CredentialPool {
@@ -169,10 +228,31 @@ impl CredentialPool {
     ///
     /// Credentials are sorted by priority **descending** so that `FillFirst`
     /// simply picks the first available entry.
+    ///
+    /// Each credential is materialized with an empty operator-facing label.
+    /// Callers that have labels available from `config.toml` should use
+    /// [`CredentialPool::new_with_labels`] so the redacted snapshot can
+    /// attribute labels correctly (see Codex #5260).
     pub fn new(keys: Vec<(String, u32)>, strategy: PoolStrategy) -> Self {
+        let labeled: Vec<(String, String, u32)> = keys
+            .into_iter()
+            .map(|(k, p)| (k, String::new(), p))
+            .collect();
+        Self::new_with_labels(labeled, strategy)
+    }
+
+    /// Create a new pool from `(api_key, label, priority)` triples.
+    ///
+    /// Use this constructor in any code path where the operator-facing label
+    /// from `config.toml` is available. The label is carried inside each
+    /// [`PooledCredential`] and emitted by [`CredentialPool::snapshot`], so
+    /// diagnostics never reconstruct the label by indexing into the original
+    /// config list (which loses alignment when boot skips a key whose env
+    /// var is unset).
+    pub fn new_with_labels(keys: Vec<(String, String, u32)>, strategy: PoolStrategy) -> Self {
         let mut credentials: Vec<PooledCredential> = keys
             .into_iter()
-            .map(|(k, p)| PooledCredential::new(k, p))
+            .map(|(k, label, p)| PooledCredential::new(k, label, p))
             .collect();
         // Sort descending: highest priority first.
         credentials.sort_unstable_by_key(|c| std::cmp::Reverse(c.priority));
@@ -184,10 +264,11 @@ impl CredentialPool {
             }),
             strategy,
             exhausted_ttl: DEFAULT_EXHAUSTED_TTL,
+            credit_exhausted_ttl: DEFAULT_CREDIT_EXHAUSTED_TTL,
         }
     }
 
-    /// Create a pool with a custom exhaustion cooldown period.
+    /// Create a pool with a custom rate-limit cooldown period.
     pub fn with_exhausted_ttl(
         keys: Vec<(String, u32)>,
         strategy: PoolStrategy,
@@ -195,6 +276,20 @@ impl CredentialPool {
     ) -> Self {
         let mut pool = Self::new(keys, strategy);
         pool.exhausted_ttl = exhausted_ttl;
+        pool
+    }
+
+    /// Create a pool with custom cooldowns for both rate-limit (429) and
+    /// credit-exhausted (402) responses.
+    pub fn with_cooldowns(
+        keys: Vec<(String, u32)>,
+        strategy: PoolStrategy,
+        exhausted_ttl: Duration,
+        credit_exhausted_ttl: Duration,
+    ) -> Self {
+        let mut pool = Self::new(keys, strategy);
+        pool.exhausted_ttl = exhausted_ttl;
+        pool.credit_exhausted_ttl = credit_exhausted_ttl;
         pool
     }
 
@@ -239,12 +334,25 @@ impl CredentialPool {
         }
     }
 
-    /// Report that a request with `api_key` was rate-limited (429) or quota-
-    /// exhausted (402).  The credential is placed in cooldown for
-    /// `exhausted_ttl`.
+    /// Report that a request with `api_key` was rate-limited (429).  The
+    /// credential is placed in cooldown for `exhausted_ttl` (default 1 hour).
+    ///
+    /// For quota-exhausted (402) responses use [`mark_credit_exhausted`]
+    /// instead — quota windows are typically daily, so the cooldown is longer.
     pub fn mark_exhausted(&self, api_key: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let until = Instant::now() + self.exhausted_ttl;
+        if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
+            c.exhausted_until = Some(until);
+        }
+    }
+
+    /// Report that a request with `api_key` returned 402 (credits / quota
+    /// exhausted). The credential is placed in cooldown for
+    /// `credit_exhausted_ttl` (default 24 hours per #4965 spec).
+    pub fn mark_credit_exhausted(&self, api_key: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let until = Instant::now() + self.credit_exhausted_ttl;
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.exhausted_until = Some(until);
         }
@@ -294,6 +402,11 @@ impl CredentialPool {
     pub fn total_count(&self) -> usize {
         let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.credentials.len()
+    }
+
+    /// Returns the pool's selection strategy.
+    pub fn strategy(&self) -> PoolStrategy {
+        self.strategy.clone()
     }
 
     /// Returns a redacted snapshot of all credentials (for diagnostics / dashboards).
@@ -378,8 +491,25 @@ impl CredentialPool {
 pub type ArcCredentialPool = Arc<CredentialPool>;
 
 /// Construct a new [`ArcCredentialPool`] from key-priority pairs.
+///
+/// Credentials are stored without operator-facing labels — use
+/// [`new_arc_pool_with_labels`] when labels from `config.toml` are available
+/// so [`CredentialPool::snapshot`] can return them in the right order.
 pub fn new_arc_pool(keys: Vec<(String, u32)>, strategy: PoolStrategy) -> ArcCredentialPool {
     Arc::new(CredentialPool::new(keys, strategy))
+}
+
+/// Construct a new [`ArcCredentialPool`] from `(api_key, label, priority)` triples.
+///
+/// Preferred over [`new_arc_pool`] in the kernel boot path so labels are
+/// carried with the materialized credentials (Codex #5260: never attribute
+/// labels by positional index after env-var resolution may have skipped a
+/// configured key).
+pub fn new_arc_pool_with_labels(
+    keys: Vec<(String, String, u32)>,
+    strategy: PoolStrategy,
+) -> ArcCredentialPool {
+    Arc::new(CredentialPool::new_with_labels(keys, strategy))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -562,5 +692,146 @@ mod tests {
     fn new_arc_pool_works() {
         let pool = new_arc_pool(vec![("key-a".to_string(), 1)], PoolStrategy::RoundRobin);
         assert_eq!(pool.acquire().as_deref(), Some("key-a"));
+    }
+
+    // ── 402 credit-exhausted (#4965) ──────────────────────────────────────────
+
+    #[test]
+    fn mark_credit_exhausted_uses_longer_ttl() {
+        // Confirm the 402 path uses the credit-exhausted TTL rather than the
+        // rate-limit TTL: with rate-limit TTL = 0 but credit TTL = 1h, a key
+        // marked via mark_credit_exhausted stays unavailable.
+        let pool = CredentialPool::with_cooldowns(
+            vec![("key-a".to_string(), 1)],
+            PoolStrategy::FillFirst,
+            Duration::from_secs(0), // rate-limit TTL — would recover immediately
+            Duration::from_secs(3600), // credit TTL — would block for an hour
+        );
+        pool.mark_credit_exhausted("key-a");
+        assert!(
+            pool.acquire().is_none(),
+            "credit-exhausted should respect credit_exhausted_ttl, not exhausted_ttl"
+        );
+    }
+
+    #[test]
+    fn mark_credit_exhausted_default_24h() {
+        // Sanity: the constant matches the issue spec.
+        assert_eq!(
+            DEFAULT_CREDIT_EXHAUSTED_TTL,
+            Duration::from_secs(24 * 60 * 60),
+            "Issue #4965 spec: 402 cooldown is 24 hours"
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_cooldown_remaining() {
+        let pool = CredentialPool::with_exhausted_ttl(
+            vec![("key-a".to_string(), 1)],
+            PoolStrategy::FillFirst,
+            Duration::from_secs(120),
+        );
+        pool.mark_exhausted("key-a");
+        let snap = pool.snapshot();
+        assert!(snap[0].is_exhausted);
+        let remaining = snap[0].cooldown_remaining_secs.expect("cooldown set");
+        // Some jitter is expected, but should be close to 120s.
+        assert!(
+            remaining > 60 && remaining <= 120,
+            "expected ~120s cooldown remaining, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_permanent_marker() {
+        let pool = make_pool(&[("key-a", 1)], PoolStrategy::FillFirst);
+        pool.mark_permanent("key-a");
+        let snap = pool.snapshot();
+        assert!(snap[0].is_exhausted);
+        assert_eq!(
+            snap[0].cooldown_remaining_secs,
+            Some(u64::MAX),
+            "mark_permanent should sentinel-encode as u64::MAX"
+        );
+    }
+
+    // ── label carry-through (#5260 round-2) ──────────────────────────────────
+
+    /// The label travels with the credential through pool construction,
+    /// snapshot rendering, and priority sort — never reconstructed by
+    /// positional indexing into the original config list.
+    #[test]
+    fn snapshot_carries_label_per_credential() {
+        let pool = CredentialPool::new_with_labels(
+            vec![
+                ("sk-low".to_string(), "Backup".to_string(), 5),
+                ("sk-high".to_string(), "Primary".to_string(), 10),
+            ],
+            PoolStrategy::FillFirst,
+        );
+        let snap = pool.snapshot();
+        // Priority-descending order: Primary (10) before Backup (5).
+        assert_eq!(snap[0].label, "Primary");
+        assert_eq!(snap[0].priority, 10);
+        assert_eq!(snap[1].label, "Backup");
+        assert_eq!(snap[1].priority, 5);
+    }
+
+    /// Cooldown is recorded against the underlying api_key match, which
+    /// continues to carry its label — so an exhausted key's snapshot row
+    /// still reports the correct operator-facing label.
+    #[test]
+    fn snapshot_label_survives_mark_exhausted() {
+        let pool = CredentialPool::new_with_labels(
+            vec![
+                ("sk-a".to_string(), "Primary".to_string(), 10),
+                ("sk-b".to_string(), "Backup".to_string(), 5),
+            ],
+            PoolStrategy::FillFirst,
+        );
+        pool.mark_exhausted("sk-a");
+        let snap = pool.snapshot();
+        assert_eq!(
+            snap[0].label, "Primary",
+            "Primary remains labelled Primary even when exhausted"
+        );
+        assert!(snap[0].is_exhausted);
+        assert_eq!(snap[1].label, "Backup");
+        assert!(!snap[1].is_exhausted);
+    }
+
+    /// The legacy unlabeled constructor still works and emits empty labels.
+    /// This keeps the in-kernel `pooled_driver` unit-test helpers and any
+    /// future internal call sites compiling without touching them.
+    #[test]
+    fn unlabeled_constructor_emits_empty_labels() {
+        let pool = make_pool(&[("sk-a", 10), ("sk-b", 5)], PoolStrategy::FillFirst);
+        let snap = pool.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].label, "");
+        assert_eq!(snap[1].label, "");
+    }
+
+    // ── key_hint redaction (UTF-8 boundary safety) ────────────────────────────
+
+    /// Defense-in-depth: a key with a non-ASCII character at the suffix boundary
+    /// must NOT panic the redaction helper. API keys are expected to be ASCII
+    /// in practice, but the diagnostic snapshot path is invoked from HTTP/CLI/
+    /// dashboard rendering — a panic there would surface as a 500 to the caller.
+    #[test]
+    fn redact_key_hint_handles_multibyte_chars() {
+        // 8-char key ending in a 4-byte emoji — `&s[s.len() - 4..]` would
+        // panic with "byte index N is not a char boundary" on the old impl.
+        let key = "abcd🦀ef"; // 7 chars; last 4 are 'd', '🦀', 'e', 'f'.
+        let hint = super::redact_key_hint(key);
+        assert_eq!(hint, "****d🦀ef");
+        // Pure-ASCII fast path still works.
+        assert_eq!(super::redact_key_hint("sk-abcd1234"), "****1234");
+        // Short key (< 4 chars) falls back to a plain redaction marker.
+        assert_eq!(super::redact_key_hint("xyz"), "****");
+        assert_eq!(super::redact_key_hint(""), "****");
+        // 4-byte char that occupies multiple bytes still counts as one char.
+        let key2 = "🦀🦀🦀🦀"; // 4 chars / 16 bytes.
+        assert_eq!(super::redact_key_hint(key2), "****🦀🦀🦀🦀");
     }
 }

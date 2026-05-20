@@ -49,8 +49,6 @@ pub mod mattermost;
 pub mod nextcloud;
 #[cfg(feature = "channel-qq")]
 pub mod qq;
-#[cfg(feature = "channel-reddit")]
-pub mod reddit;
 #[cfg(feature = "channel-rocketchat")]
 pub mod rocketchat;
 #[cfg(feature = "channel-signal")]

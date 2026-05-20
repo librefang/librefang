@@ -433,6 +433,29 @@ pub async fn run_agent_loop(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // #5227: chat-qualified scope stamped by the kernel alongside
+    // `sender_channel`. Production callers go through `messaging.rs`
+    // (`compose_sender_scope` / `for_sender_scope`) which stamps both
+    // fields atomically; agents driven from channel adapters
+    // therefore always carry the disambiguated scope.
+    //
+    // Fall back to `sender_channel` for backward compatibility with
+    // any caller still synthesizing manifests without going through
+    // those kernel inject sites (tests, fuzzers, hot-path bypasses).
+    // The fallback keeps the bare-channel behaviour the original
+    // #5227 fix shipped: the post-filter still applies on those
+    // paths, but on split-channel adapters (telegram / slack / discord
+    // — where `sender_channel` is just the platform name and the chat
+    // id lives in a separate metadata field) the scope string is
+    // ambiguous between a group and a DM with the same peer. New
+    // call sites should always set `sender_chat_scope` explicitly;
+    // grep for `compose_sender_scope` for the canonical pattern.
+    let sender_chat_scope: Option<String> = manifest
+        .metadata
+        .get("sender_chat_scope")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| sender_channel.clone());
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -448,6 +471,7 @@ pub async fn run_agent_loop(
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
+        sender_chat_scope: sender_chat_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
@@ -1269,6 +1293,7 @@ pub async fn run_agent_loop(
                         user_message,
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
+                        sender_chat_scope: sender_chat_scope.as_deref(),
                         streaming: false,
                         opts,
                     },

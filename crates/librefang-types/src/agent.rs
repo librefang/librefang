@@ -312,10 +312,12 @@ impl SessionId {
     /// them silently disagreeing would re-introduce #4868 (channel `/new`
     /// deleting the wrong sid).
     pub fn for_sender_scope(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> Self {
-        let scope = match chat_id {
-            Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
-            _ => channel.to_string(),
-        };
+        // `compose_sender_scope` returns `None` only when `channel` is
+        // empty, which is callers' responsibility to avoid (the kernel's
+        // channel branch already guards `!ctx.channel.is_empty()` before
+        // reaching here). Falling back to the bare channel preserves the
+        // pre-helper behaviour without panicking on a degenerate input.
+        let scope = compose_sender_scope(channel, chat_id).unwrap_or_else(|| channel.to_string());
         Self::for_channel(agent_id, &scope)
     }
 
@@ -376,6 +378,30 @@ impl SessionId {
             name.as_bytes(),
         ))
     }
+}
+
+/// Canonical scope-string formula shared by [`SessionId::for_sender_scope`]
+/// and the kernel's `sender_chat_scope` metadata stamp (#5227).
+///
+/// Returns `Some("<channel>:<chat_id>")` when both fields are non-empty,
+/// `Some("<channel>")` when chat_id is absent/empty, and `None` when
+/// channel itself is empty (no scope to compose).
+///
+/// Keeping the two consumers in lockstep is load-bearing: if the kernel's
+/// session-id derivation and the runtime's memory-scope filter ever
+/// disagree on this formula, a memory written under one chat will leak
+/// into the SessionId-isolated history of the OTHER chat — exactly the
+/// regression #5227 set out to close. Both call sites take a
+/// `(channel, chat_id)` pair via this helper rather than re-inlining
+/// `format!("{ch}:{cid}")`.
+pub fn compose_sender_scope(channel: &str, chat_id: Option<&str>) -> Option<String> {
+    if channel.is_empty() {
+        return None;
+    }
+    Some(match chat_id {
+        Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
+        _ => channel.to_string(),
+    })
 }
 
 impl std::str::FromStr for SessionId {
@@ -2857,6 +2883,78 @@ model = "llama-3.3-70b-versatile"
         let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
         let sid = SessionId::for_channel(agent, "telegram");
         assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
+    }
+
+    /// #5227 follow-up — `compose_sender_scope` is the canonical
+    /// formula shared by `SessionId::for_sender_scope` and the kernel's
+    /// `sender_chat_scope` metadata stamp. If the two ever drift,
+    /// memories written under one chat would leak into the SessionId-
+    /// isolated history of the OTHER chat — re-opening the original
+    /// bug but for non-WhatsApp adapters. This test pins all four
+    /// behavioural cases so any future change to the formula has to
+    /// own both sides.
+    #[test]
+    fn compose_sender_scope_formula_5227() {
+        // Bare channel — chat_id absent or empty collapses to the
+        // channel string verbatim (matches `for_channel` semantics).
+        assert_eq!(
+            compose_sender_scope("telegram", None),
+            Some("telegram".to_string()),
+        );
+        assert_eq!(
+            compose_sender_scope("telegram", Some("")),
+            Some("telegram".to_string()),
+        );
+
+        // Chat-qualified — `<channel>:<chat_id>`.
+        assert_eq!(
+            compose_sender_scope("telegram", Some("group--999")),
+            Some("telegram:group--999".to_string()),
+        );
+
+        // Already-qualified channel (WhatsApp gateway path) +
+        // chat_id None — passes through.
+        assert_eq!(
+            compose_sender_scope("whatsapp:+15551234567@s.whatsapp.net", None),
+            Some("whatsapp:+15551234567@s.whatsapp.net".to_string()),
+        );
+
+        // Empty channel is `None` — kernel inject sites guard against
+        // this before reaching the helper, but the helper itself stays
+        // defensive so callers can safely propagate the result via
+        // `if let Some(scope) = compose_sender_scope(...) { ... }`.
+        assert_eq!(compose_sender_scope("", None), None);
+        assert_eq!(compose_sender_scope("", Some("anything")), None);
+    }
+
+    /// #5227 follow-up — verify the two consumers of the formula
+    /// actually agree byte-for-byte. The session-id path goes
+    /// `for_sender_scope -> compose_sender_scope -> for_channel`;
+    /// the memory-stamp path stamps the raw `compose_sender_scope`
+    /// output. Both consumers running through the helper guarantees
+    /// they cannot drift, but it's cheap to assert the equality
+    /// explicitly so a refactor that re-inlines one side is caught.
+    #[test]
+    fn compose_sender_scope_matches_for_sender_scope_5227() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        for (channel, chat_id) in [
+            ("telegram", Some("dm-7777")),
+            ("telegram", Some("group--999")),
+            ("slack", Some("C012345")),
+            ("slack", Some("D012345")),
+            ("whatsapp:+15551234567@s.whatsapp.net", None),
+            ("whatsapp", None),
+            ("discord", Some("ch-1")),
+        ] {
+            let scope = compose_sender_scope(channel, chat_id)
+                .expect("non-empty channel composes successfully");
+            assert_eq!(
+                SessionId::for_sender_scope(agent, channel, chat_id),
+                SessionId::for_channel(agent, &scope),
+                "for_sender_scope and for_channel(compose_sender_scope) must agree \
+                 for (channel={channel}, chat_id={chat_id:?})"
+            );
+        }
     }
 
     #[test]

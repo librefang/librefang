@@ -1076,25 +1076,25 @@ webhook_port = 8450
 | `webhook_port` | u16 | `8450` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.reddit]`
+#### Reddit
+
+Reddit is provided by the Python sidecar adapter (`librefang.sidecar.adapters.reddit`). The in-process `[channels.reddit]` config block was removed in the sidecar migration. Declare Reddit as a `[[sidecar_channels]]` entry instead:
 
 ```toml
-[channels.reddit]
-client_id = ""
-client_secret_env = "REDDIT_CLIENT_SECRET"
-username = ""
-password_env = "REDDIT_PASSWORD"
-subreddits = []
+[[sidecar_channels]]
+name = "reddit"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.reddit"]
+channel_type = "reddit"
+[sidecar_channels.env]
+REDDIT_CLIENT_ID = "abc123"
+REDDIT_USERNAME = "librefang-bot"
+REDDIT_SUBREDDITS = "rust,programming"   # comma-separated
+# REDDIT_ACCOUNT_ID = "prod"              # optional, multi-bot routing key
+# REDDIT_USER_AGENT = "myorg-bot/1.0 (by /u/me)"   # override default UA
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `client_id` | string | `""` | Reddit app client ID. |
-| `client_secret_env` | string | `"REDDIT_CLIENT_SECRET"` | Env var holding the Reddit client secret. |
-| `username` | string | `""` | Reddit bot username. |
-| `password_env` | string | `"REDDIT_PASSWORD"` | Env var holding the Reddit bot password. |
-| `subreddits` | list of strings | `[]` | Subreddit names to monitor. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`REDDIT_CLIENT_SECRET` and `REDDIT_PASSWORD` belong in `~/.librefang/secrets.env` — the dashboard's Channels page writes them there when you fill the Reddit form.
 
 #### Mastodon
 
