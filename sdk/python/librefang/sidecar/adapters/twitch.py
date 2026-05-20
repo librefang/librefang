@@ -103,7 +103,10 @@ from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    split_message as _split_message,
+)
 from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_HOST = "irc.chat.twitch.tv"
@@ -130,9 +133,6 @@ SEEN_IDS_EVICT = 512
 READ_TIMEOUT_SECS = 30.0
 # Reconnect backoff bounds.
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-
 def _normalise_channel(value: str) -> str:
     """Strip whitespace, leading ``#``, and trailing slashes. Twitch
     channels are lowercase ASCII by convention; we coerce to lower

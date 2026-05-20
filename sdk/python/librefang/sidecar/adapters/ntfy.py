@@ -38,19 +38,16 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 MAX_MESSAGE_LEN = 4096
 DEFAULT_SERVER_URL = "https://ntfy.sh"
 # Reconnect/post backoff ceilings, kept separate so the publish-side
 # raise can be capped distinctly from the SSE reconnect curve.
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when ntfy 429s without a `Retry-After` header. The
-# per-topic rate limiter (publish: ~4800/h on ntfy.sh by default)
-# typically sends one in seconds form; fall back to a sane wait so we
-# don't busy-loop at 1 s.
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 class NtfyAdapter(SidecarAdapter):
     # ntfy has no typing/reaction/interactive/thread/streaming concept
     # — declare nothing, so LibreFang routes plain text only.

@@ -119,7 +119,10 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    split_message as _split_message,
+)
 from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -136,7 +139,6 @@ MAX_MESSAGE_LEN = 10000
 DEFAULT_POLL_INTERVAL_SECS = 30
 MIN_POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
 # Refresh OAuth tokens 5 minutes before expiry.
 TOKEN_REFRESH_BUFFER_SECS = 300
 # Cap the dedupe set; oldest half is evicted on overflow.

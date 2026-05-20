@@ -129,9 +129,11 @@ from typing import Any, Optional
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
-    SeenSet as _SeenSet,
     http_request as _http_request,
+    MAX_BACKOFF_SECS,
     parse_retry_after as _parse_retry_after_impl,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
 )
@@ -147,13 +149,6 @@ LONG_POLL_HTTP_TIMEOUT_SECS = POLL_TIMEOUT_SECS + 10
 SEND_TIMEOUT_SECS = 15.0
 
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-# Default fallback when Zulip 429s without a parseable Retry-After.
-# 30 s is conservative enough not to re-trigger throttling. Mirrors
-# the rocketchat / nextcloud / webex sidecars.
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 # Bounded dedupe cap on Zulip ``message.id``. Same policy as
 # reddit / rocketchat / nextcloud / webex.
 SEEN_MESSAGES_MAX = 10_000

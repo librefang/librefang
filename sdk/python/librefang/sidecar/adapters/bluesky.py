@@ -72,7 +72,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 DEFAULT_SERVICE_URL = "https://bsky.social"
 # Bluesky post length cap (graphemes per spec; we approximate with
@@ -80,12 +84,6 @@ DEFAULT_SERVICE_URL = "https://bsky.social"
 MAX_MESSAGE_LEN = 300
 POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when Bluesky 429s without a `Retry-After` header.
-# AT Protocol's XRPC layer typically sends one (seconds form, alongside
-# `RateLimit-Reset` epoch); fall back to a sane wait so we don't busy-
-# loop at 1 s when the header is absent or unparseable.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 # Sessions last ~2h on bsky.social; refresh 5 min before the 90-min
 # safety mark used by the Rust adapter.
 SESSION_LIFE_SECS = 5400

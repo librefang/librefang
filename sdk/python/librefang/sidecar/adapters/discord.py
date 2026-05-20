@@ -88,9 +88,10 @@ from typing import Any, Callable, Optional
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
-    SeenSet as _SeenSet,
     http_request as _http_request,
+    MAX_BACKOFF_SECS,
     parse_retry_after as _parse_retry_after_impl,
+    SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
 )
@@ -138,8 +139,6 @@ HANDSHAKE_TIMEOUT_SECS = 15.0
 # consecutive failure, capped at MAX_BACKOFF_SECS. Matches Rust
 # ``with_backoff`` defaults.
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
 FATAL_CLOSE_CODES = {
     4004: "authentication failed — DISCORD_BOT_TOKEN is invalid",
     4010: "invalid shard",

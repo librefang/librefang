@@ -103,8 +103,10 @@ from typing import Any
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
-    SeenSet as _SeenSet,
     http_request as _http_request,
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
     split_message as _split_message,
 )
 
@@ -115,12 +117,6 @@ MAX_MESSAGE_LEN = 32000
 DEFAULT_POLL_INTERVAL_SECS = 3
 MIN_POLL_INTERVAL_SECS = 1
 SEND_TIMEOUT_SECS = 30
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when Talk 429s without a `Retry-After` header. The
-# OCS bruteforce throttler typically sends one (delay-in-seconds form),
-# but the protocol does not require it, so we need a sane fallback.
-# 30 s matches Talk's documented default throttle window.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 # How many messages per `chat/<token>?lookIntoFuture=1` poll. Matches
 # the Rust adapter's `limit=100` query param.
 CHAT_FETCH_LIMIT = 100

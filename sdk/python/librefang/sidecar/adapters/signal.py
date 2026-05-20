@@ -125,9 +125,11 @@ from typing import Any, Callable, Optional
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
-    SeenSet as _SeenSet,
     http_request as _http_request,
+    MAX_BACKOFF_SECS,
     parse_retry_after as _parse_retry_after_impl,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
 )
@@ -136,13 +138,6 @@ SEND_TIMEOUT_SECS = 15.0
 POLL_TIMEOUT_SECS = 30.0
 
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-# Default fallback when signal-cli-rest-api 429s without a parseable
-# ``Retry-After`` header. 30 s is conservative — mirrors the rocketchat
-# / nextcloud / webex / line / mattermost sidecars (#5303).
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 # Bounded dedupe cap on ``envelope.timestamp``. Same policy as
 # reddit / rocketchat / nextcloud / webex / line / mattermost.
 SEEN_MESSAGES_MAX = 10_000

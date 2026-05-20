@@ -97,7 +97,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 # Matches the Rust adapter's MAX_MESSAGE_LEN. Rocket.Chat's hard cap is
@@ -109,12 +113,6 @@ MAX_MESSAGE_LEN = 4096
 DEFAULT_POLL_INTERVAL_SECS = 2
 MIN_POLL_INTERVAL_SECS = 1
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when Rocket.Chat 429s without a `Retry-After`
-# header. The REST API's rate-limiter typically sends one (seconds
-# form), but it isn't required by the protocol, so we need a sane
-# fallback to avoid busy-looping at 1 s.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 # How many channels to fetch in `channels.list.joined`. Matches Rust.
 LIST_JOINED_COUNT = 100
 # How many messages per `channels.history` poll. Matches Rust.

@@ -64,20 +64,19 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 # Mastodon's default per-status length limit. Some instances configure
 # higher limits (1000–4000); override via MASTODON_MAX_MESSAGE_LEN.
 DEFAULT_MAX_MESSAGE_LEN = 500
 SSE_RECONNECT_DELAY_SECS = 5
 POLL_INTERVAL_SECS = 5
-MAX_BACKOFF_SECS = 60.0
 SEND_TIMEOUT_SECS = 15
 DEFAULT_VISIBILITY = "unlisted"
-# Default fallback when Mastodon 429s without a `Retry-After` header.
-# Most instances send one (seconds form), but the protocol does not
-# require it — fall back to a sane wait so we don't busy-loop at 1 s.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 _ALLOWED_VISIBILITIES = {"public", "unlisted", "private", "direct"}
 
 def _strip_html_tags(value: str) -> str:

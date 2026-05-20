@@ -141,23 +141,30 @@ class SeenSet:
     """Bounded thread-safe LRU-ish set of seen message IDs.
 
     Used by every sidecar that dedupes inbound platform messages
-    (reddit / rocketchat / nextcloud / webex / line / mattermost /
-    signal / qq / twitch / bluesky and a handful of others).
+    (line / mattermost / nextcloud / qq / reddit / rocketchat /
+    signal / twitch / webex / zulip — 10 adapters). Note that
+    bluesky's ``_mark_seen`` is **not** a SeenSet client — it's a
+    server-side ``updateSeen`` REST POST that happens to share the
+    name; see ``bluesky.py`` for the actual function.
 
     Behaviour:
 
     * :meth:`mark` returns ``True`` iff the id is freshly seen
       (i.e. the caller should emit the event).
     * ``None`` or empty-string ids are always treated as fresh —
-      they don't participate in dedupe.
+      they don't participate in dedupe. The one exception is
+      webex, which historically returned ``False`` (drop) on
+      empty; webex's ``_mark_seen`` shim adds that check inline
+      before delegating here.
     * Once the set crosses ``max_size`` entries, the oldest
       ``evict`` ids are dropped in one batch (so the cleanup is
       amortised, not per-call).
 
-    Tests historically reached into ``self._seen_ids`` /
-    ``self._seen_order`` on the adapter; the adapter classes keep
-    those names available as @property shims pointing at this
-    class's ``ids`` / ``order`` attributes.
+    Adapter classes expose this instance as ``self._seen``; tests
+    that need to inspect the internal state read
+    ``adapter._seen.ids`` (the ``set``) or ``adapter._seen.order``
+    (the insertion-ordered ``list``) directly. There are no
+    @property shims on the adapter classes.
     """
 
     def __init__(
