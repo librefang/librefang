@@ -29,7 +29,6 @@ all-channels = [
     "channel-mattermost",
     "channel-qq",
     "channel-signal",
-    "channel-slack",
     "channel-teams",
     "channel-webex",
     "channel-webhook",
@@ -40,7 +39,6 @@ all-channels = [
 ]
 
 # Individual channel features
-channel-slack = []
 channel-matrix = ["dep:pulldown-cmark"]
 channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
 channel-webhook = []

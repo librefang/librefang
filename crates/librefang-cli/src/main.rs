@@ -7992,11 +7992,10 @@ fn cmd_channel_list() {
     println!("Channel Integrations:\n");
 
     // discord migrated to a sidecar adapter
-    // (librefang.sidecar.adapters.discord); managed via
-    // `[[sidecar_channels]]` rather than [channels.discord] now.
+    // (librefang.sidecar.adapters.{discord,slack}); managed via
+    // `[[sidecar_channels]]` rather than [channels.{discord,slack}] now.
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("slack", "SLACK_BOT_TOKEN"),
         ("whatsapp", "WA_ACCESS_TOKEN"),
         ("signal", ""),
         ("matrix", "MATRIX_TOKEN"),
@@ -8039,7 +8038,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("slack", "Slack app (Socket Mode)"),
                 ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
                 ("signal", "Signal (signal-cli)"),
@@ -8070,41 +8068,10 @@ fn cmd_channel_setup(channel: Option<&str>) {
         // (librefang.sidecar.adapters.discord) in v2026.5; the in-process
         // wizard arm was removed. Configure via [[sidecar_channels]] in
         // config.toml or through the dashboard's channel configure page.
-        "slack" => {
-            ui::section(&i18n::t("section-setup-slack"));
-            ui::blank();
-            println!("  1. Go to https://api.slack.com/apps");
-            println!("  2. Create New App -> From Scratch");
-            println!("  3. Enable Socket Mode (Settings -> Socket Mode)");
-            println!("  4. Copy the App-Level Token (xapp-...)");
-            println!("  5. Go to OAuth & Permissions, add scopes:");
-            println!("     - chat:write, app_mentions:read, im:history");
-            println!("  6. Install to workspace and copy Bot Token (xoxb-...)");
-            ui::blank();
-
-            let app_token = prompt_input("  Paste your App Token (xapp-...): ");
-            let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
-
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("slack", config_block);
-
-            if !app_token.is_empty() {
-                match dotenv::save_env_key("SLACK_APP_TOKEN", &app_token) {
-                    Ok(()) => ui::success(&i18n::t("channel-app-token-saved")),
-                    Err(_) => println!("    export SLACK_APP_TOKEN={app_token}"),
-                }
-            }
-            if !bot_token.is_empty() {
-                match dotenv::save_env_key("SLACK_BOT_TOKEN", &bot_token) {
-                    Ok(()) => ui::success(&i18n::t("channel-bot-token-saved")),
-                    Err(_) => println!("    export SLACK_BOT_TOKEN={bot_token}"),
-                }
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Slack")]));
-            notify_daemon_restart();
-        }
+        // slack was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.slack) in v2026.5; the in-process
+        // wizard arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
         "whatsapp" => {
             ui::section(&i18n::t("section-setup-whatsapp"));
             ui::blank();

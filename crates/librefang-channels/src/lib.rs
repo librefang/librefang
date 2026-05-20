@@ -49,8 +49,8 @@ pub mod mattermost;
 pub mod qq;
 #[cfg(feature = "channel-signal")]
 pub mod signal;
-#[cfg(feature = "channel-slack")]
-pub mod slack;
+// slack migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.slack); no longer an in-process channel.
 #[cfg(feature = "channel-teams")]
 pub mod teams;
 #[cfg(feature = "channel-webex")]

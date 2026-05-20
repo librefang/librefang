@@ -40,16 +40,9 @@ struct ChannelDef {
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
     // ── Messaging
-    // discord migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.discord); see the channels page in
-    // the dashboard / SIDECAR_CATALOG in routes/channels.rs.
-    ChannelDef {
-        name: "slack",
-        display_name: "Slack",
-        category: "Messaging",
-        env_vars: &["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"],
-        description: "Slack Socket Mode adapter",
-    },
+    // discord and slack migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{discord,slack}); see the channels
+    // page in the dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "whatsapp",
         display_name: "WhatsApp",

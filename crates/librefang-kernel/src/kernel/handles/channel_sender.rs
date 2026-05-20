@@ -35,7 +35,6 @@ macro_rules! for_each_channel_field {
         $mac!(mattermost, "mattermost");
         $mac!(qq, "qq");
         $mac!(signal, "signal");
-        $mac!(slack, "slack");
         $mac!(teams, "teams");
         $mac!(webex, "webex");
         $mac!(webhook, "webhook");
@@ -444,7 +443,6 @@ mod tests {
             "mattermost",
             "qq",
             "signal",
-            "slack",
             "teams",
             "webex",
             "webhook",

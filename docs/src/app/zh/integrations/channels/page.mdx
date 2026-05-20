@@ -48,10 +48,15 @@ channel_type = "discord"
 [sidecar_channels.env]
 DISCORD_BOT_TOKEN = "..."
 
-[channels.slack]
-bot_token_env = "SLACK_BOT_TOKEN"
-app_token_env = "SLACK_APP_TOKEN"
-default_agent = "ops"
+# Slack (sidecar)
+[[sidecar_channels]]
+name = "slack"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.slack"]
+channel_type = "slack"
+[sidecar_channels.env]
+SLACK_APP_TOKEN = "xapp-..."
+SLACK_BOT_TOKEN = "xoxb-..."
 
 # 企业示例
 [channels.teams]

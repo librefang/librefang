@@ -1655,7 +1655,13 @@ fn migrate_channels_from_json(
         }
     }
 
-    // --- Slack ---
+    // --- Slack (now an out-of-process sidecar adapter) ---
+    // Mirrors the Telegram / Discord blocks above: the in-process
+    // Slack channel was removed in the sidecar migration; Slack now
+    // runs as a `[[sidecar_channels]]` adapter. We still migrate the
+    // bot + app tokens to secrets.env (the sidecar reads
+    // `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`), but we no longer emit a
+    // `[channels.slack]` block the kernel would reject.
     if let Some(ref sl) = oc_channels.slack {
         if sl.enabled.unwrap_or(true) {
             if let Some(ref token) = sl.bot_token {
@@ -1664,32 +1670,16 @@ fn migrate_channels_from_json(
             if let Some(ref token) = sl.app_token {
                 emit_secret(&secrets_path, dry_run, "SLACK_APP_TOKEN", token, report);
             }
-            let fields: Vec<(&str, toml::Value)> = vec![
-                (
-                    "bot_token_env",
-                    toml::Value::String("SLACK_BOT_TOKEN".into()),
-                ),
-                (
-                    "app_token_env",
-                    toml::Value::String("SLACK_APP_TOKEN".into()),
-                ),
-            ];
-            if allow_from_to_toml_array(sl.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "Slack: OpenClaw 'allow_from' (per-user allowlist) could not be \
-                     auto-mapped — SlackConfig has no per-user allowlist, only \
-                     'allowed_channels' (channel IDs)."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "slack".to_string(),
-                build_channel_table(fields, sl.dm_policy.as_deref(), sl.group_policy.as_deref()),
-            );
-            report.imported.push(MigrateItem {
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "slack".to_string(),
-                destination: "config.toml [channels.slack]".to_string(),
+                reason: "Slack is now an out-of-process sidecar adapter. \
+                         The bot + app tokens were migrated to secrets.env; \
+                         add a [[sidecar_channels]] block running `python3 -m \
+                         librefang.sidecar.adapters.slack` with \
+                         channel_type = \"slack\" to enable it (see \
+                         docs/architecture/sidecar-channels.md)."
+                    .to_string(),
             });
         }
     }
@@ -2909,22 +2899,18 @@ fn parse_legacy_channels(
                 });
             }
             "slack" => {
-                let token_env = ch
-                    .bot_token_env
-                    .unwrap_or_else(|| "SLACK_BOT_TOKEN".to_string());
-                let mut fields: Vec<(&str, toml::Value)> =
-                    vec![("bot_token_env", toml::Value::String(token_env))];
-                if let Some(ref app_tok) = ch.app_token_env {
-                    fields.push(("app_token_env", toml::Value::String(app_tok.clone())));
-                }
-                if let Some(ref da) = ch.default_agent {
-                    fields.push(("default_agent", toml::Value::String(da.clone())));
-                }
-                channels_table.insert("slack".to_string(), build_channel_table(fields, None, None));
-                report.imported.push(MigrateItem {
+                // Slack is now an out-of-process sidecar adapter; the
+                // in-process `[channels.slack]` block was removed.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "slack".to_string(),
-                    destination: "config.toml [channels.slack]".to_string(),
+                    reason: "Slack is now an out-of-process sidecar \
+                             adapter. Add a [[sidecar_channels]] block \
+                             running `python3 -m \
+                             librefang.sidecar.adapters.slack` with \
+                             channel_type = \"slack\" to enable it (see \
+                             docs/architecture/sidecar-channels.md)."
+                        .to_string(),
                 });
             }
             "whatsapp" => {
@@ -3485,11 +3471,12 @@ mod tests {
         )
         .unwrap();
 
-        // messaging/telegram.yaml + messaging/discord.yaml (both now
-        // migrated as skipped sidecar channels) plus messaging/slack.yaml
-        // (still an in-process channel, so the legacy path keeps
-        // exercising channel import — without it the test below would
-        // see zero imported channels and fail).
+        // messaging/telegram.yaml + messaging/discord.yaml + messaging/slack.yaml
+        // (all three now migrated as skipped sidecar channels) plus
+        // messaging/mattermost.yaml (still an in-process channel, so the
+        // legacy path keeps exercising channel import — without an
+        // in-process channel the test below would see zero imported
+        // channels and fail).
         let msg_dir = dir.join("messaging");
         std::fs::create_dir_all(&msg_dir).unwrap();
         std::fs::write(
@@ -3506,6 +3493,12 @@ mod tests {
             msg_dir.join("slack.yaml"),
             "type: slack\nbot_token_env: SLACK_BOT_TOKEN\n\
              app_token_env: SLACK_APP_TOKEN\ndefault_agent: coder\n",
+        )
+        .unwrap();
+        std::fs::write(
+            msg_dir.join("mattermost.yaml"),
+            "type: mattermost\ntoken_env: MATTERMOST_TOKEN\n\
+             server_url: \"https://mm.example.com\"\ndefault_agent: coder\n",
         )
         .unwrap();
     }
@@ -3697,10 +3690,10 @@ mod tests {
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
         // 13 - imessage - bluebubbles - telegram - discord - irc
-        // (telegram and discord migrated to sidecar adapters and irc
-        // removed entirely in v2026.5: all three are reported as
-        // skipped, not imported).
-        assert_eq!(channel_items.len(), 8);
+        // (telegram, discord, and slack migrated to sidecar adapters
+        // and irc removed entirely in v2026.5: all four are reported
+        // as skipped, not imported).
+        assert_eq!(channel_items.len(), 7);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3719,7 +3712,14 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "discord"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.slack]"));
+        assert!(
+            !config_toml.contains("[channels.slack]"),
+            "slack is a sidecar channel now; the migrator must not emit \
+             a [channels.slack] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "slack"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.whatsapp]"));
         assert!(config_toml.contains("[channels.signal]"));
         assert!(config_toml.contains("[channels.matrix]"));
@@ -4030,11 +4030,16 @@ mod tests {
     #[test]
     fn test_json5_channel_extraction() {
         let target = TempDir::new().unwrap();
+        // Mattermost is the in-process witness here — telegram /
+        // discord / slack are all sidecar-skipped, so without an
+        // in-process channel the imported-count assertion below
+        // wouldn't have anything to count.
         let json5_content = r#"{
   channels: {
     telegram: { botToken: "123", allowFrom: ["alice"], enabled: true },
     discord: { token: "abc", allowFrom: ["alice"], enabled: true },
-    slack: { botToken: "xoxb", appToken: "xapp" }
+    slack: { botToken: "xoxb", appToken: "xapp" },
+    mattermost: { botToken: "mm-token", baseUrl: "https://mm.example.com" }
   }
 }"#;
         let root: OpenClawRoot = json5::from_str(json5_content).unwrap();
@@ -4044,21 +4049,23 @@ mod tests {
         assert!(channels.is_some());
         let ch = channels.unwrap();
         let ch_table = ch.as_table().unwrap();
-        // Telegram and Discord are sidecar channels now — skipped, not in
-        // the table.
+        // Telegram, Discord, and Slack are sidecar channels now —
+        // skipped, not in the table.
         assert!(!ch_table.contains_key("telegram"));
         assert!(!ch_table.contains_key("discord"));
-        assert!(report
-            .skipped
-            .iter()
-            .any(|s| s.kind == ItemKind::Channel && s.name == "telegram"));
-        assert!(report
-            .skipped
-            .iter()
-            .any(|s| s.kind == ItemKind::Channel && s.name == "discord"));
-        assert!(ch_table.contains_key("slack"));
+        assert!(!ch_table.contains_key("slack"));
+        for name in ["telegram", "discord", "slack"] {
+            assert!(
+                report.skipped.iter().any(|s|
+                    s.kind == ItemKind::Channel && s.name == name
+                ),
+                "expected {name} in report.skipped",
+            );
+        }
+        assert!(ch_table.contains_key("mattermost"));
 
-        // 1 channel import (slack; telegram + discord → sidecar/skipped)
+        // 1 channel import (mattermost; telegram + discord + slack are
+        // all sidecar/skipped).
         assert_eq!(
             report
                 .imported
@@ -4068,16 +4075,17 @@ mod tests {
             1
         );
 
-        // 4 secrets extracted (telegram + discord tokens still go to
-        // secrets.env so the sidecars can read them + slack bot + slack
-        // app)
+        // 5 secrets extracted (telegram + discord + slack-bot +
+        // slack-app tokens still go to secrets.env so the sidecars
+        // can read them; mattermost's botToken also flows into
+        // MATTERMOST_TOKEN via the in-process path).
         assert_eq!(
             report
                 .imported
                 .iter()
                 .filter(|i| i.kind == ItemKind::Secret)
                 .count(),
-            4
+            5
         );
 
         // Secrets file written
@@ -4085,6 +4093,7 @@ mod tests {
         assert!(secrets.contains("TELEGRAM_BOT_TOKEN=123"));
         assert!(secrets.contains("DISCORD_BOT_TOKEN=abc"));
         assert!(secrets.contains("SLACK_BOT_TOKEN=xoxb"));
+        assert!(secrets.contains("SLACK_APP_TOKEN=xapp"));
     }
 
     #[test]
@@ -4729,10 +4738,11 @@ mod tests {
         assert_eq!(result.agents.len(), 1);
         assert_eq!(result.agents[0].name, "coder");
         assert!(result.agents[0].has_memory);
-        assert_eq!(result.channels.len(), 3);
+        assert_eq!(result.channels.len(), 4);
         assert!(result.channels.contains(&"telegram".to_string()));
         assert!(result.channels.contains(&"discord".to_string()));
         assert!(result.channels.contains(&"slack".to_string()));
+        assert!(result.channels.contains(&"mattermost".to_string()));
     }
 
     #[test]
@@ -4843,10 +4853,11 @@ mod tests {
     #[test]
     fn test_policy_migration() {
         let target = TempDir::new().unwrap();
-        // Discord migrated to a sidecar in v2026.5 — its in-process
-        // `[channels.discord]` write is gone (migrator now records a
-        // SkippedItem instead). Slack is still in-process so the
-        // policy-mapping happy path is asserted against it.
+        // Discord and Slack migrated to sidecars in v2026.5 — both
+        // in-process `[channels.<x>]` writes are gone (migrator now
+        // records a SkippedItem instead). Mattermost is still
+        // in-process so the policy-mapping happy path is asserted
+        // against it.
         let json5_content = r#"{
   channels: {
     discord: {
@@ -4859,6 +4870,11 @@ mod tests {
       botToken: "b",
       appToken: "a",
       dmPolicy: "disabled"
+    },
+    mattermost: {
+      botToken: "mm-token",
+      baseUrl: "https://mm.example.com",
+      dmPolicy: "disabled"
     }
   }
 }"#;
@@ -4870,28 +4886,32 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Discord must NOT be written as an in-process `[channels.discord]`
-        // block — sidecar migration replaced it with a SkippedItem entry.
-        assert!(
-            !table.contains_key("discord"),
-            "discord is a sidecar channel now; migrator must not write \
-             [channels.discord] into the output table",
-        );
-        assert!(
-            report.skipped.iter().any(|s| s.kind == ItemKind::Channel
-                && s.name == "discord"
-                && s.reason.contains("sidecar")),
-            "migrator must record discord under report.skipped with a \
-             sidecar reason; got skipped={:?}",
-            report.skipped,
-        );
+        // Discord and Slack must NOT be written as in-process
+        // `[channels.<x>]` blocks — sidecar migration replaced them
+        // with SkippedItem entries.
+        for name in ["discord", "slack"] {
+            assert!(
+                !table.contains_key(name),
+                "{name} is a sidecar channel now; migrator must not write \
+                 [channels.{name}] into the output table",
+            );
+            assert!(
+                report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+                    && s.name == name
+                    && s.reason.contains("sidecar")),
+                "migrator must record {name} under report.skipped with a \
+                 sidecar reason; got skipped={:?}",
+                report.skipped,
+            );
+        }
 
-        // Slack still has the in-process adapter — assert the policy
-        // string "disabled" maps to dm_policy = "ignore" (the previously
-        // discord-only mapping coverage was kept alive via slack).
-        let sl = table["slack"].as_table().unwrap();
-        let sl_overrides = sl["overrides"].as_table().unwrap();
-        assert_eq!(sl_overrides["dm_policy"].as_str().unwrap(), "ignore");
+        // Mattermost still has the in-process adapter — assert the
+        // policy string "disabled" maps to dm_policy = "ignore" (the
+        // previously discord-only mapping coverage was kept alive via
+        // slack and now lives on mattermost).
+        let mm = table["mattermost"].as_table().unwrap();
+        let mm_overrides = mm["overrides"].as_table().unwrap();
+        assert_eq!(mm_overrides["dm_policy"].as_str().unwrap(), "ignore");
     }
 
     #[test]

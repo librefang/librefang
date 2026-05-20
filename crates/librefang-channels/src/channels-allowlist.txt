@@ -30,7 +30,6 @@ mattermost
 qq
 sidecar
 signal
-slack
 teams
 webex
 webhook

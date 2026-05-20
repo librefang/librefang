@@ -29,7 +29,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::config::{ChannelsConfig, SlackConfig, OneOrMany, SidecarChannelConfig};
+use librefang_types::config::{ChannelsConfig, MatrixConfig, OneOrMany, SidecarChannelConfig};
 use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -108,22 +108,22 @@ impl Drop for DiskHomeGuard {
     }
 }
 
-/// Write a `config.toml` containing one `[[channels.slack]]` per pair.
+/// Write a `config.toml` containing one `[[channels.matrix]]` per pair.
 /// Used by the disk-roundtrip tests below.
 ///
 /// Pins `config_version` to the current value so the kernel's
 /// `load_config()` migration path doesn't kick in and rewrite the
 /// minimal fixture with a full canonical config dump on first read —
 /// that rewrite would clobber test seeds (e.g. drop the
-/// `bot_token_env = "..."` lines we want to assert against).
-fn write_slack_instances(home: &Path, instances: &[&str]) {
+/// `access_token_env = "..."` lines we want to assert against).
+fn write_matrix_instances(home: &Path, instances: &[&str]) {
     let mut content = format!(
         "config_version = {}\n",
         librefang_types::config::CONFIG_VERSION
     );
     for env_name in instances {
-        content.push_str("[[channels.slack]]\n");
-        content.push_str(&format!("bot_token_env = \"{env_name}\"\n\n"));
+        content.push_str("[[channels.matrix]]\n");
+        content.push_str(&format!("access_token_env = \"{env_name}\"\n\n"));
     }
     std::fs::write(home.join("config.toml"), content).expect("write config.toml");
 }
@@ -279,19 +279,20 @@ async fn channels_list_returns_full_registry_with_zero_configured() {
         );
     }
 
-    // Slack MUST be present — it's the canonical in-process adapter
-    // (Discord was migrated to a sidecar; Slack is the new fixture).
-    let slack = arr
+    // Matrix MUST be present — it's the canonical in-process adapter
+    // (Discord and Slack were migrated to sidecars; Matrix is the
+    // new fixture).
+    let matrix = arr
         .iter()
-        .find(|r| r["name"] == "slack")
-        .expect("slack must appear in registry");
-    assert_eq!(slack["configured"], false);
+        .find(|r| r["name"] == "matrix")
+        .expect("matrix must appear in registry");
+    assert_eq!(matrix["configured"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_list_flips_configured_flag_when_seeded() {
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
@@ -304,21 +305,21 @@ async fn channels_list_flips_configured_flag_when_seeded() {
     );
 
     let arr = body["items"].as_array().expect("array");
-    let slack = arr
-        .iter()
-        .find(|r| r["name"] == "slack")
-        .expect("slack row");
-    assert_eq!(
-        slack["configured"], true,
-        "seeded slack must report configured=true: {slack}"
-    );
-
-    // Other rows must NOT be flipped just because slack is configured.
     let matrix = arr
         .iter()
         .find(|r| r["name"] == "matrix")
         .expect("matrix row");
-    assert_eq!(matrix["configured"], false);
+    assert_eq!(
+        matrix["configured"], true,
+        "seeded matrix must report configured=true: {matrix}"
+    );
+
+    // Other rows must NOT be flipped just because matrix is configured.
+    let mattermost = arr
+        .iter()
+        .find(|r| r["name"] == "mattermost")
+        .expect("mattermost row");
+    assert_eq!(mattermost["configured"], false);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,10 +329,10 @@ async fn channels_list_flips_configured_flag_when_seeded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_get_returns_metadata_for_known_channel() {
     let h = boot().await;
-    let (status, body) = json_request(&h, Method::GET, "/api/channels/slack", None).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels/matrix", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["name"], "slack");
-    assert_eq!(body["display_name"], "Slack");
+    assert_eq!(body["name"], "matrix");
+    assert_eq!(body["display_name"], "Matrix");
     assert!(body["fields"].is_array());
     assert_eq!(body["configured"], false);
 }
@@ -397,7 +398,7 @@ async fn channels_configure_missing_fields_object_returns_400() {
     let (status, body) = json_request(
         &h,
         Method::POST,
-        "/api/channels/slack/configure",
+        "/api/channels/matrix/configure",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -467,7 +468,7 @@ async fn channels_test_unknown_channel_returns_404() {
 // The legacy `/configure` endpoints treat every channel as a single
 // `[channels.<name>]` table. The new `/instances` endpoints let the
 // dashboard manage `[[channels.<name>]]` array entries — supporting two
-// Slack workspaces, three Mattermost servers, etc. on the same channel type.
+// Matrix homeservers, three Mattermost servers, etc. on the same channel type.
 //
 // As with `/configure`, we deliberately do NOT exercise happy-path WRITES
 // here. POST/PUT mutate `~/.librefang/secrets.env` and process-wide env
@@ -485,9 +486,9 @@ async fn channels_test_unknown_channel_returns_404() {
 async fn channels_instances_list_empty_when_unconfigured() {
     let h = boot().await;
     let (status, body) =
-        json_request(&h, Method::GET, "/api/channels/slack/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/matrix/instances", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(body["channel"], "slack");
+    assert_eq!(body["channel"], "matrix");
     assert_eq!(body["total"], 0);
     let arr = body["items"].as_array().expect("items must be array");
     assert!(arr.is_empty(), "no instances seeded → items must be empty");
@@ -495,17 +496,17 @@ async fn channels_instances_list_empty_when_unconfigured() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_instances_list_returns_seeded_instances() {
-    // Seed two slack instances and assert both come through with
+    // Seed two matrix instances and assert both come through with
     // their configured fields and `index` values.
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![
-            SlackConfig {
-                bot_token_env: "TG_SUPPORT".into(),
-                ..SlackConfig::default()
+        matrix: OneOrMany(vec![
+            MatrixConfig {
+                access_token_env: "TG_SUPPORT".into(),
+                ..MatrixConfig::default()
             },
-            SlackConfig {
-                bot_token_env: "TG_OPS".into(),
-                ..SlackConfig::default()
+            MatrixConfig {
+                access_token_env: "TG_OPS".into(),
+                ..MatrixConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
@@ -513,15 +514,15 @@ async fn channels_instances_list_returns_seeded_instances() {
     let h = boot_with_channels(channels).await;
 
     let (status, body) =
-        json_request(&h, Method::GET, "/api/channels/slack/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/matrix/instances", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["total"], 2, "two instances seeded: {body}");
     let arr = body["items"].as_array().expect("items array");
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["index"], 0);
     assert_eq!(arr[1]["index"], 1);
-    assert_eq!(arr[0]["config"]["bot_token_env"], "TG_SUPPORT");
-    assert_eq!(arr[1]["config"]["bot_token_env"], "TG_OPS");
+    assert_eq!(arr[0]["config"]["access_token_env"], "TG_SUPPORT");
+    assert_eq!(arr[1]["config"]["access_token_env"], "TG_OPS");
     // Each instance must carry the field schema so the dashboard can
     // render the form without an extra `/api/channels/{name}` round-trip.
     assert!(
@@ -564,7 +565,7 @@ async fn channels_create_instance_missing_fields_returns_400() {
     let (status, body) = json_request(
         &h,
         Method::POST,
-        "/api/channels/slack/instances",
+        "/api/channels/matrix/instances",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -599,14 +600,14 @@ async fn channels_update_instance_out_of_range_returns_404() {
     // value here is fine since the range check fires first under the
     // write lock.
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/7",
+        "/api/channels/matrix/instances/7",
         Some(serde_json::json!({
             "fields": {"default_agent": "x"},
             "signature": "stale-signature",
@@ -630,14 +631,14 @@ async fn channels_update_instance_missing_signature_returns_400() {
     // moved or modified since the client read it. A missing signature is
     // a clean 400 — the handler must not silently fall through to a write.
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({"fields": {"default_agent": "x"}})),
     )
     .await;
@@ -654,14 +655,14 @@ async fn channels_update_instance_missing_signature_returns_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_missing_fields_returns_400() {
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({"not_fields": "oops"})),
     )
     .await;
@@ -684,7 +685,7 @@ async fn channels_delete_instance_unknown_channel_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_delete_instance_out_of_range_returns_404() {
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
@@ -693,7 +694,7 @@ async fn channels_delete_instance_out_of_range_returns_404() {
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/slack/instances/3?signature=stale",
+        "/api/channels/matrix/instances/3?signature=stale",
         None,
     )
     .await;
@@ -714,14 +715,14 @@ async fn channels_delete_instance_missing_signature_returns_400() {
     // disk — silently deleting based on an index alone is the bug class
     // the CAS token closes off.
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig::default()]),
+        matrix: OneOrMany(vec![MatrixConfig::default()]),
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         None,
     )
     .await;
@@ -752,9 +753,9 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
     let guard = DiskHomeGuard::new();
 
     let h = boot_with_channels(ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig {
-            bot_token_env: "TG_DISK_A".into(),
-            ..SlackConfig::default()
+        matrix: OneOrMany(vec![MatrixConfig {
+            access_token_env: "TG_DISK_A".into(),
+            ..MatrixConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
@@ -766,7 +767,7 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
     // `std::env::var("LIBREFANG_HOME")` (e.g. the kernel's own
     // `reload_config` path) sees a sane value.
     let kernel_home = h._state.kernel.home_dir().to_path_buf();
-    write_slack_instances(&kernel_home, &["TG_DISK_A"]);
+    write_matrix_instances(&kernel_home, &["TG_DISK_A"]);
     let _ = &guard; // keep the env guard alive for the whole test
 
     // PUT idx=0 with a deliberately stale signature. After #4865 the
@@ -775,7 +776,7 @@ async fn channels_update_instance_signature_mismatch_returns_409() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "smoke" },
             "signature": "0".repeat(64),
@@ -803,27 +804,27 @@ async fn channels_delete_instance_signature_mismatch_returns_409() {
     let guard = DiskHomeGuard::new();
 
     let h = boot_with_channels(ChannelsConfig {
-        slack: OneOrMany(vec![
-            SlackConfig {
-                bot_token_env: "TG_DISK_B".into(),
-                ..SlackConfig::default()
+        matrix: OneOrMany(vec![
+            MatrixConfig {
+                access_token_env: "TG_DISK_B".into(),
+                ..MatrixConfig::default()
             },
-            SlackConfig {
-                bot_token_env: "TG_DISK_C".into(),
-                ..SlackConfig::default()
+            MatrixConfig {
+                access_token_env: "TG_DISK_C".into(),
+                ..MatrixConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
     })
     .await;
     let kernel_home = h._state.kernel.home_dir().to_path_buf();
-    write_slack_instances(&kernel_home, &["TG_DISK_B", "TG_DISK_C"]);
+    write_matrix_instances(&kernel_home, &["TG_DISK_B", "TG_DISK_C"]);
     let _ = &guard;
 
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/slack/instances/0?signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "/api/channels/matrix/instances/0?signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         None,
     )
     .await;
@@ -852,21 +853,21 @@ async fn channels_update_instance_round_trips_real_signature() {
     let guard = DiskHomeGuard::new();
 
     let h = boot_with_channels(ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig {
-            bot_token_env: "TG_DISK_D".into(),
-            ..SlackConfig::default()
+        matrix: OneOrMany(vec![MatrixConfig {
+            access_token_env: "TG_DISK_D".into(),
+            ..MatrixConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
     .await;
     let kernel_home = h._state.kernel.home_dir().to_path_buf();
-    write_slack_instances(&kernel_home, &["TG_DISK_D"]);
+    write_matrix_instances(&kernel_home, &["TG_DISK_D"]);
     let _ = &guard;
 
     // GET the list to obtain the server-computed signature for the row
     // we're about to update.
     let (list_status, list_body) =
-        json_request(&h, Method::GET, "/api/channels/slack/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/matrix/instances", None).await;
     assert_eq!(list_status, StatusCode::OK);
     let signature = list_body["items"][0]["signature"]
         .as_str()
@@ -880,7 +881,7 @@ async fn channels_update_instance_round_trips_real_signature() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "rotated" },
             "signature": signature,
@@ -907,15 +908,15 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     let guard = DiskHomeGuard::new();
 
     let h = boot_with_channels(ChannelsConfig {
-        slack: OneOrMany(vec![SlackConfig {
-            bot_token_env: "TG_LONELY".into(),
-            ..SlackConfig::default()
+        matrix: OneOrMany(vec![MatrixConfig {
+            access_token_env: "TG_LONELY".into(),
+            ..MatrixConfig::default()
         }]),
         ..ChannelsConfig::default()
     })
     .await;
     let kernel_home = h._state.kernel.home_dir().to_path_buf();
-    write_slack_instances(&kernel_home, &["TG_LONELY"]);
+    write_matrix_instances(&kernel_home, &["TG_LONELY"]);
     // Prime `secrets.env` with the env var the instance is pointing at,
     // so we can assert the cleanup loop actually removed it.
     std::fs::write(kernel_home.join("secrets.env"), "TG_LONELY=fake-token\n")
@@ -923,23 +924,23 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
     let _ = &guard;
 
     let (_, list_body) =
-        json_request(&h, Method::GET, "/api/channels/slack/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/matrix/instances", None).await;
     let signature = list_body["items"][0]["signature"]
         .as_str()
         .expect("signature must be present")
         .to_string();
 
     // PUT with `clear_secrets` listing the secret key. The instance's
-    // `bot_token_env` ref must drop, AND because no sibling references
+    // `access_token_env` ref must drop, AND because no sibling references
     // `TG_LONELY` the env-var line must be scrubbed from `secrets.env`.
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "no-auth" },
             "signature": signature,
-            "clear_secrets": ["bot_token_env"],
+            "clear_secrets": ["access_token_env"],
         })),
     )
     .await;
@@ -947,7 +948,7 @@ async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
 
     let cfg = std::fs::read_to_string(kernel_home.join("config.toml")).expect("read config.toml");
     assert!(
-        !cfg.contains("bot_token_env"),
+        !cfg.contains("access_token_env"),
         "cleared secret ref must be dropped from the rebuilt instance: {cfg}"
     );
     let secrets =
@@ -968,26 +969,26 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     // is still using it.
 
     let h = boot_with_channels(ChannelsConfig {
-        slack: OneOrMany(vec![
-            SlackConfig {
-                bot_token_env: "TG_SHARED".into(),
-                ..SlackConfig::default()
+        matrix: OneOrMany(vec![
+            MatrixConfig {
+                access_token_env: "TG_SHARED".into(),
+                ..MatrixConfig::default()
             },
-            SlackConfig {
-                bot_token_env: "TG_SHARED".into(),
-                ..SlackConfig::default()
+            MatrixConfig {
+                access_token_env: "TG_SHARED".into(),
+                ..MatrixConfig::default()
             },
         ]),
         ..ChannelsConfig::default()
     })
     .await;
     let kernel_home = h._state.kernel.home_dir().to_path_buf();
-    write_slack_instances(&kernel_home, &["TG_SHARED", "TG_SHARED"]);
+    write_matrix_instances(&kernel_home, &["TG_SHARED", "TG_SHARED"]);
     std::fs::write(kernel_home.join("secrets.env"), "TG_SHARED=fake\n").expect("seed secrets.env");
     let _ = &guard;
 
     let (_, list_body) =
-        json_request(&h, Method::GET, "/api/channels/slack/instances", None).await;
+        json_request(&h, Method::GET, "/api/channels/matrix/instances", None).await;
     let signature = list_body["items"][0]["signature"]
         .as_str()
         .expect("signature")
@@ -996,11 +997,11 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
     let (status, body) = json_request(
         &h,
         Method::PUT,
-        "/api/channels/slack/instances/0",
+        "/api/channels/matrix/instances/0",
         Some(serde_json::json!({
             "fields": { "default_agent": "no-auth" },
             "signature": signature,
-            "clear_secrets": ["bot_token_env"],
+            "clear_secrets": ["access_token_env"],
         })),
     )
     .await;
@@ -1016,13 +1017,13 @@ async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_list_includes_instance_count() {
-    // The dashboard's card subtitle ("Slack · 2 bots") depends on
+    // The dashboard's card subtitle ("Matrix · 2 bots") depends on
     // `instance_count` riding alongside the existing `configured` flag.
     let channels = ChannelsConfig {
-        slack: OneOrMany(vec![
-            SlackConfig::default(),
-            SlackConfig::default(),
-            SlackConfig::default(),
+        matrix: OneOrMany(vec![
+            MatrixConfig::default(),
+            MatrixConfig::default(),
+            MatrixConfig::default(),
         ]),
         ..ChannelsConfig::default()
     };
@@ -1030,21 +1031,21 @@ async fn channels_list_includes_instance_count() {
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
     assert_eq!(status, StatusCode::OK);
     let arr = body["items"].as_array().expect("items");
-    let slack = arr
-        .iter()
-        .find(|r| r["name"] == "slack")
-        .expect("slack row");
-    assert_eq!(
-        slack["instance_count"], 3,
-        "slack seeded with 3 instances must report instance_count=3: {slack}"
-    );
     let matrix = arr
         .iter()
         .find(|r| r["name"] == "matrix")
         .expect("matrix row");
     assert_eq!(
-        matrix["instance_count"], 0,
-        "matrix untouched must report instance_count=0: {matrix}"
+        matrix["instance_count"], 3,
+        "matrix seeded with 3 instances must report instance_count=3: {matrix}"
+    );
+    let mattermost = arr
+        .iter()
+        .find(|r| r["name"] == "mattermost")
+        .expect("mattermost row");
+    assert_eq!(
+        mattermost["instance_count"], 0,
+        "mattermost untouched must report instance_count=0: {mattermost}"
     );
 }
 
@@ -1075,7 +1076,7 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     }
 
     let h = boot().await;
-    let (status, body) = json_request(&h, Method::POST, "/api/channels/slack/test", None).await;
+    let (status, body) = json_request(&h, Method::POST, "/api/channels/matrix/test", None).await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body:?}");
     let msg = body["error"]["message"].as_str().unwrap_or("");
     assert!(

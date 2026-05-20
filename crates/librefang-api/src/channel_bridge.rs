@@ -244,8 +244,6 @@ use librefang_channels::matrix::MatrixAdapter;
 use librefang_channels::mattermost::MattermostAdapter;
 #[cfg(feature = "channel-signal")]
 use librefang_channels::signal::SignalAdapter;
-#[cfg(feature = "channel-slack")]
-use librefang_channels::slack::SlackAdapter;
 #[cfg(feature = "channel-teams")]
 use librefang_channels::teams::TeamsAdapter;
 #[cfg(feature = "channel-webhook")]
@@ -1884,7 +1882,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),
             "signal" => find_channel_info!(signal),
             "matrix" => find_channel_info!(matrix),
@@ -2546,7 +2543,6 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(slack, "channel-slack", "Slack");
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(signal, "channel-signal", "Signal");
     check_channel!(matrix, "channel-matrix", "Matrix");
@@ -2581,36 +2577,6 @@ pub async fn start_channel_bridge_with_config(
     // Collect all adapters to start: (adapter, default_agent_name, account_id)
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Slack
-    #[cfg(feature = "channel-slack")]
-    for sl_config in config.slack.iter() {
-        if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
-            if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
-                let base =
-                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone());
-                let Some(proxied) =
-                    apply_channel_proxy(base, sl_config.proxy.as_deref(), "Slack", |a, p| {
-                        a.with_proxy(p)
-                    })
-                else {
-                    continue;
-                };
-                let adapter = Arc::new(
-                    proxied
-                        .with_account_id(sl_config.account_id.clone())
-                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
-                        .with_unfurl_links(sl_config.unfurl_links)
-                        .with_backoff(sl_config.initial_backoff_secs, sl_config.max_backoff_secs),
-                );
-                adapters.push((
-                    adapter,
-                    sl_config.default_agent.clone(),
-                    sl_config.account_id.clone(),
-                ));
-            }
-        }
-    }
 
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     #[cfg(feature = "channel-whatsapp")]
@@ -4079,7 +4045,6 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.slack.is_none());
         assert!(config.channels.whatsapp.is_none());
         assert!(config.channels.signal.is_none());
         assert!(config.channels.matrix.is_none());
