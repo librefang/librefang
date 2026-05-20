@@ -550,6 +550,11 @@ pub(super) async fn tool_text_to_speech(
         // config.toml instead of silently using each provider's API default
         // (ElevenLabs API default = Rachel + mp3_44100_128, not the configured
         // voice + Opus).
+        // Note: `google_tts` is intentionally absent here — its voice is already
+        // resolved into `effective_voice` above (and wins the `.or()` chain
+        // before `config_default_voice` is consulted). Re-adding it here would
+        // be dead code. Keep the asymmetry; do not "fix" it without removing
+        // the duplicate resolution from the `effective_voice` branch first.
         let (config_default_voice, config_default_format) =
             tts_engine.map_or((None, None), |engine| match resolved_provider {
                 Some("elevenlabs") => {

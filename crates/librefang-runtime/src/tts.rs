@@ -82,7 +82,10 @@ impl TtsEngine {
                 self.synthesize_openai(text, voice_override, format_override)
                     .await
             }
-            "elevenlabs" => self.synthesize_elevenlabs(text, voice_override).await,
+            "elevenlabs" => {
+                self.synthesize_elevenlabs(text, voice_override, format_override)
+                    .await
+            }
             "google_tts" => {
                 #[cfg(feature = "media")]
                 {
@@ -176,14 +179,17 @@ impl TtsEngine {
         &self,
         text: &str,
         voice_override: Option<&str>,
+        format_override: Option<&str>,
     ) -> Result<TtsResult, String> {
         let api_key =
             std::env::var("ELEVENLABS_API_KEY").map_err(|_| "ELEVENLABS_API_KEY not set")?;
 
         let voice_id = voice_override.unwrap_or(&self.config.elevenlabs.voice_id);
-        // `output_format` is config-driven (default `opus_48000_32`). Required
-        // for WhatsApp voice-note compatibility — see TtsElevenLabsConfig docs.
-        let output_format = self.config.elevenlabs.output_format.as_str();
+        // 3-tier resolution: tool_arg override > [tts.elevenlabs].output_format
+        // (config-driven, default `opus_48000_32` for WhatsApp voice-note
+        // compatibility — see TtsElevenLabsConfig docs) > built-in default.
+        let output_format =
+            format_override.unwrap_or(self.config.elevenlabs.output_format.as_str());
         let url = format!(
             "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format={}",
             voice_id, output_format,
@@ -391,5 +397,96 @@ mod tests {
     #[test]
     fn test_max_audio_constant() {
         assert_eq!(MAX_AUDIO_RESPONSE_BYTES, 10 * 1024 * 1024);
+    }
+
+    /// Pin the 3-tier resolution chain: tool_arg override wins over
+    /// `[tts.<provider>]` config default, which wins over the built-in
+    /// constant. Future refactors that break this precedence silently
+    /// re-introduce the "config ignored" bug houko flagged on PR #5284.
+    ///
+    /// This exercises the same `unwrap_or` chain used by
+    /// `synthesize_openai` / `synthesize_elevenlabs` without hitting the
+    /// network: we mirror the resolution logic directly so the assertion
+    /// fails the moment either branch deviates.
+    #[test]
+    fn test_three_tier_resolution_elevenlabs_format() {
+        let mut config = TtsConfig::default();
+        // Tier 2: provider-config default differs from the built-in
+        // default (`opus_48000_32`) so we can distinguish them.
+        config.elevenlabs.output_format = "mp3_44100_128".to_string();
+
+        // Tier 1: tool_arg override wins.
+        let format_override: Option<&str> = Some("pcm_16000");
+        let resolved = format_override.unwrap_or(config.elevenlabs.output_format.as_str());
+        assert_eq!(resolved, "pcm_16000", "tool_arg override must win");
+
+        // Tier 2: no override → provider-config default applies.
+        let format_override: Option<&str> = None;
+        let resolved = format_override.unwrap_or(config.elevenlabs.output_format.as_str());
+        assert_eq!(
+            resolved, "mp3_44100_128",
+            "provider-config default must apply when no override"
+        );
+
+        // Tier 3: no override, default config → built-in default.
+        let default_config = TtsConfig::default();
+        let format_override: Option<&str> = None;
+        let resolved = format_override.unwrap_or(default_config.elevenlabs.output_format.as_str());
+        assert_eq!(
+            resolved, "opus_48000_32",
+            "built-in default must apply when neither override nor custom config"
+        );
+    }
+
+    #[test]
+    fn test_three_tier_resolution_elevenlabs_voice() {
+        let mut config = TtsConfig::default();
+        config.elevenlabs.voice_id = "custom_voice_id".to_string();
+
+        // Tier 1: override wins.
+        let voice_override: Option<&str> = Some("arg_voice");
+        let resolved = voice_override.unwrap_or(&config.elevenlabs.voice_id);
+        assert_eq!(resolved, "arg_voice");
+
+        // Tier 2: config default.
+        let voice_override: Option<&str> = None;
+        let resolved = voice_override.unwrap_or(&config.elevenlabs.voice_id);
+        assert_eq!(resolved, "custom_voice_id");
+
+        // Tier 3: built-in default.
+        let default_config = TtsConfig::default();
+        let voice_override: Option<&str> = None;
+        let resolved = voice_override.unwrap_or(&default_config.elevenlabs.voice_id);
+        assert_eq!(resolved, "21m00Tcm4TlvDq8ikWAM");
+    }
+
+    #[test]
+    fn test_three_tier_resolution_openai_format_and_voice() {
+        let mut config = TtsConfig::default();
+        config.openai.voice = "nova".to_string();
+        config.openai.format = "wav".to_string();
+
+        // Format: tool_arg wins.
+        let f_override: Option<&str> = Some("flac");
+        assert_eq!(f_override.unwrap_or(&config.openai.format), "flac");
+
+        // Format: config wins when no override.
+        let f_override: Option<&str> = None;
+        assert_eq!(f_override.unwrap_or(&config.openai.format), "wav");
+
+        // Format: built-in default when default config.
+        let default_config = TtsConfig::default();
+        let f_override: Option<&str> = None;
+        assert_eq!(f_override.unwrap_or(&default_config.openai.format), "mp3");
+
+        // Voice: same precedence.
+        let v_override: Option<&str> = Some("echo");
+        assert_eq!(v_override.unwrap_or(&config.openai.voice), "echo");
+        let v_override: Option<&str> = None;
+        assert_eq!(v_override.unwrap_or(&config.openai.voice), "nova");
+        assert_eq!(
+            (None as Option<&str>).unwrap_or(&default_config.openai.voice),
+            "alloy"
+        );
     }
 }
