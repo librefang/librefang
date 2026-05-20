@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertCircle,
@@ -193,6 +193,10 @@ interface AgentSchedulePanelProps {
 export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
+  // Stable per-instance id prefix so multiple AgentSchedulePanel instances
+  // on the same page (e.g. agent compare view) don't collide on input ids
+  // when wiring htmlFor → input.id pairs for a11y.
+  const formId = useId();
 
   const cronJobsQuery = useCronJobs(agent.id);
   const triggersQuery = useAgentTriggers(agent.id);
@@ -634,12 +638,16 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       {isContinuous && editingInterval && (
         <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-end gap-2 flex-wrap">
           <div className="flex-1 min-w-[140px]">
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-interval`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.check_interval_secs", {
                 defaultValue: "Check interval (seconds)",
               })}
             </label>
             <input
+              id={`${formId}-interval`}
               type="number"
               min={1}
               value={intervalDraft}
@@ -902,10 +910,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       >
         <form onSubmit={handleCronSubmit} className="p-5 space-y-4">
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-cron-name`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.cron.name", { defaultValue: "Name" })}
             </label>
             <input
+              id={`${formId}-cron-name`}
               value={cronName}
               onChange={(e) => setCronName(e.target.value)}
               placeholder="daily-summary"
@@ -914,10 +926,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-cron-expr`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.cron.expr", { defaultValue: "Cron expression" })}
             </label>
             <input
+              id={`${formId}-cron-expr`}
               value={cronExpr}
               onChange={(e) => setCronExpr(e.target.value)}
               placeholder="0 9 * * *"
@@ -931,10 +947,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             </p>
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-cron-tz`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.cron.tz", { defaultValue: "Timezone (optional)" })}
             </label>
             <input
+              id={`${formId}-cron-tz`}
               value={cronTz}
               onChange={(e) => setCronTz(e.target.value)}
               placeholder="UTC"
@@ -942,10 +962,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-cron-message`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.cron.message", { defaultValue: "Message" })}
             </label>
             <textarea
+              id={`${formId}-cron-message`}
               value={cronMessage}
               onChange={(e) => setCronMessage(e.target.value)}
               rows={3}
@@ -1017,10 +1041,14 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
       >
         <form onSubmit={handleTriggerSubmit} className="p-5 space-y-4">
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-trigger-pattern`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.trigger.pattern", { defaultValue: "Event pattern" })}
             </label>
             <select
+              id={`${formId}-trigger-pattern`}
               value={trigPatternPreset}
               onChange={(e) => setTrigPatternPreset(e.target.value)}
               className={INPUT_CLASS}
@@ -1033,6 +1061,9 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             </select>
             {trigPatternPreset === "custom" && (
               <input
+                aria-label={t("agents.detail.trigger.pattern_custom", {
+                  defaultValue: "Custom event pattern (JSON or string)",
+                })}
                 value={trigPatternCustom}
                 onChange={(e) => setTrigPatternCustom(e.target.value)}
                 placeholder='e.g. "agent_spawned" or {"agent_spawned":{"name_pattern":"*"}}'
@@ -1041,12 +1072,16 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             )}
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-trigger-prompt`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.trigger.prompt", {
                 defaultValue: "Prompt template",
               })}
             </label>
             <textarea
+              id={`${formId}-trigger-prompt`}
               value={trigPrompt}
               onChange={(e) => setTrigPrompt(e.target.value)}
               rows={3}
@@ -1058,26 +1093,34 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">
+              <label
+                htmlFor={`${formId}-trigger-max-fires`}
+                className="text-[10px] font-bold text-text-dim uppercase"
+              >
                 {t("agents.detail.trigger.max_fires", {
                   defaultValue: "Max fires (0 = unlimited)",
                 })}
               </label>
               <input
+                id={`${formId}-trigger-max-fires`}
                 type="number"
                 min={0}
                 value={trigMaxFires}
-                onChange={(e) => setTrigMaxFires(Number(e.target.value))}
+                onChange={(e) => setTrigMaxFires(Math.max(0, Number(e.target.value)))}
                 className={INPUT_CLASS}
               />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">
+              <label
+                htmlFor={`${formId}-trigger-cooldown`}
+                className="text-[10px] font-bold text-text-dim uppercase"
+              >
                 {t("agents.detail.trigger.cooldown", {
                   defaultValue: "Cooldown (seconds, blank = none)",
                 })}
               </label>
               <input
+                id={`${formId}-trigger-cooldown`}
                 type="number"
                 min={0}
                 value={trigCooldown}
@@ -1088,12 +1131,16 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             </div>
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
+            <label
+              htmlFor={`${formId}-trigger-session-mode`}
+              className="text-[10px] font-bold text-text-dim uppercase"
+            >
               {t("agents.detail.trigger.session_mode", {
                 defaultValue: "Session mode (blank = agent default)",
               })}
             </label>
             <select
+              id={`${formId}-trigger-session-mode`}
               value={trigSessionMode}
               onChange={(e) => setTrigSessionMode(e.target.value)}
               className={INPUT_CLASS}
