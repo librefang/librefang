@@ -398,14 +398,16 @@ admin_role = "admin"
         let config = KernelConfig {
             channels: ChannelsConfig {
                 whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                matrix: OneOrMany(vec![MatrixConfig::default()]),
+                // matrix migrated to a sidecar (#5368) — use wechat as
+                // the in-process fixture with a usable Default impl.
+                wechat: OneOrMany(vec![WeChatConfig::default()]),
                 email: OneOrMany(vec![EmailConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
         };
         assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.matrix.is_some());
+        assert!(config.channels.wechat.is_some());
         assert!(config.channels.email.is_some());
     }
 
@@ -873,46 +875,47 @@ admin_role = "admin"
 
     #[test]
     fn test_one_or_many_single_toml_table() {
-        // Single [channels.matrix] table should parse as OneOrMany with one element
+        // Single [channels.wechat] table should parse as OneOrMany with one element.
+        // Matrix migrated to a sidecar (#5368); these tests cover the
+        // OneOrMany helper itself, not the channel — swapped to wechat
+        // because it's one of the in-process fixtures that survived.
         let toml_str = r#"
-            [channels.matrix]
-            access_token_env = "MY_MX_TOKEN"
-            homeserver_url = "https://matrix.example.org"
+            [channels.wechat]
+            bot_token_env = "WECHAT_TOKEN_SINGLE"
             account_id = "bot1"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.matrix.is_some());
-        assert_eq!(config.channels.matrix.len(), 1);
-        let mx = config.channels.matrix.first().unwrap();
-        assert_eq!(mx.access_token_env, "MY_MX_TOKEN");
-        assert_eq!(mx.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.wechat.is_some());
+        assert_eq!(config.channels.wechat.len(), 1);
+        let wc = config.channels.wechat.first().unwrap();
+        assert_eq!(wc.bot_token_env, "WECHAT_TOKEN_SINGLE");
+        assert_eq!(wc.account_id.as_deref(), Some("bot1"));
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
-        // [[channels.matrix]] should parse as OneOrMany with multiple elements
+        // [[channels.wechat]] should parse as OneOrMany with multiple elements
+        // (matrix migrated to a sidecar — see _single_toml_table).
         let toml_str = r#"
-            [[channels.matrix]]
-            access_token_env = "MX_TOKEN_1"
-            homeserver_url = "https://a.example.org"
+            [[channels.wechat]]
+            bot_token_env = "WECHAT_TOKEN_1"
             account_id = "bot1"
             default_agent = "assistant"
 
-            [[channels.matrix]]
-            access_token_env = "MX_TOKEN_2"
-            homeserver_url = "https://b.example.org"
+            [[channels.wechat]]
+            bot_token_env = "WECHAT_TOKEN_2"
             account_id = "bot2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.matrix.is_some());
-        assert_eq!(config.channels.matrix.len(), 2);
+        assert!(config.channels.wechat.is_some());
+        assert_eq!(config.channels.wechat.len(), 2);
 
-        let bots: Vec<_> = config.channels.matrix.iter().collect();
-        assert_eq!(bots[0].access_token_env, "MX_TOKEN_1");
+        let bots: Vec<_> = config.channels.wechat.iter().collect();
+        assert_eq!(bots[0].bot_token_env, "WECHAT_TOKEN_1");
         assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].access_token_env, "MX_TOKEN_2");
+        assert_eq!(bots[1].bot_token_env, "WECHAT_TOKEN_2");
         assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
@@ -967,38 +970,40 @@ admin_role = "admin"
 
     #[test]
     fn test_one_or_many_empty_default() {
+        // Matrix migrated to a sidecar (#5368); use wechat as the
+        // surviving in-process fixture.
         let config = KernelConfig::default();
-        assert!(config.channels.matrix.is_none());
-        assert!(config.channels.matrix.is_empty());
-        assert_eq!(config.channels.matrix.len(), 0);
-        assert!(config.channels.matrix.first().is_none());
-        assert!(config.channels.matrix.as_ref().is_none());
+        assert!(config.channels.wechat.is_none());
+        assert!(config.channels.wechat.is_empty());
+        assert_eq!(config.channels.wechat.len(), 0);
+        assert!(config.channels.wechat.first().is_none());
+        assert!(config.channels.wechat.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
-        // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![MatrixConfig::default()]);
+        // Single element serializes as a bare table, multi as array-of-tables.
+        // Matrix migrated to a sidecar (#5368) — uses wechat instead.
+        let single = OneOrMany(vec![WeChatConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<MatrixConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WeChatConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![MatrixConfig::default(), MatrixConfig::default()]);
+        let multi = OneOrMany(vec![WeChatConfig::default(), WeChatConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<MatrixConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WeChatConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<MatrixConfig> = OneOrMany::default();
+        let empty: OneOrMany<WeChatConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
 
     #[test]
     fn test_account_id_in_channel_configs() {
-        // Verify account_id field exists and defaults to None
-        assert!(MatrixConfig::default().account_id.is_none());
+        // Verify account_id field exists and defaults to None.
+        // (Matrix entry removed: migrated to a sidecar in #5368.)
         assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());
         assert!(WeComConfig::default().account_id.is_none());
