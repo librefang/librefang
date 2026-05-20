@@ -286,6 +286,50 @@ def test_parse_basic_text():
     assert md["sender_email"] == "alice@example.com"
 
 
+def test_parse_prefers_person_display_name_for_user_name():
+    """When the /messages/<id> body carries `personDisplayName`, it
+    drives `user_name` instead of `personEmail`. The Rust adapter at
+    webex.rs:431 used personEmail unconditionally, leaking emails into
+    bot logs / UI surfaces. personEmail stays in metadata for routing
+    / audit; only the user-facing label changes."""
+    ev = wa.parse_webex_message(
+        _full_msg(personDisplayName="Alice"),
+        _activity(),
+        own_bot_id="BOT_ID", allowed_rooms=[], account_id=None,
+    )
+    assert ev is not None
+    p = ev["params"]
+    assert p["user_name"] == "Alice"
+    # personEmail still recorded for downstream routing.
+    assert p["metadata"]["sender_email"] == "alice@example.com"
+
+
+def test_parse_falls_back_to_email_when_display_name_missing():
+    """personDisplayName absent (older Webex orgs / service accounts)
+    falls back to personEmail — matches the Rust adapter's user-facing
+    label so existing operators don't see "unknown" / blank labels."""
+    ev = wa.parse_webex_message(
+        # No personDisplayName key in the body.
+        _full_msg(),
+        _activity(),
+        own_bot_id="BOT_ID", allowed_rooms=[], account_id=None,
+    )
+    assert ev is not None
+    assert ev["params"]["user_name"] == "alice@example.com"
+
+
+def test_parse_falls_back_to_email_when_display_name_empty():
+    """personDisplayName present but empty string treated the same as
+    absent."""
+    ev = wa.parse_webex_message(
+        _full_msg(personDisplayName=""),
+        _activity(),
+        own_bot_id="BOT_ID", allowed_rooms=[], account_id=None,
+    )
+    assert ev is not None
+    assert ev["params"]["user_name"] == "alice@example.com"
+
+
 def test_parse_filters_non_post_verb():
     ev = wa.parse_webex_message(
         _full_msg(),

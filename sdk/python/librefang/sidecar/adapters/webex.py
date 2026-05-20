@@ -281,6 +281,16 @@ def parse_webex_message(
     sender_email = full_msg.get("personEmail")
     if not isinstance(sender_email, str) or not sender_email:
         sender_email = "unknown"
+    # Prefer the personDisplayName for the user-facing label so bot
+    # logs / UI surface "Alice" instead of "alice@example.com". Falls
+    # back to personEmail when the field is absent (older Webex orgs)
+    # or empty (some service-account principals omit it). The Rust
+    # adapter at webex.rs:431 used personEmail unconditionally; this
+    # is a pure UX win, no behavioural change to routing (which
+    # keys on sender_id / sender_email below).
+    sender_display = full_msg.get("personDisplayName")
+    if not isinstance(sender_display, str) or not sender_display:
+        sender_display = sender_email
     sender_id = full_msg.get("personId")
     if not isinstance(sender_id, str):
         sender_id = ""
@@ -322,9 +332,10 @@ def parse_webex_message(
         # not the person — matches the Rust adapter's
         # `sender.platform_id = full_room_id` at webex.rs:430).
         user_id=full_room_id,
-        # Display name is the personEmail (matches the Rust
-        # adapter at webex.rs:431).
-        user_name=sender_email,
+        # personDisplayName when available; personEmail otherwise. The
+        # Rust adapter at webex.rs:431 used personEmail unconditionally
+        # — bot logs leaked emails into UI surfaces.
+        user_name=sender_display,
         content=content,
         message_id=message_id,
         is_group=is_group,
@@ -562,6 +573,14 @@ class _WebSocketClient:
 
 class WebexAdapter(SidecarAdapter):
     capabilities: list = ["thread"]
+    # Webex spaces support direct (1:1) and group rooms; the chat-room
+    # precedent set by twitch / discord / slack is to surface errors
+    # so the user gets a visible failure instead of silent swallow. A
+    # public-broadcast surface like mastodon / bluesky / reddit /
+    # nextcloud would set this True to avoid echoing internal errors to
+    # every member; Webex spaces are typically smaller, identifiable
+    # groups, so the chat-room default applies here.
+    suppress_error_responses: bool = False
 
     SCHEMA = Schema(
         name="webex",
@@ -849,7 +868,12 @@ class WebexAdapter(SidecarAdapter):
             full_msg,
             activity,
             own_bot_id=self.bot_user_id,
-            allowed_rooms=self.allowed_rooms,
+            # _handle_envelope already filtered against
+            # self.allowed_rooms above (line 855), so pass an empty
+            # list to skip the redundant per-message check inside the
+            # parser. The parser keeps the filter for direct callers
+            # (tests, future code paths).
+            allowed_rooms=[],
             account_id=self.account_id,
         )
         if ev is not None:
