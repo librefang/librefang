@@ -439,7 +439,7 @@ def test_mark_seen_empty_id_returns_true_no_state_change():
     a = _adapter()
     assert a._mark_seen("") is True
     assert a._mark_seen(None) is True  # type: ignore[arg-type]
-    assert "" not in a._seen_ids
+    assert "" not in a._seen.ids
 
 
 def test_mark_seen_eviction_at_cap(monkeypatch):
@@ -448,10 +448,10 @@ def test_mark_seen_eviction_at_cap(monkeypatch):
     a = _adapter()
     for i in range(11):
         a._mark_seen(f"post-{i}")
-    assert "post-0" not in a._seen_ids
-    assert "post-3" not in a._seen_ids
-    assert "post-4" in a._seen_ids
-    assert "post-10" in a._seen_ids
+    assert "post-0" not in a._seen.ids
+    assert "post-3" not in a._seen.ids
+    assert "post-4" in a._seen.ids
+    assert "post-10" in a._seen.ids
 
 
 # ---- _validate_token -------------------------------------------------
@@ -683,7 +683,7 @@ def test_handle_envelope_self_skip_does_not_consume_dedupe_slot():
     # we'd drop it. That's fine because Mattermost re-emits the same
     # post.id only on reconnect, not for distinct authors.
     assert emitted == []
-    assert "post-1" in a._seen_ids
+    assert "post-1" in a._seen.ids
 
 
 def test_handle_envelope_account_id_injected(monkeypatch):

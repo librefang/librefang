@@ -446,8 +446,8 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Watermark advanced to the newest id seen.
     assert a._room_watermarks["R1"] == 11
     # Both message ids tracked for dedupe.
-    assert 10 in a._seen_messages_set
-    assert 11 in a._seen_messages_set
+    assert 10 in a._seen.ids
+    assert 11 in a._seen.ids
 
 
 def test_poll_once_dedupes_id_repeats(monkeypatch):
@@ -489,7 +489,7 @@ def test_poll_once_self_skipped(monkeypatch):
     assert [e["params"]["message_id"] for e in emitted] == ["21"]
     # Even self-skipped msg id 20 is still marked seen so we don't
     # reparse it.
-    assert 20 in a._seen_messages_set
+    assert 20 in a._seen.ids
 
 
 def test_poll_once_injects_account_id(monkeypatch):
@@ -717,24 +717,24 @@ def test_seen_messages_capacity_eviction():
     for i in range(1, nc.SEEN_MESSAGES_MAX + 2):
         a._mark_seen(i)
     # ids 1..SEEN_MESSAGES_EVICT should have been evicted on overflow.
-    assert 1 not in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_EVICT not in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_EVICT + 1 in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_MAX + 1 in a._seen_messages_set
-    assert len(a._seen_messages) == len(a._seen_messages_set)
+    assert 1 not in a._seen.ids
+    assert nc.SEEN_MESSAGES_EVICT not in a._seen.ids
+    assert nc.SEEN_MESSAGES_EVICT + 1 in a._seen.ids
+    assert nc.SEEN_MESSAGES_MAX + 1 in a._seen.ids
+    assert len(a._seen.order) == len(a._seen.ids)
 
 
 def test_seen_messages_idempotent_mark():
     a = _adapter()
     a._mark_seen(5)
     a._mark_seen(5)
-    assert a._seen_messages.count(5) == 1
+    assert a._seen.order.count(5) == 1
 
 
 def test_seen_messages_empty_id_ignored():
     a = _adapter()
     a._mark_seen(0)
-    assert a._seen_messages == []
+    assert a._seen.order == []
 
 
 # ---- _post_message: outbound + threading --------------------------

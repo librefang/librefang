@@ -400,8 +400,8 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Watermark advanced to the newest ts seen.
     assert a._room_watermarks["R1"] == "2026-01-01T00:00:06.000Z"
     # Both message ids tracked for dedupe.
-    assert "m1" in a._seen_messages_set
-    assert "m2" in a._seen_messages_set
+    assert "m1" in a._seen.ids
+    assert "m2" in a._seen.ids
 
 
 def test_poll_once_emits_in_chronological_order(monkeypatch):
@@ -480,7 +480,7 @@ def test_poll_once_self_skipped(monkeypatch):
     a._poll_once(emitted.append, ["R1"])
     assert [e["params"]["message_id"] for e in emitted] == ["m2"]
     # Even self-skipped m1 is still marked seen so we don't reparse it.
-    assert "m1" in a._seen_messages_set
+    assert "m1" in a._seen.ids
 
 
 def test_poll_once_injects_account_id(monkeypatch):
@@ -571,24 +571,24 @@ def test_seen_messages_capacity_eviction():
     a = _adapter()
     for i in range(ra.SEEN_MESSAGES_MAX + 1):
         a._mark_seen(f"m{i}")
-    assert "m0" not in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_EVICT - 1}" not in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_EVICT}" in a._seen_messages_set
-    assert f"m{ra.SEEN_MESSAGES_MAX}" in a._seen_messages_set
-    assert len(a._seen_messages) == len(a._seen_messages_set)
+    assert "m0" not in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_EVICT - 1}" not in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_EVICT}" in a._seen.ids
+    assert f"m{ra.SEEN_MESSAGES_MAX}" in a._seen.ids
+    assert len(a._seen.order) == len(a._seen.ids)
 
 
 def test_seen_messages_idempotent_mark():
     a = _adapter()
     a._mark_seen("x")
     a._mark_seen("x")
-    assert a._seen_messages.count("x") == 1
+    assert a._seen.order.count("x") == 1
 
 
 def test_seen_messages_empty_id_ignored():
     a = _adapter()
     a._mark_seen("")
-    assert a._seen_messages == []
+    assert a._seen.order == []
 
 
 # ---- _post_message: outbound + threading --------------------------

@@ -489,7 +489,7 @@ def test_mark_seen_empty_id_always_true_no_state_change():
     a = _adapter()
     assert a._mark_seen("") is True
     assert a._mark_seen(None) is True  # type: ignore[arg-type]
-    assert "" not in a._seen_ids
+    assert "" not in a._seen.ids
 
 
 def test_mark_seen_eviction_at_cap(monkeypatch):
@@ -498,10 +498,10 @@ def test_mark_seen_eviction_at_cap(monkeypatch):
     a = _adapter()
     for i in range(11):
         a._mark_seen(f"msg-{i}")
-    assert "msg-0" not in a._seen_ids
-    assert "msg-3" not in a._seen_ids
-    assert "msg-4" in a._seen_ids
-    assert "msg-10" in a._seen_ids
+    assert "msg-0" not in a._seen.ids
+    assert "msg-3" not in a._seen.ids
+    assert "msg-4" in a._seen.ids
+    assert "msg-10" in a._seen.ids
 
 
 # ---- _fetch_token ----------------------------------------------------

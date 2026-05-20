@@ -125,6 +125,8 @@ from typing import Any, Callable, Optional
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
+    SeenSet as _SeenSet,
+    http_request as _http_request,
     parse_retry_after as _parse_retry_after_impl,
     split_csv as _split_csv,
     split_message as _split_message,
@@ -371,9 +373,7 @@ class WebexAdapter(SidecarAdapter):
         self.bot_display_name: Optional[str] = None
 
         # Improvement #3: bounded dedupe on activity.object.id.
-        self._seen_ids: set[str] = set()
-        self._seen_order: list[str] = []
-        self._seen_lock = threading.Lock()
+        self._seen = _SeenSet(max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT)
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -395,59 +395,23 @@ class WebexAdapter(SidecarAdapter):
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
     ) -> tuple[int, Any, bytes, dict]:
-        """One-shot HTTP request. Returns
-        ``(status, parsed_json_or_None, raw_bytes, response_headers)``.
-        Response headers are lower-cased so 429 ``Retry-After`` can be
-        looked up uniformly regardless of server casing."""
-        req = urllib.request.Request(
-            url, data=body, headers=headers or {}, method=method,
+        """Thin wrapper around :func:`librefang.sidecar.common.http_request`."""
+        return _http_request(
+            url, method=method, body=body, headers=headers,
+            timeout=timeout,
         )
-        resp_headers: dict = {}
-        try:
-            with urllib.request.urlopen(  # noqa: S310 — configured URL
-                req, timeout=timeout,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                raw = resp.read()
-                if resp.headers is not None:
-                    resp_headers = {
-                        k.lower(): v for k, v in resp.headers.items()
-                    }
-        except urllib.error.HTTPError as e:
-            status = e.code
-            try:
-                raw = e.read()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if e.headers is not None:
-                resp_headers = {k.lower(): v for k, v in e.headers.items()}
-        if not raw:
-            return status, None, b"", resp_headers
-        try:
-            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw, resp_headers
 
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, message_id: str) -> bool:
-        """Return True iff ``message_id`` is freshly seen (i.e. emit it).
-        Maintains a bounded LRU-ish set keyed on Mercury
-        ``activity.object.id``. Improvement #3."""
+        """Return True iff freshly seen. Shim around
+        :class:`librefang.sidecar.common.SeenSet` with webex's
+        historical empty-id → False override (drop the event
+        instead of treating an empty id as fresh — different from
+        the other adapters)."""
         if not message_id:
             return False
-        with self._seen_lock:
-            if message_id in self._seen_ids:
-                return False
-            self._seen_ids.add(message_id)
-            self._seen_order.append(message_id)
-            if len(self._seen_order) > SEEN_MESSAGES_MAX:
-                # Evict the oldest half so we don't thrash at the cap.
-                drop = self._seen_order[:SEEN_MESSAGES_EVICT]
-                self._seen_order = self._seen_order[SEEN_MESSAGES_EVICT:]
-                for k in drop:
-                    self._seen_ids.discard(k)
-            return True
+        return self._seen.mark(message_id)
 
     # ---- REST: auth, message fetch, send ----------------------------
 

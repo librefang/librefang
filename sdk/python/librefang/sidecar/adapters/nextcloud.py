@@ -102,7 +102,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    SeenSet as _SeenSet,
+    http_request as _http_request,
+    split_message as _split_message,
+)
 
 # Matches the Rust adapter's MAX_MESSAGE_LEN (nextcloud.rs:23).
 MAX_MESSAGE_LEN = 32000
@@ -238,8 +242,9 @@ class NextcloudAdapter(SidecarAdapter):
         self._room_watermarks: dict[str, int] = {}
         # Dedupe set on Talk message `id` (cheap, bounded). Same
         # cap / eviction policy as reddit / rocketchat.
-        self._seen_messages: list[int] = []
-        self._seen_messages_set: set[int] = set()
+        self._seen = _SeenSet(
+            max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
+        )
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -421,18 +426,11 @@ class NextcloudAdapter(SidecarAdapter):
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, msg_id: int) -> None:
-        """Track a message id with bounded eviction. Mirrors reddit /
-        rocketchat's list+set policy so eviction is deterministic
-        across runs. Talk message ids are positive integers; 0 (the
-        sentinel) is silently ignored."""
-        if not msg_id or msg_id in self._seen_messages_set:
-            return
-        self._seen_messages.append(msg_id)
-        self._seen_messages_set.add(msg_id)
-        if len(self._seen_messages) > SEEN_MESSAGES_MAX:
-            to_drop = self._seen_messages[:SEEN_MESSAGES_EVICT]
-            self._seen_messages = self._seen_messages[SEEN_MESSAGES_EVICT:]
-            self._seen_messages_set.difference_update(to_drop)
+        """Track a message id with bounded eviction. Thin shim
+        around :class:`librefang.sidecar.common.SeenSet` (the shared
+        helper returns True/False; nextcloud historically returned
+        None so we discard the return)."""
+        self._seen.mark(msg_id)
 
     # ---- inbound parsing ---------------------------------------------
 
@@ -616,7 +614,7 @@ class NextcloudAdapter(SidecarAdapter):
                     msg_id = int(raw_id) if raw_id is not None else 0
                 except (TypeError, ValueError):
                     msg_id = 0
-                if msg_id and msg_id in self._seen_messages_set:
+                if msg_id and msg_id in self._seen.ids:
                     # Already emitted — could be a boundary repeat
                     # from a previous poll. Still bump the watermark
                     # so the API query keeps advancing.

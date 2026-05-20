@@ -528,8 +528,8 @@ def test_poll_once_emits_parsed_comments(monkeypatch):
     }
     # Both comments tracked for dedupe (the t3 post is also tracked
     # under its id to avoid reparsing).
-    assert "c1" in a._seen_comments_set
-    assert "c2" in a._seen_comments_set
+    assert "c1" in a._seen.ids
+    assert "c2" in a._seen.ids
 
 
 def test_poll_once_emits_in_chronological_order(monkeypatch):
@@ -734,19 +734,19 @@ def test_seen_comments_capacity_eviction():
     for i in range(ra.SEEN_COMMENTS_MAX + 1):
         a._mark_seen(f"c{i}")
     # First half evicted; tail still present.
-    assert "c0" not in a._seen_comments_set
-    assert f"c{ra.SEEN_COMMENTS_EVICT - 1}" not in a._seen_comments_set
-    assert f"c{ra.SEEN_COMMENTS_EVICT}" in a._seen_comments_set
-    assert f"c{ra.SEEN_COMMENTS_MAX}" in a._seen_comments_set
+    assert "c0" not in a._seen.ids
+    assert f"c{ra.SEEN_COMMENTS_EVICT - 1}" not in a._seen.ids
+    assert f"c{ra.SEEN_COMMENTS_EVICT}" in a._seen.ids
+    assert f"c{ra.SEEN_COMMENTS_MAX}" in a._seen.ids
     # List and set stay coherent.
-    assert len(a._seen_comments) == len(a._seen_comments_set)
+    assert len(a._seen.order) == len(a._seen.ids)
 
 
 def test_seen_comments_idempotent_mark():
     a = _adapter()
     a._mark_seen("x")
     a._mark_seen("x")
-    assert a._seen_comments.count("x") == 1
+    assert a._seen.order.count("x") == 1
 
 
 # ---- on_send: text fallback + thread_id round-trip ----------------

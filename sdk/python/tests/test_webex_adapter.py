@@ -490,10 +490,10 @@ def test_mark_seen_capacity_eviction():
     a = _adapter()
     for i in range(wa.SEEN_MESSAGES_MAX):
         assert a._mark_seen(f"ID_{i}") is True
-    assert len(a._seen_ids) == wa.SEEN_MESSAGES_MAX
+    assert len(a._seen.ids) == wa.SEEN_MESSAGES_MAX
     # Trigger eviction
     assert a._mark_seen("ID_TRIGGER") is True
-    assert len(a._seen_ids) == wa.SEEN_MESSAGES_MAX - wa.SEEN_MESSAGES_EVICT + 1
+    assert len(a._seen.ids) == wa.SEEN_MESSAGES_MAX - wa.SEEN_MESSAGES_EVICT + 1
     # The earliest id should now have been evicted and be markable again.
     assert a._mark_seen("ID_0") is True
 

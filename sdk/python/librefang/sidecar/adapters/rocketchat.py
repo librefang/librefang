@@ -98,6 +98,7 @@ from typing import Any
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 # Matches the Rust adapter's MAX_MESSAGE_LEN. Rocket.Chat's hard cap is
 # typically configured at 5000 by default and operator-tunable; 4096 is
@@ -239,8 +240,9 @@ class RocketChatAdapter(SidecarAdapter):
         self._room_watermarks: dict[str, str] = {}
         # Dedupe set on Rocket.Chat message `_id` (cheap, bounded). Same
         # cap / eviction policy as reddit.
-        self._seen_messages: list[str] = []
-        self._seen_messages_set: set[str] = set()
+        self._seen = _SeenSet(
+            max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT,
+        )
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -405,16 +407,8 @@ class RocketChatAdapter(SidecarAdapter):
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, msg_id: str) -> None:
-        """Track a message id with bounded eviction. Mirrors reddit's
-        list+set policy so eviction is deterministic across runs."""
-        if not msg_id or msg_id in self._seen_messages_set:
-            return
-        self._seen_messages.append(msg_id)
-        self._seen_messages_set.add(msg_id)
-        if len(self._seen_messages) > SEEN_MESSAGES_MAX:
-            to_drop = self._seen_messages[:SEEN_MESSAGES_EVICT]
-            self._seen_messages = self._seen_messages[SEEN_MESSAGES_EVICT:]
-            self._seen_messages_set.difference_update(to_drop)
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(msg_id)
 
     # ---- inbound parsing ---------------------------------------------
 
@@ -559,7 +553,7 @@ class RocketChatAdapter(SidecarAdapter):
                     continue
                 msg_id = str(msg.get("_id") or "")
                 msg_ts = str(msg.get("ts") or "")
-                if msg_id and msg_id in self._seen_messages_set:
+                if msg_id and msg_id in self._seen.ids:
                     # Already emitted — could be a same-ts duplicate
                     # from the previous poll. Still bump the watermark
                     # so the API query keeps advancing.

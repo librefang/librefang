@@ -104,6 +104,7 @@ from typing import Any, Optional
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_HOST = "irc.chat.twitch.tv"
 DEFAULT_TLS_PORT = 6697
@@ -403,10 +404,10 @@ class TwitchAdapter(SidecarAdapter):
         self._writer_lock = threading.Lock()
         self._stop = threading.Event()
 
-        # Dedupe set for already-seen message ids. Capped with
-        # crude oldest-half eviction.
-        self._seen_ids: list[str] = []
-        self._seen_ids_set: set[str] = set()
+        # Dedupe set for already-seen message ids. Twitch's tighter
+        # cap (1024/512 vs the global 10000/5000) because IRC chat
+        # is high-churn and we only need ~last-minute coverage.
+        self._seen = _SeenSet(max_size=SEEN_IDS_MAX, evict=SEEN_IDS_EVICT)
 
     # ---- transport ---------------------------------------------------
 
@@ -469,19 +470,8 @@ class TwitchAdapter(SidecarAdapter):
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, msg_id: str) -> bool:
-        """Return True if `msg_id` is fresh; False if we've seen it.
-        Crude oldest-half eviction at the cap."""
-        if not msg_id:
-            return True
-        if msg_id in self._seen_ids_set:
-            return False
-        self._seen_ids.append(msg_id)
-        self._seen_ids_set.add(msg_id)
-        if len(self._seen_ids) > SEEN_IDS_MAX:
-            to_drop = self._seen_ids[:SEEN_IDS_EVICT]
-            self._seen_ids = self._seen_ids[SEEN_IDS_EVICT:]
-            self._seen_ids_set.difference_update(to_drop)
-        return True
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(msg_id)
 
     # ---- inbound: read loop on a worker thread ------------------------
 

@@ -416,7 +416,7 @@ def test_mark_seen_empty_id_returns_true_no_state_change():
     a = _adapter()
     assert a._mark_seen("") is True
     # Empty id must not be retained.
-    assert "" not in a._seen_ids
+    assert "" not in a._seen.ids
 
 
 def test_mark_seen_eviction_at_cap(monkeypatch):
@@ -429,11 +429,11 @@ def test_mark_seen_eviction_at_cap(monkeypatch):
     for i in range(11):  # 11 > MAX = 10, triggers eviction
         a._mark_seen(f"m-{i}")
     # First 4 should have been evicted.
-    assert "m-0" not in a._seen_ids
-    assert "m-3" not in a._seen_ids
+    assert "m-0" not in a._seen.ids
+    assert "m-3" not in a._seen.ids
     # The remainder are still there.
-    assert "m-4" in a._seen_ids
-    assert "m-10" in a._seen_ids
+    assert "m-4" in a._seen.ids
+    assert "m-10" in a._seen.ids
 
 
 # ---- _validate_token -------------------------------------------------
@@ -684,7 +684,7 @@ def test_handle_webhook_skips_non_message_event_without_dedupe_entry():
     status = a._handle_webhook_body(body, sig, emitted.append)
     assert status == 200
     assert emitted == []
-    assert a._seen_ids == set()
+    assert a._seen.ids == set()
 
 
 def test_handle_webhook_account_id_injected_into_metadata(monkeypatch):
