@@ -198,10 +198,7 @@ mod tests {
 
     fn make_pooled() -> super::PooledDriver {
         let pool = new_arc_pool(
-            vec![
-                ("key-a".to_string(), 10),
-                ("key-b".to_string(), 5),
-            ],
+            vec![("key-a".to_string(), 10), ("key-b".to_string(), 5)],
             PoolStrategy::FillFirst,
         );
         let base_config = librefang_llm_driver::DriverConfig {
@@ -224,7 +221,10 @@ mod tests {
             message: "Too many requests".into(),
             code: None,
         };
-        assert!(matches!(err.failover_reason(), FailoverReason::RateLimit(_)));
+        assert!(matches!(
+            err.failover_reason(),
+            FailoverReason::RateLimit(_)
+        ));
         p.handle_driver_error("key-a", &err);
         // FillFirst now picks key-b (priority 5) because key-a is in cooldown.
         let snap = p.pool.snapshot();
@@ -247,7 +247,10 @@ mod tests {
             message: "Insufficient credits".into(),
             code: None,
         };
-        assert!(matches!(err.failover_reason(), FailoverReason::CreditExhausted));
+        assert!(matches!(
+            err.failover_reason(),
+            FailoverReason::CreditExhausted
+        ));
         p.handle_driver_error("key-a", &err);
         let snap = p.pool.snapshot();
         assert!(snap[0].is_exhausted);
@@ -337,9 +340,15 @@ mod tests {
             "preconditions: both keys must be in cooldown"
         );
 
-        let err = p.acquire().expect_err("acquire must fail when no keys remain");
+        let err = p
+            .acquire()
+            .expect_err("acquire must fail when no keys remain");
         match err {
-            LlmError::Api { status, ref message, code } => {
+            LlmError::Api {
+                status,
+                ref message,
+                code,
+            } => {
                 assert_eq!(status, 503, "must be 503 so FallbackChain rolls forward");
                 assert!(
                     message.contains("exhausted"),

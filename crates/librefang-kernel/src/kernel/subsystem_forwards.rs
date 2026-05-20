@@ -136,10 +136,8 @@ impl LlmSubsystemApi for LibreFangKernel {
     #[inline]
     fn credential_pool_summaries(
         &self,
-    ) -> std::collections::BTreeMap<
-        String,
-        crate::kernel::subsystems::llm::CredentialPoolSummary,
-    > {
+    ) -> std::collections::BTreeMap<String, crate::kernel::subsystems::llm::CredentialPoolSummary>
+    {
         self.llm.credential_pool_summaries()
     }
 }
