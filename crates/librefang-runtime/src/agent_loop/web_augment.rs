@@ -187,7 +187,20 @@ pub(super) async fn web_search_augment(
     {
         Some(q) if q.is_empty() => return None, // LLM says no search needed
         Some(q) => q,
-        None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+        None => {
+            // Query-generation LLM failed — non-JSON response, network
+            // error, or the response_format=Json pin we ship in this
+            // module is ignored by the provider. Falling back to a single
+            // verbatim-user-message search keeps the feature working but
+            // is observably worse than a well-formed multi-query expansion;
+            // surface it so operators can spot a degraded provider.
+            tracing::debug!(
+                user_message_chars = user_message.chars().count(),
+                "web_search_augment: LLM query generation returned no parseable queries; \
+                 falling back to verbatim user message as the single search query",
+            );
+            vec![user_message.to_string()]
+        }
     };
 
     // Search with each query and collect results
