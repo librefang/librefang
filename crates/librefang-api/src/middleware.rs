@@ -722,8 +722,15 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     // auth (Bug #3781).
     PublicRoute::exact_get("/a2a/agents"),
     PublicRoute::exact_get("/api/auth/providers"),
-    // Auth login prefix
-    PublicRoute::prefix_get("/api/auth/login"),
+    // Auth login: exact for the base endpoint, prefix for the
+    // provider-specific suffix `/api/auth/login/{provider}`. The
+    // unsuffixed `prefix_get("/api/auth/login")` would have matched
+    // any sibling that happened to share the prefix
+    // (`/api/auth/login-status`, `/api/auth/loginhack`, etc.) and
+    // silently leaked it as public — even though no such sibling
+    // exists today (audit: login-prefix-match).
+    PublicRoute::exact_get("/api/auth/login"),
+    PublicRoute::prefix_get("/api/auth/login/"),
     // Config schema
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page

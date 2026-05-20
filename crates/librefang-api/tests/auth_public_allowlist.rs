@@ -200,6 +200,15 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/auth/dashboard-check", Expect::AlwaysPublic),
     re("/api/auth/providers", Expect::AlwaysPublic),
     re("/api/auth/login", Expect::AlwaysPublic),
+    re("/api/auth/login/google", Expect::AlwaysPublic),
+    // Regression for audit: login-prefix-match. A bare
+    // `prefix_get("/api/auth/login")` matched arbitrary siblings
+    // sharing the prefix; the split into exact + slash-terminated
+    // prefix keeps both `/api/auth/login` and
+    // `/api/auth/login/{provider}` public while requiring auth on
+    // `/api/auth/login-status`, `/api/auth/loginhack`, etc.
+    re("/api/auth/login-status", Expect::Authed),
+    re("/api/auth/loginhack", Expect::Authed),
     re("/api/config/schema", Expect::AlwaysPublic),
     re("/api/pairing/complete", Expect::AlwaysPublic),
     re("/a2a/agents", Expect::AlwaysPublic),
