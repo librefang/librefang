@@ -1058,12 +1058,29 @@ pub async fn run_agent_loop(
             Ok(r) => r,
             Err(e) => {
                 if let Some(ref k) = kernel {
+                    // houko #5311 finding 2: route the notify to the chat
+                    // the original message arrived on, not to the author's
+                    // private DM. On split-channel sidecars (telegram /
+                    // slack / discord) `sender_user_id` is the author and
+                    // `sender_chat_scope` carries the chat-qualified
+                    // address adapters use as `ChannelUser.platform_id`.
+                    // Fall back to `sender_user_id` when scope is absent
+                    // (CLI, REST, gateway-collapsed channels where
+                    // platform_id == chat_id, e.g. WhatsApp).
+                    //
+                    // finding 6: pull `account_id` off manifest metadata
+                    // (stamped by `kernel::messaging` /
+                    // `kernel::agent_execution`) so the
+                    // `{channel}:{account_id}` adapter lookup hits on
+                    // multi-bot deployments.
+                    let recipient = sender_chat_scope.as_deref().or(sender_user_id.as_deref());
+                    let account_id = manifest.metadata.get("account_id").and_then(|v| v.as_str());
                     let _ = crate::rate_limit_notify::dispatch_via_kernel(
                         manifest,
                         k,
                         sender_channel.as_deref(),
-                        sender_user_id.as_deref(),
-                        None,
+                        recipient,
+                        account_id,
                         &e.to_string(),
                     )
                     .await;

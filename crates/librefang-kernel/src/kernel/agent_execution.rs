@@ -993,6 +993,18 @@ impl LibreFangKernel {
                     .metadata
                     .insert("is_group".to_string(), serde_json::Value::Bool(true));
             }
+            // houko #5311 finding 6: see `kernel::messaging` for the
+            // rationale — the rate-limit owner-notify dispatch needs the
+            // inbound `account_id` to address the right sidecar on
+            // multi-bot deployments.
+            if let Some(aid) = ctx.account_id.as_deref() {
+                if !aid.is_empty() {
+                    manifest.metadata.insert(
+                        "account_id".to_string(),
+                        serde_json::Value::String(aid.to_string()),
+                    );
+                }
+            }
         }
 
         let proactive_memory = self.memory.proactive_memory.get().cloned();

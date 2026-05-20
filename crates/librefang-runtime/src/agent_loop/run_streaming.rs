@@ -744,12 +744,20 @@ pub async fn run_agent_loop_streaming(
                 // channel ping must land regardless of how the kernel
                 // post-processes the failed turn.
                 if let Some(ref k) = kernel {
+                    // houko #5311 findings 2 + 6: prefer the
+                    // chat-qualified scope as recipient (group chats on
+                    // split-channel sidecars), and thread the inbound
+                    // `account_id` for multi-bot deployments. See the
+                    // mirror call site in `agent_loop::run_agent_loop`
+                    // for the full rationale.
+                    let recipient = sender_chat_scope.as_deref().or(sender_user_id.as_deref());
+                    let account_id = manifest.metadata.get("account_id").and_then(|v| v.as_str());
                     let _ = crate::rate_limit_notify::dispatch_via_kernel(
                         manifest,
                         k,
                         sender_channel.as_deref(),
-                        sender_user_id.as_deref(),
-                        None,
+                        recipient,
+                        account_id,
                         &err_str,
                     )
                     .await;
