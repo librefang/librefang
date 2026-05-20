@@ -42,42 +42,45 @@ Teams 适配器使用 Microsoft Bot Framework v3 webhook 协议配合 OAuth2 令
 
 ---
 
-## Mattermost
+## Mattermost（Sidecar）
+
+Mattermost 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.mattermost`）。
 
 ### 前置条件
 
 - 一个 Mattermost 服务器（自托管或云版本），具备管理员权限
 - Bot 账户或个人访问令牌
+- Python 3 + `librefang` SDK（`pip install -e sdk/python`）
 
 ### 设置步骤
 
 1. 在 Mattermost 中，前往 **Integrations > Bot Accounts** 创建新 Bot，或前往 **Account Settings > Security > Personal Access Tokens** 生成令牌。
-2. 复制令牌。
-3. 设置环境变量：
+2. 复制令牌并写入 `~/.librefang/secrets.env`：
 
 ```bash
-export MATTERMOST_TOKEN=your-bot-token        # 环境变量
-export MATTERMOST_URL=https://mattermost.example.com
-librefang vault set MATTERMOST_TOKEN          # 加密金库（推荐）
-librefang vault set MATTERMOST_URL
-librefang config set-key mattermost           # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+MATTERMOST_TOKEN=your-bot-token
 ```
 
-4. 添加到配置文件：
+3. 在 `~/.librefang/config.toml` 中声明 sidecar：
 
 ```toml
-[channels.mattermost]
-token_env = "MATTERMOST_TOKEN"
-url_env = "MATTERMOST_URL"
+[[sidecar_channels]]
+name = "mattermost"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mattermost"]
+channel_type = "mattermost"
 default_agent = "ops"
+[sidecar_channels.env]
+MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_ALLOWED_CHANNELS = "ch-id-1,ch-id-2"    # 可选，空 = 全部
+# MATTERMOST_ACCOUNT_ID = "team-prod"                # 可选，多 Bot 路由
 ```
 
-5. 重启守护进程。
+4. 重启守护进程。
 
 ### 工作原理
 
-Mattermost 适配器通过 WebSocket 连接到 Mattermost 服务器接收实时事件，并使用 REST v4 API 发送消息。它监听新帖子事件并路由到配置的 Agent。
+Sidecar 通过 WebSocket 连接到 Mattermost 服务器（`wss://<host>/api/v4/websocket`），在握手完成后立即发送 `authentication_challenge`。订阅 `posted` 事件，按 `post.id` 去重后通过 stdio 推送给内核。出站消息使用 `POST /api/v4/posts`，并把入站的 `root_id` 透传回去，保证线程内回复仍留在原线程。
 
 ---
 

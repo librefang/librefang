@@ -303,14 +303,8 @@ impl KernelConfig {
                 ));
             }
         }
-        for m in self.channels.mattermost.iter() {
-            if std::env::var(&m.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Mattermost configured but {} is not set",
-                    m.token_env
-                ));
-            }
-        }
+        // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+        // env-var presence is now validated inside the sidecar process.
         for gc in self.channels.google_chat.iter() {
             let has_env = !std::env::var(&gc.service_account_env)
                 .unwrap_or_default()

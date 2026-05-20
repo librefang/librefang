@@ -803,7 +803,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(matrix);
         ch!(email);
         ch!(teams);
-        ch!(mattermost);
         ch!(google_chat);
         ch!(feishu);
         ch!(dingtalk);

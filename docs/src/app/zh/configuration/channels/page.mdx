@@ -186,21 +186,23 @@ allowed_tenants = []
 | `allowed_tenants` | list of strings | `[]` | 允许的 Azure AD 租户 ID 列表。空列表 = 允许所有。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
-#### `[channels.mattermost]`
+#### Mattermost（Sidecar）
+
+Mattermost 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.mattermost`）。原有 `[channels.mattermost]` 块不再识别 —— 改为声明 `[[sidecar_channels]]`：
 
 ```toml
-[channels.mattermost]
-server_url = "https://mattermost.example.com"
-token_env = "MATTERMOST_TOKEN"
-allowed_channels = []
+[[sidecar_channels]]
+name = "mattermost"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.mattermost"]
+channel_type = "mattermost"
+[sidecar_channels.env]
+MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_ALLOWED_CHANNELS = "ch-id-1,ch-id-2"   # 可选
+# MATTERMOST_ACCOUNT_ID = "team-prod"               # 可选
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Mattermost 服务器 URL。 |
-| `token_env` | string | `"MATTERMOST_TOKEN"` | 存放 Mattermost Bot 令牌的环境变量。 |
-| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`MATTERMOST_TOKEN` 写入 `~/.librefang/secrets.env`。
 
 #### `[channels.google_chat]`
 

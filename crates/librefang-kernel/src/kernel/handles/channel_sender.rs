@@ -31,7 +31,6 @@ macro_rules! for_each_channel_field {
         $mac!(feishu, "feishu");
         $mac!(google_chat, "google_chat");
         $mac!(matrix, "matrix");
-        $mac!(mattermost, "mattermost");
         $mac!(qq, "qq");
         $mac!(signal, "signal");
         $mac!(teams, "teams");
@@ -472,7 +471,6 @@ mod tests {
             "feishu",
             "google_chat",
             "matrix",
-            "mattermost",
             "qq",
             "signal",
             "teams",

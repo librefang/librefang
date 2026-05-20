@@ -1906,31 +1906,31 @@ fn migrate_channels_from_json(
     }
 
     // --- Mattermost ---
+    //
+    // Mattermost was removed as an in-process adapter and migrated to a
+    // sidecar (`librefang.sidecar.adapters.mattermost`). The OpenClaw
+    // block can't be auto-mapped to `[[sidecar_channels]]` cleanly
+    // because the sidecar reads secrets from `~/.librefang/secrets.env`
+    // and non-secret knobs from `[sidecar_channels.env]`, both of which
+    // are out of band from this migrator's TOML output. Surface a
+    // skipped item with the migration path instead of silently dropping.
     if let Some(ref mm) = oc_channels.mattermost {
         if mm.enabled.unwrap_or(true) {
             if let Some(ref token) = mm.bot_token {
                 emit_secret(&secrets_path, dry_run, "MATTERMOST_TOKEN", token, report);
             }
-            let mut fields: Vec<(&str, toml::Value)> =
-                vec![("token_env", toml::Value::String("MATTERMOST_TOKEN".into()))];
-            if let Some(ref url) = mm.base_url {
-                fields.push(("server_url", toml::Value::String(url.clone())));
-            }
-            if allow_from_to_toml_array(mm.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "Mattermost: OpenClaw 'allow_from' could not be auto-mapped — \
-                     MattermostConfig has no per-user allowlist, only 'allowed_channels' (channel IDs)."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "mattermost".to_string(),
-                build_channel_table(fields, mm.dm_policy.as_deref(), None),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "Mattermost in-process adapter was removed and migrated to a \
+                          sidecar (librefang.sidecar.adapters.mattermost). Your OpenClaw \
+                          Mattermost block was NOT migrated to config.toml — declare a \
+                          [[sidecar_channels]] entry pointing at the sidecar (see \
+                          docs/integrations/channels/enterprise) or pin a pre-removal \
+                          LibreFang release."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "mattermost".to_string(),
-                destination: "config.toml [channels.mattermost]".to_string(),
+                reason,
             });
         }
     }
@@ -2978,19 +2978,17 @@ fn parse_legacy_channels(
                 });
             }
             "mattermost" => {
-                let token_env = ch
-                    .bot_token_env
-                    .unwrap_or_else(|| "MATTERMOST_TOKEN".to_string());
-                let fields: Vec<(&str, toml::Value)> =
-                    vec![("token_env", toml::Value::String(token_env))];
-                channels_table.insert(
-                    "mattermost".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // Mattermost was migrated from in-process to a sidecar;
+                // surface a warning instead of writing a [channels.mattermost]
+                // block the kernel would refuse to deserialize.
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "mattermost".to_string(),
-                    destination: "config.toml [channels.mattermost]".to_string(),
+                    reason: "Mattermost in-process adapter was migrated to a \
+                             sidecar (librefang.sidecar.adapters.mattermost). \
+                             Declare a [[sidecar_channels]] entry instead — see \
+                             docs/integrations/channels/enterprise."
+                        .to_string(),
                 });
             }
             "feishu" => {
@@ -3734,7 +3732,17 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "irc"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.mattermost]"));
+        // Mattermost migrated to a sidecar; the migrator records a
+        // skipped entry instead of emitting a [channels.mattermost]
+        // block (same shape as the IRC removal above).
+        assert!(
+            !config_toml.contains("[channels.mattermost]"),
+            "Mattermost is no longer an in-process adapter; the migrator must not \
+             emit a [channels.mattermost] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "mattermost"
+            && s.reason.contains("sidecar")));
         assert!(config_toml.contains("[channels.feishu]"));
         assert!(config_toml.contains("[channels.teams]"));
         assert!(
@@ -3946,13 +3954,10 @@ mod tests {
 
         // 7. Per-struct field-name corrections.
         // IRC removed in v2026.5 — used to check `irc.nick == "bot"` here.
-        let mm = cfg
-            .channels
-            .mattermost
-            .iter()
-            .next()
-            .expect("mattermost configured");
-        assert_eq!(mm.token_env, "MATTERMOST_TOKEN"); // was "bot_token_env" before
+        // Mattermost migrated to a sidecar — used to check
+        // `mm.token_env == "MATTERMOST_TOKEN"` here. Both are now
+        // recorded as skipped sidecar channels (see secrets.env
+        // assertions below for the token round-trip).
         let teams = cfg.channels.teams.iter().next().expect("teams configured");
         assert_eq!(teams.allowed_tenants, vec!["tenant-xyz".to_string()]); // was "tenant_id" scalar before
         let feishu = cfg

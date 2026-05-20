@@ -25,7 +25,6 @@ all-channels = [
     "channel-feishu",
     "channel-google-chat",
     "channel-matrix",
-    "channel-mattermost",
     "channel-qq",
     "channel-signal",
     "channel-teams",
@@ -42,7 +41,6 @@ channel-webhook = []
 channel-whatsapp = []
 channel-signal = []
 channel-teams = []
-channel-mattermost = []
 channel-google-chat = ["dep:rsa"]
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-dingtalk = []

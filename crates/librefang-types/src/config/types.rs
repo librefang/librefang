@@ -6387,8 +6387,8 @@ pub struct ChannelsConfig {
     pub email: OneOrMany<EmailConfig>,
     /// Microsoft Teams configuration(s).
     pub teams: OneOrMany<TeamsConfig>,
-    /// Mattermost configuration(s).
-    pub mattermost: OneOrMany<MattermostConfig>,
+    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
     // Wave 3 — High-value channels
@@ -6467,7 +6467,6 @@ impl Default for ChannelsConfig {
             matrix: OneOrMany::default(),
             email: OneOrMany::default(),
             teams: OneOrMany::default(),
-            mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             feishu: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
@@ -6805,57 +6804,10 @@ impl Default for TeamsConfig {
     }
 }
 
-/// Mattermost channel adapter configuration.
-//
-// `deny_unknown_fields` — see `WhatsAppConfig` for the rationale (#5130).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct MattermostConfig {
-    /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
-    pub server_url: String,
-    /// Env var name holding the bot token.
-    pub token_env: String,
-    /// Allowed channel IDs (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Initial backoff in seconds on WebSocket failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on WebSocket failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
-    /// adapter's REST client (#4795). Affects REST API calls only —
-    /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `WhatsAppConfig::proxy` for accepted
-    /// URL shapes and env-var interaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for MattermostConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "MATTERMOST_TOKEN".to_string(),
-            allowed_channels: vec![],
-            account_id: None,
-            default_agent: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-            proxy: None,
-        }
-    }
-}
+// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+// the in-process `MattermostConfig` + `[channels.mattermost]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 /// Google Chat channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

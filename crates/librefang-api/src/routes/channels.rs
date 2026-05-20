@@ -229,21 +229,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
         config_template: "[channels.teams]\napp_id = \"\"\napp_password_env = \"TEAMS_APP_PASSWORD\"",
     },
-    ChannelMeta {
-        name: "mattermost", display_name: "Mattermost", icon: "MM",
-        description: "Mattermost WebSocket adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your bot token and server URL",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://mattermost.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("MATTERMOST_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_channels", label: "Allowed Channels", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123, def456", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in System Console > Bot Accounts", "Copy the token", "Enter server URL and token below"],
-        config_template: "[channels.mattermost]\nserver_url = \"\"\ntoken_env = \"MATTERMOST_TOKEN\"",
-    },
+    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+    // see SIDECAR_CATALOG below.
     ChannelMeta {
         name: "google_chat", display_name: "Google Chat", icon: "GC",
         description: "Google Chat service account adapter",
@@ -373,7 +360,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "matrix" => config.matrix.is_some(),
         "email" => config.email.is_some(),
         "teams" => config.teams.is_some(),
-        "mattermost" => config.mattermost.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
@@ -694,6 +680,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Zulip REST + event-queue long-poll adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.zulip"],
+    },
+    SidecarCatalogEntry {
+        name: "mattermost",
+        display_name: "Mattermost",
+        description: "Mattermost WebSocket + REST adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.mattermost"],
     },
 ];
 
@@ -1208,10 +1201,6 @@ fn channel_config_values(
             .teams
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "mattermost" => config
-            .mattermost
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
             .as_ref()
@@ -1257,7 +1246,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "matrix" => config.matrix.len(),
         "email" => config.email.len(),
         "teams" => config.teams.len(),
-        "mattermost" => config.mattermost.len(),
         "google_chat" => config.google_chat.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
@@ -1293,7 +1281,6 @@ fn channel_instances_serialized(
         "matrix" => ser(&config.matrix),
         "email" => ser(&config.email),
         "teams" => ser(&config.teams),
-        "mattermost" => ser(&config.mattermost),
         "google_chat" => ser(&config.google_chat),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),

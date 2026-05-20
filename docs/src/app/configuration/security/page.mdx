@@ -363,7 +363,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `EMAIL_PASSWORD` | Email | Email account password or app password. |
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
 | `TEAMS_SECURITY_TOKEN` | Teams | Outgoing webhook security token (base64) — HMAC-SHA256 key used to verify the `Authorization: HMAC <…>` header on every inbound activity. Production deployments should always set this. |
-| `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
+| `MATTERMOST_TOKEN` | Mattermost (sidecar) | Mattermost bot token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `ZULIP_API_KEY` | Zulip | Zulip bot API key. |

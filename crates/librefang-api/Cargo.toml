@@ -98,7 +98,6 @@ channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
 channel-signal = ["librefang-channels/channel-signal"]
 channel-teams = ["librefang-channels/channel-teams"]
-channel-mattermost = ["librefang-channels/channel-mattermost"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 channel-feishu = ["librefang-channels/channel-feishu"]
 channel-dingtalk = ["librefang-channels/channel-dingtalk"]
@@ -120,7 +119,7 @@ core-channels = [
 all-channels = [
     "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
+    "channel-teams", "channel-google-chat",
     "channel-feishu",
     "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
@@ -131,7 +130,7 @@ all-channels = [
 all-channels-no-email = [
     "channel-matrix",
     "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
+    "channel-teams", "channel-google-chat",
     "channel-feishu",
     "channel-dingtalk",
     "channel-qq", "channel-wechat", "channel-wecom",
@@ -141,7 +140,7 @@ all-channels-no-email = [
 mini = [
     "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
+    "channel-teams", "channel-google-chat",
 ]
 
 [target.'cfg(unix)'.dependencies]

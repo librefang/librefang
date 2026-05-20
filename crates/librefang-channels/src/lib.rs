@@ -43,8 +43,8 @@ pub mod google_chat;
 // (librefang.sidecar.adapters.line); no longer an in-process channel.
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
-#[cfg(feature = "channel-mattermost")]
-pub mod mattermost;
+// mattermost migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.mattermost); no longer an in-process channel.
 #[cfg(feature = "channel-qq")]
 pub mod qq;
 #[cfg(feature = "channel-signal")]

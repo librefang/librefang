@@ -240,8 +240,8 @@ use librefang_channels::email::EmailAdapter;
 use librefang_channels::google_chat::GoogleChatAdapter;
 #[cfg(feature = "channel-matrix")]
 use librefang_channels::matrix::MatrixAdapter;
-#[cfg(feature = "channel-mattermost")]
-use librefang_channels::mattermost::MattermostAdapter;
+// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+// see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-signal")]
 use librefang_channels::signal::SignalAdapter;
 #[cfg(feature = "channel-teams")]
@@ -1885,7 +1885,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "matrix" => find_channel_info!(matrix),
             "email" => find_channel_info!(email),
             "teams" => find_channel_info!(teams),
-            "mattermost" => find_channel_info!(mattermost),
             "google_chat" => find_channel_info!(google_chat),
             // Wave 3
             "feishu" => find_channel_info!(feishu),
@@ -2542,7 +2541,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(matrix, "channel-matrix", "Matrix");
     check_channel!(email, "channel-email", "Email");
     check_channel!(teams, "channel-teams", "Teams");
-    check_channel!(mattermost, "channel-mattermost", "Mattermost");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
@@ -2754,34 +2752,9 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Mattermost
-    #[cfg(feature = "channel-mattermost")]
-    for mm_config in config.mattermost.iter() {
-        if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
-            let base = MattermostAdapter::new(
-                mm_config.server_url.clone(),
-                token,
-                mm_config.allowed_channels.clone(),
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, mm_config.proxy.as_deref(), "Mattermost", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(mm_config.account_id.clone())
-                    .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                mm_config.default_agent.clone(),
-                mm_config.account_id.clone(),
-            ));
-        }
-    }
+    // mattermost migrated to a sidecar
+    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
+    // routes/channels.rs.
 
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
@@ -3993,7 +3966,6 @@ mod tests {
         assert!(config.channels.matrix.is_none());
         assert!(config.channels.email.is_none());
         assert!(config.channels.teams.is_none());
-        assert!(config.channels.mattermost.is_none());
         assert!(config.channels.google_chat.is_none());
         // Wave 3
         assert!(config.channels.feishu.is_none());

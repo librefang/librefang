@@ -76,19 +76,15 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // ── Social
     // mastodon, bluesky, and reddit migrated to sidecar adapters
     // ── Enterprise (10)
+    // mattermost migrated to a sidecar
+    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
+    // librefang-api/src/routes/channels.rs.
     ChannelDef {
         name: "teams",
         display_name: "Teams",
         category: "Enterprise",
         env_vars: &["TEAMS_APP_PASSWORD"],
         description: "Microsoft Teams Bot Framework adapter",
-    },
-    ChannelDef {
-        name: "mattermost",
-        display_name: "Mattermost",
-        category: "Enterprise",
-        env_vars: &["MATTERMOST_TOKEN"],
-        description: "Mattermost WebSocket adapter",
     },
     ChannelDef {
         name: "google_chat",

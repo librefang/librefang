@@ -25,7 +25,6 @@ email
 feishu
 google_chat
 matrix
-mattermost
 qq
 sidecar
 signal

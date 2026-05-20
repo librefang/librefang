@@ -621,14 +621,14 @@ mod tests {
     }
 
     /// Since #5129 / #5130 the locked-down structs (`WhatsAppConfig`,
-    /// `MattermostConfig`, `McpServerConfigEntry`) carry
-    /// `#[serde(deny_unknown_fields)]`, so an unknown field nested
-    /// inside any of them now surfaces as a "does not cleanly deserialize"
-    /// warning at migrate time. (DiscordConfig and SlackConfig were
-    /// originally in this set; both were migrated to sidecars in v2026.5
-    /// so the structs no longer exist.) The remaining nested config
-    /// structs are still tolerant and silently drop unknown fields —
-    /// see #5130 for the explicit scoping decision.
+    /// `McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`,
+    /// so an unknown field nested inside any of them now surfaces as
+    /// a "does not cleanly deserialize" warning at migrate time.
+    /// (DiscordConfig, SlackConfig, and MattermostConfig were
+    /// originally in this set; all three were migrated to sidecars in
+    /// v2026.5 so the structs no longer exist.) The remaining nested
+    /// config structs are still tolerant and silently drop unknown
+    /// fields — see #5130 for the explicit scoping decision.
     #[test]
     fn test_schema_drift_check_catches_nested_unknown_fields_in_locked_down_sections() {
         let src = TempDir::new().unwrap();
