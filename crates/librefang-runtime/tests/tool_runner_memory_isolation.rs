@@ -15,12 +15,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type AgentIdLog = Arc<Mutex<Vec<Option<String>>>>;
+type StorageMap = HashMap<(Option<String>, String), serde_json::Value>;
 
 struct IsolationKernel {
     store_agent_ids: AgentIdLog,
     recall_agent_ids: AgentIdLog,
     list_agent_ids: AgentIdLog,
-    storage: Arc<Mutex<HashMap<(Option<String>, String), serde_json::Value>>>,
+    storage: Arc<Mutex<StorageMap>>,
 }
 
 struct IsolationProbes {
@@ -304,18 +305,19 @@ async fn f1_cross_agent_negative_isolation_via_tool_path() {
     .await;
     assert!(!store.is_error, "store should succeed: {}", store.content);
 
-    let store_ids = probes.store_agent_ids.lock().unwrap();
-    assert_eq!(
-        store_ids.len(),
-        1,
-        "expected exactly one store call, got {store_ids:?}"
-    );
-    assert_eq!(
-        store_ids[0],
-        Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
-        "store must pass agent A's caller_agent_id"
-    );
-    drop(store_ids);
+    {
+        let store_ids = probes.store_agent_ids.lock().unwrap();
+        assert_eq!(
+            store_ids.len(),
+            1,
+            "expected exactly one store call, got {store_ids:?}"
+        );
+        assert_eq!(
+            store_ids[0],
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
+            "store must pass agent A's caller_agent_id"
+        );
+    }
 
     let recall_b = execute_tool_raw("t2", "memory_recall", &json!({"key": "secret"}), &ctx_b).await;
     assert!(
