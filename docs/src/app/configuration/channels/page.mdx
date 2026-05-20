@@ -295,23 +295,9 @@ ROCKETCHAT_USER_ID = "abc123"
 
 `ROCKETCHAT_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 
-#### `[channels.zulip]`
+#### Zulip
 
-```toml
-[channels.zulip]
-server_url = "https://zulip.example.com"
-bot_email = "bot@zulip.example.com"
-api_key_env = "ZULIP_API_KEY"
-streams = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Zulip server URL. |
-| `bot_email` | string | `""` | Bot email address registered in Zulip. |
-| `api_key_env` | string | `"ZULIP_API_KEY"` | Env var holding the Zulip API key. |
-| `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Zulip is provided by the Python sidecar adapter (`librefang.sidecar.adapters.zulip`). The in-process `[channels.zulip]` config block was removed in the sidecar migration. Declare Zulip as a `[[sidecar_channels]]` entry instead — see the configuration reference's "Zulip" section above for the full block.
 
 #### LINE
 

@@ -119,14 +119,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         ],
         description: "DingTalk Robot API adapter (webhook or stream mode)",
     },
-    ChannelDef {
-        name: "zulip",
-        display_name: "Zulip",
-        category: "Enterprise",
-        env_vars: &["ZULIP_API_KEY"],
-        description: "Zulip event queue adapter",
-    },
-    // twitch, rocketchat & nextcloud migrated to sidecar adapters
+    // twitch, rocketchat, nextcloud & zulip migrated to sidecar adapters
     // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",

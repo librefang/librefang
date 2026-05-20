@@ -1072,23 +1072,24 @@ ROCKETCHAT_USER_ID = "abc123"
 
 `ROCKETCHAT_TOKEN` (the personal access token) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 
-#### `[channels.zulip]`
+#### Zulip
 
-```toml
-[channels.zulip]
-server_url = "https://zulip.example.com"
-bot_email = "bot@zulip.example.com"
-api_key_env = "ZULIP_API_KEY"
-streams = []
+Zulip is provided by the Python sidecar adapter (`librefang.sidecar.adapters.zulip`). The in-process `[channels.zulip]` config block was removed in the sidecar migration. Declare Zulip as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # optional; empty = all subscribed
+# ZULIP_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Zulip server URL. |
-| `bot_email` | string | `""` | Bot email address registered in Zulip. |
-| `api_key_env` | string | `"ZULIP_API_KEY"` | Env var holding the Zulip API key. |
-| `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`ZULIP_API_KEY` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Zulip form. The sidecar surfaces the inbound topic as `thread_id` and round-trips it on outbound (replies stay in the originating topic), honours `Retry-After` on 429 across `/users/me`, `/register`, `/events`, and `/messages`, and dedupes on `message.id` so a queue re-register can't re-emit the same message.
 
 #### LINE
 
@@ -2667,7 +2668,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat personal access token (sidecar adapter — set in `~/.librefang/secrets.env`). |
-| `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
+| `ZULIP_API_KEY` | Zulip (sidecar) | Zulip bot API key (sidecar adapter — set in `~/.librefang/secrets.env`). |
 | `XMPP_PASSWORD` | XMPP | XMPP account password. |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
 | `LINE_CHANNEL_SECRET` | LINE (sidecar) | LINE channel secret (sidecar adapter — set in `~/.librefang/secrets.env`). |
@@ -2717,7 +2718,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Email | `password_env` |
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
-| Zulip | `api_key_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | Reddit | `client_secret_env` |

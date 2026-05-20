@@ -459,20 +459,12 @@ admin_role = "admin"
     }
 
     #[test]
-    fn test_zulip_config_defaults() {
-        let z = ZulipConfig::default();
-        assert_eq!(z.api_key_env, "ZULIP_API_KEY");
-        assert!(z.bot_email.is_empty());
-    }
-
-    #[test]
     fn test_all_new_channel_configs_serde() {
         let config = KernelConfig {
             channels: ChannelsConfig {
                 teams: OneOrMany(vec![TeamsConfig::default()]),
                 mattermost: OneOrMany(vec![MattermostConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                zulip: OneOrMany(vec![ZulipConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
@@ -482,7 +474,6 @@ admin_role = "admin"
         assert!(back.channels.teams.is_some());
         assert!(back.channels.mattermost.is_some());
         assert!(back.channels.google_chat.is_some());
-        assert!(back.channels.zulip.is_some());
     }
 
     #[test]

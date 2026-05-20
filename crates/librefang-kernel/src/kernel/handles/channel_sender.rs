@@ -39,7 +39,6 @@ macro_rules! for_each_channel_field {
         $mac!(wechat, "wechat");
         $mac!(wecom, "wecom");
         $mac!(whatsapp, "whatsapp");
-        $mac!(zulip, "zulip");
     };
 }
 
@@ -481,7 +480,6 @@ mod tests {
             "wechat",
             "wecom",
             "whatsapp",
-            "zulip",
         ];
 
         assert_eq!(

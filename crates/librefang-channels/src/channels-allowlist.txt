@@ -34,4 +34,3 @@ webhook
 wechat
 wecom
 whatsapp
-zulip

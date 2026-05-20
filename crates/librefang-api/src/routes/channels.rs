@@ -294,22 +294,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a robot in DingTalk", "Choose mode: webhook (needs public IP) or stream (no public IP needed)", "For webhook: copy token and signing secret", "For stream: copy App Key and App Secret from the app page"],
         config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
     },
-    ChannelMeta {
-        name: "zulip", display_name: "Zulip", icon: "ZL",
-        description: "Zulip event queue adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your API key, server URL, and bot email",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://chat.zulip.org", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "bot_email", label: "Bot Email", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@zulip.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "api_key_env", label: "API Key", field_type: FieldType::Secret, env_var: Some("ZULIP_API_KEY"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "streams", label: "Streams", field_type: FieldType::List, env_var: None, required: false, placeholder: "general, dev", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot in Zulip Settings > Your Bots", "Copy the API key", "Enter server URL, bot email, and key below"],
-        config_template: "[channels.zulip]\nserver_url = \"\"\nbot_email = \"\"\napi_key_env = \"ZULIP_API_KEY\"",
-    },
+    // zulip migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.zulip in the SDK package);
+    // see SIDECAR_CATALOG below.
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -390,7 +377,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "google_chat" => config.google_chat.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
-        "zulip" => config.zulip.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -701,6 +687,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "LINE Messaging API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.line"],
+    },
+    SidecarCatalogEntry {
+        name: "zulip",
+        display_name: "Zulip",
+        description: "Zulip REST + event-queue long-poll adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.zulip"],
     },
 ];
 
@@ -1223,10 +1216,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "zulip" => config
-            .zulip
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
             .as_ref()
@@ -1272,7 +1261,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "google_chat" => config.google_chat.len(),
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
-        "zulip" => config.zulip.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1309,7 +1297,6 @@ fn channel_instances_serialized(
         "google_chat" => ser(&config.google_chat),
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
-        "zulip" => ser(&config.zulip),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),

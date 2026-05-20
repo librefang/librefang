@@ -6391,8 +6391,6 @@ pub struct ChannelsConfig {
     pub mattermost: OneOrMany<MattermostConfig>,
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
-    /// Zulip configuration(s).
-    pub zulip: OneOrMany<ZulipConfig>,
     // Wave 3 — High-value channels
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
@@ -6471,7 +6469,6 @@ impl Default for ChannelsConfig {
             teams: OneOrMany::default(),
             mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            zulip: OneOrMany::default(),
             feishu: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
@@ -6899,42 +6896,9 @@ impl Default for GoogleChatConfig {
     }
 }
 
-/// Zulip channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ZulipConfig {
-    /// Zulip server URL.
-    pub server_url: String,
-    /// Bot email address.
-    pub bot_email: String,
-    /// Env var name holding the API key.
-    pub api_key_env: String,
-    /// Streams to listen in.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub streams: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for ZulipConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            bot_email: String::new(),
-            api_key_env: "ZULIP_API_KEY".to_string(),
-            streams: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// zulip migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.zulip); the in-process `ZulipConfig`
+// + `[channels.zulip]` block were removed in this migration.
 
 // ── Wave 3 channel configs ─────────────────────────────────────────
 // line migrated to a sidecar (librefang.sidecar.adapters.line); see

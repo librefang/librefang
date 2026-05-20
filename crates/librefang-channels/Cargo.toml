@@ -33,7 +33,6 @@ all-channels = [
     "channel-wechat",
     "channel-wecom",
     "channel-whatsapp",
-    "channel-zulip",
 ]
 
 # Individual channel features
@@ -45,7 +44,6 @@ channel-signal = []
 channel-teams = []
 channel-mattermost = []
 channel-google-chat = ["dep:rsa"]
-channel-zulip = []
 channel-feishu = ["dep:aes", "dep:cbc"]
 channel-dingtalk = []
 channel-qq = []

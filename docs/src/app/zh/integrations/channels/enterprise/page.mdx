@@ -252,6 +252,8 @@ Sidecar 按配置间隔（默认 2 秒）通过 `X-Auth-Token` / `X-User-Id` 头
 
 ## Zulip
 
+Zulip 现在由 Python sidecar 适配器 `librefang.sidecar.adapters.zulip` 提供。原 in-process 的 `[channels.zulip]` 配置块在 sidecar 迁移中已移除。
+
 ### 前置条件
 
 - Zulip 服务器账户（云版或自托管版）
@@ -262,31 +264,29 @@ Sidecar 按配置间隔（默认 2 秒）通过 `X-Auth-Token` / `X-User-Id` 头
 1. 在 Zulip 中，前往 **Settings > Your bots**，点击 **Add a new bot**。
 2. 选择 **Generic bot** 类型并创建。
 3. 记录 Bot 的邮箱地址和 API 密钥。
-4. 设置环境变量：
+4. 在配置中声明 sidecar：
 
 ```bash
-export ZULIP_EMAIL=bot@example.zulipchat.com  # 环境变量
-export ZULIP_API_KEY=your-api-key
-export ZULIP_URL=https://example.zulipchat.com
-librefang vault set ZULIP_EMAIL               # 加密金库（推荐）
-librefang vault set ZULIP_API_KEY
-librefang vault set ZULIP_URL
-librefang config set-key zulip                # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # 可选；空 = 所有已订阅 Stream
+# ZULIP_ACCOUNT_ID = "prod"                   # 可选，多 Bot 路由 key
 ```
 
-5. 添加到配置文件：
+5. 将 Bot 的 API Key 写入 `~/.librefang/secrets.env`：
 
-```toml
-[channels.zulip]
-email_env = "ZULIP_EMAIL"
-api_key_env = "ZULIP_API_KEY"
-url_env = "ZULIP_URL"
-default_agent = "assistant"
+```bash
+ZULIP_API_KEY=your-api-key
 ```
 
 6. 重启守护进程。
 
 ### 工作原理
 
-Zulip 适配器使用 Zulip 的 event queue API 进行长轮询。它注册一个消息事件队列，然后持续轮询该队列获取新消息。响应通过 `messages` REST 端点发送。
+Sidecar 使用 Zulip 的 event queue API 进行长轮询。启动时调用 `GET /api/v1/users/me` 发现 Bot 的稳定 `user_id`，通过 `POST /api/v1/register`（按 `ZULIP_STREAMS` 收窄）注册事件队列，然后长轮询 `GET /api/v1/events` 直到关闭。入站消息按 Bot 自身 `user_id` 自跳（Bot 改名也不会破自跳），按 `message.id` 去重（`BAD_EVENT_QUEUE_ID` 重新注册也不会重发同一条消息）。出站响应走 `POST /api/v1/messages`，用 `cmd.thread_id` 作为目标 topic，所以回复始终留在原 topic。四条 REST 路径上的 429 都遵守 `Retry-After`。

@@ -1060,23 +1060,24 @@ ROCKETCHAT_USER_ID = "abc123"
 
 `ROCKETCHAT_TOKEN`（个人访问令牌）应写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Rocket.Chat 表单时会自动写入。
 
-#### `[channels.zulip]`
+#### Zulip
 
-```toml
-[channels.zulip]
-server_url = "https://zulip.example.com"
-bot_email = "bot@zulip.example.com"
-api_key_env = "ZULIP_API_KEY"
-streams = []
+Zulip 现在由 Python sidecar 适配器（`librefang.sidecar.adapters.zulip`）提供。原 in-process 的 `[channels.zulip]` 配置块在 sidecar 迁移中已移除。请改用 `[[sidecar_channels]]` 声明：
+
+```bash
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # 可选；空 = 所有已订阅 Stream
+# ZULIP_ACCOUNT_ID = "prod"                   # 可选，多 Bot 路由 key
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `""` | Zulip 服务器 URL。 |
-| `bot_email` | string | `""` | 在 Zulip 中注册的 Bot 邮箱地址。 |
-| `api_key_env` | string | `"ZULIP_API_KEY"` | 存放 Zulip API Key 的环境变量。 |
-| `streams` | list of strings | `[]` | 监听的 Stream 名称列表。空列表 = 所有 Stream。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`ZULIP_API_KEY` 应写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Zulip 表单时会自动写入。Sidecar 把入站 topic 暴露为 `thread_id` 并在出站时回写（回复留在原 topic），在 `/users/me`、`/register`、`/events`、`/messages` 四条 REST 路径上都遵守 429 的 `Retry-After`，并按 `message.id` 去重以防止 queue 重新注册后重发同一条消息。
 
 #### LINE
 
@@ -2654,7 +2655,7 @@ max_versions_per_agent = 50
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost Bot 令牌。 |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth 令牌。 |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat (sidecar) | Rocket.Chat 个人访问令牌（sidecar 适配器 —— 写入 `~/.librefang/secrets.env`）。 |
-| `ZULIP_API_KEY` | Zulip | Zulip Bot API Key。 |
+| `ZULIP_API_KEY` | Zulip (sidecar) | Zulip Bot API Key（sidecar 适配器——写入 `~/.librefang/secrets.env`）。 |
 | `XMPP_PASSWORD` | XMPP | XMPP 账号密码。 |
 | `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
 | `LINE_CHANNEL_SECRET` | LINE (sidecar) | LINE Channel Secret（sidecar 适配器 —— 写入 `~/.librefang/secrets.env`）。 |
@@ -2704,7 +2705,6 @@ max_versions_per_agent = 50
 | Email | `password_env` |
 | Teams | `app_password_env` |
 | Mattermost | `token_env` |
-| Zulip | `api_key_env` |
 | Google Chat | `service_account_env` |
 | XMPP | `password_env` |
 | Reddit | `client_secret_env` |

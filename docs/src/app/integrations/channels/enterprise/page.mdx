@@ -256,6 +256,8 @@ The sidecar polls `GET /api/v1/channels.history` per room at the configured inte
 
 ## Zulip
 
+Zulip is provided by the out-of-process Python sidecar adapter `librefang.sidecar.adapters.zulip`. The in-process `[channels.zulip]` block was removed in the sidecar migration.
+
 ### Prerequisites
 
 - A Zulip server account (cloud or self-hosted)
@@ -266,31 +268,29 @@ The sidecar polls `GET /api/v1/channels.history` per room at the configured inte
 1. In Zulip, go to **Settings > Your bots** and click **Add a new bot**.
 2. Choose **Generic bot** and create it.
 3. Note the bot's email address and API key.
-4. Set environment variables:
+4. Declare the sidecar in your config:
 
 ```bash
-export ZULIP_EMAIL=bot@example.zulipchat.com  # Environment variable
-export ZULIP_API_KEY=your-api-key
-export ZULIP_URL=https://example.zulipchat.com
-librefang vault set ZULIP_EMAIL               # Encrypted vault (recommended)
-librefang vault set ZULIP_API_KEY
-librefang vault set ZULIP_URL
-librefang config set-key zulip                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+[[sidecar_channels]]
+name = "zulip"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.zulip"]
+channel_type = "zulip"
+[sidecar_channels.env]
+ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+ZULIP_BOT_EMAIL  = "bot-bot@myorg.zulipchat.com"
+# ZULIP_STREAMS = "engineering, general"      # optional; empty = all subscribed
+# ZULIP_ACCOUNT_ID = "prod"                   # optional, multi-bot routing key
 ```
 
-5. Add to config:
+5. Put the bot's API key in `~/.librefang/secrets.env`:
 
-```toml
-[channels.zulip]
-email_env = "ZULIP_EMAIL"
-api_key_env = "ZULIP_API_KEY"
-url_env = "ZULIP_URL"
-default_agent = "assistant"
+```bash
+ZULIP_API_KEY=your-api-key
 ```
 
 6. Restart the daemon.
 
 ### How It Works
 
-The Zulip adapter uses Zulip's event queue API for long-polling. It registers an event queue for message events, then continuously polls the queue for new messages. Responses are sent via the `messages` REST endpoint.
+The sidecar uses Zulip's event queue API for long-polling. At startup it calls `GET /api/v1/users/me` to discover the bot's stable user id, registers an event queue via `POST /api/v1/register` (narrowed to the configured `ZULIP_STREAMS` if set), then long-polls `GET /api/v1/events` until shutdown. Inbound messages are filtered by the bot's own user id (so renames don't break self-skip) and deduped by `message.id` (so a `BAD_EVENT_QUEUE_ID` re-register can't re-emit). Outbound responses go through `POST /api/v1/messages`, using `cmd.thread_id` as the target topic so replies land in the originating topic. 429 responses on any of the four REST paths honour `Retry-After`.

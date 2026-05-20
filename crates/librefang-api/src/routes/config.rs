@@ -805,7 +805,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(teams);
         ch!(mattermost);
         ch!(google_chat);
-        ch!(zulip);
         ch!(feishu);
         ch!(dingtalk);
         ch!(qq);

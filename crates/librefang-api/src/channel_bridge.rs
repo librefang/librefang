@@ -250,8 +250,6 @@ use librefang_channels::teams::TeamsAdapter;
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
 use librefang_channels::whatsapp::WhatsAppAdapter;
-#[cfg(feature = "channel-zulip")]
-use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
 #[cfg(feature = "channel-feishu")]
 use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
@@ -1889,7 +1887,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "teams" => find_channel_info!(teams),
             "mattermost" => find_channel_info!(mattermost),
             "google_chat" => find_channel_info!(google_chat),
-            "zulip" => find_channel_info!(zulip),
             // Wave 3
             "feishu" => find_channel_info!(feishu),
             // Wave 5
@@ -2547,7 +2544,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(mattermost, "channel-mattermost", "Mattermost");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(zulip, "channel-zulip", "Zulip");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
@@ -2818,26 +2814,8 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Zulip
-    #[cfg(feature = "channel-zulip")]
-    for z_config in config.zulip.iter() {
-        if let Some(api_key) = read_token(&z_config.api_key_env, "Zulip") {
-            let adapter = Arc::new(
-                ZulipAdapter::new(
-                    z_config.server_url.clone(),
-                    z_config.bot_email.clone(),
-                    api_key,
-                    z_config.streams.clone(),
-                )
-                .with_account_id(z_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                z_config.default_agent.clone(),
-                z_config.account_id.clone(),
-            ));
-        }
-    }
+    // zulip migrated to an out-of-process sidecar adapter
+    // (librefang.sidecar.adapters.zulip); no longer spawned here.
 
     // ── Wave 3 ──────────────────────────────────────────────────
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
@@ -4017,7 +3995,6 @@ mod tests {
         assert!(config.channels.teams.is_none());
         assert!(config.channels.mattermost.is_none());
         assert!(config.channels.google_chat.is_none());
-        assert!(config.channels.zulip.is_none());
         // Wave 3
         assert!(config.channels.feishu.is_none());
         // Wave 5

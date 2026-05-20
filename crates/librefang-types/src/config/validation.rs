@@ -311,11 +311,6 @@ impl KernelConfig {
                 ));
             }
         }
-        for z in self.channels.zulip.iter() {
-            if std::env::var(&z.api_key_env).unwrap_or_default().is_empty() {
-                warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
-            }
-        }
         for gc in self.channels.google_chat.iter() {
             let has_env = !std::env::var(&gc.service_account_env)
                 .unwrap_or_default()
