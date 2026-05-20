@@ -3971,13 +3971,16 @@ mod tests {
         // assertions below for the token round-trip).
         let teams = cfg.channels.teams.iter().next().expect("teams configured");
         assert_eq!(teams.allowed_tenants, vec!["tenant-xyz".to_string()]); // was "tenant_id" scalar before
-        let feishu = cfg
-            .channels
-            .feishu
-            .iter()
-            .next()
-            .expect("feishu configured");
-        assert_eq!(feishu.region, "intl"); // domain "lark.com" → region "intl"
+        // Feishu migrated to a sidecar (#5380); `cfg.channels.feishu`
+        // no longer exists. The migrator records the legacy `feishu:`
+        // block as a skipped channel — mirror the matrix/signal
+        // assertion shape from earlier in this test.
+        assert!(
+            report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+                && s.name == "feishu"
+                && s.reason.contains("sidecar")),
+            "Feishu must surface as a skipped sidecar channel"
+        );
 
         // ---- agent.toml round-trip ----
         let agent_str =
