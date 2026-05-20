@@ -664,12 +664,13 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Matrix config
-        // (Discord and Slack were migrated to sidecars; Matrix is the
-        // in-process fixture).
-        b.channels.matrix =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::MatrixConfig {
-                access_token_env: "MATRIX_TOKEN".to_string(),
+        // Change the channels config by adding a WeChat config
+        // (Discord, Slack, Signal, Mattermost, Matrix, Line, Webex,
+        // and QQ have all migrated to sidecars; WeChat is one of the
+        // remaining in-process fixtures with a usable Default impl).
+        b.channels.wechat =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::WeChatConfig {
+                bot_token_env: "WECHAT_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);
