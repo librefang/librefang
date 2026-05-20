@@ -1747,13 +1747,133 @@ pub async fn migrate_detect() -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
-    let path = std::path::PathBuf::from(&req.path);
+pub async fn migrate_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateScanRequest>,
+) -> impl IntoResponse {
+    // Mirror the run_migrate path-containment gate (audit:
+    // migrate-arbitrary-paths). Without this, `migrate_scan` is an
+    // FS-existence oracle: an attacker who controls `req.path`
+    // learns which paths exist on the daemon host via the
+    // 200-vs-400 split below. Restrict to the same set of
+    // migration roots `run_migrate` accepts.
+    let allowed_roots = migrate_allowed_roots(state.kernel.home_dir());
+    let path = match resolve_and_check_migrate_path(req.path.trim(), &allowed_roots, "path") {
+        Ok(p) => p,
+        Err(reason) => return ApiErrorResponse::bad_request(reason).into_json_tuple(),
+    };
     if !path.exists() {
         return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
     }
     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
+}
+
+/// Computed set of canonical filesystem roots the `/api/migrate*`
+/// handlers are willing to read from / write to. Per audit
+/// `migrate-arbitrary-paths`, callers cannot point migration at
+/// arbitrary paths — both `source_dir` and `target_dir` must
+/// canonicalise to something inside one of these.
+///
+/// Membership:
+/// * `home_dir` — always; this is where `target_dir` legitimately
+///   writes. Resolved via `canonicalize` so a symlinked home is
+///   matched by the resolved-target check below.
+/// * `~/.openclaw`, `~/.openfang`, `~/.langchain`, `~/.autogpt` —
+///   the canonical config-dir roots the four supported source
+///   frameworks ship. Only added when they exist on disk so
+///   `canonicalize()` doesn't synthesise a phantom allow-listed
+///   path under HOME.
+///
+/// A future `[migrate] allowed_roots = [...]` config field can
+/// extend this; out of scope here.
+fn migrate_allowed_roots(home_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(canon) = home_dir.canonicalize() {
+        roots.push(canon);
+    } else {
+        // Boot fallback: home_dir hasn't been created yet
+        // (`migrate` racing first-boot). Still allow the literal
+        // path so a fresh install can `target_dir = "" → home_dir`
+        // write the directory into existence.
+        roots.push(home_dir.to_path_buf());
+    }
+    let user_home = dirs::home_dir();
+    if let Some(home) = user_home {
+        for sub in [".openclaw", ".openfang", ".langchain", ".autogpt"] {
+            let p = home.join(sub);
+            if let Ok(canon) = p.canonicalize() {
+                roots.push(canon);
+            }
+        }
+    }
+    roots
+}
+
+/// Resolve `raw` (a caller-supplied path string) into an absolute
+/// canonical path, then check it lives inside one of `allowed`.
+///
+/// Rejects with a message naming the offending field. The
+/// canonicalisation collapses `..` segments and symlinks before
+/// the containment check, so e.g.
+/// `~/.librefang/../../etc/passwd` resolves to `/etc/passwd` and
+/// is correctly refused even though the literal string starts
+/// with `home_dir`.
+///
+/// For NEW paths that don't yet exist on disk
+/// (`target_dir` pointing at a fresh subdirectory the migrator
+/// will create), `canonicalize()` of the path itself fails, so we
+/// fall back to canonicalising the deepest existing ancestor +
+/// re-appending the tail — same trick `librefang-skills` uses for
+/// path containment of files that don't exist yet.
+fn resolve_and_check_migrate_path(
+    raw: &str,
+    allowed: &[std::path::PathBuf],
+    field: &str,
+) -> Result<std::path::PathBuf, String> {
+    if raw.is_empty() {
+        return Err(format!("invalid {field}: empty path"));
+    }
+    let raw_path = std::path::PathBuf::from(raw);
+    // Try to canonicalise the path itself; if it doesn't exist yet,
+    // walk up to the deepest existing ancestor and re-append the
+    // remaining tail.
+    let canon = match raw_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            let mut ancestor = raw_path.as_path();
+            let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+            let canon_ancestor = loop {
+                if let Ok(p) = ancestor.canonicalize() {
+                    break p;
+                }
+                match ancestor.file_name() {
+                    Some(name) => tail.push(name),
+                    None => return Err(format!("invalid {field}: cannot resolve {raw:?}")),
+                }
+                ancestor = match ancestor.parent() {
+                    Some(p) => p,
+                    None => return Err(format!("invalid {field}: cannot resolve {raw:?}")),
+                };
+            };
+            let mut full = canon_ancestor;
+            for seg in tail.iter().rev() {
+                full.push(seg);
+            }
+            full
+        }
+    };
+    for root in allowed {
+        if canon.starts_with(root) {
+            return Ok(canon);
+        }
+    }
+    let roots_str: Vec<String> = allowed.iter().map(|p| p.display().to_string()).collect();
+    Err(format!(
+        "invalid {field}: {} resolves outside allowed migration roots ({})",
+        canon.display(),
+        roots_str.join(", "),
+    ))
 }
 
 /// POST /api/migrate — Run migration from another agent framework.
@@ -1782,15 +1902,45 @@ pub async fn run_migrate(
         }
     };
 
-    let target_dir = if req.target_dir.trim().is_empty() {
+    // Containment check (audit: migrate-arbitrary-paths).
+    // Pre-fix, `source_dir` and `target_dir` were arbitrary
+    // `PathBuf::from` of caller input with no canonicalisation. An
+    // Admin caller could probe filesystem existence anywhere readable
+    // as the daemon UID (the 200-vs-400 oracle of the underlying
+    // `run_migration`), and `target_dir = "/etc/cron.d"` would
+    // escalate from "config write" to "filesystem write under daemon
+    // UID". Tighten both inputs to canonical paths that resolve
+    // inside one of the known migration roots:
+    //
+    //   * `home_dir` (`~/.librefang`) — always; this is where
+    //     `target_dir` legitimately writes.
+    //   * `~/.openclaw`, `~/.openfang`, `~/.langchain`, `~/.autogpt`
+    //     — the canonical config-dir roots the migrator imports
+    //     FROM. These are the only filesystem locations the
+    //     migrator is documented to read.
+    //
+    // `canonicalize()` resolves `..` and symlinks before the
+    // `starts_with` check, so `~/.librefang/../../etc` collapses to
+    // `/etc` and is correctly rejected.
+    let allowed_roots = migrate_allowed_roots(state.kernel.home_dir());
+    let source_dir =
+        match resolve_and_check_migrate_path(req.source_dir.trim(), &allowed_roots, "source_dir") {
+            Ok(p) => p,
+            Err(reason) => return ApiErrorResponse::bad_request(reason).into_json_tuple(),
+        };
+    let target_dir_raw = req.target_dir.trim();
+    let target_dir = if target_dir_raw.is_empty() {
         state.kernel.home_dir().to_path_buf()
     } else {
-        std::path::PathBuf::from(req.target_dir.trim())
+        match resolve_and_check_migrate_path(target_dir_raw, &allowed_roots, "target_dir") {
+            Ok(p) => p,
+            Err(reason) => return ApiErrorResponse::bad_request(reason).into_json_tuple(),
+        }
     };
 
     let options = librefang_migrate::MigrateOptions {
         source,
-        source_dir: std::path::PathBuf::from(req.source_dir.trim()),
+        source_dir,
         target_dir,
         dry_run: req.dry_run,
     };
