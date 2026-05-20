@@ -27,8 +27,8 @@ where
 /// Config field that accepts either a single value or an array.
 /// Enables multi-bot configurations while staying backward-compatible.
 ///
-/// TOML single-instance: `[channels.discord]`
-/// TOML multi-instance:  `[[channels.discord]]`
+/// TOML single-instance: `[channels.slack]`
+/// TOML multi-instance:  `[[channels.slack]]`
 #[derive(Debug, Clone)]
 pub struct OneOrMany<T>(pub Vec<T>);
 

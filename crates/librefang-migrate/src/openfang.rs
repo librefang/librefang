@@ -28,7 +28,7 @@ use walkdir::WalkDir;
 /// - Missing required fields on agent manifests
 ///
 /// **What this does NOT catch:**
-/// - Unknown fields **nested inside** sections (e.g. `[channels.discord].foo`).
+/// - Unknown fields **nested inside** sections (e.g. `[channels.whatsapp].foo`).
 ///   LibreFang's channel structs use `#[serde(default)]` without
 ///   `deny_unknown_fields`, so unknown nested fields are silently ignored at
 ///   deserialization time. Catching these would require per-struct field-list
@@ -592,10 +592,12 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.discord]\n\
-             bot_token_env = \"TG_TOKEN\"\n\
+             [channels.whatsapp]\n\
+             access_token_env = \"WA_TOKEN\"\n\
+             verify_token_env = \"WA_VERIFY\"\n\
+             phone_number_id = \"123\"\n\
              \n\
-             [channels.discord.overrides]\n\
+             [channels.whatsapp.overrides]\n\
              group_policy = \"respond\"\n",
         )
         .unwrap();
@@ -618,13 +620,15 @@ mod tests {
         );
     }
 
-    /// Since #5129 / #5130 the five locked-down structs (`DiscordConfig`,
-    /// `SlackConfig`, `WhatsAppConfig`, `MattermostConfig`,
-    /// `McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`, so an
-    /// unknown field nested inside any of them now surfaces as a
-    /// "does not cleanly deserialize" warning at migrate time. The remaining
-    /// nested config structs are still tolerant and silently drop unknown
-    /// fields — see #5130 for the explicit scoping decision.
+    /// Since #5129 / #5130 the locked-down structs (`WhatsAppConfig`,
+    /// `MattermostConfig`, `McpServerConfigEntry`) carry
+    /// `#[serde(deny_unknown_fields)]`, so an unknown field nested
+    /// inside any of them now surfaces as a "does not cleanly deserialize"
+    /// warning at migrate time. (DiscordConfig and SlackConfig were
+    /// originally in this set; both were migrated to sidecars in v2026.5
+    /// so the structs no longer exist.) The remaining nested config
+    /// structs are still tolerant and silently drop unknown fields —
+    /// see #5130 for the explicit scoping decision.
     #[test]
     fn test_schema_drift_check_catches_nested_unknown_fields_in_locked_down_sections() {
         let src = TempDir::new().unwrap();
@@ -635,8 +639,10 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.discord]\n\
-             bot_token_env = \"TG_TOKEN\"\n\
+             [channels.whatsapp]\n\
+             access_token_env = \"WA_TOKEN\"\n\
+             verify_token_env = \"WA_VERIFY\"\n\
+             phone_number_id = \"123\"\n\
              nickname = \"this-field-does-not-exist\"\n",
         )
         .unwrap();
@@ -649,7 +655,7 @@ mod tests {
         };
         let report = migrate(&options).unwrap();
 
-        // The deny_unknown_fields attribute on DiscordConfig surfaces the
+        // The deny_unknown_fields attribute on WhatsAppConfig surfaces the
         // unknown nested key as a deserialize-failure warning. The bad field
         // name must appear in the message so operators can locate the typo.
         assert!(

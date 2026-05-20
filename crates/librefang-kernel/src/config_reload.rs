@@ -664,10 +664,12 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Discord config
-        b.channels.discord =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::DiscordConfig {
-                bot_token_env: "DISCORD_TOKEN".to_string(),
+        // Change the channels config by adding a Matrix config
+        // (Discord and Slack were migrated to sidecars; Matrix is the
+        // in-process fixture).
+        b.channels.matrix =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::MatrixConfig {
+                access_token_env: "MATRIX_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);

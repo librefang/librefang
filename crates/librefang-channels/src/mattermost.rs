@@ -91,7 +91,7 @@ impl MattermostAdapter {
     /// Route this adapter's REST client through `proxy_url` (#4795).
     /// Affects REST API calls only — the Mattermost WebSocket is not
     /// currently routed through the proxy. See
-    /// `DiscordConfig::proxy` for accepted URL shapes and env-var fallback.
+    /// `WhatsAppConfig::proxy` for accepted URL shapes and env-var fallback.
     pub fn with_proxy(
         mut self,
         proxy_url: Option<&str>,
