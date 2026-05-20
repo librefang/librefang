@@ -1194,10 +1194,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             }
         };
 
-        let trigger_id =
-            self.kernel
-                .trigger_engine()
-                .register(agent.id, pattern, prompt.to_string(), 0);
+        let trigger_id = match self
+            .kernel
+            .trigger_engine()
+            .register(agent.id, pattern, prompt.to_string(), 0)
+        {
+            Ok(id) => id,
+            Err(e) => {
+                // Per-agent cap exceeded (audit:
+                // trigger-engine-no-per-agent-cap). Surface as a
+                // human-readable line back to the channel sender so
+                // they know the bridge isn't broken — they hit the
+                // ceiling.
+                return format!("Trigger registration refused: {e}");
+            }
+        };
         let id_str = trigger_id.0.to_string();
         let id_short = safe_truncate_str(&id_str, 8);
         format!("Trigger created [{id_short}] for agent '{agent_name}'.")
