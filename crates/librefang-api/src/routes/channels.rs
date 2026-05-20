@@ -350,22 +350,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a bot in Zulip Settings > Your Bots", "Copy the API key", "Enter server URL, bot email, and key below"],
         config_template: "[channels.zulip]\nserver_url = \"\"\nbot_email = \"\"\napi_key_env = \"ZULIP_API_KEY\"",
     },
-    // ── Developer ───────────────────────────────────────────────────
-    ChannelMeta {
-        name: "nextcloud", display_name: "Nextcloud Talk", icon: "NC",
-        description: "Nextcloud Talk REST adapter",
-        category: "developer", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Paste your server URL and auth token",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "server_url", label: "Server URL", field_type: FieldType::Text, env_var: None, required: true, placeholder: "https://cloud.example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("NEXTCLOUD_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_rooms", label: "Room Tokens", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a bot user in Nextcloud", "Generate an app password", "Enter URL and token below"],
-        config_template: "[channels.nextcloud]\nserver_url = \"\"\ntoken_env = \"NEXTCLOUD_TOKEN\"",
-    },
     // ── Notifications (3) ───────────────────────────────────────────
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
@@ -450,7 +434,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
         "zulip" => config.zulip.is_some(),
-        "nextcloud" => config.nextcloud.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -735,6 +718,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Discord Gateway bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.discord"],
+    },
+    SidecarCatalogEntry {
+        name: "nextcloud",
+        display_name: "Nextcloud Talk",
+        description: "Nextcloud Talk OCS REST adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.nextcloud"],
     },
 ];
 
@@ -1273,10 +1263,6 @@ fn channel_config_values(
             .feishu
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "nextcloud" => config
-            .nextcloud
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
             .as_ref()
@@ -1326,7 +1312,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "feishu" => config.feishu.len(),
         "dingtalk" => config.dingtalk.len(),
         "zulip" => config.zulip.len(),
-        "nextcloud" => config.nextcloud.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         "wecom" => config.wecom.len(),
@@ -1367,7 +1352,6 @@ fn channel_instances_serialized(
         "feishu" => ser(&config.feishu),
         "dingtalk" => ser(&config.dingtalk),
         "zulip" => ser(&config.zulip),
-        "nextcloud" => ser(&config.nextcloud),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         "wecom" => ser(&config.wecom),

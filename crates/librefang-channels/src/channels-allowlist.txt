@@ -27,7 +27,6 @@ google_chat
 line
 matrix
 mattermost
-nextcloud
 qq
 sidecar
 signal

@@ -6398,8 +6398,6 @@ pub struct ChannelsConfig {
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
-    /// Nextcloud Talk configuration(s).
-    pub nextcloud: OneOrMany<NextcloudConfig>,
     /// Webex bot configuration(s).
     pub webex: OneOrMany<WebexConfig>,
     // Wave 5 — Niche & differentiating channels
@@ -6476,7 +6474,6 @@ impl Default for ChannelsConfig {
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
             feishu: OneOrMany::default(),
-            nextcloud: OneOrMany::default(),
             webex: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
@@ -7197,40 +7194,6 @@ impl Default for WeChatConfig {
 }
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
-
-/// Nextcloud Talk channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NextcloudConfig {
-    /// Nextcloud server URL.
-    pub server_url: String,
-    /// Env var name holding the auth token.
-    pub token_env: String,
-    /// Room tokens to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NextcloudConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "NEXTCLOUD_TOKEN".to_string(),
-            allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
 
 /// Webex bot channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

@@ -45,8 +45,6 @@ pub mod line;
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
-#[cfg(feature = "channel-nextcloud")]
-pub mod nextcloud;
 #[cfg(feature = "channel-qq")]
 pub mod qq;
 #[cfg(feature = "channel-signal")]

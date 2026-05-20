@@ -392,21 +392,23 @@ app_secret_env = "FEISHU_APP_SECRET"
 | `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nextcloud]`
+#### Nextcloud Talk
 
-```toml
-[channels.nextcloud]
-server_url = "https://nextcloud.example.com"
-token_env = "NEXTCLOUD_TOKEN"
-allowed_rooms = []
+Nextcloud Talk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.nextcloud`). The in-process `[channels.nextcloud]` block was removed in the sidecar migration. Declare Nextcloud as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "nextcloud"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.nextcloud"]
+channel_type = "nextcloud"
+[sidecar_channels.env]
+NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
+# NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
+# NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Nextcloud server URL. |
-| `token_env` | string | `"NEXTCLOUD_TOKEN"` | Env var holding the Nextcloud Talk auth token. |
-| `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`NEXTCLOUD_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form. Outbound replies thread via Talk's `replyTo` parameter (improvement over the former Rust adapter, which never sent `replyTo`).
 
 #### `[channels.webex]`
 

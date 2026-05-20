@@ -33,7 +33,6 @@ macro_rules! for_each_channel_field {
         $mac!(line, "line");
         $mac!(matrix, "matrix");
         $mac!(mattermost, "mattermost");
-        $mac!(nextcloud, "nextcloud");
         $mac!(qq, "qq");
         $mac!(signal, "signal");
         $mac!(slack, "slack");
@@ -443,7 +442,6 @@ mod tests {
             "line",
             "matrix",
             "mattermost",
-            "nextcloud",
             "qq",
             "signal",
             "slack",

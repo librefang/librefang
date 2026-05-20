@@ -375,14 +375,6 @@ impl KernelConfig {
             }
         }
         // Wave 4 channels
-        for nc in self.channels.nextcloud.iter() {
-            if std::env::var(&nc.token_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Nextcloud configured but {} is not set",
-                    nc.token_env
-                ));
-            }
-        }
         for wx in self.channels.webex.iter() {
             if std::env::var(&wx.bot_token_env)
                 .unwrap_or_default()

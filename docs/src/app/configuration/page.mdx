@@ -1165,21 +1165,24 @@ webhook_port = 8453
 | `webhook_port` | u16 | `8453` | Port for the incoming webhook. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
-#### `[channels.nextcloud]`
+#### Nextcloud Talk
 
-```toml
-[channels.nextcloud]
-server_url = "https://nextcloud.example.com"
-token_env = "NEXTCLOUD_TOKEN"
-allowed_rooms = []
+Nextcloud Talk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.nextcloud`). The in-process `[channels.nextcloud]` config block was removed in the sidecar migration. Declare Nextcloud as a `[[sidecar_channels]]` entry instead:
+
+```bash
+[[sidecar_channels]]
+name = "nextcloud"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.nextcloud"]
+channel_type = "nextcloud"
+[sidecar_channels.env]
+NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
+# NEXTCLOUD_ROOMS = "abc123,def456"           # optional; empty = all joined
+# NEXTCLOUD_ACCOUNT_ID = "prod"               # optional, multi-bot routing key
+# NEXTCLOUD_POLL_INTERVAL_SECS = "3"          # optional, default 3, floor 1
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `""` | Nextcloud server URL. |
-| `token_env` | string | `"NEXTCLOUD_TOKEN"` | Env var holding the Nextcloud Talk auth token. |
-| `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`NEXTCLOUD_TOKEN` (the app password / OAuth bearer) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Nextcloud form.
 
 #### `[channels.webex]`
 
@@ -2655,7 +2658,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `BLUESKY_APP_PASSWORD` | Bluesky | Bluesky app password. |
 | `FEISHU_APP_SECRET` | Feishu | Feishu/Lark app secret. |
 | `REVOLT_BOT_TOKEN` | Revolt | Revolt bot token. |
-| `NEXTCLOUD_TOKEN` | Nextcloud | Nextcloud Talk auth token. |
+| `NEXTCLOUD_TOKEN` | Nextcloud (sidecar) | Nextcloud Talk app password / OAuth bearer (`librefang.sidecar.adapters.nextcloud`). |
 | `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
 | `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
 | `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
@@ -2703,7 +2706,6 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Bluesky | `app_password_env` |
 | Feishu | `app_secret_env` |
 | Revolt | `bot_token_env` |
-| Nextcloud | `token_env` |
 | Guilded | `bot_token_env` |
 | Keybase | `paperkey_env` |
 | Threema | `secret_env` |

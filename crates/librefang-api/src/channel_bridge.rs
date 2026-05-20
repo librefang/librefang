@@ -260,8 +260,6 @@ use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion}
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
 // Wave 4
-#[cfg(feature = "channel-nextcloud")]
-use librefang_channels::nextcloud::NextcloudAdapter;
 #[cfg(feature = "channel-webex")]
 use librefang_channels::webex::WebexAdapter;
 // Wave 5
@@ -1899,7 +1897,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "line" => find_channel_info!(line),
             "feishu" => find_channel_info!(feishu),
             // Wave 4
-            "nextcloud" => find_channel_info!(nextcloud),
             "webex" => find_channel_info!(webex),
             // Wave 5
             "dingtalk" => find_channel_info!(dingtalk),
@@ -2562,7 +2559,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
-    check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
     check_channel!(webex, "channel-webex", "Webex");
     check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(qq, "channel-qq", "QQ");
@@ -3001,26 +2997,6 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Wave 4 ──────────────────────────────────────────────────
-
-    // Nextcloud Talk
-    #[cfg(feature = "channel-nextcloud")]
-    for nc_config in config.nextcloud.iter() {
-        if let Some(token) = read_token(&nc_config.token_env, "Nextcloud") {
-            let adapter = Arc::new(
-                NextcloudAdapter::new(
-                    nc_config.server_url.clone(),
-                    token,
-                    nc_config.allowed_rooms.clone(),
-                )
-                .with_account_id(nc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                nc_config.default_agent.clone(),
-                nc_config.account_id.clone(),
-            ));
-        }
-    }
 
     // Webex
     #[cfg(feature = "channel-webex")]
@@ -4116,7 +4092,6 @@ mod tests {
         assert!(config.channels.line.is_none());
         assert!(config.channels.feishu.is_none());
         // Wave 4
-        assert!(config.channels.nextcloud.is_none());
         assert!(config.channels.webex.is_none());
         // Wave 5
         assert!(config.channels.dingtalk.is_none());
