@@ -211,40 +211,40 @@ The Feishu adapter substitutes each `@_user_N` placeholder with `@<display-name>
 
 ## Rocket.Chat
 
+Rocket.Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.rocketchat`). The in-process `[channels.rocketchat]` config block was removed in the sidecar migration. Declare Rocket.Chat as a `[[sidecar_channels]]` entry instead.
+
 ### Prerequisites
 
-- A Rocket.Chat server with admin access (from [Rocket.Chat](https://developer.rocket.chat/reference/api))
-- A bot user account or personal access token
+- A Rocket.Chat server with admin access
+- A bot user account with a personal access token
+- Python 3.8+ on the daemon host (the sidecar runs as `python3 -m librefang.sidecar.adapters.rocketchat`)
 
 ### Setup
 
-1. In Rocket.Chat, go to **Administration > Rooms** or create a bot user.
-2. Generate a personal access token via **My Account > Personal Access Tokens**.
-3. Set environment variables:
+1. In Rocket.Chat, go to **Administration > Users** and create a bot user (or pick an existing service account).
+2. Sign in as that bot and generate a personal access token via **My Account > Personal Access Tokens**. Note both the token and the bot's user ID.
+3. Add the sidecar entry to your `config.toml`:
 
 ```bash
-export ROCKETCHAT_TOKEN=your-access-token     # Environment variable
-export ROCKETCHAT_URL=https://chat.example.com
-librefang vault set ROCKETCHAT_TOKEN          # Encrypted vault (recommended)
-librefang vault set ROCKETCHAT_URL
-librefang config set-key rocketchat           # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # optional; empty = all joined
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # optional, multi-bot routing key
+# ROCKETCHAT_POLL_INTERVAL_SECS = "2"           # optional, default 2, floor 1
 ```
 
-4. Add to config:
-
-```toml
-[channels.rocketchat]
-token_env = "ROCKETCHAT_TOKEN"
-url_env = "ROCKETCHAT_URL"
-default_agent = "assistant"
-```
-
+4. Put `ROCKETCHAT_TOKEN` (the personal access token) in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Rocket.Chat form.
 5. Restart the daemon.
 
 ### How It Works
 
-The Rocket.Chat adapter polls the Rocket.Chat REST API for new messages at a regular interval. Incoming messages are routed to the configured agent, and responses are posted back through the REST API's chat endpoints.
+The sidecar polls `GET /api/v1/channels.history` per room at the configured interval (default 2 s) using `X-Auth-Token` / `X-User-Id` headers. Slash-command bodies (`/cmd args`) become `Command` events; everything else is plain text. Outbound replies go through `POST /api/v1/chat.postMessage` and thread correctly via `tmid` when the inbound message lived inside a thread (improvement over the former Rust adapter, which always replied at the room root).
 
 ---
 

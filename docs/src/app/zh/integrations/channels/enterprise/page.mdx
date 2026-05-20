@@ -207,40 +207,40 @@ default_agent = "assistant"
 
 ## Rocket.Chat
 
+Rocket.Chat 现以 Python sidecar 适配器（`librefang.sidecar.adapters.rocketchat`）提供。在迁移过程中，原 in-process `[channels.rocketchat]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明 Rocket.Chat。
+
 ### 前置条件
 
-- 具备管理员权限的 Rocket.Chat 服务器（参见 [Rocket.Chat API](https://developer.rocket.chat/reference/api)）
-- Bot 用户账户或个人访问令牌
+- 具备管理员权限的 Rocket.Chat 服务器
+- Bot 用户账户及其个人访问令牌
+- 守护进程主机上安装有 Python 3.8+（sidecar 以 `python3 -m librefang.sidecar.adapters.rocketchat` 运行）
 
 ### 设置步骤
 
-1. 在 Rocket.Chat 中，前往 **Administration > Rooms** 或创建 Bot 用户。
-2. 通过 **My Account > Personal Access Tokens** 生成个人访问令牌。
-3. 设置环境变量：
+1. 在 Rocket.Chat 中，前往 **Administration > Users** 创建 Bot 用户（或选用已有服务账户）。
+2. 以该 Bot 身份登录，通过 **My Account > Personal Access Tokens** 生成个人访问令牌。同时记下令牌和 Bot 的用户 ID。
+3. 在 `config.toml` 中添加 sidecar 配置：
 
 ```bash
-export ROCKETCHAT_TOKEN=your-access-token     # 环境变量
-export ROCKETCHAT_URL=https://chat.example.com
-librefang vault set ROCKETCHAT_TOKEN          # 加密金库（推荐）
-librefang vault set ROCKETCHAT_URL
-librefang config set-key rocketchat           # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+[[sidecar_channels]]
+name = "rocketchat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+channel_type = "rocketchat"
+[sidecar_channels.env]
+ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+ROCKETCHAT_USER_ID = "abc123"
+# ROCKETCHAT_CHANNELS = "GENERAL,room2"        # 可选；留空 = 所有已加入频道
+# ROCKETCHAT_ACCOUNT_ID = "prod"                # 可选，多 Bot 路由键
+# ROCKETCHAT_POLL_INTERVAL_SECS = "2"           # 可选，默认 2，下限 1
 ```
 
-4. 添加到配置文件：
-
-```toml
-[channels.rocketchat]
-token_env = "ROCKETCHAT_TOKEN"
-url_env = "ROCKETCHAT_URL"
-default_agent = "assistant"
-```
-
+4. 将 `ROCKETCHAT_TOKEN`（个人访问令牌）写入 `~/.librefang/secrets.env`——在仪表板的 Channels 页面填写 Rocket.Chat 表单时会自动写入。
 5. 重启守护进程。
 
 ### 工作原理
 
-Rocket.Chat 适配器定期轮询 Rocket.Chat REST API 获取新消息。传入消息路由到配置的 Agent，响应通过 REST API 的聊天端点发送。
+Sidecar 按配置间隔（默认 2 秒）通过 `X-Auth-Token` / `X-User-Id` 头部对每个房间轮询 `GET /api/v1/channels.history`。斜杠命令（`/cmd args`）转为 `Command` 事件，其余视为纯文本。出站回复经由 `POST /api/v1/chat.postMessage` 发送；当入站消息位于线程中时，会通过 `tmid` 正确串连（这是相对原 Rust 适配器的改进，原适配器始终回到房间根部）。
 
 ---
 

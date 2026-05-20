@@ -7991,10 +7991,11 @@ fn cmd_channel_list() {
 
     println!("Channel Integrations:\n");
 
+    // discord migrated to a sidecar adapter
+    // (librefang.sidecar.adapters.{discord,slack}); managed via
+    // `[[sidecar_channels]]` rather than [channels.{discord,slack}] now.
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("discord", "DISCORD_BOT_TOKEN"),
-        ("slack", "SLACK_BOT_TOKEN"),
         ("whatsapp", "WA_ACCESS_TOKEN"),
         ("signal", ""),
         ("matrix", "MATRIX_TOKEN"),
@@ -8037,8 +8038,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("discord", "Discord bot"),
-                ("slack", "Slack app (Socket Mode)"),
                 ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
                 ("signal", "Signal (signal-cli)"),
@@ -8065,71 +8064,14 @@ fn cmd_channel_setup(channel: Option<&str>) {
     };
 
     match channel.as_str() {
-        "discord" => {
-            ui::section(&i18n::t("section-setup-discord"));
-            ui::blank();
-            println!("  1. Go to https://discord.com/developers/applications");
-            println!("  2. Create a New Application");
-            println!("  3. Go to Bot section and click 'Add Bot'");
-            println!("  4. Copy the bot token");
-            println!("  5. Under Privileged Gateway Intents, enable:");
-            println!("     - Message Content Intent");
-            println!("  6. Use OAuth2 URL Generator to invite bot to your server");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error(&i18n::t("channel-no-token"));
-                return;
-            }
-
-            let config_block = "\n[channels.discord]\nbot_token_env = \"DISCORD_BOT_TOKEN\"\ndefault_agent = \"coder\"\n";
-            maybe_write_channel_config("discord", config_block);
-
-            match dotenv::save_env_key("DISCORD_BOT_TOKEN", &token) {
-                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
-                Err(_) => println!("    export DISCORD_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Discord")]));
-            notify_daemon_restart();
-        }
-        "slack" => {
-            ui::section(&i18n::t("section-setup-slack"));
-            ui::blank();
-            println!("  1. Go to https://api.slack.com/apps");
-            println!("  2. Create New App -> From Scratch");
-            println!("  3. Enable Socket Mode (Settings -> Socket Mode)");
-            println!("  4. Copy the App-Level Token (xapp-...)");
-            println!("  5. Go to OAuth & Permissions, add scopes:");
-            println!("     - chat:write, app_mentions:read, im:history");
-            println!("  6. Install to workspace and copy Bot Token (xoxb-...)");
-            ui::blank();
-
-            let app_token = prompt_input("  Paste your App Token (xapp-...): ");
-            let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
-
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("slack", config_block);
-
-            if !app_token.is_empty() {
-                match dotenv::save_env_key("SLACK_APP_TOKEN", &app_token) {
-                    Ok(()) => ui::success(&i18n::t("channel-app-token-saved")),
-                    Err(_) => println!("    export SLACK_APP_TOKEN={app_token}"),
-                }
-            }
-            if !bot_token.is_empty() {
-                match dotenv::save_env_key("SLACK_BOT_TOKEN", &bot_token) {
-                    Ok(()) => ui::success(&i18n::t("channel-bot-token-saved")),
-                    Err(_) => println!("    export SLACK_BOT_TOKEN={bot_token}"),
-                }
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "Slack")]));
-            notify_daemon_restart();
-        }
+        // discord was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.discord) in v2026.5; the in-process
+        // wizard arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
+        // slack was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.slack) in v2026.5; the in-process
+        // wizard arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure page.
         "whatsapp" => {
             ui::section(&i18n::t("section-setup-whatsapp"));
             ui::blank();
@@ -10088,13 +10030,15 @@ fn pool_load_doc_or_exit(path: &std::path::Path) -> toml_edit::DocumentMut {
     if content.trim().is_empty() {
         return toml_edit::DocumentMut::new();
     }
-    content.parse::<toml_edit::DocumentMut>().unwrap_or_else(|e| {
-        ui::error_with_fix(
-            &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
-            &i18n::t("config-parse-fix-alt"),
-        );
-        std::process::exit(1);
-    })
+    content
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap_or_else(|e| {
+            ui::error_with_fix(
+                &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
+                &i18n::t("config-parse-fix-alt"),
+            );
+            std::process::exit(1);
+        })
 }
 
 fn pool_write_doc_or_exit(path: &std::path::Path, doc: &toml_edit::DocumentMut) {
@@ -10128,7 +10072,9 @@ fn pool_lookup_doc_mut<'d>(
     // original file.
     let item = doc
         .entry("credential_pools")
-        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+        .or_insert(toml_edit::Item::ArrayOfTables(
+            toml_edit::ArrayOfTables::new(),
+        ));
     let arr = match item.as_array_of_tables_mut() {
         Some(a) => a,
         None => {
@@ -10156,7 +10102,10 @@ fn cmd_auth_pool_list(config: Option<PathBuf>, json: bool) {
             Ok(r) if r.status().is_success() => {
                 let body: serde_json::Value = r.json().unwrap_or_default();
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
                     return;
                 }
                 print_pool_summary_human(&body);
@@ -10247,10 +10196,7 @@ fn print_pool_summary_human(body: &serde_json::Value) {
     let pools = match body.as_array() {
         Some(a) if !a.is_empty() => a,
         _ => {
-            println!(
-                "{}",
-                "No credential pools configured.".to_string().dimmed()
-            );
+            println!("{}", "No credential pools configured.".to_string().dimmed());
             println!();
             println!("Add one with:");
             println!(
@@ -10291,7 +10237,11 @@ fn print_pool_summary_human(body: &serde_json::Value) {
                             "exhausted".yellow().to_string()
                         }
                     } else if let Some(serde_json::Value::Number(n)) = cooldown {
-                        format!("{} {}", "cooldown".yellow(), format!("({}s left)", n).dimmed())
+                        format!(
+                            "{} {}",
+                            "cooldown".yellow(),
+                            format!("({}s left)", n).dimmed()
+                        )
                     } else {
                         "exhausted".yellow().to_string()
                     }
@@ -10301,9 +10251,7 @@ fn print_pool_summary_human(body: &serde_json::Value) {
                     "healthy".green().to_string()
                 };
 
-                let reqs_str = reqs
-                    .map(|r| format!(" requests={r}"))
-                    .unwrap_or_default();
+                let reqs_str = reqs.map(|r| format!(" requests={r}")).unwrap_or_default();
                 println!(
                     "    - [{label}] {key_display}  priority={pri}{reqs_str}  status={status}"
                 );
@@ -10419,10 +10367,7 @@ fn cmd_auth_pool_add(
                 new_key_tbl["label"] = toml_edit::value(label);
                 new_key_tbl["priority"] = toml_edit::value(priority as i64);
                 keys_arr.push(new_key_tbl);
-                pool_tbl.insert(
-                    "keys",
-                    toml_edit::Item::ArrayOfTables(keys_arr),
-                );
+                pool_tbl.insert("keys", toml_edit::Item::ArrayOfTables(keys_arr));
                 arr.push(pool_tbl);
             }
         }
@@ -10442,7 +10387,9 @@ fn cmd_auth_pool_remove(config: Option<PathBuf>, provider: &str, env_var: &str) 
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&format!("No credential pool configured for provider `{provider}`."));
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
+            ));
             std::process::exit(1);
         };
 
@@ -10509,7 +10456,9 @@ fn cmd_auth_pool_strategy(config: Option<PathBuf>, provider: &str, strategy: &st
     {
         let (arr, idx) = pool_lookup_doc_mut(&mut doc, provider);
         let Some(i) = idx else {
-            ui::error(&format!("No credential pool configured for provider `{provider}`."));
+            ui::error(&format!(
+                "No credential pool configured for provider `{provider}`."
+            ));
             std::process::exit(1);
         };
         let pool_tbl = arr.get_mut(i).expect("idx within bounds");
@@ -14562,8 +14511,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 # trailing comment before our edit
 "#;
-        let mut doc: toml_edit::DocumentMut =
-            original.parse().expect("fragment must parse");
+        let mut doc: toml_edit::DocumentMut = original.parse().expect("fragment must parse");
         // Insert a credential_pools entry the same way the CLI's add-on-no-pool
         // path does — building an ArrayOfTables and pushing one table into it.
         let item = doc

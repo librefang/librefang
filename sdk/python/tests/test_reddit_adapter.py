@@ -578,17 +578,21 @@ def test_poll_once_emits_parsed_comments(monkeypatch):
     a = _adapter()
     a.own_username = "test-user"
     a._cached_token = ("tok", ra.time.monotonic() + 600)
+    # `?sort=new` returns comments newest-first, so c2 (the newer one)
+    # leads and c1 trails — the way the real listing arrives. The
+    # adapter reverses to chronological before emitting.
     fake = _FakeUrlopen([
         (200, _children(
-            _comment(cid="c1", fullname="t1_c1", body="hi"),
-            _comment(kind="t3", cid="p1"),  # skipped: post
             _comment(cid="c2", fullname="t1_c2", body="/help me"),
+            _comment(kind="t3", cid="p1"),  # skipped: post
+            _comment(cid="c1", fullname="t1_c1", body="hi"),
         )),
     ])
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
     emitted = []
     a._poll_once(emitted.append)
     assert len(emitted) == 2
+    # Emitted oldest-first despite the newest-first API order.
     assert emitted[0]["params"]["message_id"] == "c1"
     assert emitted[0]["params"]["thread_id"] == "t1_c1"
     assert emitted[1]["params"]["content"] == {
@@ -598,6 +602,27 @@ def test_poll_once_emits_parsed_comments(monkeypatch):
     # under its id to avoid reparsing).
     assert "c1" in a._seen_comments_set
     assert "c2" in a._seen_comments_set
+
+
+def test_poll_once_emits_in_chronological_order(monkeypatch):
+    """Regression: `?sort=new` returns comments newest-first. A burst
+    caught in one poll must reach the agent oldest -> newest, not
+    reversed (the Rust adapter iterated the raw newest-first listing)."""
+    a = _adapter()
+    a.own_username = "test-user"
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    # API order: newest (c3) first, oldest (c1) last.
+    fake = _FakeUrlopen([
+        (200, _children(
+            _comment(cid="c3", fullname="t1_c3", body="third"),
+            _comment(cid="c2", fullname="t1_c2", body="second"),
+            _comment(cid="c1", fullname="t1_c1", body="first"),
+        )),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    emitted = []
+    a._poll_once(emitted.append)
+    assert [e["params"]["message_id"] for e in emitted] == ["c1", "c2", "c3"]
 
 
 def test_poll_once_dedupes_seen_comments(monkeypatch):

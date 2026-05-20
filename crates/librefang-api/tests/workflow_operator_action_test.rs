@@ -449,10 +449,7 @@ async fn operator_http_inspect_returns_artifact_and_actions() {
     .await;
     assert_eq!(status, StatusCode::OK, "inspect must be 200: {body:?}");
     assert_eq!(body["run_id"].as_str().unwrap_or(""), &run_id.to_string());
-    assert_eq!(
-        body["workflow_name"].as_str().unwrap_or(""),
-        "op-action-it"
-    );
+    assert_eq!(body["workflow_name"].as_str().unwrap_or(""), "op-action-it");
     assert_eq!(body["step_name"].as_str().unwrap_or(""), "review");
     assert_eq!(
         body["artifact"].as_str().unwrap_or(""),
@@ -594,11 +591,7 @@ async fn operator_http_pending_lists_all_operator_paused_runs() {
         produce_then_operator(vec![OperatorAction::Approve, OperatorAction::Reject]),
     )
     .await;
-    let run_b = run_to_operator_pause(
-        &h,
-        produce_then_operator(vec![OperatorAction::Edit]),
-    )
-    .await;
+    let run_b = run_to_operator_pause(&h, produce_then_operator(vec![OperatorAction::Edit])).await;
 
     let (status, body) = json_request(
         &h,
@@ -610,10 +603,7 @@ async fn operator_http_pending_lists_all_operator_paused_runs() {
     assert_eq!(status, StatusCode::OK);
     let rows = body.as_array().expect("array body");
     assert_eq!(rows.len(), 2, "two paused operator runs: {body:?}");
-    let ids: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["run_id"].as_str())
-        .collect();
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["run_id"].as_str()).collect();
     let a_str = run_a.to_string();
     let b_str = run_b.to_string();
     assert!(ids.contains(&a_str.as_str()), "run A must appear: {ids:?}");

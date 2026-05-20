@@ -39,21 +39,10 @@ struct ChannelDef {
 }
 
 const CHANNEL_DEFS: &[ChannelDef] = &[
-    // ── Messaging (11)
-    ChannelDef {
-        name: "discord",
-        display_name: "Discord",
-        category: "Messaging",
-        env_vars: &["DISCORD_BOT_TOKEN"],
-        description: "Discord bot adapter",
-    },
-    ChannelDef {
-        name: "slack",
-        display_name: "Slack",
-        category: "Messaging",
-        env_vars: &["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"],
-        description: "Slack Socket Mode adapter",
-    },
+    // ── Messaging
+    // discord and slack migrated to out-of-process sidecar adapters
+    // (librefang.sidecar.adapters.{discord,slack}); see the channels
+    // page in the dashboard / SIDECAR_CATALOG in routes/channels.rs.
     ChannelDef {
         name: "whatsapp",
         display_name: "WhatsApp",
@@ -146,28 +135,7 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         env_vars: &["ZULIP_API_KEY"],
         description: "Zulip event queue adapter",
     },
-    // ── Developer
-    ChannelDef {
-        name: "nextcloud",
-        display_name: "Nextcloud",
-        category: "Developer",
-        env_vars: &["NEXTCLOUD_TOKEN"],
-        description: "Nextcloud Talk adapter",
-    },
-    ChannelDef {
-        name: "rocketchat",
-        display_name: "Rocket.Chat",
-        category: "Developer",
-        env_vars: &["ROCKETCHAT_TOKEN"],
-        description: "Rocket.Chat REST adapter",
-    },
-    ChannelDef {
-        name: "twitch",
-        display_name: "Twitch",
-        category: "Developer",
-        env_vars: &["TWITCH_OAUTH_TOKEN"],
-        description: "Twitch IRC gateway adapter",
-    },
+    // twitch, rocketchat & nextcloud migrated to sidecar adapters
     // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {
         name: "webhook",

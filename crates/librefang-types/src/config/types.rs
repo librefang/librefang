@@ -537,12 +537,15 @@ pub struct DiscordRoleMapping {
 
 /// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
 /// `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence
-/// (owner > admin > guest > member) is collapsed inside the channel
-/// adapter (`SlackAdapter::parse_users_info_response`) into a single
-/// platform token before this mapping ever sees it; the translator
-/// here is a flat lookup, not a precedence ladder. Each step is
-/// optional — leave a field unset to fall through to default-deny
-/// `Viewer` for that platform tier.
+/// (owner > admin > guest > member) was collapsed inside the Rust
+/// channel adapter (`SlackAdapter::parse_users_info_response`) into
+/// a single platform token before this mapping ever saw it. Since
+/// Slack migrated to a sidecar in v2026.5, live `users.info` role
+/// lookup is unavailable; this mapping is parsed but currently
+/// inert until a sidecar-side role-query protocol lands. The
+/// translator here is a flat lookup, not a precedence ladder. Each
+/// step is optional — leave a field unset to fall through to
+/// default-deny `Viewer` for that platform tier.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackRoleMapping {
     /// LibreFang role for `is_owner = true` users.
@@ -2171,7 +2174,7 @@ pub struct SidecarChannelConfig {
     /// When set, seeds the `AgentRouter.channel_defaults` map at boot so
     /// inbound messages with no explicit binding route to this agent. This
     /// mirrors the `default_agent` field that lived on the per-channel
-    /// in-process configs (`TelegramConfig`, `DiscordConfig`, …) before the
+    /// in-process configs (`TelegramConfig`, `WhatsAppConfig`, …) before the
     /// sidecar migration (#5241 / #5294). Without this, the resolver falls
     /// through to the non-deterministic "first available agent" branch in
     /// `resolve_or_fallback`, which silently routes traffic to a different
@@ -6369,15 +6372,11 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`)
-/// and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.slack]`)
+/// and multi-instance (`[[channels.slack]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Discord bot configuration(s).
-    pub discord: OneOrMany<DiscordConfig>,
-    /// Slack bot configuration(s).
-    pub slack: OneOrMany<SlackConfig>,
     /// WhatsApp Cloud API configuration(s).
     pub whatsapp: OneOrMany<WhatsAppConfig>,
     /// Signal (via signal-cli) configuration(s).
@@ -6392,10 +6391,6 @@ pub struct ChannelsConfig {
     pub mattermost: OneOrMany<MattermostConfig>,
     /// Google Chat configuration(s).
     pub google_chat: OneOrMany<GoogleChatConfig>,
-    /// Twitch chat configuration(s).
-    pub twitch: OneOrMany<TwitchConfig>,
-    /// Rocket.Chat configuration(s).
-    pub rocketchat: OneOrMany<RocketChatConfig>,
     /// Zulip configuration(s).
     pub zulip: OneOrMany<ZulipConfig>,
     // Wave 3 — High-value channels
@@ -6404,8 +6399,6 @@ pub struct ChannelsConfig {
     /// Feishu/Lark Open Platform configuration(s).
     pub feishu: OneOrMany<FeishuConfig>,
     // Wave 4 — Enterprise & community channels
-    /// Nextcloud Talk configuration(s).
-    pub nextcloud: OneOrMany<NextcloudConfig>,
     /// Webex bot configuration(s).
     pub webex: OneOrMany<WebexConfig>,
     // Wave 5 — Niche & differentiating channels
@@ -6471,8 +6464,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            discord: OneOrMany::default(),
-            slack: OneOrMany::default(),
             whatsapp: OneOrMany::default(),
             signal: OneOrMany::default(),
             matrix: OneOrMany::default(),
@@ -6480,12 +6471,9 @@ impl Default for ChannelsConfig {
             teams: OneOrMany::default(),
             mattermost: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            twitch: OneOrMany::default(),
-            rocketchat: OneOrMany::default(),
             zulip: OneOrMany::default(),
             line: OneOrMany::default(),
             feishu: OneOrMany::default(),
-            nextcloud: OneOrMany::default(),
             webex: OneOrMany::default(),
             dingtalk: OneOrMany::default(),
             qq: OneOrMany::default(),
@@ -6519,153 +6507,14 @@ impl ChannelsConfig {
     }
 }
 
-/// Discord channel adapter configuration.
+/// WhatsApp Cloud API channel adapter configuration.
 //
-// `deny_unknown_fields` catches typos inside `[[channels.discord]]`
+// `deny_unknown_fields` catches typos inside `[[channels.whatsapp]]`
 // elements at deserialize time. The detect_unknown_nested_fields walker
 // can't see into repeated-table elements (#5130), so the only way to
 // surface a typo here is for serde itself to reject it. This is the
 // canonical statement of the rationale; the other channel configs in
-// this module refer back to `DiscordConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct DiscordConfig {
-    /// Env var name holding the bot token (NOT the token itself).
-    pub bot_token_env: String,
-    /// Guild (server) IDs allowed to interact (empty = allow all).
-    /// Accepts strings for consistency with other channel configs.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_guilds: Vec<String>,
-    /// User IDs allowed to interact (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Gateway intents bitmask (default: 37376 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).
-    pub intents: u64,
-    /// Ignore messages from other bots (default: true).
-    /// Set to false to allow bot-to-bot interactions in multi-agent setups.
-    #[serde(default = "default_true")]
-    pub ignore_bots: bool,
-    /// Custom text patterns that trigger the bot (case-insensitive contains match).
-    /// When any pattern matches the message content, the bot treats it as if it was mentioned.
-    /// Example: `["hey bot", "!ask"]`
-    #[serde(default)]
-    pub mention_patterns: Vec<String>,
-    /// Initial backoff in seconds on WebSocket failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on WebSocket failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
-    /// adapter's REST client (#4795). Affects REST API calls only —
-    /// the gateway WebSocket is not currently routed through the
-    /// proxy.
-    ///
-    /// When unset, the adapter follows reqwest's normal env-var
-    /// fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
-    /// `NO_PROXY`). When set, the per-channel value overrides any env
-    /// var. Accepted schemes: `http://`, `https://`, `socks5://`,
-    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
-    /// Invalid URLs are rejected at adapter init. This is the canonical
-    /// proxy doc; other channel configs refer back to
-    /// `DiscordConfig::proxy`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "DISCORD_BOT_TOKEN".to_string(),
-            allowed_guilds: vec![],
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            intents: 37376,
-            ignore_bots: true,
-            mention_patterns: vec![],
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-            proxy: None,
-        }
-    }
-}
-
-/// Slack channel adapter configuration.
-//
-// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SlackConfig {
-    /// Env var name holding the app-level token (xapp-) for Socket Mode.
-    pub app_token_env: String,
-    /// Env var name holding the bot token (xoxb-) for REST API.
-    pub bot_token_env: String,
-    /// Channel IDs allowed to interact (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Whether to disable link unfurling (preview expansion) in sent messages.
-    /// When set to `false`, Slack will not expand link previews.
-    /// When `None` (default), Slack uses its own default behavior.
-    #[serde(default)]
-    pub unfurl_links: Option<bool>,
-    /// Initial backoff in seconds on WebSocket failures (default: 1).
-    #[serde(default = "default_channel_initial_backoff_secs")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on WebSocket failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// When true, bot replies are posted as top-level channel messages instead
-    /// of threaded replies. Defaults to `None` (i.e. use normal threading).
-    #[serde(default)]
-    pub force_flat_replies: Option<bool>,
-    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
-    /// adapter's REST client (#4795). Affects Web API calls only —
-    /// the Socket Mode WebSocket is not currently routed through the
-    /// proxy. See `DiscordConfig::proxy` for accepted URL shapes
-    /// and env-var interaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<String>,
-}
-
-impl Default for SlackConfig {
-    fn default() -> Self {
-        Self {
-            app_token_env: "SLACK_APP_TOKEN".to_string(),
-            bot_token_env: "SLACK_BOT_TOKEN".to_string(),
-            allowed_channels: vec![],
-            account_id: None,
-            default_agent: None,
-            unfurl_links: None,
-            initial_backoff_secs: default_channel_initial_backoff_secs(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-            force_flat_replies: None,
-            proxy: None,
-        }
-    }
-}
-
-/// WhatsApp Cloud API channel adapter configuration.
-//
-// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
+// this module refer back to `WhatsAppConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
@@ -6963,7 +6812,7 @@ impl Default for TeamsConfig {
 
 /// Mattermost channel adapter configuration.
 //
-// `deny_unknown_fields` — see `DiscordConfig` for the rationale (#5130).
+// `deny_unknown_fields` — see `WhatsAppConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
@@ -6991,7 +6840,7 @@ pub struct MattermostConfig {
     /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
     /// adapter's REST client (#4795). Affects REST API calls only —
     /// the Mattermost WebSocket connection is not currently routed
-    /// through the proxy. See `DiscordConfig::proxy` for accepted
+    /// through the proxy. See `WhatsAppConfig::proxy` for accepted
     /// URL shapes and env-var interaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -7045,77 +6894,6 @@ impl Default for GoogleChatConfig {
             service_account_key_path: None,
             space_ids: vec![],
             webhook_port: 8444,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Twitch chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TwitchConfig {
-    /// Env var name holding the OAuth token.
-    pub oauth_token_env: String,
-    /// Twitch channels to join (without #).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub channels: Vec<String>,
-    /// Bot nickname.
-    pub nick: String,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TwitchConfig {
-    fn default() -> Self {
-        Self {
-            oauth_token_env: "TWITCH_OAUTH_TOKEN".to_string(),
-            channels: vec![],
-            nick: "librefang".to_string(),
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Rocket.Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct RocketChatConfig {
-    /// Rocket.Chat server URL.
-    pub server_url: String,
-    /// Env var name holding the auth token.
-    pub token_env: String,
-    /// User ID for the bot.
-    pub user_id: String,
-    /// Allowed channel IDs (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_channels: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for RocketChatConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "ROCKETCHAT_TOKEN".to_string(),
-            user_id: String::new(),
-            allowed_channels: vec![],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -7353,40 +7131,6 @@ impl Default for WeChatConfig {
 }
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
-
-/// Nextcloud Talk channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct NextcloudConfig {
-    /// Nextcloud server URL.
-    pub server_url: String,
-    /// Env var name holding the auth token.
-    pub token_env: String,
-    /// Room tokens to listen in (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_rooms: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for NextcloudConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            token_env: "NEXTCLOUD_TOKEN".to_string(),
-            allowed_rooms: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
 
 /// Webex bot channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

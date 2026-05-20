@@ -284,9 +284,15 @@ Estimated runway: ~10–14 PRs after this one. Tracked under the umbrella issue
    ~180 sites in this PR. (That cascade is the work of follow-up PRs.)
 5. Tests:
    - Pure unit tests in `cron.rs` for the three "kernel missing →
-     `Unavailable`" wiring guards plus the `caller_agent_id_missing` helper
-     (which maps to `Internal`, NOT `Unavailable`, so the 503 surface stays
-     honest about subsystem state).
+     `Unavailable`" wiring guards plus the `caller_agent_id_missing` helper.
+     The latter maps to `MissingParameter("agent_id")`, NOT `Unavailable`
+     (no subsystem is down) and NOT `Internal` (the MCP HTTP route
+     legitimately passes `None` when `X-LibreFang-Agent-Id` is absent —
+     that is a user-input gap, not a server bug, and the
+     `MissingParameter` → `InvalidInput` → HTTP 400 lift is the honest
+     mapping). The operator-facing diagnostic (which call site dropped
+     attribution) is preserved via a `tracing::warn!` next to the
+     constructor.
    - End-to-end integration tests in
      `tests/tool_runner_forwarding_task_cron.rs` for each error path the
      functions can actually hit on a `Some(kernel)` call:
