@@ -7,39 +7,13 @@ description = "Channel Bridge Layer — pluggable messaging integrations for Lib
 readme = "README.md"
 
 [features]
-# Channel crate defaults are intentionally empty: every workspace
-# consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets
-# `default-features = false` and forwards an explicit subset, so the old
-# 25+ channel default just confused readers and risked drifting from
-# `all-channels`. Pick a feature explicitly when depending on this
-# crate. See #3655.
+# No cargo features. Every channel adapter ships as a sidecar
+# (`librefang.sidecar.adapters.*` in `sdk/python/`); the crate
+# itself just provides the trampoline (`sidecar.rs`), the bridge
+# types, and shared helpers. The historical `channel-*` and
+# `all-channels` feature flags are gone — their last consumer was
+# `librefang-api` which no longer references them.
 default = []
-
-# Every channel adapter the crate ships. Kept in lock-step with the
-# individual `channel-*` features below — adding a new adapter requires
-# a matching entry here. CI / release / packaging pipelines opt in to
-# this; everyday `cargo build` paths don't.
-# Every in-process channel has migrated to a sidecar; this kept as
-# `[]` so consumers that opt into `all-channels` continue to compile.
-all-channels = []
-
-# Individual channel features
-# email migrated to a sidecar (librefang.sidecar.adapters.email);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }

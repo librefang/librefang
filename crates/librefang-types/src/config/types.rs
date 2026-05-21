@@ -4,10 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-// `OneOrMany` import removed — every former in-process channel
-// (google_chat, webhook, …) migrated to a sidecar, so the type has
-// no remaining consumer in this module. Re-add when a future
-// in-process channel needs the array-of-tables shape.
 use super::DEFAULT_API_LISTEN;
 
 /// Hard ceiling on messages persisted per session, enforced by
@@ -6380,45 +6376,14 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.slack]`)
-/// and multi-instance (`[[channels.slack]]`) TOML syntax for multi-bot routing.
+/// Every channel runs as a sidecar (`[[sidecar_channels]]` — see
+/// [`SidecarChannelConfig`]); the per-vendor in-process fields that
+/// used to live here (`telegram`, `slack`, `whatsapp`, …, each typed
+/// `OneOrMany<*Config>`) are gone. What remains are the shared
+/// file-transfer caps + download dir that every channel honours.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // email migrated to a sidecar (librefang.sidecar.adapters.email);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // Wave 3 — High-value channels
-    // line migrated to a sidecar (librefang.sidecar.adapters.line);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // Wave 4 — Enterprise & community channels
-    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // Wave 5 — Niche & differentiating channels
-    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-
     // --- Global file-download settings ---
     /// Maximum file size in bytes for channel file downloads (default: 50 MB).
     #[serde(default = "default_file_download_max_bytes")]
@@ -6470,9 +6435,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            // All previously in-process channels (google_chat,
-            // webhook, …) migrated to sidecars; `ChannelsConfig`
-            // no longer carries per-channel fields.
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),

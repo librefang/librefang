@@ -378,45 +378,31 @@ impl LibreFangKernel {
     /// (the pre-#2872 behavior).
     pub(crate) fn resolve_agent_home_channel(&self, agent_id: AgentId) -> Option<SenderContext> {
         let entry = self.agents.registry.get(agent_id)?;
-        // `_agent_name` / `_channels` underscore-prefixed so
-        // `cargo check -D warnings` stays green while
-        // `for_each_channel_field!` expands to nothing — every
-        // in-process channel has migrated to a sidecar. The macro
-        // shape is preserved so a future in-process channel re-enables
-        // the loop by appending one `$mac!(field, "name")` line in
-        // `for_each_channel_field!`.
-        let _agent_name = entry.name.clone();
+        let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-        let _channels = &cfg.channels;
 
-        // Scan each channel type for the first instance whose default_agent
-        // names this agent. The `first` semantics match `channel_overrides`
-        // in channel_bridge.rs when multiple instances share a default_agent.
-        //
-        // `for_each_channel_field!` expands the exhaustive field list shared
-        // with `resolve_channel_owner` in channel_sender.rs — one edit point
-        // for all 40+ channel types keeps the two functions in sync.
-        #[allow(unused_macros)]
-        macro_rules! check {
-            ($field:ident, $channel_name:literal) => {{
-                if let Some(entry) = _channels
-                    .$field
-                    .iter()
-                    .find(|c| c.default_agent.as_deref() == Some(_agent_name.as_str()))
-                {
-                    return Some(SenderContext {
-                        channel: $channel_name.to_string(),
-                        account_id: entry.account_id.clone(),
-                        use_canonical_session: true,
-                        ..Default::default()
-                    });
-                }
-            }};
-        }
-
-        crate::for_each_channel_field!(check);
-
-        None
+        // Every channel is a sidecar; scan `cfg.sidecar_channels` for the
+        // first entry whose `default_agent` names this agent. First-match
+        // semantics match the previous in-process channel scan (which used
+        // the `for_each_channel_field!` macro, now retired). The effective
+        // channel key is `channel_type` when set, else the entry `name` —
+        // same mapping `sidecar_default_agent` in channel_sender.rs uses
+        // for the inverted lookup.
+        cfg.sidecar_channels.iter().find_map(|sc| {
+            if sc.default_agent.as_deref() != Some(agent_name.as_str()) {
+                return None;
+            }
+            let channel = sc
+                .channel_type
+                .clone()
+                .unwrap_or_else(|| sc.name.clone());
+            Some(SenderContext {
+                channel,
+                account_id: None,
+                use_canonical_session: true,
+                ..Default::default()
+            })
+        })
     }
 
     /// Send an ephemeral "side question" to an agent (`/btw` command).

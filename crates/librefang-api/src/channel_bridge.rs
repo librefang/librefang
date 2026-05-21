@@ -1853,100 +1853,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn channel_overrides(
         &self,
-        channel_type: &str,
-        account_id: Option<&str>,
+        _channel_type: &str,
+        _account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        // `_account_id` / `_channels` underscore-prefixed and
-        // `find_channel_info!` marked `#[allow(unused_macros)]` so
-        // `cargo check -D warnings` stays green while every former
-        // in-process channel (google_chat, webhook, …) runs as a
-        // sidecar. The macro shape + cfg lookup are preserved so a
-        // future in-process channel can re-enable the match arms
-        // below by appending its handler.
-        let _ = account_id;
-        let cfg = self.kernel.config_ref();
-        let _channels = &cfg.channels;
-
-        /// Look up channel overrides and default_agent from the matching
-        /// channel config entry. Prefers the entry whose `account_id` matches;
-        /// falls back to the first entry when no account_id is provided.
-        #[allow(unused_macros)]
-        macro_rules! find_channel_info {
-            ($field:ident) => {{
-                let entry = if let Some(aid) = account_id {
-                    _channels
-                        .$field
-                        .iter()
-                        .find(|c| c.account_id.as_deref() == Some(aid))
-                } else {
-                    _channels.$field.first()
-                };
-                (
-                    entry.map(|c| c.overrides.clone()),
-                    entry.and_then(|c| c.default_agent.clone()),
-                )
-            }};
-        }
-
-        // All previously in-process channels (google_chat, webhook,
-        // …) migrated to sidecars; per-channel overrides surface
-        // through the sidecar bridge in
-        // `librefang_kernel::kernel::handles::channel_sender`. With
-        // no `match` arm producing `Some(_)` the type inferencer
-        // can't pick concrete types for the `None` legs, so the
-        // tuple is bound explicitly. Restore a real `match
-        // channel_type { … }` here when a future in-process channel
-        // brings the field back.
-        let _ = channel_type;
-        let (mut overrides, default_agent_name): (
-            Option<librefang_types::config::ChannelOverrides>,
-            Option<String>,
-        ) = (None, None);
-
-        // Merge the default agent's routing aliases into group_trigger_patterns
-        // so aliases trigger the bot in group chats without needing a formal
-        // @mention. Issue #2292.
-        if let (Some(ref mut ov), Some(agent_name)) = (&mut overrides, default_agent_name) {
-            if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
-                if let Some(routing) = entry.manifest.metadata.get("routing") {
-                    let aliases: Vec<String> = routing
-                        .get("aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let weak: Vec<String> = routing
-                        .get("weak_aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for alias in aliases.into_iter().chain(weak) {
-                        if !alias.is_empty() {
-                            let escaped_alias: String = alias
-                                .chars()
-                                .flat_map(|c| {
-                                    if ".+*?^$()[]{}|\\".contains(c) {
-                                        vec!['\\', c]
-                                    } else {
-                                        vec![c]
-                                    }
-                                })
-                                .collect();
-                            // Use \b word boundaries only for ASCII aliases;
-                            // CJK and other non-ASCII aliases use plain substring
-                            // matching since \b is ASCII-only in Rust's regex.
-                            let escaped = if escaped_alias.is_ascii() {
-                                format!("(?i)\\b{}\\b", escaped_alias)
-                            } else {
-                                format!("(?i){}", escaped_alias)
-                            };
-                            if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
-                                ov.group_trigger_patterns.push(escaped);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        overrides
+        // Per-channel `ChannelOverrides` only ever lived on the
+        // in-process `[channels.<name>]` configs, alongside an
+        // alias-merging side effect that pushed the default agent's
+        // routing aliases onto `group_trigger_patterns` (#2292).
+        // Sidecars have no equivalent per-instance override slot,
+        // and the alias-merging happens elsewhere now (via
+        // `agent_channel_overrides`, below, which reads the
+        // agent.toml). With every channel sidecar-migrated this
+        // method has nothing to return.
+        //
+        // The trait method stays — callers in the bridge still
+        // invoke it through the `KernelApi` interface, and the
+        // `None` short-circuits the per-channel override merge.
+        None
     }
 
     async fn agent_channel_overrides(
@@ -2466,23 +2389,17 @@ async fn redispatch_journal_entry(
 
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
-    config: &librefang_types::config::ChannelsConfig,
+    _config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
-    // All previously in-process channels (google_chat, webhook, …)
-    // migrated to sidecars; operators configure them through
-    // `[[sidecar_channels]]` and the `check_channel!` env-presence
-    // probes are obsolete. Re-add the macro + invocations when a
-    // future in-process channel brings the shape back.
-    let _ = config;
-    #[allow(unused_mut)]
-    let mut has_any = false;
-
-    // Sidecar channels (always available, not feature-gated)
-    if !kernel.config_ref().sidecar_channels.is_empty() {
-        has_any = true;
-    }
-
-    if !has_any {
+    // Every channel adapter is now a sidecar; `_config` (the
+    // `[channels]` block from `KernelConfig`) is kept on the
+    // signature for callers that still pass it (hot-reload, etc.)
+    // but is no longer consulted — the `check_channel!` env-
+    // presence macro + `has_any` flag + per-channel construction
+    // blocks that this function used to host all moved to the
+    // sidecar loop below.
+    let sidecar_cfg = kernel.config_ref();
+    if sidecar_cfg.sidecar_channels.is_empty() {
         return (None, Vec::new(), axum::Router::new());
     }
 
@@ -2491,61 +2408,13 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // Collect all adapters to start: (adapter, default_agent_name, account_id)
-    #[allow(unused_mut, clippy::type_complexity)]
+    // (adapter, default_agent_name, account_id) — `account_id` is
+    // always None because `SidecarChannelConfig` carries no such
+    // field (sidecars surface their own per-instance id via env
+    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
+    // downstream router-population loop's signature.
+    #[allow(clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // email migrated to a sidecar (librefang.sidecar.adapters.email);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // mattermost migrated to a sidecar
-    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
-    // routes/channels.rs.
-
-    // google_chat migrated to a sidecar
-    // (librefang.sidecar.adapters.google_chat); no longer spawned here.
-
-    // zulip migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.zulip); no longer spawned here.
-
-    // ── Wave 3 ──────────────────────────────────────────────────
-    // line migrated to a sidecar (librefang.sidecar.adapters.line);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // ── Wave 4 ──────────────────────────────────────────────────
-    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // ── Wave 5 ──────────────────────────────────────────────────
-
-    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
-    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // ── Sidecar channel adapters ───────────────────────────────
     // Re-init path: this loop runs on every channel-bridge cycle, not just
@@ -2561,7 +2430,6 @@ pub async fn start_channel_bridge_with_config(
     // that handler-side follow-up will silently fail to spawn the sidecar
     // (the supervisor map stays empty); audit any new save endpoint that
     // touches `sidecar_channels` for this pattern.
-    let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
             name = %sidecar_config.name,

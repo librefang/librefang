@@ -2642,95 +2642,19 @@ mod instance_helper_tests {
     //! and have no business reaching production untested.
     use super::*;
 
-    fn matrix_meta() -> &'static ChannelMeta {
-        // Witness rotation history (function name kept for git-blame
-        // continuity): matrix → whatsapp → google_chat → webhook.
-        // After the google_chat sidecar migration the only remaining
-        // in-process ChannelMeta is `webhook`, whose `secret_env`
-        // field is `required: false`. The `resolve_secret_env_overrides`
-        // unit tests below still exercise the suffix-allocator logic
-        // — they just key off `secret_env` / `WEBHOOK_SECRET` instead
-        // of `service_account_env` / `GOOGLE_CHAT_SERVICE_ACCOUNT`.
-        find_channel_meta("webhook").expect("webhook is in the registry")
-    }
-
-    fn inst_with_env(env_name: &str) -> serde_json::Value {
-        serde_json::json!({ "secret_env": env_name })
-    }
-
-    /// First-instance create on an empty channel returns the bare default
-    /// env-var name (no suffix), matching the legacy single-instance flow.
-    #[test]
-    fn resolve_overrides_picks_default_for_first_instance() {
-        let meta = matrix_meta();
-        let overrides = resolve_secret_env_overrides(meta, &[], 0);
-        assert_eq!(
-            overrides.get("secret_env").map(|s| s.as_str()),
-            Some("WEBHOOK_SECRET"),
-            "first instance must use the bare default env-var name: {overrides:?}"
-        );
-    }
-
-    /// After deleting the middle of three instances, the survivors point at
-    /// `_ACCESS_TOKEN` and `_ACCESS_TOKEN_3`. Adding a new instance must NOT
-    /// pick `_ACCESS_TOKEN_3` (which would silently overwrite the surviving
-    /// instance at idx 1) — it must pick `_ACCESS_TOKEN_2`, the lowest
-    /// unused suffix.
-    #[test]
-    fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
-        let meta = matrix_meta();
-        let existing = vec![
-            inst_with_env("WEBHOOK_SECRET"),
-            inst_with_env("WEBHOOK_SECRET_3"),
-        ];
-        let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
-        assert_eq!(
-            overrides.get("secret_env").map(|s| s.as_str()),
-            Some("WEBHOOK_SECRET_2"),
-            "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
-        );
-    }
-
-    /// Update on an existing instance preserves the env-var name that
-    /// instance is already pointing at — no fresh suffix allocated, no
-    /// drift onto a sibling's env var. This is what makes "rotate the
-    /// access token in place" actually rotate in place.
-    #[test]
-    fn resolve_overrides_preserves_existing_env_name_on_update() {
-        let meta = matrix_meta();
-        let existing = vec![
-            inst_with_env("WEBHOOK_SECRET"),
-            inst_with_env("MY_CUSTOM_WEBHOOK_SECRET"),
-        ];
-        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
-        assert_eq!(
-            overrides.get("secret_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_WEBHOOK_SECRET"),
-            "update path must preserve the instance's existing env-var name: {overrides:?}"
-        );
-    }
-
-    /// Sibling-set excludes the target index. An update should not skip
-    /// `_ACCESS_TOKEN_2` just because the row being updated currently
-    /// points at it (we'd never reach the suffix branch for a non-empty
-    /// existing ref anyway, but a future caller passing target_index for
-    /// an empty row should still be allowed to pick its own slot).
-    #[test]
-    fn resolve_overrides_excludes_target_index_from_sibling_set() {
-        let meta = matrix_meta();
-        let existing = vec![
-            inst_with_env("WEBHOOK_SECRET"),
-            inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("WEBHOOK_SECRET_3"),
-        ];
-        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
-        // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
-        // KEY_3. Lowest unused: KEY_2.
-        assert_eq!(
-            overrides.get("secret_env").map(|s| s.as_str()),
-            Some("WEBHOOK_SECRET_2")
-        );
-    }
+    // resolve_overrides_* (4 tests) retired: their witness was
+    // rotated matrix → whatsapp → google_chat → webhook by
+    // successive sidecar migrations, but #5455 (webhook → sidecar)
+    // emptied `CHANNEL_REGISTRY` so `find_channel_meta("webhook")`
+    // is now `None` and the matrix_meta() helper panicked at
+    // runtime (broken since #5455 merged + #5459 force-pushed past
+    // CI). With every in-process channel gone there's no remaining
+    // ChannelMeta witness to rotate to — restore the 4 tests
+    // alongside the next in-process channel that brings the
+    // registry shape back. `resolve_secret_env_overrides` itself
+    // is still wired into the (effectively-404) per-instance REST
+    // handlers; deleting it would cascade into removing several
+    // dead route handlers, which belongs in a follow-up cleanup.
 
     /// Signature is stable across object-key insertion order, so two
     /// processes seeing identical content always emit the same hex string.

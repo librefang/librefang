@@ -11,8 +11,9 @@ mod types;
 mod validation;
 mod version;
 
-// Maintain backward compatibility: re-export all public types
-pub use serde_helpers::*;
+// Maintain backward compatibility: re-export all public types.
+// `serde_helpers` re-export removed alongside `OneOrMany<T>` (its
+// only public symbol) — restore if a future serde helper resurfaces.
 pub use types::*;
 pub use version::*;
 
@@ -809,83 +810,12 @@ admin_role = "admin"
         assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
     }
 
-    // OneOrMany single-table + array-of-tables tests rotated from
-    // matrix (#5368) → dingtalk → whatsapp → webhook → google_chat,
-    // all sidecar-migrated. With no in-process channel left to use
-    // as a TOML witness, the tests re-point at a local test fixture
-    // struct (`OoMTestRow`) so OneOrMany's `Deserialize` /
-    // `Serialize` shape stays under coverage independent of any
-    // production caller's field set.
-    #[derive(
-        Debug, Clone, Default, serde::Serialize, serde::Deserialize,
-        schemars::JsonSchema,
-    )]
-    #[serde(default)]
-    struct OoMTestRow {
-        token_env: String,
-        default_agent: Option<String>,
-    }
-
-    #[test]
-    fn test_one_or_many_single_serde_value() {
-        // Single-element single-table shape.
-        let raw = serde_json::json!({ "token_env": "MY_TOKEN" });
-        let row: OneOrMany<OoMTestRow> = serde_json::from_value(raw).unwrap();
-        assert!(row.is_some());
-        assert_eq!(row.len(), 1);
-        assert_eq!(row.first().unwrap().token_env, "MY_TOKEN");
-    }
-
-    #[test]
-    fn test_one_or_many_array_of_serde_values() {
-        let raw = serde_json::json!([
-            { "token_env": "TOK_1", "default_agent": "assistant" },
-            { "token_env": "TOK_2", "default_agent": "coder" },
-        ]);
-        let rows: OneOrMany<OoMTestRow> = serde_json::from_value(raw).unwrap();
-        assert_eq!(rows.len(), 2);
-        let rows_vec: Vec<_> = rows.iter().collect();
-        assert_eq!(rows_vec[0].token_env, "TOK_1");
-        assert_eq!(rows_vec[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(rows_vec[1].token_env, "TOK_2");
-        assert_eq!(rows_vec[1].default_agent.as_deref(), Some("coder"));
-    }
-
-    // test_one_or_many_single_wechat_table removed — wechat migrated
-    // to a sidecar (librefang.sidecar.adapters.wechat); the
-    // [channels.wechat] TOML key is no longer recognised.
-
-    // test_one_or_many_array_of_wecom_tables removed — wecom migrated to
-    // a sidecar (librefang.sidecar.adapters.wecom); the [channels.wecom]
-    // TOML key is no longer recognised.
-
-    #[test]
-    fn test_one_or_many_empty_default() {
-        let empty: OneOrMany<OoMTestRow> = OneOrMany::default();
-        assert!(empty.is_none());
-        assert!(empty.is_empty());
-        assert_eq!(empty.len(), 0);
-        assert!(empty.first().is_none());
-        assert!(empty.as_ref().is_none());
-    }
-
-    #[test]
-    fn test_one_or_many_serialize_roundtrip() {
-        // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![OoMTestRow::default()]);
-        let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<OoMTestRow> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.len(), 1);
-
-        let multi = OneOrMany(vec![OoMTestRow::default(), OoMTestRow::default()]);
-        let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<OoMTestRow> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.len(), 2);
-
-        let empty: OneOrMany<OoMTestRow> = OneOrMany::default();
-        let json = serde_json::to_string(&empty).unwrap();
-        assert_eq!(json, "null");
-    }
+    // test_one_or_many_* (4 tests + the local `OoMTestRow` fixture)
+    // retired alongside the `OneOrMany<T>` type. With every channel
+    // sidecar-migrated `OneOrMany<T>` had zero production callers
+    // and was deleted from `serde_helpers.rs`. Restore from git
+    // history alongside the type if a future in-process channel
+    // needs the single-table-or-array-of-tables shape back.
 
     // test_account_id_in_channel_configs removed — its witnesses
     // (WhatsApp + WeChat + DingTalk) all migrated to sidecars. The
