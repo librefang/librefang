@@ -439,35 +439,23 @@ channel_type = "webex"
 
 `WEBEX_BOT_TOKEN` belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form. Outbound replies thread via Webex's `parentId` parameter (improvement over the former Rust adapter, which never sent `parentId`).
 
-#### `[channels.dingtalk]`
+#### DingTalk (sidecar)
 
-Supports two modes: **stream** (default, recommended) and **webhook** (legacy).
+DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), **stream mode only**. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration. Declare DingTalk as a `[[sidecar_channels]]` entry instead. The legacy in-process `webhook` mode (HTTP callback + HMAC-SHA256) is NOT ported — operators who relied on webhook mode must re-create the robot with stream subscription enabled in the DingTalk admin console.
 
 ```toml
-# Stream mode (recommended — no public IP needed)
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-
-# Webhook mode (legacy)
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-# webhook_port = 8457  # Deprecated: webhooks now share the API port
+[[sidecar_channels]]
+name = "dingtalk"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.dingtalk"]
+channel_type = "dingtalk"
+[sidecar_channels.env]
+DINGTALK_APP_KEY = "dingxxx..."
+# DINGTALK_ACCOUNT_ID = "prod-bot"     # optional, multi-bot routing key
+# DINGTALK_ROBOT_CODE = ""             # optional, defaults to app_key
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `receive_mode` | string | `"stream"` | Connection mode: `"stream"` or `"webhook"`. |
-| `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
-| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
-| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). **Required** — webhook mode rejects requests without a numeric `timestamp` header (400), with a stale or mismatched signature (401). |
-| `webhook_port` | u16 | `8457` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`DINGTALK_APP_SECRET` goes into `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the DingTalk form. The sidecar opens a WebSocket to the DingTalk Stream Gateway via two-step endpoint discovery (`POST /v1.0/gateway/connections/open`), ACKs every CALLBACK frame inline, and posts replies to the per-message `sessionWebhook` URL delivered with each inbound event.
 
 #### `[channels.ntfy]`
 

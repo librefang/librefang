@@ -801,7 +801,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         ch!(whatsapp);
         ch!(teams);
         ch!(google_chat);
-        ch!(dingtalk);
         ch!(webhook);
         serde_json::Value::Object(map)
     };

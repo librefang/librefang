@@ -29,8 +29,8 @@ pub use message_truncator::{
 };
 
 // Individual channel adapters — feature-gated (alphabetical order)
-#[cfg(feature = "channel-dingtalk")]
-pub mod dingtalk;
+// dingtalk migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.dingtalk); no longer an in-process channel.
 // discord migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.discord); no longer an in-process channel.
 // email migrated to an out-of-process sidecar adapter

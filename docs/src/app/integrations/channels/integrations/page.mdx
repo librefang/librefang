@@ -51,72 +51,38 @@ The sidecar runs as a supervised subprocess of LibreFang. It serves a standalone
 
 ## DingTalk
 
-Supports two modes:
-- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
-- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
+DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), **stream mode only**. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration; declare DingTalk as a `[[sidecar_channels]]` entry instead. The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — switch the robot to stream subscription in the DingTalk admin console.
 
 ### Prerequisites
 
 - A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
-- For **stream mode**: App Key and App Secret from your DingTalk application
-- For **webhook mode**: A custom robot with webhook access token and signing secret
+- App Key and App Secret from your DingTalk application
+- `python3` on the daemon host (no third-party packages required — stdlib-only sidecar)
 
-### Setup (Stream Mode -- Recommended)
+### Setup
 
 1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
 2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
-3. Set environment variables:
-
-```bash
-export DINGTALK_APP_KEY=your-app-key          # Environment variable
-export DINGTALK_APP_SECRET=your-app-secret
-librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
-librefang vault set DINGTALK_APP_SECRET
-```
-
-4. Add to config:
+3. Add to `config.toml`:
 
 ```toml
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "dingtalk"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.dingtalk"]
+channel_type = "dingtalk"
+[sidecar_channels.env]
+DINGTALK_APP_KEY = "dingxxx..."
+# DINGTALK_ACCOUNT_ID = "prod-bot"     # optional, multi-bot routing key
+# DINGTALK_ROBOT_CODE = ""             # optional, defaults to app_key
 ```
 
+4. Put `DINGTALK_APP_SECRET` in `~/.librefang/secrets.env` (the dashboard's Channels page writes it for you).
 5. Restart the daemon.
-
-### Setup (Webhook Mode)
-
-1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
-2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
-3. Note the webhook access token and signing secret.
-4. Set environment variables:
-
-```bash
-export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
-export DINGTALK_SECRET=your-signing-secret
-librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
-librefang vault set DINGTALK_SECRET
-```
-
-5. Add to config:
-
-```toml
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-default_agent = "assistant"
-```
-
-6. Restart the daemon.
 
 ### How It Works
 
-In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
-
-In **webhook mode**, the adapter receives messages via HTTP callback on the shared API server at `/channels/dingtalk/webhook`. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+The sidecar registers with the DingTalk gateway via `POST /v1.0/gateway/connections/open` to obtain a WebSocket endpoint + ticket, opens the WS connection, ACKs every CALLBACK frame inline, and posts replies to the per-message `sessionWebhook` URL that DingTalk delivers with each inbound event. Heartbeat SYSTEM ping/pong is handled automatically. Reconnect is 3 → 60 s exponential backoff.
 
 ---
 

@@ -259,8 +259,8 @@ use librefang_channels::whatsapp::WhatsAppAdapter;
 // (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
 // routes/channels.rs.
 // Wave 5
-#[cfg(feature = "channel-dingtalk")]
-use librefang_channels::dingtalk::DingTalkAdapter;
+// dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
 // see SIDECAR_CATALOG in routes/channels.rs.
 #[cfg(feature = "channel-wechat")]
@@ -1884,7 +1884,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "teams" => find_channel_info!(teams),
             "google_chat" => find_channel_info!(google_chat),
             // Wave 5
-            "dingtalk" => find_channel_info!(dingtalk),
             "webhook" => find_channel_info!(webhook),
             "wechat" => find_channel_info!(wechat),
             _ => (None, None),
@@ -2480,7 +2479,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
     check_channel!(wechat, "channel-wechat", "WeChat");
-    check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
     check_channel!(webhook, "channel-webhook", "Webhook");
 
     // Sidecar channels (always available, not feature-gated)
@@ -2677,67 +2675,8 @@ pub async fn start_channel_bridge_with_config(
 
     // ── Wave 5 ──────────────────────────────────────────────────
 
-    // DingTalk
-    #[cfg(feature = "channel-dingtalk")]
-    for dt_config in config.dingtalk.iter() {
-        use librefang_types::config::DingTalkReceiveMode;
-        match dt_config.receive_mode {
-            DingTalkReceiveMode::Stream => {
-                if let Some(client_id) = read_token(&dt_config.app_key_env, "DingTalk (app_key)") {
-                    let client_secret =
-                        match read_token(&dt_config.app_secret_env, "DingTalk (app_secret)") {
-                            Some(s) if !s.is_empty() => s,
-                            _ => {
-                                warn!("DingTalk stream mode requires app_secret; skipping adapter");
-                                continue;
-                            }
-                        };
-                    let adapter = Arc::new(
-                        DingTalkAdapter::new_stream(client_id, client_secret)
-                            .with_account_id(dt_config.account_id.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        dt_config.default_agent.clone(),
-                        dt_config.account_id.clone(),
-                    ));
-                }
-            }
-            DingTalkReceiveMode::Webhook => {
-                if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-                    // #3441: refuse to register a webhook adapter with an empty
-                    // signing secret.  An empty secret would still reject all
-                    // verifications (HMAC of an empty key fails the equality
-                    // check), but this is loud rather than silent — a misconfig
-                    // here means every inbound message is dropped, and the
-                    // operator should know at boot.
-                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
-                        Some(s) if !s.is_empty() => s,
-                        _ => {
-                            tracing::error!(
-                                env = %dt_config.secret_env,
-                                "DingTalk webhook adapter requires a non-empty signing secret \
-                                 (env var unset or empty); refusing to register adapter \
-                                 (default-deny). Set the env var or switch receive_mode \
-                                 to \"stream\".",
-                            );
-                            continue;
-                        }
-                    };
-                    let adapter = Arc::new(
-                        DingTalkAdapter::new(token, secret, dt_config.webhook_port)
-                            .with_account_id(dt_config.account_id.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        dt_config.default_agent.clone(),
-                        dt_config.account_id.clone(),
-                    ));
-                }
-            }
-        }
-    }
-
+    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+    // see SIDECAR_CATALOG in routes/channels.rs.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG in routes/channels.rs.
 
@@ -3727,7 +3666,6 @@ mod tests {
         assert!(config.channels.teams.is_none());
         assert!(config.channels.google_chat.is_none());
         // Wave 5
-        assert!(config.channels.dingtalk.is_none());
         assert!(config.channels.webhook.is_none());
     }
 

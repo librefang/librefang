@@ -1201,36 +1201,11 @@ channel_type = "webex"
 
 `WEBEX_BOT_TOKEN` (the bot Bearer token from `developer.webex.com`) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form.
 
-#### `[channels.dingtalk]`
+#### DingTalk (sidecar)
 
-Supports two modes: **stream** (default, recommended) and **webhook** (legacy).
+DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), stream mode only. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration. Declare DingTalk as a `[[sidecar_channels]]` entry instead — see [DingTalk in the channels configuration guide](/configuration/channels#dingtalk-sidecar).
 
-```toml
-# Stream mode (recommended — no public IP needed)
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-
-# Webhook mode (legacy)
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-webhook_port = 8457
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `receive_mode` | string | `"stream"` | Connection mode: `"stream"` or `"webhook"`. |
-| `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
-| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
-| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). **Required** — webhook mode rejects requests without a numeric `timestamp` header (400), with a stale or mismatched signature (401). |
-| `webhook_port` | u16 | `8457` | Port for the incoming webhook (webhook mode only). |
-| `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
+The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — operators who relied on webhook mode must switch to stream subscription in the DingTalk admin console.
 
 #### `[channels.ntfy]`
 

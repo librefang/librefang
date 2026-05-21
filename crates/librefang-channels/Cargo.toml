@@ -20,7 +20,6 @@ default = []
 # a matching entry here. CI / release / packaging pipelines opt in to
 # this; everyday `cargo build` paths don't.
 all-channels = [
-    "channel-dingtalk",
     "channel-google-chat",
     "channel-teams",
     "channel-webhook",
@@ -35,7 +34,8 @@ channel-webhook = []
 channel-whatsapp = []
 channel-teams = []
 channel-google-chat = ["dep:rsa"]
-channel-dingtalk = []
+# dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 channel-wechat = []
 # wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.

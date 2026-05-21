@@ -311,42 +311,8 @@ impl KernelConfig {
         // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
         // env-var presence is now validated inside the sidecar process.
         // Wave 5 channels
-        for dt in self.channels.dingtalk.iter() {
-            use super::DingTalkReceiveMode;
-            match dt.receive_mode {
-                DingTalkReceiveMode::Stream => {
-                    if std::env::var(&dt.app_key_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk stream mode configured but {} is not set",
-                            dt.app_key_env
-                        ));
-                    }
-                    if std::env::var(&dt.app_secret_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk stream mode configured but {} is not set",
-                            dt.app_secret_env
-                        ));
-                    }
-                }
-                DingTalkReceiveMode::Webhook => {
-                    if std::env::var(&dt.access_token_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk configured but {} is not set",
-                            dt.access_token_env
-                        ));
-                    }
-                }
-            }
-        }
+        // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+        // env-var presence is now validated inside the sidecar process.
         for wh in self.channels.webhook.iter() {
             if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(

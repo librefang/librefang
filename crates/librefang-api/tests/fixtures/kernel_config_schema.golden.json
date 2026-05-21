@@ -1069,15 +1069,6 @@
     "ChannelsConfig": {
       "description": "Channel bridge configuration.\n\nEach field uses `OneOrMany<T>` to support both single-instance (`[channels.discord]`) and multi-instance (`[[channels.discord]]`) TOML syntax for multi-bot routing.",
       "properties": {
-        "dingtalk": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_DingTalkConfig"
-            }
-          ],
-          "default": null,
-          "description": "DingTalk robot configuration(s)."
-        },
         "discord": {
           "allOf": [
             {
@@ -1897,128 +1888,6 @@
         }
       },
       "type": "object"
-    },
-    "DingTalkConfig": {
-      "description": "DingTalk Robot API channel adapter configuration.\n\nSupports two receive modes: - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived WebSocket connection via the DingTalk Stream protocol. No public IP needed. - **Webhook** (legacy): HTTP server that receives callback POST requests. Requires `access_token` and `secret` for HMAC-SHA256 verification.",
-      "properties": {
-        "access_token_env": {
-          "default": "DINGTALK_ACCESS_TOKEN",
-          "description": "Env var name holding the webhook access token.",
-          "type": "string"
-        },
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "app_key_env": {
-          "default": "DINGTALK_APP_KEY",
-          "description": "Env var name holding the DingTalk app key (stream mode).",
-          "type": "string"
-        },
-        "app_secret_env": {
-          "default": "DINGTALK_APP_SECRET",
-          "description": "Env var name holding the DingTalk app secret (stream mode).",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "receive_mode": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/DingTalkReceiveMode"
-            }
-          ],
-          "default": "stream",
-          "description": "How to receive inbound messages (stream or webhook)."
-        },
-        "robot_code": {
-          "default": null,
-          "description": "Robot code for sending messages via the Open API (stream mode). If empty, falls back to app_key.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "secret_env": {
-          "default": "DINGTALK_SECRET",
-          "description": "Env var name holding the signing secret.",
-          "type": "string"
-        },
-        "webhook_port": {
-          "default": 8457,
-          "description": "Port for the incoming webhook (webhook mode only).",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
-    "DingTalkReceiveMode": {
-      "description": "How the DingTalk adapter receives inbound events.",
-      "oneOf": [
-        {
-          "description": "HTTP webhook server (requires public IP / reverse proxy).",
-          "enum": [
-            "webhook"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Long-lived WebSocket connection via DingTalk Stream protocol (default).",
-          "enum": [
-            "stream"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "DiscordConfig": {
       "additionalProperties": false,
@@ -4222,119 +4091,6 @@
         "id"
       ],
       "type": "object"
-    },
-    "OneOrMany_DingTalkConfig": {
-      "oneOf": [
-        {
-          "description": "DingTalk Robot API channel adapter configuration.\n\nSupports two receive modes: - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived WebSocket connection via the DingTalk Stream protocol. No public IP needed. - **Webhook** (legacy): HTTP server that receives callback POST requests. Requires `access_token` and `secret` for HMAC-SHA256 verification.",
-          "properties": {
-            "access_token_env": {
-              "default": "DINGTALK_ACCESS_TOKEN",
-              "description": "Env var name holding the webhook access token.",
-              "type": "string"
-            },
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "app_key_env": {
-              "default": "DINGTALK_APP_KEY",
-              "description": "Env var name holding the DingTalk app key (stream mode).",
-              "type": "string"
-            },
-            "app_secret_env": {
-              "default": "DINGTALK_APP_SECRET",
-              "description": "Env var name holding the DingTalk app secret (stream mode).",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "receive_mode": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/DingTalkReceiveMode"
-                }
-              ],
-              "default": "stream",
-              "description": "How to receive inbound messages (stream or webhook)."
-            },
-            "robot_code": {
-              "default": null,
-              "description": "Robot code for sending messages via the Open API (stream mode). If empty, falls back to app_key.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "secret_env": {
-              "default": "DINGTALK_SECRET",
-              "description": "Env var name holding the signing secret.",
-              "type": "string"
-            },
-            "webhook_port": {
-              "default": 8457,
-              "description": "Port for the incoming webhook (webhook mode only).",
-              "format": "uint16",
-              "minimum": 0.0,
-              "type": "integer"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/DingTalkConfig"
-          },
-          "type": "array"
-        }
-      ]
     },
     "OneOrMany_DiscordConfig": {
       "oneOf": [
@@ -9223,7 +8979,6 @@
         }
       ],
       "default": {
-        "dingtalk": null,
         "discord": null,
         "file_download_dir": null,
         "file_download_max_bytes": 52428800,

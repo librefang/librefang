@@ -1189,35 +1189,11 @@ channel_type = "webex"
 
 `WEBEX_BOT_TOKEN`（Bot Bearer 令牌，来自 developer.webex.com）应放在 `~/.librefang/secrets.env`——在仪表板 Channels 页面填写 Webex 表单时会自动写入。
 
-#### `[channels.dingtalk]`
+#### 钉钉（DingTalk，sidecar）
 
-支持两种模式：**stream**（默认，推荐）和 **webhook**（传统）。
+钉钉现以 Python sidecar 适配器（`librefang.sidecar.adapters.dingtalk`）提供，**仅 stream 模式**。原 in-process `[channels.dingtalk]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明——详见[频道配置指南中的 DingTalk 部分](/zh/configuration/channels#dingtalk-sidecar)。
 
-```toml
-# Stream 模式（推荐 — 无需公网 IP）
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-
-# Webhook 模式（传统）
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-webhook_port = 8457
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `receive_mode` | string | `"stream"` | 连接模式：`"stream"` 或 `"webhook"`。 |
-| `app_key_env` | string | `"DINGTALK_APP_KEY"` | 存放钉钉 App Key 的环境变量（stream 模式）。 |
-| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | 存放钉钉 App Secret 的环境变量（stream 模式）。 |
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | 存放钉钉 Webhook 访问令牌的环境变量（webhook 模式）。 |
-| `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量（webhook 模式）。 |
-| `webhook_port` | u16 | `8457` | 入站 Webhook 端口（仅 webhook 模式）。 |
-| `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+原 in-process `webhook` 模式（HMAC-SHA256 校验 `timestamp + secret + body`）**未迁移**——依赖 webhook 模式的运维需要在钉钉后台改用 stream 订阅。
 
 #### `[channels.ntfy]`
 

@@ -279,12 +279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayvec"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
-
-[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -584,12 +578,6 @@ checksum = "022dfe9eb35f19ebbcb51e0b40a5ab759f46ad60cadf7297e0bd085afb50e076"
 
 [[package]]
 name = "base64"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
@@ -760,12 +748,6 @@ dependencies = [
  "memchr",
  "serde",
 ]
-
-[[package]]
-name = "bufstream"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40e38929add23cdf8a366df9b0e088953150724bcbe5fc330b0d8eb3b328eec8"
 
 [[package]]
 name = "bumpalo"
@@ -992,16 +974,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "rand_core 0.10.0",
-]
-
-[[package]]
-name = "charset"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1f927b07c74ba84c7e5fe4db2baeb3e996ab2688992e39ac68ce3220a677c7e"
-dependencies = [
- "base64 0.22.1",
- "encoding_rs",
 ]
 
 [[package]]
@@ -2200,22 +2172,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "email-encoding"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
-dependencies = [
- "base64 0.22.1",
- "memchr",
-]
-
-[[package]]
-name = "email_address"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
-
-[[package]]
 name = "embed-resource"
 version = "3.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2694,17 +2650,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "futures-rustls"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
-dependencies = [
- "futures-io",
- "rustls",
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -3344,17 +3289,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "html-escape"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3702,30 +3636,6 @@ checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error 2.0.1",
-]
-
-[[package]]
-name = "imap"
-version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c617c55def8c42129e0dd503f11d7ee39d73f5c7e01eff55768b3879ff1d107d"
-dependencies = [
- "base64 0.13.1",
- "bufstream",
- "chrono",
- "imap-proto",
- "lazy_static",
- "nom 5.1.3",
- "regex",
-]
-
-[[package]]
-name = "imap-proto"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a6def1d5ac8975d70b3fd101d57953fe3278ef2ee5d7816cba54b1d1dfc22f"
-dependencies = [
- "nom 5.1.3",
 ]
 
 [[package]]
@@ -4187,47 +4097,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lettre"
-version = "0.11.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "email-encoding",
- "email_address",
- "fastrand",
- "futures-io",
- "futures-util",
- "hostname",
- "httpdate",
- "idna",
- "mime",
- "nom 8.0.0",
- "percent-encoding",
- "quoted_printable",
- "rustls",
- "socket2",
- "tokio",
- "tokio-rustls",
- "url",
- "webpki-roots",
-]
-
-[[package]]
-name = "lexical-core"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6607c62aa161d23d17a9072cc5da0be67cdfc89d3afb1e8d9c842bebc2525ffe"
-dependencies = [
- "arrayvec",
- "bitflags 1.3.2",
- "cfg-if",
- "ryu",
- "static_assertions",
-]
-
-[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4414,19 +4283,14 @@ dependencies = [
  "hmac",
  "html-escape",
  "image",
- "imap",
- "lettre",
  "librefang-types",
- "mailparse",
  "pdf-extract",
  "regex",
  "regex-lite",
  "reqwest",
  "rsa",
  "rustls",
- "rustls-connector",
  "rustls-native-certs",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha1",
@@ -5211,17 +5075,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mailparse"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60819a97ddcb831a5614eb3b0174f3620e793e97e09195a395bfa948fd68ed2f"
-dependencies = [
- "charset",
- "data-encoding",
- "quoted_printable",
-]
-
-[[package]]
 name = "markup5ever"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5540,17 +5393,6 @@ name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
-
-[[package]]
-name = "nom"
-version = "5.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08959a387a676302eebf4ddbcbc611da04285579f76f88ee0506c63b1a61dd4b"
-dependencies = [
- "lexical-core",
- "memchr",
- "version_check",
-]
 
 [[package]]
 name = "nom"
@@ -7208,12 +7050,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quoted_printable"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
-
-[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8077,21 +7913,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-connector"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "546c32c0a03187814b1e1239eec017778dc9b87d8241a2c5c1954c47ab8ac8fd"
-dependencies = [
- "futures-rustls",
- "log",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "rustls-webpki",
-]
-
-[[package]]
 name = "rustls-native-certs"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8101,15 +7922,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework 3.7.0",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

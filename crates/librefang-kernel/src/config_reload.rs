@@ -664,12 +664,15 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a DingTalk config.
-        // (Discord / Slack / Matrix were migrated to sidecars;
-        // DingTalk is a remaining in-process fixture.)
-        b.channels.dingtalk =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::DingTalkConfig {
-                access_token_env: "DINGTALK_TOKEN".to_string(),
+        // Change the channels config by adding a WhatsApp config.
+        // Witness rotated from DingTalk → WhatsApp after DingTalk
+        // migrated to a sidecar. (Discord / Slack / Matrix / Feishu /
+        // Email / WeCom / DingTalk are all sidecars now; the
+        // remaining in-process fixtures are WhatsApp / Teams /
+        // GoogleChat / WeChat / Webhook.)
+        b.channels.whatsapp =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::WhatsAppConfig {
+                access_token_env: "WHATSAPP_TOKEN".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);

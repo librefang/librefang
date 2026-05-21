@@ -98,7 +98,8 @@ channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
 channel-teams = ["librefang-channels/channel-teams"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
-channel-dingtalk = ["librefang-channels/channel-dingtalk"]
+# dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+# see SIDECAR_CATALOG in src/routes/channels.rs.
 channel-wechat = ["librefang-channels/channel-wechat"]
 # wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
@@ -117,7 +118,6 @@ core-channels = [
 all-channels = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-dingtalk",
     "channel-wechat",
 ]
 
@@ -128,7 +128,6 @@ all-channels = [
 all-channels-no-email = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-dingtalk",
     "channel-wechat",
 ]
 

@@ -835,47 +835,48 @@ admin_role = "admin"
     }
 
     // OneOrMany single-table + array-of-tables tests rotated from
-    // matrix (deleted by #5368) to dingtalk (still in-process). The
-    // assertion is on OneOrMany's TOML parse behaviour, not on any
-    // adapter-specific field shape — any remaining in-process channel
-    // works as the witness.
+    // matrix (deleted by #5368) → dingtalk → whatsapp (after the
+    // dingtalk sidecar migration). The assertion is on OneOrMany's
+    // TOML parse behaviour, not on any adapter-specific field
+    // shape — any remaining in-process channel works as the
+    // witness.
     #[test]
     fn test_one_or_many_single_toml_table() {
         let toml_str = r#"
-            [channels.dingtalk]
-            access_token_env = "MY_DT_TOKEN"
+            [channels.whatsapp]
+            access_token_env = "MY_WA_TOKEN"
             account_id = "bot1"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.dingtalk.is_some());
-        assert_eq!(config.channels.dingtalk.len(), 1);
-        let dt = config.channels.dingtalk.first().unwrap();
-        assert_eq!(dt.access_token_env, "MY_DT_TOKEN");
-        assert_eq!(dt.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.whatsapp.is_some());
+        assert_eq!(config.channels.whatsapp.len(), 1);
+        let wa = config.channels.whatsapp.first().unwrap();
+        assert_eq!(wa.access_token_env, "MY_WA_TOKEN");
+        assert_eq!(wa.account_id.as_deref(), Some("bot1"));
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
         let toml_str = r#"
-            [[channels.dingtalk]]
-            access_token_env = "DT_TOKEN_1"
+            [[channels.whatsapp]]
+            access_token_env = "WA_TOKEN_1"
             account_id = "bot1"
             default_agent = "assistant"
 
-            [[channels.dingtalk]]
-            access_token_env = "DT_TOKEN_2"
+            [[channels.whatsapp]]
+            access_token_env = "WA_TOKEN_2"
             account_id = "bot2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.dingtalk.is_some());
-        assert_eq!(config.channels.dingtalk.len(), 2);
+        assert!(config.channels.whatsapp.is_some());
+        assert_eq!(config.channels.whatsapp.len(), 2);
 
-        let bots: Vec<_> = config.channels.dingtalk.iter().collect();
-        assert_eq!(bots[0].access_token_env, "DT_TOKEN_1");
+        let bots: Vec<_> = config.channels.whatsapp.iter().collect();
+        assert_eq!(bots[0].access_token_env, "WA_TOKEN_1");
         assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].access_token_env, "DT_TOKEN_2");
+        assert_eq!(bots[1].access_token_env, "WA_TOKEN_2");
         assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
@@ -905,27 +906,27 @@ admin_role = "admin"
     #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
-        assert!(config.channels.dingtalk.is_none());
-        assert!(config.channels.dingtalk.is_empty());
-        assert_eq!(config.channels.dingtalk.len(), 0);
-        assert!(config.channels.dingtalk.first().is_none());
-        assert!(config.channels.dingtalk.as_ref().is_none());
+        assert!(config.channels.whatsapp.is_none());
+        assert!(config.channels.whatsapp.is_empty());
+        assert_eq!(config.channels.whatsapp.len(), 0);
+        assert!(config.channels.whatsapp.first().is_none());
+        assert!(config.channels.whatsapp.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![DingTalkConfig::default()]);
+        let single = OneOrMany(vec![WhatsAppConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<DingTalkConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WhatsAppConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![DingTalkConfig::default(), DingTalkConfig::default()]);
+        let multi = OneOrMany(vec![WhatsAppConfig::default(), WhatsAppConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<DingTalkConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WhatsAppConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<DingTalkConfig> = OneOrMany::default();
+        let empty: OneOrMany<WhatsAppConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
@@ -933,12 +934,11 @@ admin_role = "admin"
     #[test]
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None.
-        // Matrix witness deleted by #5368, Feishu by #5380, Email by
-        // this PR; remaining in-process witnesses that expose
-        // `account_id` are below.
+        // Matrix witness deleted by #5368, Feishu by #5380, Email +
+        // DingTalk by their sidecar migrations; remaining in-process
+        // witnesses that expose `account_id` are below.
         assert!(WhatsAppConfig::default().account_id.is_none());
         assert!(WeChatConfig::default().account_id.is_none());
-        assert!(DingTalkConfig::default().account_id.is_none());
     }
 
     #[test]

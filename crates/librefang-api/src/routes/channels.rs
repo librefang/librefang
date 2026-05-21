@@ -216,24 +216,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // see SIDECAR_CATALOG below.
     // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "dingtalk", display_name: "DingTalk", icon: "DT",
-        description: "DingTalk Robot API adapter (webhook or stream mode)",
-        category: "enterprise", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Choose webhook or stream mode, then paste credentials",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "receive_mode", label: "Mode", field_type: FieldType::Text, env_var: None, required: false, placeholder: "stream (default) or webhook", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_key_env", label: "App Key (stream)", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_KEY"), required: false, placeholder: "dingxxx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret (stream)", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_SECRET"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "access_token_env", label: "Access Token (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_ACCESS_TOKEN"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "secret_env", label: "Signing Secret (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_SECRET"), required: false, placeholder: "SEC...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8457", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a robot in DingTalk", "Choose mode: webhook (needs public IP) or stream (no public IP needed)", "For webhook: copy token and signing secret", "For stream: copy App Key and App Secret from the app page"],
-        config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
-    },
+    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+    // see SIDECAR_CATALOG below.
     // zulip migrated to an out-of-process sidecar adapter
     // (librefang.sidecar.adapters.zulip in the SDK package);
     // see SIDECAR_CATALOG below.
@@ -282,7 +266,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "whatsapp" => config.whatsapp.is_some(),
         "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "dingtalk" => config.dingtalk.is_some(),
         "webhook" => config.webhook.is_some(),
         "wechat" => config.wechat.is_some(),
         _ => false,
@@ -370,7 +353,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "teams" | "dingtalk" | "google_chat" | "webhook" => Some("/webhook"),
+        "teams" | "google_chat" | "webhook" => Some("/webhook"),
         _ => None,
     }
 }
@@ -635,6 +618,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "IMAP / SMTP email adapter (out-of-process sidecar, Python stdlib only)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.email"],
+    },
+    SidecarCatalogEntry {
+        name: "dingtalk",
+        display_name: "DingTalk",
+        description: "DingTalk (\u{9489}\u{9489}) Robot stream-mode adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.dingtalk"],
     },
 ];
 
@@ -1141,10 +1131,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "dingtalk" => config
-            .dingtalk
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
             .as_ref()
@@ -1168,7 +1154,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "whatsapp" => config.whatsapp.len(),
         "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
-        "dingtalk" => config.dingtalk.len(),
         "webhook" => config.webhook.len(),
         "wechat" => config.wechat.len(),
         _ => 0,
@@ -1197,7 +1182,6 @@ fn channel_instances_serialized(
         "whatsapp" => ser(&config.whatsapp),
         "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
-        "dingtalk" => ser(&config.dingtalk),
         "webhook" => ser(&config.webhook),
         "wechat" => ser(&config.wechat),
         _ => Vec::new(),
