@@ -767,6 +767,101 @@ async def test_on_send_falls_back_to_user_platform_id(monkeypatch):
     assert c["url"].endswith("/v2/users/u9/messages")
 
 
+@pytest.mark.asyncio
+async def test_on_send_recovers_msg_id_from_user_librefang_user(monkeypatch):
+    """Regression guard for the original PR #5325 sidecar: it expected
+    ``cmd.thread_id`` to carry the inbound ``msg_id`` for QQ Bot
+    OpenAPI v2 passive-reply correlation. The daemon's bridge only
+    sets ``cmd.thread_id`` when BOTH
+    ``[channels.qq.overrides] threading = true`` AND the sidecar
+    declares the ``thread`` capability — QQ does neither. So in
+    production every reply went out with no ``msg_id``, classified
+    as a proactive push by the QQ platform and either rejected
+    (unlicensed bots) or quota-burned (licensed bots).
+
+    The fix mirrors dingtalk #5423: stash the ``msg_id`` in
+    ``ChannelUser.librefang_user`` on inbound, recover from
+    ``cmd.user.get("librefang_user")`` here. ``librefang_user`` is
+    the only daemon-honoured per-message carrier that doesn't
+    depend on capabilities / overrides.
+
+    This test exercises the realistic daemon shape:
+    ``thread_id=None`` (the daemon-default), ``user.librefang_user``
+    carries the msg_id. The body MUST contain ``msg_id`` from
+    ``user.librefang_user``."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(qq_mod.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._token = "tok"
+    await a.on_send(_make_send(
+        channel_id="/v2/groups/G/messages",
+        text="hi",
+        content={"Text": "hi"},
+        # Daemon-default: thread_id is None
+        thread_id=None,
+        # The bridge round-trips librefang_user from inbound emit
+        user={
+            "platform_id": "/v2/groups/G/messages",
+            "display_name": "Alice",
+            "librefang_user": "qq-msg-id-abc123",
+        },
+    ))
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["msg_id"] == "qq-msg-id-abc123", \
+        "on_send must recover the passive-reply msg_id from " \
+        "cmd.user.librefang_user (not from cmd.thread_id which " \
+        "the daemon NULLs by default for capability-less sidecars)"
+
+
+@pytest.mark.asyncio
+async def test_on_send_ignores_url_shaped_librefang_user(monkeypatch):
+    """librefang_user is shared across channels — dingtalk puts a
+    sessionWebhook URL there, telegram puts the @username string,
+    etc. We must reject anything URL-shaped or whitespace-bearing
+    before using it as a QQ msg_id."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(qq_mod.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._token = "tok"
+    await a.on_send(_make_send(
+        channel_id="/v2/groups/G/messages",
+        text="hi",
+        content={"Text": "hi"},
+        thread_id=None,
+        user={
+            "platform_id": "/v2/groups/G/messages",
+            "librefang_user": "https://oapi.dingtalk.com/sb?s=42",
+        },
+    ))
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert "msg_id" not in body, \
+        "URL-shaped librefang_user must be rejected — silently " \
+        "treating it as msg_id would send a corrupted passive " \
+        "reply (which the platform rejects with cryptic errors)"
+
+
+@pytest.mark.asyncio
+async def test_on_send_thread_id_fallback_still_works(monkeypatch):
+    """When BOTH the operator opts into ``threading = true`` AND a
+    future QQ rewrite gains the ``thread`` capability, cmd.thread_id
+    would carry the msg_id — keep that path as a fallback so the
+    forward-compat story isn't broken."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(qq_mod.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a._token = "tok"
+    # No librefang_user in user dict — fall back to thread_id.
+    await a.on_send(_make_send(
+        channel_id="/v2/groups/G/messages",
+        text="hi",
+        content={"Text": "hi"},
+        thread_id="qq-msg-via-thread",
+        user={"platform_id": "/v2/groups/G/messages"},
+    ))
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["msg_id"] == "qq-msg-via-thread"
+
+
 # ---- WS gateway flow (mock _WebSocketClient) ------------------------
 
 

@@ -20,27 +20,25 @@ default = []
 # a matching entry here. CI / release / packaging pipelines opt in to
 # this; everyday `cargo build` paths don't.
 all-channels = [
-    "channel-dingtalk",
-    "channel-email",
-    "channel-feishu",
     "channel-google-chat",
-    "channel-teams",
-    "channel-webhook",
-    "channel-wechat",
-    "channel-wecom",
-    "channel-whatsapp",
 ]
 
 # Individual channel features
-channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
-channel-webhook = []
-channel-whatsapp = []
-channel-teams = []
+# email migrated to a sidecar (librefang.sidecar.adapters.email);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+# webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+# whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+# teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 channel-google-chat = ["dep:rsa"]
-channel-feishu = ["dep:aes", "dep:cbc"]
-channel-dingtalk = []
-channel-wechat = []
-channel-wecom = ["dep:aes", "dep:cbc"]
+# dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+# wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+# wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
@@ -83,11 +81,12 @@ aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true }
 rustls = { workspace = true, features = ["ring"] }
 
-lettre = { workspace = true, optional = true }
-imap = { workspace = true, optional = true }
-rustls-connector = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
-mailparse = { workspace = true, optional = true }
+# Email-sidecar migration (#…): the `lettre` / `imap` /
+# `rustls-connector` / `rustls-pemfile` / `mailparse` optional deps
+# the in-process channel-email feature used to gate are removed
+# alongside the adapter — the sidecar runs on Python's stdlib
+# `imaplib` + `smtplib` + `email` packages and pulls nothing of the
+# sort into the Rust workspace.
 
 [dev-dependencies]
 criterion = { workspace = true }
