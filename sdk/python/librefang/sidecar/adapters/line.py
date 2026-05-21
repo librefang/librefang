@@ -164,6 +164,26 @@ SEND_TIMEOUT_SECS = 15.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
+# LINE's reply API accepts the inbound ``replyToken`` for up to one
+# minute after the webhook fires. We use 55s as the safe window so a
+# brief network jitter or scheduling delay between recovering the
+# token and posting doesn't cause the LINE API to reject the call
+# with ``Invalid reply token``. Replies inside this window are free
+# (don't burn push-message quota and don't count against the per-bot
+# push rate limit); outside it we degrade to push.
+LINE_REPLY_TOKEN_TTL_SECS = 55.0
+
+# ``librefang_user`` prefix marking the value as a LINE reply-token
+# bundle (``linereply:<token>:<event_ts_ms>``). The bridge round-trips
+# ``librefang_user`` bytewise (see sidecar.rs:766 / :1204), so we use
+# it as the cross-process carrier for the reply token + the inbound
+# event's millisecond timestamp. A prefix lets ``on_send`` validate
+# that the value is genuinely ours before parsing — librefang_user is
+# shared across channels (dingtalk stores a sessionWebhook URL,
+# telegram stores an @username) and a misrouted value must not be
+# fed to LINE's reply endpoint.
+LINE_REPLY_LIBREFANG_USER_PREFIX = "linereply:"
+
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
     """Backwards-compat wrapper around
     :func:`librefang.sidecar.common.parse_retry_after`."""
@@ -257,6 +277,9 @@ def parse_line_event(
     reply_token = event.get("replyToken")
     if not isinstance(reply_token, str):
         reply_token = ""
+    event_ts = event.get("timestamp")
+    if not isinstance(event_ts, (int, float)):
+        event_ts = 0
 
     # Slash-command routing.
     if text.startswith("/"):
@@ -275,6 +298,23 @@ def parse_line_event(
     if account_id is not None:
         metadata["account_id"] = account_id
 
+    # Carry the reply token + the inbound event's epoch-ms timestamp
+    # through ``librefang_user``. The bridge round-trips this field
+    # bytewise (capability/override gates do not apply), giving
+    # ``on_send`` a way to recover the token and decide between the
+    # free reply-API path and the quota-charged push fallback. We
+    # need both pieces because the reply API rejects tokens older
+    # than ~1 minute and only the sidecar can decide which path to
+    # take. Falls back to the bare ``reply_to`` when no token / no
+    # timestamp is present — that preserves cross-channel correlation
+    # for adapters/tests that don't carry LINE event metadata.
+    librefang_user_carry: Optional[str] = None
+    if reply_token and int(event_ts) > 0:
+        librefang_user_carry = (
+            f"{LINE_REPLY_LIBREFANG_USER_PREFIX}"
+            f"{reply_token}:{int(event_ts)}"
+        )
+
     # The Rust adapter at line.rs:333-336 used the group/room/user id
     # for ``sender.platform_id`` and the *user_id* string for the
     # display name (because the REST profile fetch was dead code) —
@@ -286,6 +326,7 @@ def parse_line_event(
         content=content,
         message_id=msg_id or None,
         is_group=is_group,
+        librefang_user=librefang_user_carry,
         metadata=metadata,
     )
 
@@ -472,6 +513,131 @@ class LineAdapter(SidecarAdapter):
                 "to": to,
                 "messages": [{"type": "text", "text": chunk}],
             })
+
+    def _post_reply(
+        self,
+        reply_token: str,
+        text: str,
+        *,
+        deadline_ms: Optional[int] = None,
+    ) -> bool:
+        """POST /v2/bot/message/reply with the chunked text. Returns
+        True on a successful 2xx and False if LINE rejected the call
+        (most commonly because the token already expired in the gap
+        between dispatch and our wakeup). On a False return the
+        caller must fall back to push so the agent's reply still
+        lands. Honours 429 ``Retry-After`` the same way ``_post_push``
+        does, but does NOT retry on a non-429 error — replaying a
+        ``reply`` call with the same token always errors, so we'd
+        just burn 1-2 s for nothing.
+
+        ``deadline_ms`` is the absolute epoch-ms at which LINE will
+        reject the reply token regardless. When the 429 ``Retry-After``
+        sleep would overshoot it, we skip the sleep and return False
+        immediately — sleeping `wait` seconds just to hit "Invalid
+        reply token" wastes the LINE-API quota delay and the agent's
+        latency budget. ``None`` disables the optimisation (sleep +
+        retry unconditionally).
+
+        Multi-chunk text producing more than 5 chunks short-circuits
+        to False without an API call — LINE's reply endpoint accepts
+        at most 5 messages per reply token and a 6+-chunk payload
+        cannot be delivered via reply at all.
+        """
+        url = f"{self.api_base}/v2/bot/message/reply"
+        messages = [
+            {"type": "text", "text": chunk}
+            for chunk in _split_message(text, LINE_MSG_LIMIT)
+        ]
+        # LINE's reply API accepts up to 5 messages per call.
+        if len(messages) > 5:
+            log.debug("line reply skipped: text exceeds 5-message cap",
+                      chunk_count=len(messages))
+            return False
+        body = json.dumps({
+            "replyToken": reply_token,
+            "messages": messages,
+        }).encode("utf-8")
+        status, resp, raw, resp_hdrs = self._http(
+            url, method="POST", body=body,
+            headers=self._auth_headers(content_type=True),
+        )
+        if status == 429:
+            wait = _parse_retry_after(
+                resp_hdrs, default_secs=RETRY_AFTER_DEFAULT_SECS,
+            )
+            # Skip the Retry-After sleep when it would land past the
+            # reply-token deadline — a `wait`-second pause followed
+            # by an "Invalid reply token" 400 wastes time AND the
+            # caller has to fall back to push anyway. Return False
+            # immediately and let push pick up the agent's reply.
+            if deadline_ms is not None:
+                now_ms = int(time.time() * 1000)
+                if now_ms + int(wait * 1000) >= deadline_ms:
+                    log.warn(
+                        "line reply 429; skipping retry — sleep would "
+                        "overshoot reply-token deadline; falling back "
+                        "to push",
+                        retry_after_secs=wait,
+                        remaining_ms=deadline_ms - now_ms,
+                    )
+                    return False
+            log.warn("line POST /v2/bot/message/reply 429; sleeping then "
+                     "retrying once",
+                     retry_after_secs=wait)
+            time.sleep(wait)
+            status, resp, raw, resp_hdrs = self._http(
+                url, method="POST", body=body,
+                headers=self._auth_headers(content_type=True),
+            )
+        if 200 <= status < 300:
+            return True
+        snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+        log.warn("line POST /v2/bot/message/reply failed; falling back to "
+                 "push",
+                 status=status, body=snippet)
+        return False
+
+    @staticmethod
+    def _parse_reply_carry(
+        librefang_user: Any,
+        *,
+        now_ms: Optional[int] = None,
+    ) -> Optional[tuple]:
+        """Recover the LINE reply token + its absolute deadline from
+        ``cmd.user["librefang_user"]`` when (a) the value carries our
+        ``linereply:`` prefix, and (b) the embedded inbound timestamp
+        is within ``LINE_REPLY_TOKEN_TTL_SECS`` of now. Returns
+        ``(token, deadline_ms)`` or ``None`` (caller falls back to
+        push). ``deadline_ms`` is the absolute epoch-ms past which
+        the token is unusable — `on_send` threads it into
+        ``_post_reply`` so the 429-retry path can skip a sleep that
+        would overshoot the deadline. ``now_ms`` is an injection seam
+        for tests.
+        """
+        if not isinstance(librefang_user, str):
+            return None
+        if not librefang_user.startswith(LINE_REPLY_LIBREFANG_USER_PREFIX):
+            return None
+        rest = librefang_user[len(LINE_REPLY_LIBREFANG_USER_PREFIX):]
+        # Split from the right so a token that happens to contain ':'
+        # (LINE tokens are URL-safe but we don't depend on that here)
+        # still parses correctly.
+        token, sep, ts_str = rest.rpartition(":")
+        if not sep or not token or not ts_str:
+            return None
+        try:
+            ts_ms = int(ts_str)
+        except ValueError:
+            return None
+        if ts_ms <= 0:
+            return None
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        age_secs = (now - ts_ms) / 1000.0
+        if age_secs < 0 or age_secs > LINE_REPLY_TOKEN_TTL_SECS:
+            return None
+        deadline_ms = ts_ms + int(LINE_REPLY_TOKEN_TTL_SECS * 1000)
+        return token, deadline_ms
 
     def _push_image(self, to: str, url: str,
                     caption: Optional[str]) -> None:
@@ -697,6 +863,28 @@ class LineAdapter(SidecarAdapter):
         text = cmd.text or ""
         loop = asyncio.get_event_loop()
 
+        # Recover the LINE reply token + deadline (carried through
+        # ``librefang_user`` since the bridge does not round-trip the
+        # ``metadata.reply_token`` stash). When the token is still
+        # within the LINE-server's ~60 s window we use the free reply
+        # API; otherwise we degrade to push. We only attempt reply
+        # on the plain-text path — image-and-caption sends issue two
+        # pushes and the reply token is one-shot-locked on first
+        # acceptance. We also skip reply for empty text — LINE rejects
+        # empty messages on both endpoints and we'd just double the
+        # wasted-call count over the existing push-empty behaviour.
+        is_text_path = content is None or (
+            isinstance(content, dict) and "Text" in content
+        )
+        reply_token: Optional[str] = None
+        reply_deadline_ms: Optional[int] = None
+        if is_text_path and text:
+            carry = self._parse_reply_carry(
+                (cmd.user or {}).get("librefang_user"),
+            )
+            if carry is not None:
+                reply_token, reply_deadline_ms = carry
+
         if isinstance(content, dict):
             if "Image" in content:
                 img = content.get("Image") or {}
@@ -726,6 +914,21 @@ class LineAdapter(SidecarAdapter):
                     ),
                 )
                 return
+
+        if reply_token:
+            replied = await loop.run_in_executor(
+                None,
+                lambda: self._post_reply(
+                    reply_token, text, deadline_ms=reply_deadline_ms,
+                ),
+            )
+            if replied:
+                return
+            # Reply call rejected (token expired between dispatch and
+            # our wakeup, LINE returned 4xx for an unrelated reason,
+            # or the 429 retry was skipped because Retry-After would
+            # overshoot the token deadline): fall through to push so
+            # the agent's reply still lands.
 
         await loop.run_in_executor(
             None, lambda: self._push_text(to, text),
