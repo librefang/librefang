@@ -551,6 +551,77 @@ def test_post_message_5xx_logged_and_continues(monkeypatch):
     a._post_message("C01", "hi")  # must not raise
 
 
+def test_post_message_honours_retry_after_on_429(monkeypatch):
+    """Slack rate-limits chat.postMessage (Tier 4: 100/min global +
+    per-method quotas). The 3-tuple `_http` helper historically
+    threw away response headers and conflated 429 with 5xx, silently
+    dropping the chunk on every rate limit. The fix routes 429 with
+    Retry-After through `parse_retry_after` and retries once."""
+    fake = _FakeUrlopen([
+        (429, {"ok": False, "error": "ratelimited"}, {"Retry-After": "4"}),
+        (200, {"ok": True, "ts": "1700000000.0"}),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa.time, "sleep", sleeps.append)
+    a = _adapter()
+    a._post_message("C01", "hi")
+    # Retry-After honoured at the server-suggested 4 s window.
+    assert sleeps == [4.0]
+    # Original probe + retry — both with the same body shape so the
+    # retry actually re-posts the chunk rather than a stale snapshot.
+    assert len(fake.calls) == 2
+    body = json.loads(fake.calls[1]["body_raw"])
+    assert body == {"channel": "C01", "text": "hi"}
+
+
+def test_post_message_surfaces_second_429(monkeypatch):
+    """If the server still returns 429 after honouring Retry-After,
+    the second response falls through to the `status >= 300` arm and
+    is logged-and-continued (matching the Rust fail-open behaviour)
+    rather than looping forever."""
+    fake = _FakeUrlopen([
+        (429, {"ok": False}, {"Retry-After": "1"}),
+        (429, {"ok": False}, {"Retry-After": "1"}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa.time, "sleep", lambda _s: None)
+    a = _adapter()
+    a._post_message("C01", "hi")  # must not raise / must not loop
+    # Exactly one sleep then surface — two POSTs total.
+    assert len(fake.calls) == 2
+
+
+def test_post_message_429_without_retry_after_uses_default(monkeypatch):
+    fake = _FakeUrlopen([
+        (429, {"ok": False}, {}),
+        (200, {"ok": True}),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa.time, "sleep", sleeps.append)
+    a = _adapter()
+    a._post_message("C01", "hi")
+    from librefang.sidecar import common as _common
+    assert sleeps == [_common.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_add_reaction_honours_retry_after_on_429(monkeypatch):
+    """Slack rate-limits reactions.add (Tier 3) — same fix applies
+    via the shared `_http` helper, no per-callsite change needed."""
+    fake = _FakeUrlopen([
+        (429, {"ok": False}, {"Retry-After": "2"}),
+        (200, {"ok": True}),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa.time, "sleep", sleeps.append)
+    a = _adapter()
+    a._add_reaction("C01", "1700000000.0", "thumbsup")
+    assert sleeps == [2.0]
+    assert len(fake.calls) == 2
+
+
 def test_post_message_blocks_payload(monkeypatch):
     fake = _FakeUrlopen([(200, {"ok": True})])
     monkeypatch.setattr(sa.urllib.request, "urlopen", fake)

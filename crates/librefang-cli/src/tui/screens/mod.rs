@@ -1,6 +1,9 @@
 pub mod agents;
 pub mod audit;
-pub mod channels;
+// `channels` screen retired alongside the deleted per-channel REST
+// endpoints. The dashboard owns channel management UX now; operators
+// who want a CLI surface edit `config.toml` and run
+// `POST /api/channels/reload`.
 pub mod chat;
 pub mod comms;
 pub mod dashboard;
