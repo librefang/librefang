@@ -5657,24 +5657,21 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-// `default_channel_initial_backoff_secs` was removed in the
-// wecom-sidecar migration: WeCom was the only remaining caller, and
-// the sidecar uses its own constant (`INITIAL_BACKOFF_SECS` in
-// `librefang.sidecar.adapters.wecom`).
-
-/// Default maximum backoff in seconds for channels using exponential backoff (60s).
-fn default_channel_max_backoff_secs() -> u64 {
-    60
-}
-
-/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
-fn default_channel_initial_backoff_2s() -> u64 {
-    2
-}
-
-// default_signal_poll_interval_secs removed — Signal migrated to a
-// sidecar; the polling cadence is now controlled by
-// SIGNAL_POLL_INTERVAL_SECS in [sidecar_channels.env].
+// The shared channel-timeout helpers
+// (`default_channel_initial_backoff_secs`,
+// `default_channel_max_backoff_secs`,
+// `default_channel_initial_backoff_2s`,
+// `default_signal_poll_interval_secs`) are all gone. Their last
+// in-process consumers — Signal, Matrix, WeCom, Feishu, WeChat —
+// migrated to sidecars in #5368 / #5380 / #5392 / #5408 / #5421.
+// Sidecars own their own backoff / poll constants
+// (`INITIAL_BACKOFF_SECS` in `librefang.sidecar.adapters.wecom`,
+// `SIGNAL_POLL_INTERVAL_SECS` in `[sidecar_channels.env]`, etc.).
+// The in-process channels table no longer needs the
+// `serde(default = "...")` hooks. Re-add them when a future
+// in-process channel needs the same shape — until then,
+// `warnings = "deny"` workspace-wide would turn main red on an
+// orphaned helper.
 
 impl Default for KernelConfig {
     fn default() -> Self {
