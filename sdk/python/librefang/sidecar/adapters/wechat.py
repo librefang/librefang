@@ -270,7 +270,11 @@ def parse_wechat_msg(
 class WeChatAdapter(SidecarAdapter):
     """WeChat personal-account sidecar via the iLink protocol."""
 
-    capabilities: list = []
+    # `typing` — POST /ilink/bot/sendtyping handled by `_on_typing`
+    # via TypingCmd. Same surface the Rust adapter offered at
+    # wechat.rs:773-817. (No reaction / thread / streaming — iLink
+    # has no analogue.)
+    capabilities: list = ["typing"]
     suppress_error_responses: bool = False
 
     SCHEMA = Schema(
@@ -594,6 +598,29 @@ class WeChatAdapter(SidecarAdapter):
                     f"(status={status}): {snippet}",
                 )
 
+    def _send_typing(self, to_user_id: str) -> None:
+        """``POST /ilink/bot/sendtyping`` with the cached
+        ``typing_ticket``. Best-effort: no token / no ticket /
+        non-200 are all silent no-ops, mirroring wechat.rs:773-817."""
+        if not to_user_id:
+            return
+        token = self._get_token()
+        if token is None:
+            return  # not logged in yet
+        ticket = self._typing_ticket
+        if not ticket:
+            return  # no ticket primed yet (getconfig pending)
+        body = {"to_user_id": to_user_id, "typing_ticket": ticket}
+        try:
+            status, _resp, _raw, _hdrs = self._post_json(
+                "/ilink/bot/sendtyping", body, token=token,
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("wechat sendtyping error", error=str(e))
+            return
+        if status < 200 or status >= 300:
+            log.debug("wechat sendtyping non-2xx", status=status)
+
     # ---- sidecar surface ---------------------------------------------
 
     async def produce(self, emit: Callable[[dict], None]) -> None:
@@ -602,6 +629,22 @@ class WeChatAdapter(SidecarAdapter):
 
     async def on_shutdown(self) -> None:
         self._shutdown.set()
+
+    async def on_command(self, cmd) -> None:
+        """Dispatch inbound daemon commands. `Send` falls through to
+        the base class which routes to `on_send`; `TypingCmd` triggers
+        a best-effort `sendtyping` post."""
+        from librefang.sidecar.protocol import Send, TypingCmd
+        if isinstance(cmd, TypingCmd):
+            user_id = cmd.channel_id or ""
+            if not user_id:
+                return
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._send_typing, user_id)
+            return
+        if isinstance(cmd, Send):
+            await self.on_send(cmd)
+            return
 
     async def on_send(self, cmd) -> None:
         user_id = (
@@ -744,10 +787,15 @@ class WeChatAdapter(SidecarAdapter):
                 continue
 
             # Stash reply context BEFORE emit so a Send back from the
-            # daemon picks it up immediately.
+            # daemon picks it up immediately. Only store non-empty
+            # `context_token` — an empty token from a subsequent
+            # inbound (rare but possible per the iLink protocol,
+            # e.g. system events) would otherwise blow away the real
+            # token from an earlier user message and break threading
+            # on the very next outbound.
             meta = params.get("metadata", {})
             ctx = meta.get("context_token") if isinstance(meta, dict) else None
-            if isinstance(ctx, str):
+            if isinstance(ctx, str) and ctx:
                 with self._context_lock:
                     self._user_context_tokens[from_user] = ctx
             emit(ev)

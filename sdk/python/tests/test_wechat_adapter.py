@@ -490,6 +490,27 @@ def test_dispatch_messages_allowlist_accepts_listed_user():
     assert len(emitted) == 1
 
 
+def test_dispatch_messages_empty_context_token_does_not_overwrite():
+    """A subsequent inbound with `context_token == ""` (rare but
+    possible for iLink system events) must NOT clobber the real
+    context_token from an earlier user message. Otherwise the next
+    outbound reply lands without threading."""
+    emitted: list = []
+    a = _adapter()
+    # First message stashes a real ctx.
+    first = _text_msg(from_user_id="alice@im.wechat", context_token="real_ctx",
+                       msg_id="m1")
+    a._dispatch_messages([first], lambda ev: emitted.append(ev))
+    assert a._user_context_tokens["alice@im.wechat"] == "real_ctx"
+    # Second message from same user has empty ctx — must not clobber.
+    second = _text_msg(from_user_id="alice@im.wechat", context_token="",
+                        msg_id="m2")
+    a._dispatch_messages([second], lambda ev: emitted.append(ev))
+    assert a._user_context_tokens["alice@im.wechat"] == "real_ctx", (
+        "empty context_token must not overwrite the previously-stored value"
+    )
+
+
 def test_dispatch_messages_skips_bot_origin():
     emitted: list = []
     a = _adapter()
@@ -625,8 +646,100 @@ def test_schema_exposes_required_envs():
     assert "WECHAT_BOT_TOKEN" in secrets
 
 
-def test_capabilities_text_only():
-    # WeChat sidecar parity with Rust: text outbound, image/file/etc.
-    # surface inbound but degrade to placeholder text on outbound.
-    # No special daemon-side routing flags claimed.
-    assert wc.WeChatAdapter.capabilities == []
+def test_capabilities_declares_typing():
+    # iLink's /sendtyping endpoint is the only out-of-band surface
+    # the Rust adapter exposed beyond send; we re-claim it so the
+    # daemon routes TypingCmd to the sidecar instead of silently
+    # dropping. (No reaction / thread / streaming — iLink has no
+    # analogue.)
+    assert "typing" in wc.WeChatAdapter.capabilities
+
+
+# ---- typing -------------------------------------------------------
+
+
+def test_send_typing_basic(monkeypatch):
+    sent: list = []
+
+    def _fake_http(url, **kw):
+        sent.append((url, json.loads(kw["body"].decode("utf-8"))))
+        return (200, {"errcode": 0}, b"", {})
+
+    monkeypatch.setattr(wc, "_http_request", _fake_http)
+    a = _adapter()
+    a._typing_ticket = "tk_typing"
+    a._send_typing("alice@im.wechat")
+    assert len(sent) == 1
+    assert "/ilink/bot/sendtyping" in sent[0][0]
+    body = sent[0][1]
+    assert body == {"to_user_id": "alice@im.wechat", "typing_ticket": "tk_typing"}
+
+
+def test_send_typing_no_ticket_no_call(monkeypatch):
+    """No `typing_ticket` cached yet → silent no-op (matches Rust at
+    wechat.rs:786-789)."""
+    sent: list = []
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (sent.append(url), (200, {}, b"", {}))[1],
+    )
+    a = _adapter()
+    a._typing_ticket = None
+    a._send_typing("alice@im.wechat")
+    assert sent == []
+
+
+def test_send_typing_no_token_no_call(monkeypatch):
+    sent: list = []
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (sent.append(url), (200, {}, b"", {}))[1],
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    a._typing_ticket = "tk"
+    a._send_typing("alice@im.wechat")
+    assert sent == []
+
+
+def test_send_typing_http_error_swallowed(monkeypatch):
+    """Sendtyping is best-effort — a non-2xx must not crash on_command."""
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (500, None, b"oops", {}),
+    )
+    a = _adapter()
+    a._typing_ticket = "tk"
+    # Must not raise.
+    a._send_typing("alice@im.wechat")
+
+
+@pytest.mark.asyncio
+async def test_on_command_routes_typing_cmd(monkeypatch):
+    sent: list = []
+
+    def _fake_http(url, **kw):
+        sent.append((url, json.loads(kw["body"].decode("utf-8"))))
+        return (200, {}, b"", {})
+
+    monkeypatch.setattr(wc, "_http_request", _fake_http)
+    a = _adapter()
+    a._typing_ticket = "tk"
+    from librefang.sidecar.protocol import TypingCmd
+    cmd = TypingCmd(channel_id="alice@im.wechat")
+    await a.on_command(cmd)
+    assert any("/ilink/bot/sendtyping" in c[0] for c in sent)
+
+
+@pytest.mark.asyncio
+async def test_on_command_typing_empty_user_drops(monkeypatch):
+    sent: list = []
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (sent.append(url), (200, {}, b"", {}))[1],
+    )
+    a = _adapter()
+    a._typing_ticket = "tk"
+    from librefang.sidecar.protocol import TypingCmd
+    cmd = TypingCmd(channel_id="")
+    await a.on_command(cmd)
+    assert sent == []
