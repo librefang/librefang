@@ -31,16 +31,14 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 }
 
 use super::sidecar_describe::{describe_sidecar, SidecarSchema};
-// `super::skills` channel helpers (upsert_channel_config /
-// remove_channel_config / append_channel_instance /
-// update_channel_instance / remove_channel_instance /
-// CHANNEL_AOT_CONFLICT_PREFIX / validate_env_var / write_secret_env /
-// remove_secret_env) were used by the deleted in-process channel
-// REST endpoints. None of the surviving handlers
-// (`list_channels`, `channels_snapshot`, `reload_channels`,
-// `list_channel_registry`, `configure_sidecar_channel`) call any of
-// them; the helpers themselves are now orphaned in skills.rs and
-// should be retired in a follow-up.
+// The `super::skills` channel-config helpers
+// (upsert_channel_config / remove_channel_config /
+// append_channel_instance / update_channel_instance /
+// remove_channel_instance / CHANNEL_AOT_CONFLICT_PREFIX /
+// validate_env_var) that the deleted in-process channel REST
+// endpoints depended on were retired alongside them in this same
+// change — `routes/skills.rs` no longer carries any channel-config
+// codepaths.
 use super::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

@@ -725,10 +725,9 @@ impl App {
                     self.switch_tab(Tab::Memory);
                     return;
                 }
-                KeyCode::F(8) => {
-                    // F8 was the `Channels` tab shortcut; tab retired.
-                    return;
-                }
+                // F(8) was the `Channels` tab shortcut; the tab is
+                // retired, so the key now falls through to the
+                // default arm rather than being swallowed.
                 KeyCode::F(9) => {
                     self.switch_tab(Tab::Skills);
                     return;
@@ -815,10 +814,9 @@ impl App {
                         self.switch_tab(Tab::Memory);
                         return;
                     }
-                    KeyCode::Char('8') => {
-                        // Alt-8 was the `Channels` tab shortcut; tab retired.
-                        return;
-                    }
+                    // Char('8') was the Alt-8 `Channels` tab shortcut;
+                    // the tab is retired, so the key falls through to
+                    // the default arm rather than being swallowed.
                     KeyCode::Char('9') => {
                         self.switch_tab(Tab::Skills);
                         return;

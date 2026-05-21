@@ -191,6 +191,7 @@ use crate::types;
         routes::list_channels,
         routes::configure_sidecar_channel,
         routes::reload_channels,
+        routes::list_channel_registry,
         // Per-channel `/configure` (POST/DELETE) + `/instances` (GET/POST)
         // + `/instances/{index}` (PUT/DELETE) + `/test` (POST) endpoints
         // gone alongside the in-process channel scaffolding — they all
