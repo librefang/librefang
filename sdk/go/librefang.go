@@ -662,14 +662,6 @@ func (r *ChannelsResource) ConfigureSidecarChannel(name string, data map[string]
 	return r.client.request("POST", fmt.Sprintf("/api/channels/sidecar/%s/configure", name), data, nil)
 }
 
-func (r *ChannelsResource) WechatQrStart() (interface{}, error) {
-	return r.client.request("POST", "/api/channels/wechat/qr/start", nil, nil)
-}
-
-func (r *ChannelsResource) WechatQrStatus(query map[string]string) (interface{}, error) {
-	return r.client.request("GET", "/api/channels/wechat/qr/status", nil, query)
-}
-
 func (r *ChannelsResource) WhatsappQrStart() (interface{}, error) {
 	return r.client.request("POST", "/api/channels/whatsapp/qr/start", nil, nil)
 }
