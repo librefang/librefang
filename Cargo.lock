@@ -4714,6 +4714,7 @@ dependencies = [
  "r2d2",
  "r2d2_sqlite",
  "rand 0.10.1",
+ "regex",
  "regex-lite",
  "reqwest",
  "rusqlite",

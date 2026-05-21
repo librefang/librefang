@@ -41,6 +41,11 @@ rand = { workspace = true }
 wasmtime = { workspace = true }
 dashmap = { workspace = true }
 regex-lite = { workspace = true }
+# Full `regex` (RE2-based) — used by `pii_filter` so operator-
+# supplied patterns can be bounded via `RegexBuilder.size_limit`
+# / `.dfa_size_limit`. `regex-lite` has no equivalent guard.
+# Audit: pii-filter-regex-no-size-cap.
+regex = { workspace = true }
 rusqlite = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
