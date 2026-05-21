@@ -1,5 +1,29 @@
 //! Core channel bridge types.
 
+/// Kernel-internal channel names that derive `SessionId`s via
+/// `SessionId::for_channel(agent, name)`. Mirrors the constants in
+/// `librefang-kernel::kernel::{SYSTEM_CHANNEL_CRON,
+/// SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_WEBUI}` — duplicated
+/// here because `librefang-channels` cannot depend on
+/// `librefang-kernel` (the dependency goes the other way).
+///
+/// Audit: cron-channel-name-not-reserved — a custom channel adapter
+/// passing `channel = "cron"` (case-insensitively) used to derive the
+/// SAME `SessionId` as the cron-fire path, so two write streams could
+/// interleave into one session history. The `is_internal_cron` flag
+/// gated behaviour but not SessionId derivation.
+pub const RESERVED_SYSTEM_CHANNEL_NAMES: &[&str] = &["cron", "autonomous", "webui"];
+
+/// Returns true when `name` would collide with a kernel-internal
+/// system channel (case-insensitive). Used by `channel_type_str` to
+/// rename operator-supplied `Custom("cron")` (and friends) before
+/// they reach the SessionId derivation path. See
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`].
+pub fn is_reserved_system_channel(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    RESERVED_SYSTEM_CHANNEL_NAMES.iter().any(|r| *r == lower)
+}
+
 /// Truncate `s` to at most `max_bytes`, respecting UTF-8 char boundaries.
 pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -1368,5 +1392,40 @@ mod tests {
         };
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.contains("Connection refused"));
+    }
+
+    /// Audit: cron-channel-name-not-reserved. The reservation list
+    /// must match (case-insensitively) the kernel-internal channel
+    /// names. A drift between this list and
+    /// `librefang-kernel::kernel::SYSTEM_CHANNEL_*` is fine
+    /// short-term but indicates an upstream channel migration —
+    /// keep the lists in sync.
+    #[test]
+    fn is_reserved_system_channel_matches_case_insensitively() {
+        for variant in [
+            "cron",
+            "CRON",
+            "Cron",
+            "  cron  ",
+            "autonomous",
+            "Autonomous",
+            "webui",
+            "WebUI",
+        ] {
+            assert!(
+                is_reserved_system_channel(variant),
+                "{variant:?} must be flagged as reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn is_reserved_system_channel_passes_through_normal_names() {
+        for name in ["telegram", "slack", "discord", "ext-cron", "custom-bot", ""] {
+            assert!(
+                !is_reserved_system_channel(name),
+                "{name:?} must NOT be flagged as reserved"
+            );
+        }
     }
 }
