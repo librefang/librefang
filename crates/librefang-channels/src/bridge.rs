@@ -872,6 +872,29 @@ impl MessageDebouncer {
     }
 }
 
+/// True when the `/approve` / `/reject` text-ack reply from
+/// `handle_command` is redundant because the user **clicked an
+/// inline-keyboard button** rather than typing the slash command.
+///
+/// Rationale: tapping `[Approve]` already conveys the action visibly
+/// in the chat. The kernel then either fires the agent-wake continuation
+/// (#5488, "I've written the file…") OR posts a separate channel-listener
+/// confirmation — both arrive within seconds. The extra `"Approved
+/// [abc12345] file_write — uuid"` line that the slash-command handler
+/// returned post-#5483 was a UX wart: noisy, machine-shaped, and
+/// arrived between the user's tap and the agent's natural-language
+/// follow-up.
+///
+/// Suppression is scoped tight: ONLY the approve/reject command pair,
+/// and ONLY when triggered by a `ButtonCallback`. Typed `/approve <id>`
+/// keeps its ack — text-only channels (IRC, SMS, any sidecar without
+/// the `interactive` capability) need that confirmation because they
+/// don't have an inline-keyboard tap to convey "your action landed".
+fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool {
+    matches!(content, ChannelContent::ButtonCallback { .. })
+        && matches!(command, "approve" | "reject")
+}
+
 fn content_to_text(content: &ChannelContent) -> String {
     match content {
         ChannelContent::Text(t) => t.clone(),
@@ -3305,7 +3328,9 @@ async fn dispatch_message(
                 overrides.as_ref(),
             )
             .await;
-            send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            if !suppress_button_command_ack(&message.content, name) {
+                send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            }
             return;
         }
         debug!(
@@ -3923,7 +3948,9 @@ async fn dispatch_message(
                     overrides.as_ref(),
                 )
                 .await;
-                send_response(adapter, &message.sender, result, thread_id, output_format).await;
+                if !suppress_button_command_ack(&message.content, cmd) {
+                    send_response(adapter, &message.sender, result, thread_id, output_format).await;
+                }
                 return;
             }
             debug!(
@@ -5873,6 +5900,61 @@ mod tests {
     // back via the default `ChannelAdapter::send_interactive` impl,
     // which exposes the slash commands as text. These tests pin both
     // the wire shape and the slash-command actions inside the buttons.
+
+    // ── suppress_button_command_ack ──────────────────────────────
+    //
+    // Pin the noise-suppression rule for `/approve` and `/reject`
+    // when triggered by an inline-keyboard click. Goal of these tests
+    // is to keep two failure modes from sneaking back in:
+    //   1. Suppression accidentally widening to other commands (a
+    //      future `/cancel` button must still get its ack — only
+    //      approve/reject are the duplicate-ack case).
+    //   2. Suppression accidentally widening to typed slash commands
+    //      (text-only channels with no button affordance need the
+    //      ack — silencing typed `/approve abc` would break IRC/SMS
+    //      UX where the tap doesn't exist).
+
+    fn button_callback(action: &str) -> ChannelContent {
+        ChannelContent::ButtonCallback {
+            action: action.to_string(),
+            message_text: None,
+        }
+    }
+
+    #[test]
+    fn suppress_button_command_ack_silences_button_approve_and_reject() {
+        let approve = button_callback("/approve abc12345");
+        let reject = button_callback("/reject abc12345");
+        assert!(suppress_button_command_ack(&approve, "approve"));
+        assert!(suppress_button_command_ack(&reject, "reject"));
+    }
+
+    #[test]
+    fn suppress_button_command_ack_keeps_ack_for_typed_slash_commands() {
+        // Typed `/approve abc12345` arrives as plain text on inbound.
+        // The slash-command handler still sees `command == "approve"`,
+        // but the originating content is NOT a ButtonCallback, so the
+        // ack must NOT be suppressed — text-only channels (IRC, SMS,
+        // any sidecar lacking the `interactive` capability) rely on
+        // it to confirm the resolution landed.
+        let typed = ChannelContent::Text("/approve abc12345".to_string());
+        assert!(!suppress_button_command_ack(&typed, "approve"));
+        assert!(!suppress_button_command_ack(&typed, "reject"));
+    }
+
+    #[test]
+    fn suppress_button_command_ack_does_not_widen_to_other_commands() {
+        // Future-proofing: if another command (e.g. `/cancel`,
+        // `/agents`) ever gets an inline-keyboard trigger, that
+        // command's ack must still send. The duplicate-ack issue
+        // is specific to approval resolution; other commands rely
+        // on their text response to communicate result.
+        let btn = button_callback("/cancel xyz");
+        assert!(!suppress_button_command_ack(&btn, "cancel"));
+        assert!(!suppress_button_command_ack(&btn, "agents"));
+        assert!(!suppress_button_command_ack(&btn, "ping"));
+        assert!(!suppress_button_command_ack(&btn, ""));
+    }
 
     #[test]
     fn build_approval_interactive_shapes_two_buttons_in_one_row() {
