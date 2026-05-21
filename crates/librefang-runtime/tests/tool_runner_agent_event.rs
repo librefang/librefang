@@ -261,6 +261,7 @@ fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> T
         process_registry: None,
         sender_id: None,
         channel: None,
+        chat_id: None,
         session_id: None,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,
