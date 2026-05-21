@@ -664,15 +664,14 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a WeChat config
-        // (Discord, Slack, Signal, Mattermost, Matrix, Line, Webex,
-        // and QQ have all migrated to sidecars; WeChat is one of the
-        // remaining in-process fixtures with a usable Default impl).
-        b.channels.wechat =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::WeChatConfig {
-                bot_token_env: "WECHAT_TOKEN".to_string(),
-                ..Default::default()
-            }]);
+        // Witness rotation history: dingtalk → whatsapp → webhook →
+        // google_chat → here (`file_download_max_bytes`), the only
+        // non-`OneOrMany` field still on `ChannelsConfig` after all
+        // in-process channels migrated to sidecars. The assertion
+        // is on the ReloadChannels hot action firing for ANY change
+        // to the `channels` block, not on any adapter-specific
+        // shape. (`sidecar_channels` is covered by the next test.)
+        b.channels.file_download_max_bytes = a.channels.file_download_max_bytes + 1;
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadChannels));
