@@ -45,24 +45,14 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // (librefang.sidecar.adapters.{discord,slack,webex,line}); see the
     // channels page in the dashboard / SIDECAR_CATALOG in
     // routes/channels.rs.
-    ChannelDef {
-        name: "whatsapp",
-        display_name: "WhatsApp",
-        category: "Messaging",
-        env_vars: &["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN"],
-        description: "WhatsApp Cloud API adapter",
-    },
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    ChannelDef {
-        name: "email",
-        display_name: "Email",
-        category: "Messaging",
-        env_vars: &["EMAIL_PASSWORD"],
-        description: "IMAP/SMTP email adapter",
-    },
+    // email migrated to a sidecar (librefang.sidecar.adapters.email);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // ── Social
     // mastodon, bluesky, and reddit migrated to sidecar adapters
     // ── Enterprise (10)
@@ -86,25 +76,12 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // webex migrated to a sidecar
     // (librefang.sidecar.adapters.webex); see the channels page in the
     // dashboard / SIDECAR_CATALOG in routes/channels.rs.
-    ChannelDef {
-        name: "feishu",
-        display_name: "Feishu/Lark",
-        category: "Enterprise",
-        env_vars: &["FEISHU_APP_SECRET"],
-        description: "Feishu/Lark Open Platform adapter",
-    },
-    ChannelDef {
-        name: "dingtalk",
-        display_name: "DingTalk",
-        category: "Enterprise",
-        env_vars: &[
-            "DINGTALK_APP_KEY",
-            "DINGTALK_APP_SECRET",
-            "DINGTALK_ACCESS_TOKEN",
-            "DINGTALK_SECRET",
-        ],
-        description: "DingTalk Robot API adapter (webhook or stream mode)",
-    },
+    // feishu migrated to a sidecar
+    // (librefang.sidecar.adapters.feishu); see the channels page in the
+    // dashboard / SIDECAR_CATALOG in routes/channels.rs.
+    // dingtalk migrated to a sidecar
+    // (librefang.sidecar.adapters.dingtalk); see the channels page in the
+    // dashboard / SIDECAR_CATALOG in routes/channels.rs.
     // twitch, rocketchat, nextcloud & zulip migrated to sidecar adapters
     // ── Notifications — ntfy & gotify migrated to sidecar adapters
     ChannelDef {

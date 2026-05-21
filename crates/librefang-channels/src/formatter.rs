@@ -32,15 +32,13 @@ pub fn format_for_channel(text: &str, format: OutputFormat) -> String {
     }
 }
 
-/// Format a message for WeCom, using a stronger plain-text conversion to avoid
-/// leaking Markdown syntax into enterprise chat replies.
-#[inline]
-pub fn format_for_wecom(text: &str, format: OutputFormat) -> String {
-    match format {
-        OutputFormat::PlainText => markdown_to_wecom_plain(text),
-        _ => format_for_channel(text, format),
-    }
-}
+// `format_for_wecom` and `markdown_to_wecom_plain` were removed in
+// the wecom-sidecar migration: the in-process WeCom adapter is gone,
+// and the Python sidecar (`librefang.sidecar.adapters.wecom`) wraps
+// every outbound chunk as `msgtype: "markdown"` on its own — so the
+// kernel side only ever needs the generic `format_for_channel` path
+// with the Markdown default (which `default_output_format_for_channel`
+// still returns for `"wecom"`).
 
 /// Convert Markdown to Telegram HTML subset.
 ///
@@ -351,201 +349,16 @@ fn markdown_to_slack_mrkdwn(text: &str) -> String {
     result
 }
 
-fn strip_atx_heading(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
-    if !(1..=6).contains(&heading_level) {
-        return line.to_string();
-    }
-
-    if trimmed.chars().nth(heading_level) != Some(' ') {
-        return line.to_string();
-    }
-
-    trimmed[heading_level..]
-        .trim()
-        .trim_end_matches('#')
-        .trim_end()
-        .to_string()
-}
-
-fn strip_blockquote_prefix(line: &str) -> String {
-    let mut trimmed = line.trim_start();
-    while let Some(rest) = trimmed.strip_prefix('>') {
-        trimmed = rest.trim_start();
-    }
-    trimmed.to_string()
-}
-
-fn strip_task_list_prefix(line: &str) -> String {
-    let trimmed = line.trim_start();
-    for prefix in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return rest.to_string();
-        }
-    }
-    line.to_string()
-}
-
-fn is_fenced_code_marker(line: &str) -> bool {
-    let trimmed = line.trim();
-    let Some(marker) = trimmed.chars().next() else {
-        return false;
-    };
-    if marker != '`' && marker != '~' {
-        return false;
-    }
-    let fence_len = trimmed.chars().take_while(|c| *c == marker).count();
-    if fence_len < 3 {
-        return false;
-    }
-
-    let rest = trimmed[fence_len..].trim();
-    rest.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '+' | '{' | '}' | '#')
-    })
-}
-
-fn is_setext_heading_underline(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.len() < 3 {
-        return false;
-    }
-    trimmed.chars().all(|c| c == '=' || c == '-') && trimmed.contains(['=', '-'])
-}
-
-fn is_table_divider(line: &str) -> bool {
-    let trimmed = line.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|c| matches!(c, '|' | ':' | '-' | ' '))
-}
-
-fn strip_inline_markdown(mut text: String) -> String {
-    while let Some(start) = text.find("![") {
-        if let Some(mid) = text[start..].find("](") {
-            let mid = start + mid;
-            if let Some(end) = text[mid + 2..].find(')') {
-                let end = mid + 2 + end;
-                let alt = &text[start + 2..mid];
-                let url = &text[mid + 2..end];
-                let replacement = if alt.is_empty() {
-                    url.to_string()
-                } else {
-                    format!("{alt} ({url})")
-                };
-                text = format!("{}{}{}", &text[..start], replacement, &text[end + 1..]);
-                continue;
-            }
-        }
-        break;
-    }
-
-    while let Some(start) = text.find('[') {
-        if let Some(mid) = text[start..].find("](") {
-            let mid = start + mid;
-            if let Some(end) = text[mid + 2..].find(')') {
-                let end = mid + 2 + end;
-                let label = &text[start + 1..mid];
-                let url = &text[mid + 2..end];
-                text = format!("{}{} ({}){}", &text[..start], label, url, &text[end + 1..]);
-                continue;
-            }
-        }
-        break;
-    }
-
-    while let Some(start) = text.find('<') {
-        if let Some(end) = text[start + 1..].find('>') {
-            let end = start + 1 + end;
-            let inner = &text[start + 1..end];
-            if inner.starts_with("http://")
-                || inner.starts_with("https://")
-                || inner.starts_with("mailto:")
-            {
-                text = format!("{}{}{}", &text[..start], inner, &text[end + 1..]);
-                continue;
-            }
-        }
-        break;
-    }
-
-    text = text.replace("**", "");
-    text = text.replace("__", "");
-    text = text.replace("~~", "");
-    text = text.replace('`', "");
-
-    let mut out = String::with_capacity(text.len());
-    let mut prev_char = '\0';
-    let bytes = text.as_bytes();
-    for (i, ch) in text.char_indices() {
-        if ch == '*'
-            && prev_char != '*'
-            && (i + ch.len_utf8() >= bytes.len() || bytes[i + ch.len_utf8()] != b'*')
-        {
-            prev_char = ch;
-            continue;
-        }
-        out.push(ch);
-        prev_char = ch;
-    }
-    out
-}
-
-/// Strip common Markdown blocks for WeCom plain-text replies.
-fn markdown_to_wecom_plain(text: &str) -> String {
-    let mut result_lines = Vec::new();
-    let mut in_fenced_code = false;
-
-    for raw_line in text.replace("\r\n", "\n").lines() {
-        let trimmed = raw_line.trim();
-
-        if is_fenced_code_marker(trimmed) {
-            in_fenced_code = !in_fenced_code;
-            continue;
-        }
-
-        if in_fenced_code {
-            result_lines.push(raw_line.trim_end().to_string());
-            continue;
-        }
-
-        if is_setext_heading_underline(trimmed) || is_table_divider(trimmed) {
-            continue;
-        }
-
-        let mut line = strip_atx_heading(raw_line);
-        line = strip_blockquote_prefix(&line);
-        line = strip_task_list_prefix(&line);
-
-        let trimmed_line = line.trim();
-        if trimmed_line.starts_with('|') && trimmed_line.ends_with('|') && trimmed_line.len() > 2 {
-            line = trimmed_line
-                .trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim())
-                .collect::<Vec<_>>()
-                .join("    ");
-        }
-
-        line = strip_inline_markdown(line);
-        result_lines.push(line.trim().to_string());
-    }
-
-    let mut collapsed = Vec::new();
-    for line in result_lines {
-        if line.is_empty()
-            && collapsed
-                .last()
-                .is_some_and(|prev: &String| prev.is_empty())
-        {
-            continue;
-        }
-        collapsed.push(line);
-    }
-
-    collapsed.join("\n").trim().to_string()
-}
+// The block of WeCom-specific Markdown helpers
+// (`strip_atx_heading` / `strip_blockquote_prefix` /
+// `strip_task_list_prefix` / `is_fenced_code_marker` /
+// `is_setext_heading_underline` / `is_table_divider` /
+// `strip_inline_markdown`, plus `markdown_to_wecom_plain` itself)
+// was removed in the wecom-sidecar migration. They had no callers
+// outside `markdown_to_wecom_plain`, and the generic
+// `markdown_to_plain` below covers the PlainText output format for
+// every other channel. Recover from git history if a future channel
+// needs the more aggressive stripping shape.
 
 /// Strip all Markdown formatting, producing plain text.
 fn markdown_to_plain(text: &str) -> String {
@@ -689,31 +502,12 @@ mod tests {
         assert_eq!(result, "click (https://example.com)");
     }
 
-    #[test]
-    fn test_wecom_plain_text_strips_common_markdown_blocks() {
-        let result = markdown_to_wecom_plain(
-            "# Title\n\
-             \n\
-             > quoted text\n\
-             \n\
-             - [x] done item\n\
-             - [ ] todo item\n\
-             \n\
-             ```rust\n\
-             let value = 1;\n\
-             ```\n\
-             \n\
-             [docs](https://example.com)\n",
-        );
-        assert_eq!(
-            result,
-            "Title\n\nquoted text\n\ndone item\ntodo item\n\nlet value = 1;\n\ndocs (https://example.com)"
-        );
-    }
-
-    #[test]
-    fn test_single_backtick_line_is_not_treated_as_fenced_code() {
-        let result = markdown_to_wecom_plain("`status`\nnext line");
-        assert_eq!(result, "status\nnext line");
-    }
+    // `test_wecom_plain_text_strips_common_markdown_blocks` and
+    // `test_single_backtick_line_is_not_treated_as_fenced_code` were
+    // removed together with `markdown_to_wecom_plain` in the
+    // wecom-sidecar migration. The behaviour the second test was
+    // pinning (single-backtick lines must not be parsed as fenced
+    // code) still applies to other channels via `is_fenced_code_marker`;
+    // see the `format_for_channel(_, OutputFormat::PlainText)` tests
+    // above which exercise the same path through `markdown_to_plain`.
 }

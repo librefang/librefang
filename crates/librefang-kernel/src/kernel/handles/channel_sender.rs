@@ -26,15 +26,7 @@ macro_rules! for_each_channel_field {
         // processes or compilations would silently change which agent wins
         // when multiple channel instances share a `default_agent`. See
         // CLAUDE.md "Deterministic prompt ordering".
-        $mac!(dingtalk, "dingtalk");
-        $mac!(email, "email");
-        $mac!(feishu, "feishu");
         $mac!(google_chat, "google_chat");
-        $mac!(teams, "teams");
-        $mac!(webhook, "webhook");
-        $mac!(wechat, "wechat");
-        $mac!(wecom, "wecom");
-        $mac!(whatsapp, "whatsapp");
     };
 }
 
@@ -73,7 +65,10 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
-        let cfg = self.config.load_full();
+        // `self.config.load_full()` was previously read here for the
+        // wecom-specific output-format override; removed in the
+        // wecom-sidecar migration (the sidecar handles its own
+        // formatting via `msgtype: "markdown"` frames).
         let lookup_key = account_id
             .filter(|s| !s.is_empty())
             .map(|aid| format!("{channel}:{aid}"))
@@ -110,17 +105,14 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
 
         let default_format =
             librefang_channels::formatter::default_output_format_for_channel(channel);
-        let formatted = if channel == "wecom" {
-            let output_format = cfg
-                .channels
-                .wecom
-                .as_ref()
-                .and_then(|c| c.overrides.output_format)
-                .unwrap_or(default_format);
-            librefang_channels::formatter::format_for_wecom(message, output_format)
-        } else {
-            librefang_channels::formatter::format_for_channel(message, default_format)
-        };
+        // wecom migrated to a sidecar; its formatting now happens inside
+        // the Python adapter (`librefang.sidecar.adapters.wecom`) which
+        // wraps every outbound chunk as `msgtype: "markdown"`. The
+        // generic `format_for_channel` path with the Markdown default
+        // (see `default_output_format_for_channel("wecom")`) gives the
+        // sidecar exactly that.
+        let formatted =
+            librefang_channels::formatter::format_for_channel(message, default_format);
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
 
@@ -463,15 +455,7 @@ mod tests {
 
         // Hardcoded sorted reference — must match the macro body exactly.
         const EXPECTED: &[&str] = &[
-            "dingtalk",
-            "email",
-            "feishu",
             "google_chat",
-            "teams",
-            "webhook",
-            "wechat",
-            "wecom",
-            "whatsapp",
         ];
 
         assert_eq!(

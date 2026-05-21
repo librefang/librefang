@@ -153,7 +153,7 @@ export interface ChannelItem {
    *  renders it for `category === "sidecar"` to avoid noise on regular
    *  CHANNEL_REGISTRY rows that already have a setup form. */
   config_template?: string;
-  /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
+  /** Webhook endpoint path on the shared server (e.g. "/channels/teams/webhook"). */
   webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by

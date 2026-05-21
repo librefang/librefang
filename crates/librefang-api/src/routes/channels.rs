@@ -25,22 +25,17 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
         .route("/channels/{name}/test", axum::routing::post(test_channel))
         .route("/channels/reload", axum::routing::post(reload_channels))
-        .route(
-            "/channels/whatsapp/qr/start",
-            axum::routing::post(whatsapp_qr_start),
-        )
-        .route(
-            "/channels/whatsapp/qr/status",
-            axum::routing::get(whatsapp_qr_status),
-        )
-        .route(
-            "/channels/wechat/qr/start",
-            axum::routing::post(wechat_qr_start),
-        )
-        .route(
-            "/channels/wechat/qr/status",
-            axum::routing::get(wechat_qr_status),
-        )
+        // whatsapp_qr_start / whatsapp_qr_status removed alongside the
+        // WhatsApp in-process adapter when it migrated to a sidecar
+        // (librefang.sidecar.adapters.whatsapp). The Baileys gateway
+        // (when in use) now owns the QR-login flow end-to-end — its
+        // own HTTP API exposes the QR string for the dashboard to
+        // proxy if needed.
+        // wechat_qr_start / wechat_qr_status removed alongside the
+        // WeChat in-process adapter when it migrated to a sidecar
+        // (librefang.sidecar.adapters.wechat). The sidecar now drives
+        // the QR login flow itself and logs the QR code at INFO; the
+        // dashboard can still display it by reading sidecar logs.
         .route(
             "/channels/registry",
             axum::routing::get(list_channel_registry),
@@ -85,6 +80,14 @@ pub(crate) enum FieldType {
     Text,
     Number,
     List,
+    /// Dropdown-style enum picker. WeCom's `mode` field was the only
+    /// in-process consumer; after its sidecar migration the variant
+    /// has no callers, but the dashboard form runtime still emits
+    /// `"select"` for sidecar adapters that declare it via the
+    /// `--describe` schema, so the enum surface is preserved for any
+    /// future in-process channel that wants to opt in without
+    /// reintroducing the variant.
+    #[allow(dead_code)]
     Select,
 }
 
@@ -142,45 +145,14 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // telegram, discord, and slack migrated to out-of-process sidecar
     // adapters (librefang.sidecar.adapters.{telegram,discord,slack});
     // no longer in-process channels.
-    ChannelMeta {
-        name: "whatsapp", display_name: "WhatsApp", icon: "WA",
-        description: "Connect your personal WhatsApp via QR scan",
-        category: "messaging", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Scan QR code with your phone — no developer account needed",
-        setup_type: "qr",
-        fields: &[
-            // Business API fallback fields — all advanced (hidden behind "Use Business API" toggle)
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_ACCESS_TOKEN"), required: false, placeholder: "EAAx...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "phone_number_id", label: "Phone Number ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "1234567890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8443", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
-        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"",
-    },
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG below.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG below.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "email", display_name: "Email", icon: "EM",
-        description: "IMAP/SMTP email adapter",
-        category: "messaging", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Enter your email, password, and server hosts",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "username", label: "Email Address", field_type: FieldType::Text, env_var: None, required: true, placeholder: "bot@example.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "password_env", label: "Password / App Password", field_type: FieldType::Secret, env_var: Some("EMAIL_PASSWORD"), required: true, placeholder: "app-password", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "imap_host", label: "IMAP Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "imap.gmail.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "smtp_host", label: "SMTP Host", field_type: FieldType::Text, env_var: None, required: true, placeholder: "smtp.gmail.com", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "imap_port", label: "IMAP Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "993", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "smtp_port", label: "SMTP Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "587", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enable IMAP on your email account", "Generate an app password if using Gmail", "Fill in email, password, and hosts below"],
-        config_template: "[channels.email]\nimap_host = \"imap.gmail.com\"\nsmtp_host = \"smtp.gmail.com\"\npassword_env = \"EMAIL_PASSWORD\"",
-    },
+    // email migrated to a sidecar (librefang.sidecar.adapters.email);
+    // see SIDECAR_CATALOG below.
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
     // see SIDECAR_CATALOG below.
     // ── Social ──────────────────────────────────────────────────────
@@ -188,21 +160,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
     // the SDK package); no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
-    ChannelMeta {
-        name: "teams", display_name: "Microsoft Teams", icon: "MS",
-        description: "Teams Bot Framework adapter",
-        category: "enterprise", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Paste your Azure Bot App ID and Password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "00000000-0000-...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("TEAMS_APP_PASSWORD"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "3978", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
-        config_template: "[channels.teams]\napp_id = \"\"\napp_password_env = \"TEAMS_APP_PASSWORD\"",
-    },
+    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+    // see SIDECAR_CATALOG below.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG below.
     ChannelMeta {
@@ -222,39 +181,10 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     },
     // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "feishu", display_name: "Feishu/Lark", icon: "FS",
-        description: "Feishu/Lark Open Platform adapter",
-        category: "enterprise", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Paste your App ID and App Secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "cli_abc123", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("FEISHU_APP_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8453", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an app at open.feishu.cn", "Copy App ID and Secret", "Paste them below"],
-        config_template: "[channels.feishu]\napp_id = \"\"\napp_secret_env = \"FEISHU_APP_SECRET\"",
-    },
-    ChannelMeta {
-        name: "dingtalk", display_name: "DingTalk", icon: "DT",
-        description: "DingTalk Robot API adapter (webhook or stream mode)",
-        category: "enterprise", difficulty: "Easy", setup_time: "~3 min",
-        quick_setup: "Choose webhook or stream mode, then paste credentials",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "receive_mode", label: "Mode", field_type: FieldType::Text, env_var: None, required: false, placeholder: "stream (default) or webhook", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_key_env", label: "App Key (stream)", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_KEY"), required: false, placeholder: "dingxxx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_secret_env", label: "App Secret (stream)", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_SECRET"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "access_token_env", label: "Access Token (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_ACCESS_TOKEN"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "secret_env", label: "Signing Secret (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_SECRET"), required: false, placeholder: "SEC...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8457", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a robot in DingTalk", "Choose mode: webhook (needs public IP) or stream (no public IP needed)", "For webhook: copy token and signing secret", "For stream: copy App Key and App Secret from the app page"],
-        config_template: "[channels.dingtalk]\nreceive_mode = \"stream\"\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
-    },
+    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+    // see SIDECAR_CATALOG below.
+    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+    // see SIDECAR_CATALOG below.
     // zulip migrated to an out-of-process sidecar adapter
     // (librefang.sidecar.adapters.zulip in the SDK package);
     // see SIDECAR_CATALOG below.
@@ -262,53 +192,12 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
     // in the SDK package); no longer in-process channels.
-    ChannelMeta {
-        name: "webhook", display_name: "Webhook", icon: "WH",
-        description: "Generic HMAC-signed webhook adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Optionally set an HMAC secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "secret_env", label: "HMAC Secret", field_type: FieldType::Secret, env_var: Some("WEBHOOK_SECRET"), required: false, placeholder: "my-secret", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "listen_port", label: "Listen Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8460", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://example.com/webhook", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enter an HMAC secret (or leave blank)", "Click Save — that's it!"],
-        config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
-    },
-    ChannelMeta {
-        name: "wechat", display_name: "WeChat", icon: "WX",
-        description: "WeChat personal account via iLink protocol",
-        category: "messaging", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Scan QR code with your WeChat app — no developer account needed",
-        setup_type: "qr",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token (from previous session)", field_type: FieldType::Secret, env_var: Some("WECHAT_BOT_TOKEN"), required: false, placeholder: "ilink_bot_...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123@im.wechat", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open WeChat on your phone", "The QR code will appear in the dashboard", "Scan it with WeChat to connect"],
-        config_template: "[channels.wechat]\nbot_token_env = \"WECHAT_BOT_TOKEN\"",
-    },
-    ChannelMeta {
-        name: "wecom", display_name: "WeCom", icon: "WC",
-        description: "WeCom intelligent bot (WebSocket or URL callback)",
-        category: "messaging", difficulty: "Easy", setup_time: "~2 min",
-        quick_setup: "Enter your Bot ID and Secret from the WeCom admin console",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "bot_id", label: "Bot ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "aibxxxxx", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "secret_env", label: "Bot Secret", field_type: FieldType::Secret, env_var: Some("WECOM_BOT_SECRET"), required: true, placeholder: "xxxxxxxxxxxxxxxx...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "mode", label: "Connection Mode", field_type: FieldType::Select, env_var: None, required: false, placeholder: "websocket", advanced: false, options: Some(&["websocket", "callback"]), show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL (configure in WeCom admin)", field_type: FieldType::Text, env_var: None, required: false, placeholder: "", advanced: false, options: None, show_when: Some("callback"), readonly: true },
-            ChannelField { key: "token_env", label: "Callback Token", field_type: FieldType::Secret, env_var: Some("WECOM_CALLBACK_TOKEN"), required: true, placeholder: "Token from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
-            ChannelField { key: "encoding_aes_key_env", label: "EncodingAESKey", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: true, placeholder: "EncodingAESKey from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: set Callback Token and EncodingAESKey, then configure the displayed Callback URL in WeCom admin"],
-        config_template: "[channels.wecom]\nbot_id = \"\"\nsecret_env = \"WECOM_BOT_SECRET\"\nmode = \"websocket\"",
-    },
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG below.
+    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+    // see SIDECAR_CATALOG below.
+    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+    // see SIDECAR_CATALOG below.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG below.
 ];
@@ -316,15 +205,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
-        "whatsapp" => config.whatsapp.is_some(),
-        "email" => config.email.is_some(),
-        "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "feishu" => config.feishu.is_some(),
-        "dingtalk" => config.dingtalk.is_some(),
-        "webhook" => config.webhook.is_some(),
-        "wechat" => config.wechat.is_some(),
-        "wecom" => config.wecom.is_some(),
         _ => false,
     }
 }
@@ -392,29 +273,17 @@ fn build_field_json(
 ///
 /// Since v2026.3.31 all webhook channels share the main API server port.
 /// The URL pattern is `http://{api_listen}/channels/{channel_name}/webhook`.
+///
+/// After the wecom-sidecar migration this function has no in-process
+/// callers (wecom was the only `callback_url`-bearing in-process
+/// channel); kept as a stub so future in-process callback-style
+/// channels can opt in by adding their match arm without changing the
+/// surrounding call sites.
 fn inject_callback_url(
-    fields: &mut [serde_json::Value],
-    channel_name: &str,
+    _fields: &mut [serde_json::Value],
+    _channel_name: &str,
     _config_values: Option<&serde_json::Value>,
 ) {
-    let path = match channel_name {
-        "wecom" => "/channels/wecom/webhook",
-        _ => return,
-    };
-
-    // Use 0.0.0.0 with the default API port — users should substitute their
-    // public hostname when pasting into external platform consoles.
-    let url = format!(
-        "http://0.0.0.0:{}{path}",
-        librefang_types::config::DEFAULT_API_PORT
-    );
-
-    for field in fields.iter_mut() {
-        if field.get("key").and_then(|v| v.as_str()) == Some("callback_url") {
-            field["value"] = serde_json::Value::String(url.clone());
-            field["has_value"] = serde_json::Value::Bool(true);
-        }
-    }
 }
 
 /// Channels that receive messages via webhook on the shared server.
@@ -422,7 +291,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "feishu" | "teams" | "dingtalk" | "google_chat" | "webhook" | "wecom" => Some("/webhook"),
+        "google_chat" => Some("/webhook"),
         _ => None,
     }
 }
@@ -666,6 +535,62 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Matrix Client-Server API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.matrix"],
+    },
+    SidecarCatalogEntry {
+        name: "feishu",
+        display_name: "Feishu / Lark",
+        description: "Feishu/Lark Open Platform adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.feishu"],
+    },
+    SidecarCatalogEntry {
+        name: "wecom",
+        display_name: "WeCom",
+        description: "WeCom (\u{4f01}\u{4e1a}\u{5fae}\u{4fe1}) intelligent-bot WebSocket adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.wecom"],
+    },
+    SidecarCatalogEntry {
+        name: "email",
+        display_name: "Email (IMAP + SMTP)",
+        description: "IMAP / SMTP email adapter (out-of-process sidecar, Python stdlib only)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.email"],
+    },
+    SidecarCatalogEntry {
+        name: "dingtalk",
+        display_name: "DingTalk",
+        description: "DingTalk (\u{9489}\u{9489}) Robot stream-mode adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.dingtalk"],
+    },
+    SidecarCatalogEntry {
+        name: "wechat",
+        display_name: "WeChat",
+        description: "WeChat personal-account adapter via the iLink (ClawBot) gateway (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.wechat"],
+    },
+    SidecarCatalogEntry {
+        name: "teams",
+        display_name: "Microsoft Teams",
+        description: "Teams Bot Framework v3 adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.teams"],
+    },
+    SidecarCatalogEntry {
+        name: "whatsapp",
+        display_name: "WhatsApp",
+        description: "WhatsApp adapter — Meta Cloud API + Web/QR (Baileys) gateway dual-mode (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.whatsapp"],
+    },
+    SidecarCatalogEntry {
+        name: "webhook",
+        display_name: "Webhook",
+        description: "Generic HMAC-signed HTTP webhook adapter (out-of-process sidecar, Python stdlib only)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.webhook"],
     },
 ];
 
@@ -1160,40 +1085,8 @@ fn channel_config_values(
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "whatsapp" => config
-            .whatsapp
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "email" => config
-            .email
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "teams" => config
-            .teams
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "feishu" => config
-            .feishu
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "dingtalk" => config
-            .dingtalk
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "webhook" => config
-            .webhook
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "wechat" => config
-            .wechat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "wecom" => config
-            .wecom
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
@@ -1208,15 +1101,7 @@ fn channel_config_values(
 /// `instance_count`.
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
-        "whatsapp" => config.whatsapp.len(),
-        "email" => config.email.len(),
-        "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
-        "feishu" => config.feishu.len(),
-        "dingtalk" => config.dingtalk.len(),
-        "webhook" => config.webhook.len(),
-        "wechat" => config.wechat.len(),
-        "wecom" => config.wecom.len(),
         _ => 0,
     }
 }
@@ -1240,15 +1125,7 @@ fn channel_instances_serialized(
             .collect()
     }
     match name {
-        "whatsapp" => ser(&config.whatsapp),
-        "email" => ser(&config.email),
-        "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
-        "feishu" => ser(&config.feishu),
-        "dingtalk" => ser(&config.dingtalk),
-        "webhook" => ser(&config.webhook),
-        "wechat" => ser(&config.wechat),
-        "wecom" => ser(&config.wecom),
         _ => Vec::new(),
     }
 }
@@ -2615,372 +2492,17 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp QR login flow (OpenClaw-style)
 // ---------------------------------------------------------------------------
-#[utoipa::path(
-    post,
-    path = "/api/channels/whatsapp/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WhatsApp QR session started", body = crate::types::JsonObject)
-    )
-)]
-/// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
-///
-/// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
-/// this proxies the request and returns a base64 QR code data URL. If no gateway
-/// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start() -> impl IntoResponse {
-    // Check for WhatsApp Web gateway URL in config or env
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
+// WhatsApp QR endpoints removed — the WhatsApp adapter migrated
+// to a sidecar (librefang.sidecar.adapters.whatsapp). The Baileys
+// gateway (when in use) owns the QR login flow end-to-end now.
+// ---------------------------------------------------------------------------
 
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "available": false,
-            "message": "WhatsApp Web gateway not running. Start the gateway or use Business API mode.",
-            "help": "The WhatsApp Web gateway auto-starts with the daemon when configured. Ensure Node.js >= 18 is installed and WhatsApp is configured in config.toml. Set WHATSAPP_WEB_GATEWAY_URL to use an external gateway."
-        }));
-    }
+// WeChat QR endpoints removed — the WeChat adapter migrated to
+// a sidecar (librefang.sidecar.adapters.wechat). The sidecar
+// now runs the QR login flow itself and logs the QR string at
+// INFO; the dashboard surfaces it by tailing sidecar logs.
 
-    // Try to reach the gateway and start a QR session.
-    // Uses a raw HTTP request via tokio TcpStream to avoid adding reqwest as a runtime dep.
-    let start_url = format!("{}/login/start", gateway_url.trim_end_matches('/'));
-    match gateway_http_post(&start_url).await {
-        Ok(body) => {
-            let qr_url = body
-                .get("qr_data_url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let sid = body
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices");
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "available": true,
-                "qr_data_url": qr_url,
-                "session_id": sid,
-                "message": msg,
-                "connected": connected,
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach WhatsApp Web gateway: {e}"),
-            "help": "Make sure the gateway is running at the configured URL"
-        })),
-    }
-}
-#[utoipa::path(
-    get,
-    path = "/api/channels/whatsapp/qr/status",
-    tag = "channels",
-    params(
-        ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
-    ),
-    responses(
-        (status = 200, description = "WhatsApp QR scan status", body = crate::types::JsonObject)
-    )
-)]
-/// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
-///
-/// After calling `/qr/start`, the frontend polls this to check if the user
-/// has scanned the QR code and the WhatsApp Web session is connected.
-pub async fn whatsapp_qr_status(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "message": "Gateway not available"
-        }));
-    }
-
-    let session_id = params.get("session_id").cloned().unwrap_or_default();
-    let status_url = format!(
-        "{}/login/status?session_id={}",
-        gateway_url.trim_end_matches('/'),
-        session_id
-    );
-
-    match gateway_http_get(&status_url).await {
-        Ok(body) => {
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Waiting for scan...");
-            let expired = body
-                .get("expired")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "connected": connected,
-                "message": msg,
-                "expired": expired,
-            }))
-        }
-        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" })),
-    }
-}
-
-/// Lightweight HTTP POST to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // Split into base URL + path from the full URL like "http://127.0.0.1:3009/login/start"
-    let without_scheme = url_with_path
-        .strip_prefix("http://")
-        .or_else(|| url_with_path.strip_prefix("https://"))
-        .unwrap_or(url_with_path);
-    let (host_port, path) = if let Some(idx) = without_scheme.find('/') {
-        (&without_scheme[..idx], &without_scheme[idx..])
-    } else {
-        (without_scheme, "/")
-    };
-    let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-        (h, p.parse().unwrap_or(3009u16))
-    } else {
-        (host_port, 3009u16)
-    };
-
-    let mut stream = tokio::net::TcpStream::connect(format!("{host}:{port}"))
-        .await
-        .map_err(|e| format!("Connect failed: {e}"))?;
-
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {e}"))?;
-
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("Read failed: {e}"))?;
-    let response = String::from_utf8_lossy(&buf);
-
-    // Find the JSON body after the blank line separating headers from body
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body_str = &response[idx + 4..];
-        serde_json::from_str(body_str.trim()).map_err(|e| format!("Parse failed: {e}"))
-    } else {
-        Err("No HTTP body in response".to_string())
-    }
-}
-
-/// Lightweight HTTP GET to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let without_scheme = url_with_path
-        .strip_prefix("http://")
-        .or_else(|| url_with_path.strip_prefix("https://"))
-        .unwrap_or(url_with_path);
-    let (host_port, path_and_query) = if let Some(idx) = without_scheme.find('/') {
-        (&without_scheme[..idx], &without_scheme[idx..])
-    } else {
-        (without_scheme, "/")
-    };
-    let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-        (h, p.parse().unwrap_or(3009u16))
-    } else {
-        (host_port, 3009u16)
-    };
-
-    let mut stream = tokio::net::TcpStream::connect(format!("{host}:{port}"))
-        .await
-        .map_err(|e| format!("Connect failed: {e}"))?;
-
-    let req = format!(
-        "GET {path_and_query} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {e}"))?;
-
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("Read failed: {e}"))?;
-    let response = String::from_utf8_lossy(&buf);
-
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body_str = &response[idx + 4..];
-        serde_json::from_str(body_str.trim()).map_err(|e| format!("Parse failed: {e}"))
-    } else {
-        Err("No HTTP body in response".to_string())
-    }
-}
-
-// ── WeChat QR login endpoints ────────────────────────────────────────────────
-
-/// iLink API base URL used by the WeChat adapter.
-const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
-
-#[utoipa::path(
-    post,
-    path = "/api/channels/wechat/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WeChat QR login initiated", body = crate::types::JsonObject)
-    )
-)]
-/// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
-pub async fn wechat_qr_start() -> impl IntoResponse {
-    let client = match librefang_kernel::http_client::client_builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "available": false,
-                "message": format!("HTTP client error: {e}")
-            }));
-        }
-    };
-
-    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_bot_qrcode?bot_type=3");
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let qrcode = body["qrcode"].as_str().unwrap_or("");
-                let qrcode_url = body["qrcode_img_content"].as_str().unwrap_or("");
-                if qrcode.is_empty() {
-                    return Json(serde_json::json!({
-                        "available": false,
-                        "message": "iLink returned empty qrcode"
-                    }));
-                }
-                Json(serde_json::json!({
-                    "available": true,
-                    "qr_code": qrcode,
-                    "qr_url": qrcode_url,
-                    "message": "Scan this QR code with your WeChat app to log in",
-                }))
-            }
-            Err(e) => Json(serde_json::json!({
-                "available": false,
-                "message": format!("Failed to parse iLink response: {e}")
-            })),
-        },
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Json(serde_json::json!({
-                "available": false,
-                "message": format!("iLink QR request failed ({status}): {body}")
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach iLink API: {e}")
-        })),
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/channels/wechat/qr/status",
-    tag = "channels",
-    params(
-        ("qr_code" = String, Query, description = "QR code value from /qr/start")
-    ),
-    responses(
-        (status = 200, description = "WeChat QR scan status", body = crate::types::JsonObject)
-    )
-)]
-/// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
-pub async fn wechat_qr_status(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let qr_code = params.get("qr_code").cloned().unwrap_or_default();
-    if qr_code.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "expired": false,
-            "message": "Missing qr_code parameter"
-        }));
-    }
-
-    // iLink uses long-polling: the request hangs until the user scans or it
-    // times out server-side (~30s). Use a generous timeout so we don't mistake
-    // a normal long-poll wait for a network error.
-    let client = match librefang_kernel::http_client::client_builder()
-        .timeout(std::time::Duration::from_secs(35))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return Json(serde_json::json!({
-                "connected": false,
-                "expired": false,
-                "message": "HTTP client error"
-            }));
-        }
-    };
-
-    let encoded: String = url::form_urlencoded::byte_serialize(qr_code.as_bytes()).collect();
-    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_qrcode_status?qrcode={encoded}");
-
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let status = body["status"].as_str().unwrap_or("pending");
-                match status {
-                    "confirmed" => {
-                        let bot_token = body["bot_token"].as_str().unwrap_or("");
-                        Json(serde_json::json!({
-                            "connected": true,
-                            "expired": false,
-                            "message": "WeChat login successful",
-                            "bot_token": bot_token,
-                        }))
-                    }
-                    "expired" => Json(serde_json::json!({
-                        "connected": false,
-                        "expired": true,
-                        "message": "QR code expired — click Start to get a new one"
-                    })),
-                    _ => Json(serde_json::json!({
-                        "connected": false,
-                        "expired": false,
-                        "message": "Waiting for scan..."
-                    })),
-                }
-            }
-            Err(_) => Json(serde_json::json!({
-                "connected": false,
-                "expired": false,
-                "message": "Failed to parse status response"
-            })),
-        },
-        // Timeout is normal for long-poll — treat as "still waiting"
-        _ => Json(serde_json::json!({
-            "connected": false,
-            "expired": false,
-            "message": "Waiting for scan..."
-        })),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Channel registry metadata — loaded from ~/.librefang/channels/*.toml
@@ -3080,12 +2602,16 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // WhatsApp requires WHATSAPP_ACCESS_TOKEN. With it unset we must
-        // surface a 412 — NOT a 200 with a "status: error" body, which
-        // silently passes dashboard `fetch().ok` checks (#3507).
-        let _g = EnvGuard::unset("WHATSAPP_ACCESS_TOKEN");
+        // Google Chat requires GOOGLE_CHAT_SERVICE_ACCOUNT. With it
+        // unset we must surface a 412 — NOT a 200 with a "status:
+        // error" body, which silently passes dashboard
+        // `fetch().ok` checks (#3507). Witness rotated: Email →
+        // Teams → WhatsApp (all sidecar-migrated) → GoogleChat,
+        // the only remaining in-process channel with a
+        // `required: true` secret env var.
+        let _g = EnvGuard::unset("GOOGLE_CHAT_SERVICE_ACCOUNT");
 
-        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -3101,9 +2627,12 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("WHATSAPP_ACCESS_TOKEN", "syt-test-not-real");
+        let _g = EnvGuard::set(
+            "GOOGLE_CHAT_SERVICE_ACCOUNT",
+            "/nonexistent/sa.json",
+        );
 
-        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3130,15 +2659,17 @@ mod instance_helper_tests {
     use super::*;
 
     fn matrix_meta() -> &'static ChannelMeta {
-        // Matrix migrated to a sidecar in v2026.5; rotate to whatsapp
-        // (still in-process, still uses `access_token_env`) so the
-        // resolve_secret_env_overrides + instance_signature unit tests
-        // keep a real ChannelMeta witness.
-        find_channel_meta("whatsapp").expect("whatsapp is in the registry")
+        // Matrix migrated to a sidecar in v2026.5; rotated through
+        // whatsapp (also sidecar-migrated) to google_chat — the
+        // remaining in-process channel with a `required: true`
+        // secret env var, so the resolve_secret_env_overrides +
+        // instance_signature unit tests keep a real ChannelMeta
+        // witness. Function name kept for git-blame continuity.
+        find_channel_meta("google_chat").expect("google_chat is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
-        serde_json::json!({ "access_token_env": env_name })
+        serde_json::json!({ "service_account_env": env_name })
     }
 
     /// First-instance create on an empty channel returns the bare default
@@ -3148,8 +2679,8 @@ mod instance_helper_tests {
         let meta = matrix_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -3163,13 +2694,13 @@ mod instance_helper_tests {
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
-            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN_2"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -3182,13 +2713,13 @@ mod instance_helper_tests {
     fn resolve_overrides_preserves_existing_env_name_on_update() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
-            inst_with_env("MY_CUSTOM_WA_TOKEN"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            inst_with_env("MY_CUSTOM_GC_SA"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_WA_TOKEN"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("MY_CUSTOM_GC_SA"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -3202,16 +2733,16 @@ mod instance_helper_tests {
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN_2")
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2")
         );
     }
 
