@@ -384,6 +384,29 @@ def test_webhook_body_dedupes_repeated_activity_id():
     assert len(emitted) == 1
 
 
+def test_webhook_body_does_not_dedupe_dropped_activities():
+    """A dropped activity (empty text, wrong type, disallowed
+    tenant) must NOT mark its Activity ID as seen — otherwise a
+    legitimate retry that lands the parseable payload would be
+    rejected as a duplicate. Bot Framework retries on non-2xx /
+    timeout, so the second delivery may arrive with the fields
+    the parse path needs."""
+    a = _adapter()
+    # First delivery: same activity_id, but text is empty → parse
+    # drops, we should NOT mark seen.
+    bad = _msg_activity(activity_id="retry-1", text="")
+    body1 = json.dumps(bad).encode("utf-8")
+    emitted: list = []
+    a._handle_webhook_body(body1, None, lambda ev: emitted.append(ev))
+    assert emitted == []
+    # Second delivery: same activity_id, with text. Must emit.
+    good = _msg_activity(activity_id="retry-1", text="now with text")
+    body2 = json.dumps(good).encode("utf-8")
+    a._handle_webhook_body(body2, None, lambda ev: emitted.append(ev))
+    assert len(emitted) == 1
+    assert emitted[0]["params"]["content"]["Text"] == "now with text"
+
+
 def test_webhook_body_caches_service_url_per_conversation():
     """Improvement #1: the per-conversation serviceUrl gets cached
     so outbound replies hit the right region instead of the

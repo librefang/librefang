@@ -564,22 +564,35 @@ class TeamsAdapter(SidecarAdapter):
         if conv_id and service_url:
             self._stash_service_url(conv_id, service_url)
 
-        # Improvement #2: dedupe on Activity ID before parse so
-        # retries from Bot Framework don't double-emit.
-        activity_id = activity.get("id") if isinstance(activity.get("id"), str) else ""
-        if activity_id and not self._seen.mark(activity_id):
-            log.debug("teams duplicate activity id, dropping",
-                      activity_id=activity_id)
-            return 200
-
+        # Parse first, then dedupe only successfully-parsed messages.
+        # Marking the Activity ID seen on a *dropped* activity (no
+        # text / wrong type / disallowed tenant) would block any
+        # subsequent legitimate retry that shares the ID — Bot
+        # Framework can redeliver after a non-2xx, and a previously
+        # rejected payload may arrive with the fields the parse path
+        # needs the second time around (e.g. activity 'updated' to
+        # carry text).
         ev = parse_teams_activity(
             activity,
             app_id=self.app_id,
             allowed_tenants=self.allowed_tenants,
             account_id=self.account_id,
         )
-        if ev is not None:
-            emit(ev)
+        if ev is None:
+            return 200
+
+        # Improvement #2: bounded SeenSet on Activity ID. Bot
+        # Framework retries on non-2xx / timeout within ~10 s and
+        # the Rust adapter at teams.rs:434-441 emitted every
+        # activity unconditionally.
+        params = ev.get("params", {})
+        activity_id = params.get("message_id")
+        if isinstance(activity_id, str) and activity_id:
+            if not self._seen.mark(activity_id):
+                log.debug("teams duplicate activity id, dropping",
+                          activity_id=activity_id)
+                return 200
+        emit(ev)
         return 200
 
     def _make_handler_class(
