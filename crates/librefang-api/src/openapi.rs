@@ -189,23 +189,17 @@ use crate::types;
 
         // ── Channels ──
         routes::list_channels,
-        routes::configure_channel,
         routes::configure_sidecar_channel,
-        routes::remove_channel,
-        routes::test_channel,
         routes::reload_channels,
-        // Per-instance management (#4837): the dashboard manages multiple
-        // `[[channels.<name>]]` entries via these endpoints; the legacy
-        // `/configure` ones above stay registered for backwards compat.
-        routes::list_channel_instances,
-        routes::create_channel_instance,
-        routes::update_channel_instance_handler,
-        routes::delete_channel_instance,
-        routes::whatsapp_qr_start,
-        routes::whatsapp_qr_status,
-        // wechat_qr_{start,status} removed alongside the WeChat
-        // in-process → sidecar migration (#5421); the equivalent
-        // endpoints now live on the WeChat sidecar HTTP surface.
+        routes::list_channel_registry,
+        // Per-channel `/configure` (POST/DELETE) + `/instances` (GET/POST)
+        // + `/instances/{index}` (PUT/DELETE) + `/test` (POST) endpoints
+        // gone alongside the in-process channel scaffolding — they all
+        // hit a fall-through 404 via the removed `find_channel_meta`
+        // helper anyway. Sidecar channels go through
+        // `configure_sidecar_channel` (POST /channels/sidecar/{name}/configure).
+        // whatsapp_qr_* / wechat_qr_* were removed earlier when those
+        // QR-pairing routes moved to the channel sidecars.
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,

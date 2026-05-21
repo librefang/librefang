@@ -200,22 +200,26 @@ librefang skill remove code-reviewer
 
 ### 通道设置
 
+所有通道都以独立进程的 sidecar adapter 形式运行。配置写在
+`~/.librefang/config.toml` 的 `[[sidecar_channels]]` 条目里。
+`librefang channel` 子命令组对接的就是存活的 daemon endpoint
+（dashboard **Channels** 页用的是同一套流程，只是换成了 schema-driven 表单）。
+
 ```bash
-# 交互式通道选择器
-librefang channel setup
-
-# 直接设置通道
-librefang channel setup telegram
-
-# 查看通道状态
+# 列出已配置的通道（NAME / KIND / CONFIGURED / TOKEN / 24H MSGS）
 librefang channel list
 
-# 测试通道
-librefang channel test telegram
+# 对一个 sidecar 走 schema-driven 配置 —— 逐字段提示
+librefang channel setup telegram
 
-# 启用/禁用通道
-librefang channel enable discord
-librefang channel disable slack
+# 未配置 sidecar 的交互式选择器
+librefang channel setup
+
+# 从 config.toml 删一个 sidecar 条目 + 热加载
+librefang channel rm telegram
+
+# 手动改完 config.toml 后热加载
+librefang channel reload
 ```
 
 ### 配置管理

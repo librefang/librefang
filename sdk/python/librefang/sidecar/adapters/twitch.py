@@ -544,8 +544,14 @@ class TwitchAdapter(SidecarAdapter):
             # a server-generated UUID.
             message_id=msg_id or None,
             is_group=True,  # Twitch chat is always a public channel.
-            # P2: surface @id as thread_id so on_send can attach
-            # @reply-parent-msg-id back to the source message.
+            # P2 (revised): `librefang_user` is the always-round-tripped
+            # carrier for the @reply-parent-msg-id correlation. The
+            # daemon strips `cmd.thread_id` to None for cap-less
+            # sidecars (twitch declares no `thread` cap), so the
+            # original P2 silently lost the reply context. Keep
+            # `thread_id` for forward-compat with a future
+            # `threading=true` + cap opt-in.
+            librefang_user=msg_id or None,
             thread_id=msg_id or None,
             metadata=metadata,
         )
@@ -682,13 +688,29 @@ class TwitchAdapter(SidecarAdapter):
                 "twitch on_send: missing channel target "
                 "(cmd.channel_id and cmd.user.platform_id are both empty)"
             )
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] (always round-
+        # tripped). Fallback: cmd.thread_id (forward-compat threading=
+        # true + `thread` cap path). Twitch msg ids are UUID-shape —
+        # generic URL/whitespace/@ guard is enough.
+        reply_parent_id: "Optional[str]" = None
+        raw_user2 = getattr(cmd, "user", None) or {}
+        if isinstance(raw_user2, dict):
+            candidate = raw_user2.get("librefang_user")
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                reply_parent_id = candidate
+        if reply_parent_id is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            reply_parent_id = thread_id or None
+
         await asyncio.get_event_loop().run_in_executor(
             None,
             self._send_privmsg_blocking,
-            channel, text, thread_id or None,
+            channel, text, reply_parent_id,
         )
 
     async def on_shutdown(self) -> None:

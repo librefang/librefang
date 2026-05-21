@@ -294,13 +294,25 @@ class MastodonAdapter(SidecarAdapter):
         if in_reply_to:
             metadata["in_reply_to_id"] = in_reply_to
 
+        # `status_id` is the id of the mention itself — i.e. the status
+        # we want to reply TO when the bot answers. The pre-fix
+        # behaviour surfaced `in_reply_to` here (the PARENT the mention
+        # was responding to), which had two bugs at once: (1) the wrong
+        # target — the bot would reply to whoever the user was
+        # responding to, not the user; (2) the daemon's bridge only
+        # round-trips `thread_id` under
+        # `[channels.mastodon.overrides] threading = true` AND `thread`
+        # capability, neither of which mastodon has, so the field was
+        # always `None` in `on_send` regardless. Both fixed by using
+        # `librefang_user` (always round-tripped) as the carrier.
         return protocol.message(
             user_id=account_id,
             user_name=display_name,
             content=content,
             message_id=status_id,
             is_group=False,
-            thread_id=in_reply_to,
+            librefang_user=status_id or None,
+            thread_id=status_id or None,
             metadata=metadata,
         )
 
@@ -531,14 +543,35 @@ class MastodonAdapter(SidecarAdapter):
             text = "(Unsupported content type)"
         else:
             text = cmd.text or ""
-        # `cmd.thread_id` carries the in_reply_to_id from the inbound
-        # mention (we surfaced it as the metadata.in_reply_to_id and
-        # the SDK forwards it on send). When set, post as a reply.
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] carries the
+        # status_id of the mention the bot is replying TO (set in
+        # _parse_notification — librefang_user round-trips bytewise
+        # through the bridge regardless of capabilities/overrides).
+        # Fallback to cmd.thread_id for the forward-compat
+        # threading=true path (would also require a future
+        # `thread` capability declaration).
+        in_reply_to: "Optional[str]" = None
+        user = getattr(cmd, "user", None) or {}
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            # Guard: librefang_user is shared across channels (dingtalk
+            # puts a sessionWebhook URL, telegram puts @username, …).
+            # Mastodon status ids are typically pure-digit strings on
+            # mastodon.social but opaque alphanumerics on some forks —
+            # keep the guard generic (no URL, no whitespace, no @).
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                in_reply_to = candidate
+        if in_reply_to is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            in_reply_to = thread_id
+
         await asyncio.get_event_loop().run_in_executor(
-            None, self._post_status, text, thread_id,
+            None, self._post_status, text, in_reply_to,
         )
 
 

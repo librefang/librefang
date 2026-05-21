@@ -1013,11 +1013,8 @@ impl LibreFangKernel {
         &self.tool_policy_override
     }
 
-    /// WhatsApp gateway PID.
-    #[inline]
-    pub fn whatsapp_pid(&self) -> &Arc<std::sync::Mutex<Option<u32>>> {
-        &self.whatsapp_gateway_pid
-    }
+    // whatsapp_pid accessor removed alongside the whatsapp sidecar
+    // migration — the Baileys gateway is no longer auto-spawned.
 
     /// Context engine (pluggable memory recall + assembly).
     #[inline]

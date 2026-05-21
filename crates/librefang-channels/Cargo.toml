@@ -7,38 +7,13 @@ description = "Channel Bridge Layer — pluggable messaging integrations for Lib
 readme = "README.md"
 
 [features]
-# Channel crate defaults are intentionally empty: every workspace
-# consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets
-# `default-features = false` and forwards an explicit subset, so the old
-# 25+ channel default just confused readers and risked drifting from
-# `all-channels`. Pick a feature explicitly when depending on this
-# crate. See #3655.
+# No cargo features. Every channel adapter ships as a sidecar
+# (`librefang.sidecar.adapters.*` in `sdk/python/`); the crate
+# itself just provides the trampoline (`sidecar.rs`), the bridge
+# types, and shared helpers. The historical `channel-*` and
+# `all-channels` feature flags are gone — their last consumer was
+# `librefang-api` which no longer references them.
 default = []
-
-# Every channel adapter the crate ships. Kept in lock-step with the
-# individual `channel-*` features below — adding a new adapter requires
-# a matching entry here. CI / release / packaging pipelines opt in to
-# this; everyday `cargo build` paths don't.
-all-channels = [
-    "channel-google-chat",
-    "channel-teams",
-    "channel-webhook",
-    "channel-whatsapp",
-]
-
-# Individual channel features
-# email migrated to a sidecar (librefang.sidecar.adapters.email);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-channel-webhook = []
-channel-whatsapp = []
-channel-teams = []
-channel-google-chat = ["dep:rsa"]
-# dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-# wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
@@ -55,17 +30,10 @@ reqwest = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-tokio-tungstenite = { workspace = true }
 url = { workspace = true }
-zeroize = { workspace = true }
 axum = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
-sha1 = { workspace = true }
 base64 = { workspace = true }
-hex = { workspace = true }
 subtle = { workspace = true }
-html-escape = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 pdf-extract = "0.10"
 regex = { workspace = true }
@@ -73,26 +41,36 @@ regex-lite = { workspace = true }
 smallvec = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
-urlencoding = { workspace = true }
+# TLS config for the shared HTTP client (`http_client.rs`). The code
+# builds its provider via `rustls::crypto::aws_lc_rs` (rustls' default
+# backend), so no extra provider feature is requested here — the old
+# `features = ["ring"]` pulled an unused second crypto backend.
+rustls = { workspace = true }
 
-# Channel-specific optional dependencies
-rsa = { workspace = true, optional = true }
-aes = { version = "0.9", optional = true }
-cbc = { version = "0.2", optional = true }
-rustls = { workspace = true, features = ["ring"] }
-
-# Email-sidecar migration (#…): the `lettre` / `imap` /
-# `rustls-connector` / `rustls-pemfile` / `mailparse` optional deps
-# the in-process channel-email feature used to gate are removed
-# alongside the adapter — the sidecar runs on Python's stdlib
-# `imaplib` + `smtplib` + `email` packages and pulls nothing of the
-# sort into the Rust workspace.
+# Sidecar migration cleanup: with every channel adapter moved
+# out-of-process (`librefang.sidecar.adapters.*`), the crypto and
+# transport deps the in-process adapters needed have no remaining
+# consumer in this crate and were removed:
+#   - `hmac` / `sha2` / `sha1` — inbound webhook signature
+#     verification now runs inside each Python sidecar (see AGENTS.md
+#     "Webhook security").
+#   - `aes` / `cbc` — AES-CBC envelope decryption of WeCom (#5392) /
+#     Feishu (#5380) webhook payloads; now done in those sidecars.
+#     (Were `optional` with no feature to enable them, so already
+#     unreachable from this crate.)
+#   - `tokio-tungstenite` — Socket-Mode / gateway websockets (e.g.
+#     WeCom) are the sidecar's concern now.
+#   - `hex` / `html-escape` / `urlencoding` / `zeroize` — no remaining
+#     in-crate caller after the adapters left.
+# `lettre` / `imap` / `rustls-connector` / `rustls-pemfile` /
+# `mailparse` (the email adapter) and `rsa` (google_chat
+# service-account JWT) were dropped earlier alongside their adapters;
+# the sidecars use Python stdlib instead.
 
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
-tower = { workspace = true }
 serde_json = { workspace = true }
 
 [[bench]]
