@@ -27,6 +27,15 @@ import {
 vi.mock("../lib/queries/providers", () => ({
   useProviders: vi.fn(),
   useProviderStatus: vi.fn(),
+  // CredentialPoolsSection (#5459-era addition) calls this; default to the
+  // empty/hidden state so the existing provider-list tests don't have to
+  // care about the niche credential-pools feature. Tests that exercise it
+  // can override via the exported mock.
+  useCredentialPools: vi.fn(() => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  })),
 }));
 
 vi.mock("../lib/queries/models", () => ({
