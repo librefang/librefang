@@ -1532,54 +1532,6 @@ impl ChannelsResource {
         .await
     }
 
-    pub async fn wechat_qr_start(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/channels/wechat/qr/start".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn wechat_qr_status(&self, qr_code: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/channels/wechat/qr/status".to_string(),
-            None,
-            &[("qr_code", qr_code)],
-        )
-        .await
-    }
-
-    pub async fn whatsapp_qr_start(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/channels/whatsapp/qr/start".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn whatsapp_qr_status(&self, session_id: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/channels/whatsapp/qr/status".to_string(),
-            None,
-            &[("session_id", session_id)],
-        )
-        .await
-    }
-
     pub async fn configure_channel(&self, name: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
