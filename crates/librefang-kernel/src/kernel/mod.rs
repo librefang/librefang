@@ -1458,6 +1458,118 @@ impl LibreFangKernel {
         if !self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result) {
             self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
                 .await;
+            // Patching the session updates the on-disk tool_result but
+            // does NOT fire a new agent turn. After a channel-originated
+            // tool call, the LLM responded to the original `WaitingApproval`
+            // placeholder with "OK, waiting on approval" prose and the
+            // agent loop went idle — so the user sees the bot's
+            // `Approved [abc12345] file_write — …` confirmation from
+            // the channel listener and then silence forever (reported
+            // post-#5483 + #5484 by an operator: "approve 就没然后了").
+            //
+            // Wake the agent with a synthetic continuation. The text
+            // mirrors the in-flight `handle_mid_turn_signal` injection
+            // at `tool_call.rs::825-865` so the LLM sees the same
+            // payload shape whether it was live during the resolve or
+            // resumed from idle.
+            self.wake_agent_after_approval(&agent_id, &deferred, &decision, &result)
+                .await;
+        }
+    }
+
+    /// Synthesize a `[System]` continuation message and feed it to the
+    /// agent via `send_message_full` so the loop wakes up, sees the
+    /// just-patched tool_result, and generates a response that flows
+    /// back to the originating channel.
+    ///
+    /// No-op when:
+    /// - `(deferred.channel, deferred.sender_id)` is missing — non-channel
+    ///   sources (dashboard direct, cron, autonomous, inline-blocking
+    ///   `request_approval`) need their own resume path; we don't have
+    ///   a chat to route a response to.
+    /// - The kernel self-handle is unavailable (early boot / shutdown).
+    /// - `send_message_full` fails — logged at WARN; the patched
+    ///   session is still on disk so the next user-initiated turn will
+    ///   see the resolved result, just without an immediate response.
+    async fn wake_agent_after_approval(
+        &self,
+        agent_id: &AgentId,
+        deferred: &librefang_types::tool::DeferredToolExecution,
+        decision: &librefang_types::approval::ApprovalDecision,
+        result: &librefang_types::tool::ToolResult,
+    ) {
+        let (Some(channel), Some(sender_id)) =
+            (deferred.channel.as_deref(), deferred.sender_id.as_deref())
+        else {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                "Approval resolved with no channel/sender context — session patched but agent left idle (non-channel source; next user message will see the resolved result)"
+            );
+            return;
+        };
+
+        let kernel_handle = match self.self_handle.get().and_then(|w| w.upgrade()) {
+            Some(arc) => arc,
+            None => {
+                warn!(
+                    agent_id = %agent_id,
+                    "wake_agent_after_approval: kernel self-handle unavailable — agent will stay idle until next external trigger"
+                );
+                return;
+            }
+        };
+
+        // Minimal SenderContext matching what the original tool call's
+        // SenderContext looked like — channel + user_id are the
+        // load-bearing pair for `SessionId::for_channel`. `chat_id` is
+        // populated to `sender_id` for the common DM case; in group
+        // chats the runtime doesn't currently persist a separate
+        // `chat_id` on the deferred payload, so multi-user-group
+        // resumes route to the inviting user's DM with the bot rather
+        // than the group — a known limitation tracked in the PR body
+        // as out-of-scope follow-up.
+        let sender_ctx = librefang_channels::types::SenderContext {
+            channel: channel.to_string(),
+            user_id: sender_id.to_string(),
+            chat_id: Some(sender_id.to_string()),
+            ..Default::default()
+        };
+
+        let result_preview = librefang_types::truncate_str(&result.content, 300);
+        let msg = format!(
+            "[System] Tool '{}' approval resolved ({}). Result: {}",
+            deferred.tool_name,
+            decision.as_str(),
+            result_preview
+        );
+
+        if let Err(e) = self
+            .send_message_full(
+                *agent_id,
+                &msg,
+                kernel_handle,
+                None,
+                Some(&sender_ctx),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            warn!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                error = %e,
+                "Failed to wake agent after approval resolution — session patched, will need an external trigger to continue"
+            );
+        } else {
+            info!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                channel = channel,
+                "Woke idle agent after approval resolution with synthetic continuation"
+            );
         }
     }
 
