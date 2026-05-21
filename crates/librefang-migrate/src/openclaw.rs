@@ -3564,15 +3564,11 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 channels in the JSON5 fixture; 12 are skipped (telegram,
-        // discord, slack, signal, matrix, irc, mattermost, feishu,
-        // teams, whatsapp all migrated to sidecar adapters, plus
-        // imessage + bluebubbles which the migrator always skips).
-        // That leaves 1 in-process import: google_chat. (The JSON5
-        // keys `googlechat` / `msteams` are aliased to `google_chat`
-        // / `teams` for parsing but `msteams` now emits a
-        // SkippedItem instead of a `[channels.teams]` block.)
-        assert_eq!(channel_items.len(), 1);
+        // Every channel in the fixture migrated to a sidecar adapter
+        // (google_chat joined the set in #5459), so there are no
+        // in-process `[channels.*]` imports — they all surface as
+        // SkippedItem entries instead.
+        assert_eq!(channel_items.len(), 0);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -4013,16 +4009,12 @@ mod tests {
         let mut report = MigrationReport::default();
 
         let channels = migrate_channels_from_json(&root, target.path(), false, &mut report);
-        assert!(channels.is_some());
-        let ch = channels.unwrap();
-        let ch_table = ch.as_table().unwrap();
-        // Telegram, Discord, Slack, and Mattermost are all sidecar
-        // channels now — skipped, not in the table.
-        assert!(!ch_table.contains_key("telegram"));
-        assert!(!ch_table.contains_key("discord"));
-        assert!(!ch_table.contains_key("slack"));
-        assert!(!ch_table.contains_key("mattermost"));
-        for name in ["telegram", "discord", "slack", "mattermost"] {
+        // Every channel is an out-of-process sidecar adapter now, so the
+        // migrator emits no in-process `[channels.*]` table at all — each
+        // one is recorded under report.skipped instead (google_chat joined
+        // the sidecar set in #5459).
+        assert!(channels.is_none());
+        for name in ["telegram", "discord", "slack", "mattermost", "google_chat"] {
             assert!(
                 report
                     .skipped
@@ -4031,17 +4023,16 @@ mod tests {
                 "expected {name} in report.skipped",
             );
         }
-        assert!(ch_table.contains_key("google_chat"));
 
-        // 1 channel import (google_chat; telegram + discord + slack +
-        // mattermost are all sidecar/skipped).
+        // No in-process channel imports — every channel is a sidecar now
+        // (telegram + discord + slack + mattermost + google_chat all skipped).
         assert_eq!(
             report
                 .imported
                 .iter()
                 .filter(|i| i.kind == ItemKind::Channel)
                 .count(),
-            1
+            0
         );
 
         // 5 secrets extracted (telegram + discord + slack-bot +
@@ -4495,7 +4486,9 @@ mod tests {
         assert!(report.imported.iter().any(|i| i.kind == ItemKind::Config));
         assert!(report.imported.iter().any(|i| i.kind == ItemKind::Agent));
         assert!(report.imported.iter().any(|i| i.kind == ItemKind::Memory));
-        assert!(report.imported.iter().any(|i| i.kind == ItemKind::Channel));
+        // Channels no longer import as in-process blocks — they migrate to
+        // sidecar adapters and are recorded under report.skipped.
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel));
 
         assert!(target.path().join("config.toml").exists());
         assert!(target.path().join("agents/coder/agent.toml").exists());
@@ -4897,9 +4890,9 @@ mod tests {
         let mut report = MigrationReport::default();
 
         let channels = migrate_channels_from_json(&root, target.path(), false, &mut report);
-        assert!(channels.is_some());
-        let ch_table = channels.unwrap();
-        let table = ch_table.as_table().unwrap();
+        // Every channel is a sidecar now — the migrator emits no in-process
+        // `[channels.*]` table; each channel is recorded under report.skipped.
+        assert!(channels.is_none());
 
         // Discord, Slack, Mattermost, Signal, Matrix, Feishu, and
         // Google Chat must NOT be written as in-process
@@ -4909,11 +4902,6 @@ mod tests {
             "discord", "slack", "mattermost", "signal", "matrix", "feishu",
             "google_chat",
         ] {
-            assert!(
-                !table.contains_key(name),
-                "{name} is a sidecar channel now; migrator must not write \
-                 [channels.{name}] into the output table",
-            );
             assert!(
                 report.skipped.iter().any(|s| s.kind == ItemKind::Channel
                     && s.name == name
