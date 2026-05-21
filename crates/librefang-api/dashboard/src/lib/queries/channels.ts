@@ -1,10 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import {
-  listChannels,
-  listChannelInstances,
-  getCommsTopology,
-  listCommsEvents,
-} from "../http/client";
+import { listChannels, getCommsTopology, listCommsEvents } from "../http/client";
 import { channelKeys, commsKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -21,16 +16,6 @@ export const channelQueries = {
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
-    }),
-  // Per-instance list (#4837). No background refresh — the dashboard
-  // re-reads via the standard `invalidateQueries` pattern after every
-  // create/update/delete mutation, and the form drawer is short-lived
-  // so a periodic refetch would be wasted load.
-  instances: (name: string) =>
-    queryOptions({
-      queryKey: channelKeys.instances(name),
-      queryFn: () => listChannelInstances(name),
-      staleTime: STALE_MS,
     }),
 };
 
@@ -53,17 +38,6 @@ export const commsQueries = {
 
 export function useChannels(options: QueryOverrides = {}) {
   return useQuery(withOverrides(channelQueries.list(), options));
-}
-
-export function useChannelInstances(
-  name: string,
-  options: QueryOverrides & { enabled?: boolean } = {},
-) {
-  const base = channelQueries.instances(name);
-  return useQuery({
-    ...withOverrides(base, options),
-    enabled: options.enabled ?? Boolean(name),
-  });
 }
 
 export function useCommsTopology(options: QueryOverrides = {}) {
