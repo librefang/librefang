@@ -443,32 +443,14 @@ class _ChannelsResource(_Resource):
     def list_channels(self):
         return self._c._request("GET", "/api/channels")
 
+    def list_channel_registry(self):
+        return self._c._request("GET", "/api/channels/registry")
+
     def reload_channels(self):
         return self._c._request("POST", "/api/channels/reload")
 
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)
-
-    def configure_channel(self, name: str, **data):
-        return self._c._request("POST", f"/api/channels/{name}/configure", data)
-
-    def remove_channel(self, name: str):
-        return self._c._request("DELETE", f"/api/channels/{name}/configure")
-
-    def list_channel_instances(self, name: str):
-        return self._c._request("GET", f"/api/channels/{name}/instances")
-
-    def create_channel_instance(self, name: str, **data):
-        return self._c._request("POST", f"/api/channels/{name}/instances", data)
-
-    def update_channel_instance_handler(self, name: str, index: str, **data):
-        return self._c._request("PUT", f"/api/channels/{name}/instances/{index}", data)
-
-    def delete_channel_instance(self, name: str, index: str, signature: Any = None):
-        return self._c._request("DELETE", f"/api/channels/{name}/instances/{index}", None, query={"signature": signature})
-
-    def test_channel(self, name: str, **data):
-        return self._c._request("POST", f"/api/channels/{name}/test", data)
 
 
 # ── Extensions Resource ────────────────────────────────────────

@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use super::screens::{
     audit::AuditEntry,
-    channels::ChannelInfo,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
     hands::{HandInfo, HandInstanceInfo},
@@ -91,10 +90,8 @@ pub enum AppEvent {
         enabled: bool,
         rows: Vec<crate::tui::screens::dashboard::DreamRow>,
     },
-    /// Channel list loaded.
-    ChannelListLoaded(Vec<ChannelInfo>),
-    /// Channel test result.
-    ChannelTestResult { success: bool, message: String },
+    // `ChannelListLoaded` + `ChannelTestResult` removed alongside the
+    // TUI Channels tab.
     /// Workflow list loaded.
     WorkflowListLoaded(Vec<WorkflowInfo>),
     /// Workflow runs loaded for a specific workflow.
@@ -775,101 +772,9 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-/// Fetch channel list in background.
-pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
+// `spawn_fetch_channels` + `spawn_test_channel` retired alongside
+// the TUI Channels tab.
 
-            if let Ok(resp) = client.get(format!("{base_url}/api/channels")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let channels: Vec<ChannelInfo> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|ch| {
-                                    use super::screens::channels::ChannelStatus;
-                                    let status_str =
-                                        ch["status"].as_str().unwrap_or("not_configured");
-                                    let status = match status_str {
-                                        "ready" => ChannelStatus::Ready,
-                                        "missing_env" => ChannelStatus::MissingEnv,
-                                        _ => ChannelStatus::NotConfigured,
-                                    };
-                                    ChannelInfo {
-                                        name: ch["name"].as_str().unwrap_or("?").to_string(),
-                                        display_name: ch["display_name"]
-                                            .as_str()
-                                            .unwrap_or(ch["name"].as_str().unwrap_or("?"))
-                                            .to_string(),
-                                        category: ch["category"]
-                                            .as_str()
-                                            .unwrap_or("messaging")
-                                            .to_string(),
-                                        status,
-                                        env_vars: Vec::new(),
-                                        enabled: ch["enabled"].as_bool().unwrap_or(false),
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::ChannelListLoaded(channels));
-                }
-            }
-        }
-        BackendRef::InProcess(_kernel) => {
-            // In-process: fall back to default channel detection
-            let _ = tx.send(AppEvent::ChannelListLoaded(Vec::new()));
-        }
-    });
-}
-
-/// Test a channel in background.
-pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client =
-                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
-
-            match client
-                .post(format!("{base_url}/api/channels/{channel}/test"))
-                .send()
-            {
-                Ok(resp) => {
-                    let success = resp.status().is_success();
-                    let msg = resp
-                        .json::<serde_json::Value>()
-                        .ok()
-                        .and_then(|b| b["message"].as_str().map(String::from))
-                        .unwrap_or_else(|| {
-                            if success {
-                                "Test passed".to_string()
-                            } else {
-                                "Test failed".to_string()
-                            }
-                        });
-                    let _ = tx.send(AppEvent::ChannelTestResult {
-                        success,
-                        message: msg,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::ChannelTestResult {
-                        success: false,
-                        message: format!("{e}"),
-                    });
-                }
-            }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::ChannelTestResult {
-                success: false,
-                message: "Channel test not available in in-process mode".to_string(),
-            });
-        }
-    });
-}
 
 /// Fetch workflow list in background.
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
