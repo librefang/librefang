@@ -22,6 +22,5 @@
 # One basename per line, no `.rs`. Keep sorted.
 google_chat
 sidecar
-teams
 webhook
 whatsapp

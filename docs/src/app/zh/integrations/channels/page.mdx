@@ -58,11 +58,15 @@ channel_type = "slack"
 SLACK_APP_TOKEN = "xapp-..."
 SLACK_BOT_TOKEN = "xoxb-..."
 
-# 企业示例
-[channels.teams]
-app_id_env = "TEAMS_APP_ID"
-app_secret_env = "TEAMS_APP_SECRET"
-default_agent = "ops"
+# 企业示例（Teams — sidecar）
+[[sidecar_channels]]
+name = "teams"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.teams"]
+channel_type = "teams"
+[sidecar_channels.env]
+TEAMS_APP_ID = "00000000-0000-0000-0000-000000000000"
+TEAMS_WEBHOOK_PORT = "8459"
 
 # 社交示例（Mastodon — sidecar）
 [[sidecar_channels]]

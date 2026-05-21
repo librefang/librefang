@@ -6384,8 +6384,8 @@ pub struct ChannelsConfig {
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // email migrated to a sidecar (librefang.sidecar.adapters.email);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Microsoft Teams configuration(s).
-    pub teams: OneOrMany<TeamsConfig>,
+    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Google Chat configuration(s).
@@ -6462,7 +6462,6 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             whatsapp: OneOrMany::default(),
-            teams: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             webhook: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
@@ -6577,53 +6576,10 @@ impl Default for WhatsAppConfig {
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Microsoft Teams (Bot Framework v3) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TeamsConfig {
-    /// Azure Bot App ID.
-    pub app_id: String,
-    /// Env var name holding the app password.
-    pub app_password_env: String,
-    /// Env var name holding the outgoing webhook security token (base64-encoded).
-    /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// Required by default; setting `signature_required = false` opts out (dev only).
-    #[serde(default)]
-    pub security_token_env: String,
-    /// Reject adapter startup unless a security token is configured (default `true`).
-    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
-    #[serde(default = "default_true")]
-    pub signature_required: bool,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Allowed tenant IDs (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_tenants: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TeamsConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_password_env: "TEAMS_APP_PASSWORD".to_string(),
-            security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
-            signature_required: true,
-            webhook_port: 3978,
-            allowed_tenants: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+// the in-process `TeamsConfig` + `[channels.teams]` block were removed
+// in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // the in-process `MattermostConfig` + `[channels.mattermost]` block were

@@ -274,17 +274,8 @@ impl KernelConfig {
         // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
         // email migrated to a sidecar (librefang.sidecar.adapters.email);
         // env-var presence is now validated inside the sidecar process.
-        for t in self.channels.teams.iter() {
-            if std::env::var(&t.app_password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Teams configured but {} is not set",
-                    t.app_password_env
-                ));
-            }
-        }
+        // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+        // env-var presence is now validated inside the sidecar process.
         // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
         // env-var presence is now validated inside the sidecar process.
         for gc in self.channels.google_chat.iter() {

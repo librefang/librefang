@@ -209,25 +209,25 @@ EMAIL_USERNAME = "bot@example.com"
 
 `EMAIL_PASSWORD` (and the optional per-protocol overrides `EMAIL_IMAP_PASSWORD` / `EMAIL_SMTP_PASSWORD`) go into `~/.librefang/secrets.env` — the dashboard's Channels page writes them there when you fill the form. The sidecar polls IMAP with `UID SEARCH UNSEEN UNKEYWORD Librefang-Quarantine` (falls back to plain `UNSEEN` when the server rejects the keyword), retries `LOGIN` → `AUTHENTICATE PLAIN` for servers like Lark that only advertise SASL PLAIN, and threads outbound replies via `In-Reply-To` + `References` from a per-sender cache.
 
-#### `[channels.teams]`
+#### Microsoft Teams (sidecar)
+
+Teams migrated from the in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.teams`). The in-process `[channels.teams]` config block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-security_token_env = "TEAMS_SECURITY_TOKEN"
-# webhook_port = 3978  # Deprecated: webhooks now share the API port
-allowed_tenants = []
+[[sidecar_channels]]
+name = "teams"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.teams"]
+channel_type = "teams"
+[sidecar_channels.env]
+TEAMS_APP_ID = "00000000-0000-0000-0000-000000000000"
+TEAMS_WEBHOOK_PORT = "8459"
+# TEAMS_WEBHOOK_PATH = "/webhook"
+# TEAMS_ALLOWED_TENANTS = "tenant-a,tenant-b"     # empty = all
+# TEAMS_ACCOUNT_ID = "production"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Azure Bot App ID. |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
-| `security_token_env` | string | `"TEAMS_SECURITY_TOKEN"` | Env var holding the **outgoing webhook security token** (base64-encoded, copied from the Teams portal). Used for HMAC-SHA256 verification of every inbound `Authorization: HMAC <…>` header. If unset or non-base64, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
-| `webhook_port` | u16 | `3978` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`TEAMS_APP_PASSWORD` (Bot Framework client secret) and `TEAMS_SECURITY_TOKEN` (base64 outgoing-webhook token from the Teams portal — gates HMAC-SHA256 verification of every inbound) go into `~/.librefang/secrets.env`. The sidecar runs its own webhook server on `TEAMS_WEBHOOK_PORT` (default 8459) — the public URL operators register in the Azure Bot Channel configuration changes from `https://<host>/channels/teams/webhook` to `https://<host>:<TEAMS_WEBHOOK_PORT><TEAMS_WEBHOOK_PATH>`.
 
 #### Mattermost (sidecar)
 

@@ -1154,15 +1154,6 @@
           "default": null,
           "description": "Slack bot configuration(s)."
         },
-        "teams": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_TeamsConfig"
-            }
-          ],
-          "default": null,
-          "description": "Microsoft Teams configuration(s)."
-        },
         "webex": {
           "allOf": [
             {
@@ -4826,110 +4817,6 @@
         }
       ]
     },
-    "OneOrMany_TeamsConfig": {
-      "oneOf": [
-        {
-          "description": "Microsoft Teams (Bot Framework v3) channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_tenants": {
-              "default": [],
-              "description": "Allowed tenant IDs (empty = allow all).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "app_id": {
-              "default": "",
-              "description": "Azure Bot App ID.",
-              "type": "string"
-            },
-            "app_password_env": {
-              "default": "TEAMS_APP_PASSWORD",
-              "description": "Env var name holding the app password.",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "security_token_env": {
-              "default": "",
-              "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. Required by default; setting `signature_required = false` opts out (dev only).",
-              "type": "string"
-            },
-            "signature_required": {
-              "default": true,
-              "description": "Reject adapter startup unless a security token is configured (default `true`). Setting to `false` is strongly discouraged — webhook becomes a public endpoint.",
-              "type": "boolean"
-            },
-            "webhook_port": {
-              "default": 3978,
-              "description": "Port for the incoming webhook.",
-              "format": "uint16",
-              "minimum": 0.0,
-              "type": "integer"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/TeamsConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_WebexConfig": {
       "oneOf": [
         {
@@ -6997,100 +6884,6 @@
       },
       "type": "object"
     },
-    "TeamsConfig": {
-      "description": "Microsoft Teams (Bot Framework v3) channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_tenants": {
-          "default": [],
-          "description": "Allowed tenant IDs (empty = allow all).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "app_id": {
-          "default": "",
-          "description": "Azure Bot App ID.",
-          "type": "string"
-        },
-        "app_password_env": {
-          "default": "TEAMS_APP_PASSWORD",
-          "description": "Env var name holding the app password.",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "security_token_env": {
-          "default": "",
-          "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. Required by default; setting `signature_required = false` opts out (dev only).",
-          "type": "string"
-        },
-        "signature_required": {
-          "default": true,
-          "description": "Reject adapter startup unless a security token is configured (default `true`). Setting to `false` is strongly discouraged — webhook becomes a public endpoint.",
-          "type": "boolean"
-        },
-        "webhook_port": {
-          "default": 3978,
-          "description": "Port for the incoming webhook.",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "TelegramRoleMapping": {
       "description": "Telegram-side mapping. Telegram exposes three statuses for a member of a chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/ `kicked` which we collapse into \"no derived role\").",
       "properties": {
@@ -8798,7 +8591,6 @@
         "qq": null,
         "signal": null,
         "slack": null,
-        "teams": null,
         "webex": null,
         "webhook": null,
         "whatsapp": null,

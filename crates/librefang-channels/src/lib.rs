@@ -51,8 +51,8 @@ pub mod google_chat;
 // (librefang.sidecar.adapters.signal); no longer an in-process channel.
 // slack migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.slack); no longer an in-process channel.
-#[cfg(feature = "channel-teams")]
-pub mod teams;
+// teams migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.teams); no longer an in-process channel.
 // webex migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.webex); no longer an in-process channel.
 #[cfg(feature = "channel-webhook")]

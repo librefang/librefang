@@ -173,23 +173,25 @@ EMAIL_USERNAME = "bot@example.com"
 
 `EMAIL_PASSWORD`（以及可选的分协议覆盖 `EMAIL_IMAP_PASSWORD` / `EMAIL_SMTP_PASSWORD`）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Email 表单时会自动写入。sidecar 用 `UID SEARCH UNSEEN UNKEYWORD Librefang-Quarantine` 轮询 IMAP（服务器拒绝该关键字时退回 `UNSEEN`），先 `LOGIN` 再 `AUTHENTICATE PLAIN` 兼容只支持 SASL PLAIN 的服务器（Lark 等），通过 per-sender `In-Reply-To` + `References` 缓存做外发回复线程化。
 
-#### `[channels.teams]`
+#### Microsoft Teams（Sidecar）
+
+Teams 已从进程内 Rust 适配器迁移到进程外 Python sidecar（`librefang.sidecar.adapters.teams`）。原有 `[channels.teams]` 块不再识别——改为声明 `[[sidecar_channels]]`：
 
 ```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-# webhook_port = 3978  # 已弃用：Webhook 现共享 API 端口
-allowed_tenants = []
+[[sidecar_channels]]
+name = "teams"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.teams"]
+channel_type = "teams"
+[sidecar_channels.env]
+TEAMS_APP_ID = "00000000-0000-0000-0000-000000000000"
+TEAMS_WEBHOOK_PORT = "8459"
+# TEAMS_WEBHOOK_PATH = "/webhook"
+# TEAMS_ALLOWED_TENANTS = "tenant-a,tenant-b"     # 留空允许全部
+# TEAMS_ACCOUNT_ID = "production"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | string | `""` | Azure Bot 应用 ID。 |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | 存放 Azure Bot Framework 应用密码的环境变量。 |
-| `webhook_port` | u16 | `3978` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `allowed_tenants` | list of strings | `[]` | 允许的 Azure AD 租户 ID 列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`TEAMS_APP_PASSWORD`（Bot Framework 客户端密钥）和 `TEAMS_SECURITY_TOKEN`（Teams 后台 outgoing-webhook 的 base64 token，用于校验每条入站请求的 HMAC-SHA256）写入 `~/.librefang/secrets.env`。sidecar 监听自己的 webhook 端口（默认 8459），所以你在 Azure Bot Channel 配置里登记的公网 URL 从 `https://<host>/channels/teams/webhook` 改为 `https://<host>:<TEAMS_WEBHOOK_PORT><TEAMS_WEBHOOK_PATH>`。
 
 #### Mattermost（Sidecar）
 

@@ -974,25 +974,9 @@ Secret via `~/.librefang/secrets.env`: `MATRIX_ACCESS_TOKEN` (the bot's access t
 
 Email is provided by the Python sidecar adapter (`librefang.sidecar.adapters.email`). The in-process `[channels.email]` config block was removed in the sidecar migration. Declare email as a `[[sidecar_channels]]` entry instead — see [Email in the channels configuration guide](/configuration/channels#email-imap--smtp-sidecar).
 
-#### `[channels.teams]`
+#### Microsoft Teams (sidecar)
 
-```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-security_token_env = "TEAMS_SECURITY_TOKEN"
-webhook_port = 3978
-allowed_tenants = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Azure Bot App ID. |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
-| `security_token_env` | string | `"TEAMS_SECURITY_TOKEN"` | Env var holding the **outgoing webhook security token** (base64-encoded, copied from the Teams portal). Used for HMAC-SHA256 verification of every inbound `Authorization: HMAC <…>` header. If unset or non-base64, signature verification is skipped and a warning is logged once at startup — production should always set this. |
-| `webhook_port` | u16 | `3978` | Port for the Bot Framework incoming webhook. |
-| `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Teams is provided by the Python sidecar adapter (`librefang.sidecar.adapters.teams`). The in-process `[channels.teams]` config block was removed in the sidecar migration. Declare Teams as a `[[sidecar_channels]]` entry instead — see [Microsoft Teams in the channels configuration guide](/configuration/channels#microsoft-teams-sidecar).
 
 #### Mattermost (sidecar)
 

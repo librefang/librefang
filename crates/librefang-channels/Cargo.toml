@@ -21,7 +21,6 @@ default = []
 # this; everyday `cargo build` paths don't.
 all-channels = [
     "channel-google-chat",
-    "channel-teams",
     "channel-webhook",
     "channel-whatsapp",
 ]
@@ -31,7 +30,8 @@ all-channels = [
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 channel-webhook = []
 channel-whatsapp = []
-channel-teams = []
+# teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 channel-google-chat = ["dep:rsa"]
 # dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.

@@ -177,21 +177,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
     // the SDK package); no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
-    ChannelMeta {
-        name: "teams", display_name: "Microsoft Teams", icon: "MS",
-        description: "Teams Bot Framework adapter",
-        category: "enterprise", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Paste your Azure Bot App ID and Password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "00000000-0000-...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("TEAMS_APP_PASSWORD"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "3978", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
-        config_template: "[channels.teams]\napp_id = \"\"\napp_password_env = \"TEAMS_APP_PASSWORD\"",
-    },
+    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+    // see SIDECAR_CATALOG below.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG below.
     ChannelMeta {
@@ -249,7 +236,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
         "whatsapp" => config.whatsapp.is_some(),
-        "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "webhook" => config.webhook.is_some(),
         _ => false,
@@ -337,7 +323,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "teams" | "google_chat" | "webhook" => Some("/webhook"),
+        "google_chat" | "webhook" => Some("/webhook"),
         _ => None,
     }
 }
@@ -616,6 +602,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WeChat personal-account adapter via the iLink (ClawBot) gateway (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.wechat"],
+    },
+    SidecarCatalogEntry {
+        name: "teams",
+        display_name: "Microsoft Teams",
+        description: "Teams Bot Framework v3 adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.teams"],
     },
 ];
 
@@ -1114,10 +1107,6 @@ fn channel_config_values(
             .whatsapp
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "teams" => config
-            .teams
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
             .as_ref()
@@ -1139,7 +1128,6 @@ fn channel_config_values(
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
         "whatsapp" => config.whatsapp.len(),
-        "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
         "webhook" => config.webhook.len(),
         _ => 0,
@@ -1166,7 +1154,6 @@ fn channel_instances_serialized(
     }
     match name {
         "whatsapp" => ser(&config.whatsapp),
-        "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
         "webhook" => ser(&config.webhook),
         _ => Vec::new(),
@@ -2854,15 +2841,15 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Teams requires TEAMS_APP_PASSWORD. With it unset we must
-        // surface a 412 — NOT a 200 with a "status: error" body,
-        // which silently passes dashboard `fetch().ok` checks
-        // (#3507). Witness rotated from Email (deleted in the email
-        // sidecar migration) → Teams, which still ships in-process
-        // with a `required: true` secret env var.
-        let _g = EnvGuard::unset("TEAMS_APP_PASSWORD");
+        // WhatsApp requires WHATSAPP_ACCESS_TOKEN. With it unset we
+        // must surface a 412 — NOT a 200 with a "status: error"
+        // body, which silently passes dashboard `fetch().ok` checks
+        // (#3507). Witness rotated again: Email → Teams (both
+        // sidecar-migrated) → WhatsApp, which still ships
+        // in-process with a `required: true` secret env var.
+        let _g = EnvGuard::unset("WHATSAPP_ACCESS_TOKEN");
 
-        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -2878,9 +2865,9 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("TEAMS_APP_PASSWORD", "not-a-real-password");
+        let _g = EnvGuard::set("WHATSAPP_ACCESS_TOKEN", "not-a-real-password");
 
-        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("whatsapp".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);

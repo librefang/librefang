@@ -356,30 +356,25 @@ admin_role = "admin"
 
     #[test]
     fn test_channels_config_with_new_channels() {
-        // Witness rotated to WhatsApp + Teams after the email sidecar
-        // migration deleted EmailConfig and the `channels.email`
-        // field. (Earlier rotations: Matrix #5368 → Email; Email →
-        // here.)
+        // Witness rotated again: Matrix #5368 → Email → Teams → here
+        // (WhatsApp + GoogleChat, both still in-process). The
+        // assertion is on ChannelsConfig serde shape, not on any
+        // adapter-specific behaviour.
         let config = KernelConfig {
             channels: ChannelsConfig {
                 whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                teams: OneOrMany(vec![TeamsConfig::default()]),
+                google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
         };
         assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.teams.is_some());
+        assert!(config.channels.google_chat.is_some());
     }
 
-    #[test]
-    fn test_teams_config_defaults() {
-        let t = TeamsConfig::default();
-        assert_eq!(t.app_password_env, "TEAMS_APP_PASSWORD");
-        assert_eq!(t.webhook_port, 3978);
-        assert!(t.allowed_tenants.is_empty());
-        assert!(t.signature_required, "default-deny on Teams webhook");
-    }
+    // test_teams_config_defaults removed — teams migrated to a
+    // sidecar (librefang.sidecar.adapters.teams) and the in-process
+    // TeamsConfig was deleted.
 
     // test_mattermost_config_defaults removed — mattermost migrated to
     // a sidecar (librefang.sidecar.adapters.mattermost) and the
@@ -396,7 +391,6 @@ admin_role = "admin"
     fn test_all_new_channel_configs_serde() {
         let config = KernelConfig {
             channels: ChannelsConfig {
-                teams: OneOrMany(vec![TeamsConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
                 ..Default::default()
             },
@@ -404,7 +398,6 @@ admin_role = "admin"
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let back: KernelConfig = toml::from_str(&toml_str).unwrap();
-        assert!(back.channels.teams.is_some());
         assert!(back.channels.google_chat.is_some());
     }
 

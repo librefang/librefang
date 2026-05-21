@@ -96,7 +96,8 @@ telemetry = [
 # see SIDECAR_CATALOG in src/routes/channels.rs.
 channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
-channel-teams = ["librefang-channels/channel-teams"]
+# teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+# see SIDECAR_CATALOG in src/routes/channels.rs.
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 # dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
@@ -118,7 +119,7 @@ core-channels = [
 
 all-channels = [
     "channel-webhook", "channel-whatsapp",
-    "channel-teams", "channel-google-chat",
+    "channel-google-chat",
 ]
 
 # All channels except email — kept as an alias for `all-channels`
@@ -127,13 +128,13 @@ all-channels = [
 # `mobile-smoke.yml` is rewired to use `all-channels` directly.
 all-channels-no-email = [
     "channel-webhook", "channel-whatsapp",
-    "channel-teams", "channel-google-chat",
+    "channel-google-chat",
 ]
 
 # Mini: a small core set of channels
 mini = [
     "channel-webhook", "channel-whatsapp",
-    "channel-teams", "channel-google-chat",
+    "channel-google-chat",
 ]
 
 [target.'cfg(unix)'.dependencies]
