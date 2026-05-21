@@ -449,12 +449,6 @@ class _ChannelsResource(_Resource):
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)
 
-    def wechat_qr_start(self):
-        return self._c._request("POST", "/api/channels/wechat/qr/start")
-
-    def wechat_qr_status(self, qr_code: Any = None):
-        return self._c._request("GET", "/api/channels/wechat/qr/status", None, query={"qr_code": qr_code})
-
     def whatsapp_qr_start(self):
         return self._c._request("POST", "/api/channels/whatsapp/qr/start")
 
