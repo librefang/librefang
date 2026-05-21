@@ -60,6 +60,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socketserver
 import struct
 import threading
 import time
@@ -67,7 +68,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from base64 import b64decode, urlsafe_b64encode
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Optional
 
 from .. import logging as log
@@ -97,6 +98,11 @@ ALLOWED_TOKEN_URI_PREFIXES = (
 WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 HTTP_TIMEOUT_SECS = 30
+
+# Default webhook bind address. `0.0.0.0` matches the established
+# sidecar convention (teams / webhook); operators behind a reverse
+# proxy override via `GOOGLE_CHAT_BIND_HOST = "127.0.0.1"`.
+DEFAULT_BIND_HOST = "0.0.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +414,13 @@ SCHEMA = Schema(
             placeholder="8090",
         ),
         Field(
+            "GOOGLE_CHAT_BIND_HOST",
+            "Bind address (default 0.0.0.0; set 127.0.0.1 behind a reverse proxy)",
+            "text",
+            advanced=True,
+            placeholder=DEFAULT_BIND_HOST,
+        ),
+        Field(
             "GOOGLE_CHAT_ACCOUNT_ID",
             "Account ID (multi-bot routing — surfaces as google_chat:<id> in channel_defaults)",
             "text",
@@ -451,6 +464,9 @@ class GoogleChatAdapter(SidecarAdapter):
         self._api_base = (
             os.environ.get("GOOGLE_CHAT_API_BASE") or GOOGLE_CHAT_API_BASE
         ).rstrip("/")
+        self._bind_host = (
+            os.environ.get("GOOGLE_CHAT_BIND_HOST", "").strip() or DEFAULT_BIND_HOST
+        )
         self.account_id = os.environ.get("GOOGLE_CHAT_ACCOUNT_ID") or None
 
         # Pre-parse the RSA key once so a bad PEM fails at startup
@@ -480,7 +496,7 @@ class GoogleChatAdapter(SidecarAdapter):
             )
 
         # Server handle for clean shutdown.
-        self._httpd: Optional[HTTPServer] = None
+        self._httpd: Optional[socketserver.ThreadingTCPServer] = None
         self._server_thread: Optional[threading.Thread] = None
 
     # ---- Token resolution ------------------------------------------
@@ -582,8 +598,8 @@ class GoogleChatAdapter(SidecarAdapter):
     # ---- Inbound (webhook) -----------------------------------------
 
     async def produce(self, emit) -> None:
-        # Spin up the HTTPServer in a background thread; bridge inbound
-        # events to the asyncio emit via run_coroutine_threadsafe.
+        # Bridge inbound webhook events from the worker thread to the
+        # asyncio emit via `loop.call_soon_threadsafe`.
         loop = asyncio.get_running_loop()
 
         def thread_emit(event: dict) -> None:
@@ -601,10 +617,36 @@ class GoogleChatAdapter(SidecarAdapter):
                 # Loop closed — drop the event.
                 pass
 
+        # ThreadingTCPServer (not single-threaded HTTPServer) so two
+        # concurrent webhook POSTs don't serialize behind each other.
+        # `daemon_threads` so per-request workers don't block process
+        # exit on shutdown; `allow_reuse_address` so a restart that
+        # left the socket in TIME_WAIT can re-bind without EADDRINUSE.
+        # Matches the established pattern from teams.py / webhook.py.
+        class _ReusingServer(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
         handler_cls = _make_webhook_handler(self, thread_emit)
-        self._httpd = HTTPServer(("0.0.0.0", self._webhook_port), handler_cls)
+        try:
+            self._httpd = _ReusingServer(
+                (self._bind_host, self._webhook_port), handler_cls,
+            )
+        except OSError as e:
+            # Port in use, permission denied, etc. Log cleanly and
+            # let the framework restart the sidecar with backoff
+            # instead of crashing with a bare stack trace.
+            log.error(
+                "google_chat webhook bind failed",
+                host=self._bind_host,
+                port=self._webhook_port,
+                error=str(e),
+            )
+            return
+
         log.info(
             "google_chat webhook listening",
+            host=self._bind_host,
             port=self._webhook_port,
             api_base=self._api_base,
             spaces=len(self._space_ids),
@@ -618,18 +660,43 @@ class GoogleChatAdapter(SidecarAdapter):
             target=_serve, name="google-chat-webhook", daemon=True,
         )
         self._server_thread.start()
-        # Block here until shutdown — the framework cancels this coroutine
-        # on stop, at which point on_shutdown closes the server.
-        while True:
-            await asyncio.sleep(3600)
+
+        # Block until the framework cancels this coroutine on shutdown.
+        # Explicitly catch CancelledError so `_shutdown_server` runs
+        # before the cancellation propagates — without this the server
+        # thread + listening socket leak past `on_shutdown` (which the
+        # framework may not even reach if `produce` raises first).
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self._shutdown_server()
+            raise
+
+    def _shutdown_server(self) -> None:
+        """Drop the listening socket without blocking the caller.
+
+        ``ThreadingTCPServer.shutdown()`` blocks until the
+        ``serve_forever()`` loop exits — calling it from an asyncio
+        coroutine wedges the event loop. Spawn a daemon thread to
+        do the wait so the caller returns immediately. Mirrors
+        teams.py's `_shutdown_server` shape.
+        """
+        httpd = self._httpd
+        self._httpd = None
+        if httpd is None:
+            return
+        try:
+            threading.Thread(
+                target=httpd.shutdown,
+                name="google-chat-shutdown",
+                daemon=True,
+            ).start()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def on_shutdown(self) -> None:
-        if self._httpd is not None:
-            try:
-                self._httpd.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
-            self._httpd = None
+        self._shutdown_server()
 
 
 # ---------------------------------------------------------------------------

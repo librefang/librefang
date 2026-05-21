@@ -72,7 +72,7 @@ def _service_account_blob(*, with_jwt: bool = True, with_token: bool = False):
 
 
 def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
-             account_id: str = "", api_base: str = ""):
+             account_id: str = "", api_base: str = "", bind_host: str = ""):
     os.environ["GOOGLE_CHAT_SERVICE_ACCOUNT_JSON"] = sa_blob
     os.environ["GOOGLE_CHAT_SPACE_IDS"] = spaces
     os.environ["GOOGLE_CHAT_WEBHOOK_PORT"] = port
@@ -81,6 +81,10 @@ def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
         os.environ["GOOGLE_CHAT_API_BASE"] = api_base
     else:
         os.environ.pop("GOOGLE_CHAT_API_BASE", None)
+    if bind_host:
+        os.environ["GOOGLE_CHAT_BIND_HOST"] = bind_host
+    else:
+        os.environ.pop("GOOGLE_CHAT_BIND_HOST", None)
 
 
 # Module import — must be after env preset for SCHEMA-only use, but
@@ -533,3 +537,97 @@ async def test_on_send_empty_text_drops(monkeypatch):
     )
     await a.on_send(_send_cmd(text=""))
     assert calls == []
+
+
+# ---- bind host knob ---------------------------------------------------
+
+
+def test_default_bind_host_is_0_0_0_0():
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    assert a._bind_host == gc.DEFAULT_BIND_HOST == "0.0.0.0"
+
+
+def test_bind_host_env_overrides_default():
+    """Operators behind a reverse proxy lock the listener to 127.0.0.1
+    via `GOOGLE_CHAT_BIND_HOST`. Mirrors `TEAMS_BIND_HOST` /
+    `WEBHOOK_BIND_HOST` from sibling sidecars."""
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        bind_host="127.0.0.1",
+    )
+    a = gc.GoogleChatAdapter()
+    assert a._bind_host == "127.0.0.1"
+
+
+def test_bind_host_empty_string_falls_back_to_default():
+    """`GOOGLE_CHAT_BIND_HOST=""` (set but blank) must not be passed
+    straight through — `HTTPServer(("",  port))` listens on ALL
+    interfaces on Linux but raises on Windows. Mirrors the
+    `os.environ.get(...).strip() or DEFAULT` pattern in
+    teams.py / webhook.py."""
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        bind_host="   ",
+    )
+    a = gc.GoogleChatAdapter()
+    assert a._bind_host == gc.DEFAULT_BIND_HOST
+
+
+def test_bind_host_field_in_schema_marked_advanced():
+    schema = gc.GoogleChatAdapter.SCHEMA.to_dict()
+    bh = next(
+        f for f in schema["fields"] if f["key"] == "GOOGLE_CHAT_BIND_HOST"
+    )
+    assert bh["advanced"] is True
+    assert bh["required"] is False
+
+
+# ---- shutdown lifecycle ------------------------------------------------
+
+
+def test_shutdown_server_returns_immediately_without_blocking():
+    """`ThreadingTCPServer.shutdown()` blocks until `serve_forever`
+    exits; calling it inline from an asyncio coroutine wedges the
+    event loop. `_shutdown_server` must spawn a daemon thread so
+    the caller returns immediately. This regression test pins that
+    behaviour by replacing `_httpd` with a fake whose `shutdown()`
+    sleeps long enough that an inline call would be observable."""
+    import time as _t
+
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+
+    shutdown_called_at: list = []
+
+    class _SlowHttpd:
+        def shutdown(self):
+            shutdown_called_at.append(_t.monotonic())
+            _t.sleep(0.5)  # if this blocks the caller, the test fails
+
+    a._httpd = _SlowHttpd()  # type: ignore[assignment]
+    started_at = _t.monotonic()
+    a._shutdown_server()
+    elapsed = _t.monotonic() - started_at
+    # Must return well under 0.5 s — the work happens on a daemon
+    # thread the caller doesn't await on.
+    assert elapsed < 0.2, (
+        f"_shutdown_server blocked for {elapsed:.3f}s — must dispatch "
+        f"to a thread, not call shutdown() inline"
+    )
+    # And _httpd is cleared so repeated calls are no-ops.
+    assert a._httpd is None
+    # Give the daemon thread a moment to run so the test is deterministic.
+    for _ in range(10):
+        if shutdown_called_at:
+            break
+        _t.sleep(0.05)
+    assert shutdown_called_at, "shutdown() was never actually invoked"
+
+
+def test_shutdown_server_is_idempotent():
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    a._httpd = None
+    a._shutdown_server()  # must not raise
+    a._shutdown_server()  # twice — still no raise
