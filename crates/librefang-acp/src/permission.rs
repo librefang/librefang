@@ -50,7 +50,9 @@ pub(crate) async fn run_bridge<K: AcpKernel>(
     loop {
         match rx.recv().await {
             Ok(ApprovalEvent::Created(approval)) => {
-                if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, approval).await {
+                // `approval` is now `Box<ApprovalRequest>`; unbox so
+                // `dispatch_pending`'s by-value signature still works.
+                if let Err(e) = dispatch_pending(&kernel, &sessions, &cx, *approval).await {
                     warn!(error = %e, "ACP permission bridge: dispatch_pending failed");
                 }
             }
