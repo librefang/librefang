@@ -456,9 +456,15 @@ class BlueskyAdapter(SidecarAdapter):
             content=content,
             message_id=uri,
             is_group=False,
-            # Surface the URI as thread_id so LibreFang threads outbound
-            # replies through to on_send via cmd.thread_id; the sidecar
-            # then reconstructs the reply struct from its cache.
+            # `librefang_user` is the always-round-tripped carrier for
+            # the at:// URI that on_send uses to look up the cached
+            # `{root, parent}` reply struct. Without it, the daemon
+            # would strip `cmd.thread_id` to None for cap-less
+            # sidecars and the reply would post as a top-level skeet
+            # instead of a thread reply. `thread_id` kept for
+            # forward-compat with a future `threading=true` + cap
+            # opt-in.
+            librefang_user=uri or None,
             thread_id=uri or None,
             metadata=metadata,
         )
@@ -638,11 +644,26 @@ class BlueskyAdapter(SidecarAdapter):
             text = "(Unsupported content type)"
         else:
             text = cmd.text or ""
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] (always round-
+        # tripped). Fallback: cmd.thread_id (forward-compat). Bluesky
+        # URIs have a deterministic `at://` prefix — strong sanity
+        # guard.
+        uri_key: "Optional[str]" = None
+        user = getattr(cmd, "user", None) or {}
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            if (isinstance(candidate, str)
+                    and candidate.startswith("at://")
+                    and " " not in candidate):
+                uri_key = candidate
+        if uri_key is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            uri_key = thread_id
+
         await asyncio.get_event_loop().run_in_executor(
-            None, self._post_status, text, thread_id,
+            None, self._post_status, text, uri_key,
         )
 
 

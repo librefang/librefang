@@ -246,10 +246,10 @@ use librefang_channels::google_chat::GoogleChatAdapter;
 // see SIDECAR_CATALOG in routes/channels.rs.
 // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-webhook")]
-use librefang_channels::webhook::WebhookAdapter;
-#[cfg(feature = "channel-whatsapp")]
-use librefang_channels::whatsapp::WhatsAppAdapter;
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // Wave 3
 // line migrated to a sidecar (librefang.sidecar.adapters.line); see
 // SIDECAR_CATALOG in routes/channels.rs.
@@ -1880,10 +1880,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "whatsapp" => find_channel_info!(whatsapp),
             "google_chat" => find_channel_info!(google_chat),
-            // Wave 5
-            "webhook" => find_channel_info!(webhook),
             _ => (None, None),
         };
 
@@ -2473,9 +2470,7 @@ pub async fn start_channel_bridge_with_config(
         };
     }
 
-    check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(webhook, "channel-webhook", "Webhook");
 
     // Sidecar channels (always available, not feature-gated)
     if !kernel.config_ref().sidecar_channels.is_empty() {
@@ -2495,36 +2490,8 @@ pub async fn start_channel_bridge_with_config(
     #[allow(unused_mut, clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
 
-    // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
-    #[cfg(feature = "channel-whatsapp")]
-    for wa_config in config.whatsapp.iter() {
-        let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env)
-            .ok()
-            .filter(|u| !u.is_empty());
-
-        if cloud_token.is_some() || gateway_url.is_some() {
-            let token = cloud_token.unwrap_or_default();
-            let verify_token =
-                read_token(&wa_config.verify_token_env, "WhatsApp (verify)").unwrap_or_default();
-            let adapter = Arc::new(
-                WhatsAppAdapter::new(
-                    wa_config.phone_number_id.clone(),
-                    token,
-                    verify_token,
-                    wa_config.webhook_port,
-                    wa_config.allowed_users.clone(),
-                )
-                .with_gateway(gateway_url)
-                .with_account_id(wa_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wa_config.default_agent.clone(),
-                wa_config.account_id.clone(),
-            ));
-        }
-    }
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in routes/channels.rs.
@@ -2600,32 +2567,8 @@ pub async fn start_channel_bridge_with_config(
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG in routes/channels.rs.
 
-    // Webhook
-    #[cfg(feature = "channel-webhook")]
-    for wh_config in config.webhook.iter() {
-        if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
-            match WebhookAdapter::new(
-                secret,
-                wh_config.listen_port,
-                wh_config.callback_url.clone(),
-            ) {
-                Ok(wa) => {
-                    let adapter = Arc::new(
-                        wa.with_account_id(wh_config.account_id.clone())
-                            .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        wh_config.default_agent.clone(),
-                        wh_config.account_id.clone(),
-                    ));
-                }
-                Err(e) => {
-                    tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
-                }
-            }
-        }
-    }
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // ── Sidecar channel adapters ───────────────────────────────
     // Re-init path: this loop runs on every channel-bridge cycle, not just
@@ -3582,10 +3525,7 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.whatsapp.is_none());
         assert!(config.channels.google_chat.is_none());
-        // Wave 5
-        assert!(config.channels.webhook.is_none());
     }
 
     #[test]

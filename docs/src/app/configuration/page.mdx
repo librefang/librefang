@@ -902,32 +902,9 @@ multi-bot routing via `SLACK_ACCOUNT_ID`. Workspace-role RBAC via
 `channel_role_mapping.slack` is no longer live: see the regression
 note in the CHANGELOG.
 
-#### `[channels.whatsapp]`
+#### WhatsApp (sidecar)
 
-```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-webhook_port = 8443
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # optional admin phone numbers
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
-| `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
-| `webhook_port` | u16 | `8443` | Port to listen for incoming webhook callbacks. |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
-| `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+WhatsApp migrated to a Python sidecar (`librefang.sidecar.adapters.whatsapp`). The in-process `[channels.whatsapp]` block is no longer recognised. Both modes (Meta Cloud API + Web/QR Baileys gateway) are preserved. See [WhatsApp in the channels configuration guide](/configuration/channels#whatsapp-sidecar).
 
 #### Signal (sidecar)
 
@@ -1228,21 +1205,9 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN` (publish) and `GOTIFY_CLIENT_TOKEN` (subscribe) belong in `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
-#### `[channels.webhook]`
+#### Webhook (sidecar)
 
-```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
-| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Webhook migrated to a Python sidecar (`librefang.sidecar.adapters.webhook`). The in-process `[channels.webhook]` block is no longer recognised. Declare as `[[sidecar_channels]]` instead — see [Webhook in the channels configuration guide](/configuration/channels#webhook-sidecar).
 
 #### QQ Bot (sidecar)
 
