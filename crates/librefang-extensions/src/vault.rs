@@ -715,7 +715,16 @@ impl CredentialVault {
         // naming the divergence on the next unlock, instead of
         // never finding out their keyring is being ignored.
         let env_key = std::env::var(VAULT_KEY_ENV).ok().map(Zeroizing::new);
-        let keyring_key = load_keyring_key().ok();
+        // Side-effect-free peek when the env var is set: the divergence
+        // diagnostic must NOT trigger keyring writes / OS Keychain prompts
+        // on env-only (headless / CI / Docker) deployments. Only the
+        // genuine no-env fallback path is allowed to auto-migrate legacy
+        // keyring files (v1/v2 → v3, macOS opt-out mirror).
+        let keyring_key = if env_key.is_some() {
+            load_keyring_key_inner(false).ok()
+        } else {
+            load_keyring_key().ok()
+        };
 
         match classify_master_key_sources(
             env_key.as_ref().map(|s| s.as_str()),
@@ -1194,7 +1203,29 @@ pub(crate) fn classify_master_key_sources(
 ///
 /// On a successful v2 decrypt the file is atomically re-wrapped as v3 so
 /// subsequent loads take the fast v3 path.
+/// Auto-migrating loader used by the no-env fallback path. Reads the
+/// master key from the OS keyring / file store and rewrites legacy
+/// (v1/v2) keyring files to v3 in place, plus the macOS opt-out
+/// migration. Side effects are intentional here.
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
+    load_keyring_key_inner(true)
+}
+
+/// Shared keyring loader.
+///
+/// When `migrate == true`, behaves exactly like the historical
+/// `load_keyring_key`: rewrites legacy v1/v2 files to v3, and on the
+/// macOS opt-out path force-reads the OS keyring and mirrors it to the
+/// file store.
+///
+/// When `migrate == false`, performs a SIDE-EFFECT-FREE peek: it still
+/// reads and decrypts the existing keyring value, but never calls
+/// `store_keyring_key` / `store_keyring_key_to_file` and never takes the
+/// `os_keyring::try_load_force()` macOS-migration branch (which can
+/// trigger an OS Keychain prompt). This lets `resolve_master_key`
+/// compare env vs keyring for the divergence diagnostic without
+/// incurring keyring writes/prompts on env-only deployments.
+fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
         // OS keyring first (issue #3178). `try_load` returns None for both
@@ -1223,7 +1254,12 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             // fact enabled, `try_load` already attempted this and failed,
             // so `try_load_force` will return `None` immediately and we
             // fall through to the missing-file error.
-            if !should_use_os_keyring() {
+            //
+            // Skipped entirely on a non-migrating peek (`migrate == false`):
+            // `try_load_force` can trigger an OS Keychain prompt and the
+            // mirror writes to disk — both forbidden side effects when we
+            // are only comparing env vs keyring.
+            if migrate && !should_use_os_keyring() {
                 if let Some(s) = os_keyring::try_load_force() {
                     info!(
                         "Migrated master key from OS keyring to file-based store at {:?}; \
@@ -1334,12 +1370,16 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
                         )?;
 
                     // Re-wrap with v3 fingerprint and atomically replace the file.
-                    if let Err(e) = store_keyring_key(&key_str) {
-                        warn!("Failed to migrate keyring from v2 to v3 format: {e}");
-                    } else {
-                        info!(
-                            "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
-                        );
+                    // Suppressed on a non-migrating peek (`migrate == false`):
+                    // we return the decrypted value without rewriting the file.
+                    if migrate {
+                        if let Err(e) = store_keyring_key(&key_str) {
+                            warn!("Failed to migrate keyring from v2 to v3 format: {e}");
+                        } else {
+                            info!(
+                                "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
+                            );
+                        }
                     }
 
                     return Ok(Zeroizing::new(key_str));
@@ -1372,17 +1412,22 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             .collect();
         let key_str = String::from_utf8(key_bytes).map_err(|e| format!("legacy utf8: {e}"))?;
 
-        // Re-store with proper encryption to auto-migrate
-        if let Err(e) = store_keyring_key(&key_str) {
-            warn!("Failed to migrate legacy keyring to v3 format: {e}");
-        } else {
-            info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
+        // Re-store with proper encryption to auto-migrate.
+        // Suppressed on a non-migrating peek (`migrate == false`): we
+        // return the decrypted value without rewriting the file.
+        if migrate {
+            if let Err(e) = store_keyring_key(&key_str) {
+                warn!("Failed to migrate legacy keyring to v3 format: {e}");
+            } else {
+                info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
+            }
         }
 
         Ok(Zeroizing::new(key_str))
     }
     #[cfg(test)]
     {
+        let _ = migrate;
         Err("Keyring not available in tests".to_string())
     }
 }
