@@ -650,3 +650,227 @@ def test_shutdown_server_is_idempotent():
     a._httpd = None
     a._shutdown_server()  # must not raise
     a._shutdown_server()  # twice — still no raise
+
+
+# ---- 429 Retry-After + inbound dedupe (sidecar cross-audit fix) ---
+
+
+def _make_429_then_200_urlopen(retry_after: str = "2"):
+    """Return a fake `urlopen` that raises 429 with the given
+    Retry-After header on the first call and returns 200 on later
+    calls. Tracks every call so tests can assert retry behaviour."""
+    import io as _io
+    import urllib.error as _urlerr
+
+    class _Hdrs:
+        def __init__(self, hdrs):
+            self._hdrs = hdrs
+
+        def items(self):
+            return list(self._hdrs.items())
+
+        def get(self, k, default=None):
+            for kk, vv in self._hdrs.items():
+                if kk.lower() == k.lower():
+                    return vv
+            return default
+
+    state = {"calls": 0}
+
+    def fake_urlopen(req, timeout=None):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise _urlerr.HTTPError(
+                req.full_url, 429, "Too Many Requests",
+                _Hdrs({"Retry-After": retry_after}) if retry_after else _Hdrs({}),
+                _io.BytesIO(b""),
+            )
+
+        class _R:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _R()
+
+    return fake_urlopen, state
+
+
+def test_send_text_honours_retry_after_on_429(monkeypatch):
+    """Google Chat publishes per-bot + per-space quotas; both
+    surface as 429 with Retry-After. Pre-fix `_send_text` raised on
+    every 429 (only 401 was specially handled). The fix honours
+    Retry-After and retries once."""
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    fake, state = _make_429_then_200_urlopen(retry_after="3")
+    sleeps: list[float] = []
+    monkeypatch.setattr(gc.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(gc.time, "sleep", sleeps.append)
+    a._send_text("spaces/AAAA", "hi")
+    assert sleeps == [3.0]
+    assert state["calls"] == 2
+
+
+def test_send_text_429_without_retry_after_uses_default(monkeypatch):
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    fake, state = _make_429_then_200_urlopen(retry_after="")
+    sleeps: list[float] = []
+    monkeypatch.setattr(gc.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(gc.time, "sleep", sleeps.append)
+    a._send_text("spaces/AAAA", "hi")
+    assert sleeps == [gc.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_send_text_surfaces_second_429(monkeypatch):
+    """Second 429 raises so the caller surfaces backpressure instead
+    of looping forever."""
+    import io as _io
+    import urllib.error as _urlerr
+
+    class _Hdrs:
+        def items(self):
+            return []
+
+        def get(self, k, default=None):
+            return default
+
+    state = {"calls": 0}
+
+    def fake_urlopen(req, timeout=None):
+        state["calls"] += 1
+        raise _urlerr.HTTPError(
+            req.full_url, 429, "Too Many Requests",
+            _Hdrs(), _io.BytesIO(b""),
+        )
+
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    monkeypatch.setattr(gc.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gc.time, "sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="429"):
+        a._send_text("spaces/AAAA", "hi")
+    assert state["calls"] == 2
+
+
+def _post_to_webhook(adapter, body: dict, *, emit_target: list,
+                     path: str = "/webhook") -> tuple[int, bytes]:
+    """Drive `_make_webhook_handler` end-to-end against a fake socket.
+
+    Mirrors the same pattern feishu's tests use to exercise the real
+    `do_POST` wiring without spinning up an HTTPServer. Asserting only
+    `_seen.mark()` directly (as an earlier revision did) doesn't cover
+    the wiring inside `do_POST` — if a future refactor reordered the
+    `_seen.mark()` call out of the emit gate, the dedupe contract
+    would silently break.
+    """
+    import io
+    handler_cls = gc._make_webhook_handler(adapter, emit_target.append)
+    body_bytes = json.dumps(body).encode("utf-8")
+    hdr_lines = [
+        f"POST {path} HTTP/1.1",
+        "Host: localhost",
+        f"Content-Length: {len(body_bytes)}",
+        "Content-Type: application/json",
+    ]
+    request_text = "\r\n".join(hdr_lines) + "\r\n\r\n"
+    raw = request_text.encode("ascii") + body_bytes
+
+    class _Sock:
+        def __init__(self, data: bytes) -> None:
+            self._r = io.BytesIO(data)
+            self.w = io.BytesIO()
+
+        def makefile(self, mode, *_args, **_kw):
+            return self._r if "r" in mode else self.w
+
+        def sendall(self, data: bytes) -> None:
+            self.w.write(data)
+
+        def getsockname(self):
+            return ("127.0.0.1", 0)
+
+    sock = _Sock(raw)
+    # BaseHTTPRequestHandler runs do_POST inside __init__ via handle().
+    handler_cls(sock, ("127.0.0.1", 9999), None)
+    response_raw = sock.w.getvalue()
+    first_line = response_raw.split(b"\r\n", 1)[0]
+    parts = first_line.split(b" ", 2)
+    status = int(parts[1]) if len(parts) >= 2 else 0
+    return status, response_raw
+
+
+def test_webhook_handler_dedupes_redelivered_event():
+    """Google Chat uses at-least-once delivery — the same MESSAGE
+    event can arrive multiple times under slow-ack conditions. The
+    adapter's webhook handler now keys on `message.name` (the
+    space-scoped unique message id) and drops the redelivery before
+    the daemon ever sees it.
+
+    Drives `do_POST` through a fake socket so the dedupe wiring
+    (parse → mark → emit) is end-to-end covered, not just `SeenSet`
+    in isolation.
+    """
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    emitted: list[dict] = []
+
+    payload = _msg_event(text="hi")
+    # First delivery: emit fires + 200 OK returned to Google.
+    status, _ = _post_to_webhook(a, payload, emit_target=emitted)
+    assert status == 200
+    assert len(emitted) == 1
+    assert emitted[0]["params"]["message_id"] == "spaces/AAAA/messages/M1"
+
+    # Redelivery of the exact same `message.name`: handler still
+    # returns 200 (we always 200 so Google stops replaying) but the
+    # event must NOT be emitted a second time.
+    status, _ = _post_to_webhook(a, payload, emit_target=emitted)
+    assert status == 200
+    assert len(emitted) == 1  # dedupe suppressed the redelivery
+
+    # A distinct message in the same space still emits.
+    payload2 = _msg_event(text="round 2")
+    payload2["message"]["name"] = "spaces/AAAA/messages/M2"
+    status, _ = _post_to_webhook(a, payload2, emit_target=emitted)
+    assert status == 200
+    assert [e["params"]["message_id"] for e in emitted] == [
+        "spaces/AAAA/messages/M1",
+        "spaces/AAAA/messages/M2",
+    ]
+
+
+def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
+    """Filtered-out events (wrong space, non-MESSAGE type) must not
+    burn a `_seen` slot — the dedupe table is 10 000 entries, and
+    flooding it with non-emittable events would evict legitimate
+    message IDs and re-open the at-least-once window we just closed.
+    """
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        spaces="spaces/AAAA",  # only this space is allowed
+    )
+    a = gc.GoogleChatAdapter()
+    emitted: list[dict] = []
+
+    # Event for a disallowed space → filtered out by `_parse_webhook_event`.
+    blocked = _msg_event(text="hi", space_name="spaces/BBBB")
+    status, _ = _post_to_webhook(a, blocked, emit_target=emitted)
+    assert status == 200
+    assert emitted == []
+    # The blocked message's `name` ID must NOT have been added to _seen.
+    assert "spaces/BBBB/messages/M1" not in a._seen.ids
+
+    # Non-MESSAGE event → also filtered, also no _seen consumption.
+    non_msg = {"type": "ADDED_TO_SPACE",
+               "space": {"name": "spaces/AAAA", "type": "ROOM"}}
+    status, _ = _post_to_webhook(a, non_msg, emit_target=emitted)
+    assert status == 200
+    assert emitted == []
+    assert len(a._seen.ids) == 0
