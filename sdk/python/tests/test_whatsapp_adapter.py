@@ -461,6 +461,32 @@ def test_post_webhook_valid_signature_emits():
     assert len(emitted) == 1
 
 
+def test_post_webhook_missing_signature_returns_400():
+    """Meta always sends X-Hub-Signature-256 when app_secret is
+    configured on the App side. A missing header is a malformed
+    request (or a stripped-by-proxy attack) — 400, not 401, since
+    401 implies credentials were presented and rejected. Aligns
+    with how `test_webhook_body_missing_auth_rejected_400` shapes
+    the Teams adapter."""
+    a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
+    body = json.dumps(_wh_payload()).encode("utf-8")
+    emitted: list = []
+    status = a._handle_post_webhook(body, None, lambda ev: emitted.append(ev))
+    assert status == 400
+    assert emitted == []
+
+
+def test_post_webhook_empty_signature_returns_400():
+    """Same as missing — empty string is also a malformed
+    request, not a credentials-rejected case."""
+    a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
+    body = json.dumps(_wh_payload()).encode("utf-8")
+    emitted: list = []
+    status = a._handle_post_webhook(body, "", lambda ev: emitted.append(ev))
+    assert status == 400
+    assert emitted == []
+
+
 def test_post_webhook_invalid_signature_rejected():
     a = _cloud_adapter(WHATSAPP_APP_SECRET="appsecret")
     body = json.dumps(_wh_payload()).encode("utf-8")

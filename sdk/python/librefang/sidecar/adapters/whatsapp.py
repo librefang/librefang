@@ -684,6 +684,12 @@ class WhatsAppAdapter(SidecarAdapter):
         """Verify X-Hub-Signature-256 (if app_secret configured) +
         parse Cloud API webhook body + emit text events."""
         if self.app_secret:
+            if not signature:
+                # Missing header (Meta omits it, or the upstream
+                # proxy stripped it) — 400 not 401, since 401
+                # implies credentials were presented and rejected.
+                log.warn("whatsapp: missing X-Hub-Signature-256 header")
+                return 400
             if not verify_xhub_signature(
                 self.app_secret.encode("utf-8"), body, signature,
             ):
