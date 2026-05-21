@@ -100,7 +100,8 @@ channel-teams = ["librefang-channels/channel-teams"]
 channel-google-chat = ["librefang-channels/channel-google-chat"]
 # dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
-channel-wechat = ["librefang-channels/channel-wechat"]
+# wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+# see SIDECAR_CATALOG in src/routes/channels.rs.
 # wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
 
@@ -118,7 +119,6 @@ core-channels = [
 all-channels = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-wechat",
 ]
 
 # All channels except email — kept as an alias for `all-channels`
@@ -128,7 +128,6 @@ all-channels = [
 all-channels-no-email = [
     "channel-webhook", "channel-whatsapp",
     "channel-teams", "channel-google-chat",
-    "channel-wechat",
 ]
 
 # Mini: a small core set of channels

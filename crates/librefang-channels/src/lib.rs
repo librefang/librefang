@@ -57,8 +57,8 @@ pub mod teams;
 // (librefang.sidecar.adapters.webex); no longer an in-process channel.
 #[cfg(feature = "channel-webhook")]
 pub mod webhook;
-#[cfg(feature = "channel-wechat")]
-pub mod wechat;
+// wechat migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.wechat); no longer an in-process channel.
 // wecom migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.wecom); no longer an in-process channel.
 #[cfg(feature = "channel-whatsapp")]

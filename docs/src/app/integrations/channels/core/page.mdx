@@ -267,31 +267,32 @@ The WhatsApp adapter can send voice replies via `send_voice(to, audio, mime_type
 
 ---
 
-## WeChat (Personal)
+## WeChat (Personal) — sidecar
+
+WeChat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.wechat`). The in-process `[channels.wechat]` config block was removed in the sidecar migration. Declare WeChat as a `[[sidecar_channels]]` entry instead.
 
 ### Prerequisites
 
 - A personal WeChat account (iOS 8.0.70+ recommended)
 - WeChat ClawBot plugin access (currently in gradual rollout)
+- `python3` on the daemon host (stdlib-only sidecar — no third-party packages)
 
 ### Setup
 
-1. Add to config:
+1. Add to `config.toml`:
 
 ```toml
-[channels.wechat]
-# bot_token is obtained automatically via QR scan
-# If you have a token from a previous session, set it here to skip QR login:
-# bot_token_env = "WECHAT_BOT_TOKEN"
-default_agent = "assistant"
-allowed_users = []        # empty = allow all; format: "hash@im.wechat"
+[[sidecar_channels]]
+name = "wechat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wechat"]
+channel_type = "wechat"
+[sidecar_channels.env]
+# WECHAT_BOT_TOKEN = ""        # leave blank to trigger QR login
+# WECHAT_ALLOWED_USERS = ""    # comma-separated hash@im.wechat
 ```
 
-2. Start (or restart) the LibreFang daemon.
-3. A QR code will appear in the daemon logs — scan it with your WeChat app.
-4. Once confirmed, the adapter begins receiving messages.
-
-> **Tip:** After the first QR login, save the `bot_token` to an environment variable so subsequent restarts skip the QR flow.
+2. Start (or restart) the LibreFang daemon. The sidecar will log a QR code at INFO — scan it with your WeChat app to confirm. After the first QR login, paste the `bot_token` into `WECHAT_BOT_TOKEN` (in `~/.librefang/secrets.env`) to skip the QR flow on subsequent restarts.
 
 ### How It Works
 

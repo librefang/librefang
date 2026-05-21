@@ -881,23 +881,9 @@ admin_role = "admin"
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
 
-    #[test]
-    fn test_one_or_many_single_wechat_table() {
-        let toml_str = r#"
-            [channels.wechat]
-            bot_token_env = "WECHAT_TOKEN_MAIN"
-            account_id = "wechat-main"
-            default_agent = "assistant"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wechat.is_some());
-        assert_eq!(config.channels.wechat.len(), 1);
-
-        let wechat = config.channels.wechat.first().unwrap();
-        assert_eq!(wechat.bot_token_env, "WECHAT_TOKEN_MAIN");
-        assert_eq!(wechat.account_id.as_deref(), Some("wechat-main"));
-        assert_eq!(wechat.default_agent.as_deref(), Some("assistant"));
-    }
+    // test_one_or_many_single_wechat_table removed — wechat migrated
+    // to a sidecar (librefang.sidecar.adapters.wechat); the
+    // [channels.wechat] TOML key is no longer recognised.
 
     // test_one_or_many_array_of_wecom_tables removed — wecom migrated to
     // a sidecar (librefang.sidecar.adapters.wecom); the [channels.wecom]
@@ -935,10 +921,9 @@ admin_role = "admin"
     fn test_account_id_in_channel_configs() {
         // Verify account_id field exists and defaults to None.
         // Matrix witness deleted by #5368, Feishu by #5380, Email +
-        // DingTalk by their sidecar migrations; remaining in-process
-        // witnesses that expose `account_id` are below.
+        // DingTalk + WeChat by their sidecar migrations; remaining
+        // in-process witnesses that expose `account_id` are below.
         assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(WeChatConfig::default().account_id.is_none());
     }
 
     #[test]

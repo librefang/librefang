@@ -6405,8 +6405,8 @@ pub struct ChannelsConfig {
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
-    /// WeChat personal account (iLink) configuration(s).
-    pub wechat: OneOrMany<WeChatConfig>,
+    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
@@ -6465,7 +6465,6 @@ impl Default for ChannelsConfig {
             teams: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             webhook: OneOrMany::default(),
-            wechat: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6689,45 +6688,9 @@ impl Default for GoogleChatConfig {
 // stdlib-only by policy. Operators on callback mode must switch
 // the bot to WebSocket mode in the WeCom admin console.
 
-/// WeChat personal account (iLink protocol) adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WeChatConfig {
-    /// Env var name holding the bot token from a previous QR login session.
-    /// If the env var is set and non-empty, the adapter skips QR login.
-    pub bot_token_env: String,
-    /// Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.
-    #[serde(default)]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Initial backoff in seconds on API failures (default: 2).
-    #[serde(default = "default_channel_initial_backoff_2s")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on API failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WeChatConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "WECHAT_BOT_TOKEN".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            initial_backoff_secs: default_channel_initial_backoff_2s(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat); the
+// in-process `WeChatConfig` + `[channels.wechat]` block were removed in
+// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
 // webex migrated to a sidecar (librefang.sidecar.adapters.webex); see

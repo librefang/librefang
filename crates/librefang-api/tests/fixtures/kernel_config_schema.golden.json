@@ -1181,15 +1181,6 @@
           "default": null,
           "description": "Generic webhook configuration(s)."
         },
-        "wechat": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_WeChatConfig"
-            }
-          ],
-          "default": null,
-          "description": "WeChat personal account (iLink) configuration(s)."
-        },
         "whatsapp": {
           "allOf": [
             {
@@ -4939,102 +4930,6 @@
         }
       ]
     },
-    "OneOrMany_WeChatConfig": {
-      "oneOf": [
-        {
-          "description": "WeChat personal account (iLink protocol) adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_users": {
-              "default": [],
-              "description": "Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "bot_token_env": {
-              "default": "WECHAT_BOT_TOKEN",
-              "description": "Env var name holding the bot token from a previous QR login session. If the env var is set and non-empty, the adapter skips QR login.",
-              "type": "string"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "initial_backoff_secs": {
-              "default": 2,
-              "description": "Initial backoff in seconds on API failures (default: 2).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "max_backoff_secs": {
-              "default": 60,
-              "description": "Maximum backoff in seconds on API failures (default: 60).",
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/WeChatConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_WebexConfig": {
       "oneOf": [
         {
@@ -8093,92 +7988,6 @@
       },
       "type": "object"
     },
-    "WeChatConfig": {
-      "description": "WeChat personal account (iLink protocol) adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_users": {
-          "default": [],
-          "description": "Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "bot_token_env": {
-          "default": "WECHAT_BOT_TOKEN",
-          "description": "Env var name holding the bot token from a previous QR login session. If the env var is set and non-empty, the adapter skips QR login.",
-          "type": "string"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "initial_backoff_secs": {
-          "default": 2,
-          "description": "Initial backoff in seconds on API failures (default: 2).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "max_backoff_secs": {
-          "default": 60,
-          "description": "Maximum backoff in seconds on API failures (default: 60).",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        }
-      },
-      "type": "object"
-    },
     "WeComMode": {
       "description": "Connection mode for the WeCom intelligent bot adapter.",
       "oneOf": [
@@ -8992,7 +8801,6 @@
         "teams": null,
         "webex": null,
         "webhook": null,
-        "wechat": null,
         "whatsapp": null,
         "zulip": null
       },

@@ -29,7 +29,6 @@ macro_rules! for_each_channel_field {
         $mac!(google_chat, "google_chat");
         $mac!(teams, "teams");
         $mac!(webhook, "webhook");
-        $mac!(wechat, "wechat");
         $mac!(whatsapp, "whatsapp");
     };
 }
@@ -462,7 +461,6 @@ mod tests {
             "google_chat",
             "teams",
             "webhook",
-            "wechat",
             "whatsapp",
         ];
 

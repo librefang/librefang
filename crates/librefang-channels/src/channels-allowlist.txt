@@ -24,5 +24,4 @@ google_chat
 sidecar
 teams
 webhook
-wechat
 whatsapp

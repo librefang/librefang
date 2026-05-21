@@ -364,10 +364,14 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # [sidecar_channels.env]
 # WECOM_BOT_ID = "aibxxxxxxx"
 
-# [channels.wechat]
-# bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
-# default_agent = "assistant"
-# allowed_users = []
+# WeChat migrated to a sidecar:
+# [[sidecar_channels]]
+# name = "wechat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wechat"]
+# channel_type = "wechat"
+# [sidecar_channels.env]
+# WECHAT_BOT_TOKEN = ""               # blank → triggers QR login
 
 # --- Browser Automation ---
 [browser]
@@ -1294,25 +1298,9 @@ WECOM_BOT_ID = "aibxxxxxxx"
 
 Secret via `~/.librefang/secrets.env`: `WECOM_BOT_SECRET` (the bot secret from the WeCom admin console).
 
-#### `[channels.wechat]`
+#### WeChat (sidecar)
 
-WeChat personal account channel adapter using Tencent's iLink Bot API. Connects via QR code scan — no API keys or developer accounts required.
-
-```toml
-[channels.wechat]
-# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: persisted token from previous session
-allowed_users = []
-# default_agent = "assistant"
-# account_id = "my-wechat-bot"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"WECHAT_BOT_TOKEN"` | Env var holding a persisted bot token from a previous QR login session. When set, skips QR login on restart. |
-| `allowed_users` | list of strings | `[]` | WeChat user IDs allowed to interact (format: `hash@im.wechat`). Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+WeChat (personal account via iLink) is provided by the Python sidecar adapter (`librefang.sidecar.adapters.wechat`). The in-process `[channels.wechat]` config block was removed in the sidecar migration. Declare WeChat as a `[[sidecar_channels]]` entry instead — see [WeChat in the channels configuration guide](/configuration/channels#wechat-sidecar).
 
 ---
 

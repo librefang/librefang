@@ -263,8 +263,8 @@ use librefang_channels::whatsapp::WhatsAppAdapter;
 // see SIDECAR_CATALOG in routes/channels.rs.
 // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-wechat")]
-use librefang_channels::wechat::WeChatAdapter;
+// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
 // see SIDECAR_CATALOG in routes/channels.rs.
 
@@ -1885,7 +1885,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "google_chat" => find_channel_info!(google_chat),
             // Wave 5
             "webhook" => find_channel_info!(webhook),
-            "wechat" => find_channel_info!(wechat),
             _ => (None, None),
         };
 
@@ -2478,7 +2477,6 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
     check_channel!(teams, "channel-teams", "Teams");
     check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(webhook, "channel-webhook", "Webhook");
 
     // Sidecar channels (always available, not feature-gated)
@@ -2642,29 +2640,8 @@ pub async fn start_channel_bridge_with_config(
     // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
     // see SIDECAR_CATALOG in routes/channels.rs.
 
-    // WeChat (personal account via iLink)
-    // Only start when a bot token is available — without a token the adapter
-    // would block on QR login which stalls the entire server startup.
-    // Users obtain a token via the dashboard QR flow, which saves it to
-    // secrets.env; on next restart the adapter will start normally.
-    #[cfg(feature = "channel-wechat")]
-    for wx_config in config.wechat.iter() {
-        let bot_token = read_token(&wx_config.bot_token_env, "WeChat");
-        if bot_token.is_none() {
-            warn!("WeChat: no bot token available — skipping adapter start (use dashboard QR login to obtain one)");
-            continue;
-        }
-        let adapter = Arc::new(
-            WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
-                .with_account_id(wx_config.account_id.clone())
-                .with_backoff(wx_config.initial_backoff_secs, wx_config.max_backoff_secs),
-        );
-        adapters.push((
-            adapter,
-            wx_config.default_agent.clone(),
-            wx_config.account_id.clone(),
-        ));
-    }
+    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+    // see SIDECAR_CATALOG in routes/channels.rs.
 
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
     // see SIDECAR_CATALOG in routes/channels.rs.

@@ -33,14 +33,11 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/whatsapp/qr/status",
             axum::routing::get(whatsapp_qr_status),
         )
-        .route(
-            "/channels/wechat/qr/start",
-            axum::routing::post(wechat_qr_start),
-        )
-        .route(
-            "/channels/wechat/qr/status",
-            axum::routing::get(wechat_qr_status),
-        )
+        // wechat_qr_start / wechat_qr_status removed alongside the
+        // WeChat in-process adapter when it migrated to a sidecar
+        // (librefang.sidecar.adapters.wechat). The sidecar now drives
+        // the QR login flow itself and logs the QR code at INFO; the
+        // dashboard can still display it by reading sidecar logs.
         .route(
             "/channels/registry",
             axum::routing::get(list_channel_registry),
@@ -240,20 +237,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Enter an HMAC secret (or leave blank)", "Click Save — that's it!"],
         config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
     },
-    ChannelMeta {
-        name: "wechat", display_name: "WeChat", icon: "WX",
-        description: "WeChat personal account via iLink protocol",
-        category: "messaging", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Scan QR code with your WeChat app — no developer account needed",
-        setup_type: "qr",
-        fields: &[
-            ChannelField { key: "bot_token_env", label: "Bot Token (from previous session)", field_type: FieldType::Secret, env_var: Some("WECHAT_BOT_TOKEN"), required: false, placeholder: "ilink_bot_...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123@im.wechat", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open WeChat on your phone", "The QR code will appear in the dashboard", "Scan it with WeChat to connect"],
-        config_template: "[channels.wechat]\nbot_token_env = \"WECHAT_BOT_TOKEN\"",
-    },
+    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+    // see SIDECAR_CATALOG below.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
     // see SIDECAR_CATALOG below.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
@@ -267,7 +252,6 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
         "webhook" => config.webhook.is_some(),
-        "wechat" => config.wechat.is_some(),
         _ => false,
     }
 }
@@ -625,6 +609,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "DingTalk (\u{9489}\u{9489}) Robot stream-mode adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.dingtalk"],
+    },
+    SidecarCatalogEntry {
+        name: "wechat",
+        display_name: "WeChat",
+        description: "WeChat personal-account adapter via the iLink (ClawBot) gateway (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.wechat"],
     },
 ];
 
@@ -1135,10 +1126,6 @@ fn channel_config_values(
             .webhook
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "wechat" => config
-            .wechat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -1155,7 +1142,6 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
         "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
         "webhook" => config.webhook.len(),
-        "wechat" => config.wechat.len(),
         _ => 0,
     }
 }
@@ -1183,7 +1169,6 @@ fn channel_instances_serialized(
         "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
         "webhook" => ser(&config.webhook),
-        "wechat" => ser(&config.wechat),
         _ => Vec::new(),
     }
 }
@@ -2765,157 +2750,11 @@ async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, Stri
     }
 }
 
-// ── WeChat QR login endpoints ────────────────────────────────────────────────
+// WeChat QR endpoints removed — the WeChat adapter migrated to
+// a sidecar (librefang.sidecar.adapters.wechat). The sidecar
+// now runs the QR login flow itself and logs the QR string at
+// INFO; the dashboard surfaces it by tailing sidecar logs.
 
-/// iLink API base URL used by the WeChat adapter.
-const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
-
-#[utoipa::path(
-    post,
-    path = "/api/channels/wechat/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WeChat QR login initiated", body = crate::types::JsonObject)
-    )
-)]
-/// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
-pub async fn wechat_qr_start() -> impl IntoResponse {
-    let client = match librefang_kernel::http_client::client_builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "available": false,
-                "message": format!("HTTP client error: {e}")
-            }));
-        }
-    };
-
-    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_bot_qrcode?bot_type=3");
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let qrcode = body["qrcode"].as_str().unwrap_or("");
-                let qrcode_url = body["qrcode_img_content"].as_str().unwrap_or("");
-                if qrcode.is_empty() {
-                    return Json(serde_json::json!({
-                        "available": false,
-                        "message": "iLink returned empty qrcode"
-                    }));
-                }
-                Json(serde_json::json!({
-                    "available": true,
-                    "qr_code": qrcode,
-                    "qr_url": qrcode_url,
-                    "message": "Scan this QR code with your WeChat app to log in",
-                }))
-            }
-            Err(e) => Json(serde_json::json!({
-                "available": false,
-                "message": format!("Failed to parse iLink response: {e}")
-            })),
-        },
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Json(serde_json::json!({
-                "available": false,
-                "message": format!("iLink QR request failed ({status}): {body}")
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach iLink API: {e}")
-        })),
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/channels/wechat/qr/status",
-    tag = "channels",
-    params(
-        ("qr_code" = String, Query, description = "QR code value from /qr/start")
-    ),
-    responses(
-        (status = 200, description = "WeChat QR scan status", body = crate::types::JsonObject)
-    )
-)]
-/// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
-pub async fn wechat_qr_status(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let qr_code = params.get("qr_code").cloned().unwrap_or_default();
-    if qr_code.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "expired": false,
-            "message": "Missing qr_code parameter"
-        }));
-    }
-
-    // iLink uses long-polling: the request hangs until the user scans or it
-    // times out server-side (~30s). Use a generous timeout so we don't mistake
-    // a normal long-poll wait for a network error.
-    let client = match librefang_kernel::http_client::client_builder()
-        .timeout(std::time::Duration::from_secs(35))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return Json(serde_json::json!({
-                "connected": false,
-                "expired": false,
-                "message": "HTTP client error"
-            }));
-        }
-    };
-
-    let encoded: String = url::form_urlencoded::byte_serialize(qr_code.as_bytes()).collect();
-    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_qrcode_status?qrcode={encoded}");
-
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let status = body["status"].as_str().unwrap_or("pending");
-                match status {
-                    "confirmed" => {
-                        let bot_token = body["bot_token"].as_str().unwrap_or("");
-                        Json(serde_json::json!({
-                            "connected": true,
-                            "expired": false,
-                            "message": "WeChat login successful",
-                            "bot_token": bot_token,
-                        }))
-                    }
-                    "expired" => Json(serde_json::json!({
-                        "connected": false,
-                        "expired": true,
-                        "message": "QR code expired — click Start to get a new one"
-                    })),
-                    _ => Json(serde_json::json!({
-                        "connected": false,
-                        "expired": false,
-                        "message": "Waiting for scan..."
-                    })),
-                }
-            }
-            Err(_) => Json(serde_json::json!({
-                "connected": false,
-                "expired": false,
-                "message": "Failed to parse status response"
-            })),
-        },
-        // Timeout is normal for long-poll — treat as "still waiting"
-        _ => Json(serde_json::json!({
-            "connected": false,
-            "expired": false,
-            "message": "Waiting for scan..."
-        })),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Channel registry metadata — loaded from ~/.librefang/channels/*.toml
