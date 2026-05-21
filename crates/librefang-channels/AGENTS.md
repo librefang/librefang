@@ -5,77 +5,99 @@ See repo-root `CLAUDE.md` for cross-cutting rules.
 
 ## Purpose
 
-40+ pluggable messaging integrations. Convert platform messages into unified `ChannelMessage` events for the kernel; route agent replies back out.
-Adapters are gated behind cargo features (`channel-xxx`).
+Channel infrastructure crate. Every channel adapter runs
+out-of-process as a sidecar (`librefang.sidecar.adapters.*` in
+`sdk/python/`); this crate owns the trampoline that connects the
+kernel to those sidecars (`sidecar.rs`), the shared bridge types
+every adapter speaks, and the shared HTTP client.
 
 ## Cargo features
 
-`default = []`. Every workspace consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets `default-features = false` and forwards an explicit subset.
-
-- `all-channels` — every adapter (IMAP, google-chat, …). Used by release CI.
-- Per-adapter: `channel-email`, `channel-webhook`, etc. (ntfy, telegram, gotify, mastodon, bluesky, reddit, twitch, rocketchat, discord, nextcloud, slack, webex, line, zulip, mattermost, signal, qq, and matrix migrated to sidecars — see `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat,discord,nextcloud,slack,webex,line,zulip,mattermost,signal,qq,matrix}` in the SDK.)
-
-See `Cargo.toml` for the full feature matrix.
+`default = []`. No feature flags. The historical `channel-*` /
+`all-channels` aliases gated in-process adapters; with every
+channel sidecar-migrated there is nothing left to gate.
 
 ## Always-compiled core
 
-The trait + dispatch glue compiles unconditionally. Only adapters are feature-gated.
+Every module compiles unconditionally. Modules: `attachment_enrich`,
+`bridge`, `commands`, `formatter`, `group_history`, `http_client`,
+`message_journal`, `message_truncator`, `rate_limiter`, `roster`,
+`router`, `sanitizer`, **`sidecar`** (the trampoline), `thread_ownership`,
+`types`.
 
 ## Boundary
 
-- Owns: `ChannelAdapter` trait, `ChannelMessage` event type, every adapter under `src/<channel>/`.
-- Does NOT own: kernel's per-`(agent,session)` lock (channel messages always derive `SessionId::for_channel(agent,"channel:chat")`). HTTP webhook routes — those live in `librefang-api/src/routes/channels.rs`.
-- Depends on: `librefang-types`, `librefang-extensions` (for vault), `librefang-http`. NOT on `librefang-kernel` or `librefang-runtime` directly.
+- Owns: `ChannelAdapter` trait, `ChannelMessage` event type, the
+  sidecar trampoline, and the shared bridge helpers.
+- Does NOT own: kernel's per-`(agent,session)` lock (channel
+  messages always derive `SessionId::for_channel(agent,"channel:chat")`).
+  HTTP webhook routes — those live in
+  `librefang-api/src/routes/channels.rs`.
+- Depends on: `librefang-types`, `librefang-extensions` (for vault),
+  `librefang-http`. NOT on `librefang-kernel` or `librefang-runtime`
+  directly.
 
 ## Webhook security (mandatory)
 
-HMAC verification is **mandatory** for Teams, DingTalk (and was for LINE, now in the sidecar at `librefang.sidecar.adapters.line` — same `X-Line-Signature` HMAC-SHA256 contract). Missing signature → 400. Mismatch → 401. Don't silently bypass.
+HMAC verification is **mandatory** on every sidecar that takes
+inbound webhooks — Teams, DingTalk, WhatsApp Cloud, WeChat, etc.
+The verification happens inside the sidecar (see the
+`librefang.sidecar.adapters.<name>` module's `_verify_request`-style
+helper). Missing signature → 400. Mismatch → 401. Don't silently
+bypass.
 
-- Teams: `TEAMS_SECURITY_TOKEN` (base64 outgoing-webhook security token). New `security_token_env` in `[channels.teams]`.
-- DingTalk: platform-specific signature header.
-
-Probes without the platform's signature header (curl, monitoring health checks) now return 4xx rather than 200. That's intended.
+Probes without the platform's signature header (curl, monitoring
+health checks) return 4xx rather than 200. That's intended.
 
 ## Outbound webhook SSRF guard
 
-`[channels.webhook] callback_url` MUST resolve to a public IP. Adapters refuse to start if the URL points at:
+The `librefang.sidecar.adapters.webhook` sidecar's `WEBHOOK_CALLBACK_URL`
+MUST resolve to a public IP. The SSRF guard lives in the Python
+sidecar (pure-Python port of `http_client::validate_url_for_fetch`)
+and runs both at adapter construction AND on every outbound POST.
+Rejects:
 - Private (10/8, 172.16/12, 192.168/16)
 - CGN (100.64/10)
 - Loopback (127/8, ::1)
 - Link-local, multicast, cloud metadata
-- IPv6 short forms ([::]), IPv4-mapped ([::ffff:127.0.0.1]), NAT64, trailing-dot FQDNs
+- IPv6 short forms ([::]), IPv4-mapped ([::ffff:127.0.0.1]), NAT64,
+  trailing-dot FQDNs
 
-Local dev: use a public tunnel (ngrok, cloudflared) or omit `callback_url`.
+Local dev: use a public tunnel (ngrok, cloudflared) or omit
+`WEBHOOK_CALLBACK_URL`.
 
 ## Send-path testing
 
-Inbound parsing has 795 tests. Outbound `send()` has historically had ~zero (#3820). New send() work MUST include a wiremock'd test in `tests/<channel>_wiremock.rs`. PRs that add an adapter without a `send()` test will be sent back.
+Every sidecar adapter has its own pytest suite at
+`sdk/python/tests/test_<name>_adapter.py` exercising both inbound
+parsing and outbound send. New send() work owes a wiremock-style
+unit test in the adapter's test file.
 
 ## Adding a new channel
 
-Sidecar-first. A new channel is an out-of-process sidecar adapter, not
-a new module here. See `CONTRIBUTING.md` ("Add a sidecar channel
-adapter"), `docs/architecture/sidecar-channels.md`, and the
-`librefang.sidecar` SDK (`sdk/python/`).
+**Sidecar-only**. A new channel is an out-of-process sidecar
+adapter, not a new module here. See `CONTRIBUTING.md` ("Add a
+sidecar channel adapter"), `docs/architecture/sidecar-channels.md`,
+and the existing adapters under `sdk/python/librefang/sidecar/adapters/`
+for templates.
 
-A new in-process `impl ChannelAdapter` is **rejected** by
-`scripts/hooks/pre-commit` and `cargo xtask channel-policy` (CI) unless
-its basename is in `src/channels-allowlist.txt` — that list only
-shrinks (a sidecar migration deletes the module and its line). Adding
-a name back is an explicit maintainer decision in a separate reviewed
+A new in-process `impl ChannelAdapter for X` (other than the
+`SidecarAdapter` trampoline) is **rejected** by
+`scripts/hooks/pre-commit` and `cargo xtask channel-policy` (CI)
+unless the source basename is in `src/channels-allowlist.txt`.
+That allowlist currently contains only `sidecar`. Adding a name
+back is an explicit maintainer decision in a separate reviewed
 commit, not routine.
-
-The grandfathered in-process adapters still obey the existing rules:
-new `send()` work owes a `tests/<channel>_wiremock.rs` (happy path +
-one error); HTTP webhooks wire through
-`librefang-api/src/routes/channels.rs`; channels ship off-by-default
-behind `channel-<name>`; required env vars go in the adapter's doc
-comment.
 
 ## Taboos
 
-- No `librefang-kernel` import. Channels are below kernel; kernel calls into channels through dispatch.
-- No bespoke `reqwest::Client`. Use `librefang-extensions::http_client::shared_client()`.
-- No `default = ["all-channels"]`. The default is and stays empty.
-- No silently bypassing HMAC verification. Either implement, or refuse to start.
-- No SSRF-leaky `callback_url` parsing. Use the existing guard.
+- No `librefang-kernel` import. Channels are below kernel; kernel
+  calls into channels through dispatch.
+- No bespoke `reqwest::Client`. Use
+  `librefang-extensions::http_client::shared_client()`.
+- No new in-process channel modules. Sidecar-only — the
+  `channels-allowlist.txt` ratchet enforces it.
+- No silently bypassing HMAC verification in sidecar adapters.
+  Either implement, or refuse to start.
+- No SSRF-leaky `WEBHOOK_CALLBACK_URL` parsing. Use the existing
+  guard in `librefang.sidecar.adapters.webhook`.

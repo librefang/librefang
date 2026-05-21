@@ -269,21 +269,8 @@ impl KernelConfig {
         // env-var presence is now validated inside the sidecar process.
         // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
         // env-var presence is now validated inside the sidecar process.
-        for gc in self.channels.google_chat.iter() {
-            let has_env = !std::env::var(&gc.service_account_env)
-                .unwrap_or_default()
-                .is_empty();
-            let has_key_path = gc
-                .service_account_key_path
-                .as_ref()
-                .is_some_and(|p| !p.is_empty());
-            if !has_env && !has_key_path {
-                warnings.push(format!(
-                    "Google Chat configured but neither {} nor service_account_key_path is set",
-                    gc.service_account_env
-                ));
-            }
-        }
+        // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 3 channels
         // line migrated to a sidecar (librefang.sidecar.adapters.line);
         // env-var presence is now validated inside the sidecar process.
