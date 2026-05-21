@@ -3591,12 +3591,12 @@ pub async fn hand_send_message(
         Err(e) => return e,
     };
 
-    // Reject oversized messages
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Reject oversized messages — see check_message_size for the
+    // byte/char split. Audit: message-byte-vs-char-cap.
+    if let Err(e) = crate::validation::check_message_size(&req.message) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": e.message})),
         );
     }
 

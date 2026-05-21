@@ -1670,8 +1670,11 @@ pub async fn send_message(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Audit: message-byte-vs-char-cap — the byte-only check used to
+    // unfairly clip CJK users (3 bytes/glyph). The helper enforces
+    // both MAX_MESSAGE_BYTES (memory cap) and MAX_MESSAGE_CHARS
+    // (LLM-cost cap) so the limits are fair across scripts.
+    if crate::validation::check_message_size(&req.message).is_err() {
         // #3511: tag every response for which `agent_id` is known so
         // request_logging middleware can emit it as a structured field.
         return crate::extensions::with_agent_id(
@@ -2725,8 +2728,9 @@ pub async fn send_message_stream(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Audit: message-byte-vs-char-cap — see the sibling check_message_size
+    // call in `post_message`.
+    if crate::validation::check_message_size(&req.message).is_err() {
         return ApiErrorResponse::bad_request(err_too_large)
             .with_code("message_too_large")
             .with_status(StatusCode::PAYLOAD_TOO_LARGE)
