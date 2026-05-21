@@ -187,21 +187,27 @@ librefang config set-key ntfy                 # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-3. 添加到配置文件：
+3. 添加到配置文件（ntfy 以独立进程 sidecar 形式运行，模块 `librefang.sidecar.adapters.ntfy`）：
 
 ```toml
-[channels.ntfy]
-url_env = "NTFY_URL"
-topic_env = "NTFY_TOPIC"
-# token_env = "NTFY_TOKEN"   # optional
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_SERVER_URL = "https://ntfy.sh"
+NTFY_TOPIC = "my-agent-topic"
+# NTFY_ACCOUNT_ID = "assistant"      # 可选，多机器人路由
 ```
 
-4. 重启守护进程。
+`NTFY_TOKEN`（认证 token，公开 topic 可选）写入 `~/.librefang/secrets.env`。
+
+4. 热加载（`curl -X POST http://127.0.0.1:4545/api/channels/reload`）或者重启 daemon。
 
 ### 工作原理
 
-ntfy 适配器使用 Server-Sent Events (SSE) 订阅 ntfy 服务器上的主题以实时接收消息。传入消息路由到配置的 Agent，响应通过 ntfy REST API 发布回该主题。
+Sidecar 通过 Server-Sent Events (SSE) 订阅 ntfy 服务器上的 topic 实时收消息。入站消息路由给配置的 Agent，回复通过 ntfy REST API 发布回该 topic。
 
 ---
 
@@ -274,51 +280,54 @@ sidecar 按配置间隔（默认 3 秒）以 Bearer 鉴权加必需的 `OCS-APIR
 
 ---
 
-## Webhook
+## Webhook（Sidecar）
+
+Webhook 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.webhook`，仅依赖标准库）。保留全套 HMAC-SHA256 + 时间戳 + SSRF 防护，外加入站 `message_id` 去重和 429 `Retry-After`（Rust 适配器没有的两项改进）。
 
 ### 前置条件
 
-- 可接受 HTTP POST 请求的目标 URL（无需注册外部服务）
+- 可选：可接受 HTTP POST 请求的出站目标 URL
+- HMAC-SHA256 共享密钥
+- 守护进程主机上有 `python3`（无须任何 Python 第三方包）
 
 ### 设置步骤
 
-1. 选择 webhook 负载要发送到的 URL。
-2. 选择用于 HMAC-SHA256 签名验证的共享密钥。
-3. 设置环境变量：
-
-```bash
-export WEBHOOK_URL=https://your-service.example.com/hook  # 环境变量
-export WEBHOOK_SECRET=your-shared-secret
-librefang vault set WEBHOOK_URL               # 加密金库（推荐）
-librefang vault set WEBHOOK_SECRET
-librefang config set-key webhook              # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-4. 添加到配置文件：
+1. 选择用于 HMAC-SHA256 签名验证的共享密钥。
+2. 添加到 `config.toml`：
 
 ```toml
-[channels.webhook]
-url_env = "WEBHOOK_URL"
-secret_env = "WEBHOOK_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+# WEBHOOK_LISTEN_PATH = "/webhook"
+# WEBHOOK_CALLBACK_URL = "https://your-service.example.com/hook"
 ```
 
-5. 重启守护进程。
+3. 把 `WEBHOOK_SECRET` 写入 `~/.librefang/secrets.env`。
+4. 重启守护进程。
 
 ### 工作原理
 
-Webhook 适配器提供通用的双向 HTTP 集成。传入消息以 HTTP POST 请求形式发送到 LibreFang 的 webhook 端点，通过共享密钥的 HMAC-SHA256 进行验证。响应以 HTTP POST 负载形式送达配置的 URL，同样使用 HMAC-SHA256 签名。
+sidecar 在 `WEBHOOK_LISTEN_PORT` 上跑自己的 `BaseHTTPRequestHandler` over `ThreadingTCPServer` 监听。入站 POST 通过 HMAC-SHA256 验签（`X-Webhook-Signature: sha256=<hex>`，针对原始请求体），可选 `X-Webhook-Timestamp`（毫秒级 Unix 时间戳，±5 分钟时钟偏差容差）用于重放保护。出站回复 POST 到 `WEBHOOK_CALLBACK_URL`（若已设置），同样签名。SSRF 防护在启动时**和**每次出站 POST 时都拒绝指向私网 / 回环 / 链路本地 / 多播 / 云元数据的 callback URL。
 
 ### `deliver_only` 透传模式
 
-Webhook 通道还可以跑成零 LLM 透传:入站 payload 完全绕过 agent 循环(无 sanitiser、无限流、无 agent 查找),直接转发到目标通道。适合推送通知和带外告警 —— 你只想让消息落到 Telegram / Slack 之类的地方。
+Webhook sidecar 可以跑成零 LLM 透传：入站 payload 完全绕过 agent 循环（无 sanitiser、无限流、无 agent 查找），直接转发到目标通道。
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # deliver_only = true 时必填
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # WEBHOOK_DELIVER_ONLY=1 时必填
 ```
 
-`deliver_only = true` 但 `deliver` 未设时,librefang 启动时打 `warn`,webhook 保持不激活。完整的 `__deliver_only__` / `__deliver_target__` 内部 metadata 信号化机制见 channels overview 的 [Webhook `deliver_only` 模式](/zh/integrations/channels#webhook-deliver_only-mode)。
+`WEBHOOK_DELIVER_ONLY=1` 时若 `WEBHOOK_DELIVER` 为空，sidecar **启动时 fail-closed** —— 原 Rust validator 在同位置只 warn-and-continue，导致入站运行时被静默丢弃。完整的 `__deliver_only__` / `__deliver_target__` 内部 metadata 信号化机制见 channels overview 的 [Webhook `deliver_only` 模式](/zh/integrations/channels#webhook-deliver_only-mode)。
