@@ -44,6 +44,7 @@ async fn test_shell_exec_blocked_for_readonly_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -104,6 +105,7 @@ async fn test_shell_exec_allowed_when_not_targeting_readonly_workspace() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -676,6 +678,7 @@ async fn test_web_search() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -712,6 +715,7 @@ async fn test_unknown_tool() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -748,6 +752,7 @@ async fn test_agent_tools_without_kernel() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -785,6 +790,7 @@ async fn test_capability_enforcement_denied() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -823,6 +829,7 @@ async fn test_capability_enforcement_allowed() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -887,6 +894,7 @@ async fn test_capability_enforcement_aliased_tool_name() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -929,6 +937,7 @@ async fn test_capability_enforcement_aliased_denied() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -979,6 +988,7 @@ async fn test_shell_exec_full_policy_skips_approval_gate() {
         None,
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1030,6 +1040,7 @@ async fn test_shell_exec_non_full_policy_still_requires_approval() {
         None,
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1102,6 +1113,7 @@ async fn test_shell_exec_drains_pipe_above_buffer_size() {
         None,
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
