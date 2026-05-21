@@ -1795,8 +1795,16 @@ pub async fn run_daemon(
                 st.skillhub_cache
                     .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
 
-                // Evict expired session tokens
-                let expired_sessions = {
+                // Evict expired session tokens and persist the
+                // trimmed state to disk. Audit:
+                // active-sessions-unbounded — the in-memory `retain`
+                // here resolves the "WS upgrade is the only sweep"
+                // half of the audit, but the trimmed state never made
+                // it back to `~/.librefang/sessions.json`, so every
+                // expired token came back to life on the next daemon
+                // boot via `load_sessions`. Persisting after the
+                // prune closes that survives-restart loop.
+                let (expired_sessions, sessions_snapshot) = {
                     let mut sessions = st.active_sessions.write().await;
                     let before = sessions.len();
                     sessions.retain(|_, token| {
@@ -1805,8 +1813,19 @@ pub async fn run_daemon(
                             crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                         )
                     });
-                    before - sessions.len()
+                    let removed = before - sessions.len();
+                    // Snapshot for disk write so we can drop the
+                    // write guard before the (potentially blocking)
+                    // file syscall. Only snapshot when there's
+                    // actually something to persist — the token map
+                    // is shallow but cloning on every tick when
+                    // nothing expired would be wasted work.
+                    let snap = (removed > 0).then(|| sessions.clone());
+                    (removed, snap)
                 };
+                if let Some(snap) = sessions_snapshot {
+                    save_sessions(st.kernel.home_dir(), &snap);
+                }
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
@@ -2178,6 +2197,82 @@ mod observability_tests {
         assert_ne!(
             a, b,
             "two daemons with distinct home_dirs must NOT share a compose project"
+        );
+    }
+
+    /// Audit: active-sessions-unbounded. The 5-minute GC loop in
+    /// `run_server` evicts expired tokens from the in-memory
+    /// `active_sessions` map AND persists the trimmed snapshot to
+    /// disk. Without the persist step, the in-memory state was clean
+    /// (the load_sessions filter already drops expired tokens at
+    /// boot), but the file on disk grew unbounded — every successful
+    /// login left a token there forever. Persisting after the prune
+    /// stops the audit-flagged "RAM + disk usage grow as
+    /// `n_logins × token_size`" regression on the disk side.
+    ///
+    /// This test inspects the raw file contents (not the in-memory
+    /// view from `load_sessions`, which already filters expired
+    /// tokens at load time) to confirm the trimmed write reaches
+    /// disk.
+    #[test]
+    fn save_sessions_after_retain_drops_expired_tokens_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let live = crate::password_hash::SessionToken {
+            token: "live-token".to_string(),
+            created_at: now.saturating_sub(60),
+            user_name: None,
+            user_role: None,
+        };
+        let expired = crate::password_hash::SessionToken {
+            token: "expired-token".to_string(),
+            created_at: now
+                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            user_name: None,
+            user_role: None,
+        };
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("live-token".to_string(), live);
+        sessions.insert("expired-token".to_string(), expired);
+
+        // Initial persist — both tokens on disk. Read raw bytes
+        // because `load_sessions` filters expired tokens at load,
+        // hiding the on-disk state from the in-memory caller.
+        save_sessions(home, &sessions);
+        let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_before.contains("live-token") && raw_before.contains("expired-token"),
+            "baseline: both tokens must be on disk before the GC step: {raw_before}"
+        );
+
+        // Simulate the GC retain step — same shape as the
+        // background loop in `run_server`.
+        sessions.retain(|_, token| {
+            !crate::password_hash::is_token_expired(
+                token,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+            )
+        });
+        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        save_sessions(home, &sessions);
+
+        let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_after.contains("live-token"),
+            "live token must still be on disk after the GC sweep: {raw_after}"
+        );
+        assert!(
+            !raw_after.contains("expired-token"),
+            "expired token MUST NOT be on disk after the GC sweep — \
+             the audit-flagged disk-bloat lever was that expired tokens \
+             survived restart in the file: {raw_after}"
         );
     }
 
