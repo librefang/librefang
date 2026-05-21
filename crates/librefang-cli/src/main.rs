@@ -241,12 +241,6 @@ enum Commands {
         long_about = "Manage agent skills: install from FangHub, list, search, test, and publish.\n\nSkills extend agent capabilities with tools, integrations, and custom logic.\n\nExamples:\n  librefang skill install web-search   # Install from FangHub\n  librefang skill list                 # List installed skills\n  librefang skill search \"code review\" # Search FangHub\n  librefang skill test ./my-skill      # Validate a local skill\n  librefang skill create               # Scaffold a new skill\n  librefang skill publish              # Publish to FangHub"
     )]
     Skill(SkillCommands),
-    /// Manage channel integrations (setup, test, enable, disable) [*].
-    #[command(
-        subcommand,
-        long_about = "Manage messaging channel integrations (Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup discord     # Interactive Discord setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test discord      # Send a test message\n  librefang channel enable discord    # Enable a channel\n  librefang channel disable discord   # Disable without removing config"
-    )]
-    Channel(ChannelCommands),
     /// Manage hands (list, activate, status, pause, info) [*].
     #[command(
         subcommand,
@@ -963,54 +957,6 @@ enum EvolveCommands {
         /// Target a specific hand's workspace instead of the global skills dir.
         #[arg(long)]
         hand: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ChannelCommands {
-    /// List configured channels and their status.
-    #[command(
-        long_about = "List all configured channels and show their current status (enabled/disabled).\n\nExamples:\n  librefang channel list"
-    )]
-    List,
-    /// Interactive setup wizard for a channel.
-    #[command(
-        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup discord    # Set up Discord\n  librefang channel setup slack      # Set up Slack"
-    )]
-    Setup {
-        /// Channel name (discord, slack, whatsapp, etc.). Shows picker if omitted.
-        channel: Option<String>,
-    },
-    /// Test a channel by sending a test message.
-    #[command(
-        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890\n  librefang channel test whatsapp --chat-id 123456789"
-    )]
-    Test {
-        /// Channel name.
-        #[arg(value_name = "NAME")]
-        name: String,
-        /// Target channel ID for Discord or Slack live message tests.
-        #[arg(long = "channel", conflicts_with = "chat_id")]
-        channel_id: Option<String>,
-        /// Target chat/channel ID for live message tests.
-        #[arg(long, conflicts_with = "channel_id")]
-        chat_id: Option<String>,
-    },
-    /// Enable a channel.
-    #[command(
-        long_about = "Enable a previously configured channel.\n\nExamples:\n  librefang channel enable telegram"
-    )]
-    Enable {
-        /// Channel name.
-        channel: String,
-    },
-    /// Disable a channel without removing its configuration.
-    #[command(
-        long_about = "Disable a channel without removing its configuration.\n\nThe channel can be re-enabled later without reconfiguring.\n\nExamples:\n  librefang channel disable telegram"
-    )]
-    Disable {
-        /// Channel name.
-        channel: String,
     },
 }
 
@@ -2292,17 +2238,6 @@ fn main() {
             SkillCommands::Create => cmd_skill_create(),
             SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
             SkillCommands::Pending(sub) => cmd_skill_pending(sub),
-        },
-        Some(Commands::Channel(sub)) => match sub {
-            ChannelCommands::List => cmd_channel_list(),
-            ChannelCommands::Setup { channel } => cmd_channel_setup(channel.as_deref()),
-            ChannelCommands::Test {
-                name,
-                channel_id,
-                chat_id,
-            } => cmd_channel_test(&name, channel_id.as_deref(), chat_id.as_deref()),
-            ChannelCommands::Enable { channel } => cmd_channel_toggle(&channel, true),
-            ChannelCommands::Disable { channel } => cmd_channel_toggle(&channel, false),
         },
         Some(Commands::Hand(sub)) => match sub {
             HandCommands::List => cmd_hand_list(),
@@ -7978,169 +7913,15 @@ fn cmd_skill_pending(sub: PendingCommands) {
 // Channel commands
 // ---------------------------------------------------------------------------
 
-fn cmd_channel_list() {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
 
-    if !config_path.exists() {
-        println!("No configuration found. Run `librefang init` first.");
-        return;
-    }
-
-    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    println!("Channel Integrations:\n");
-
-    // discord migrated to a sidecar adapter
-    // (librefang.sidecar.adapters.{discord,slack}); managed via
-    // `[[sidecar_channels]]` rather than [channels.{discord,slack}] now.
-    let channels: Vec<(&str, &str)> = vec![
-        ("webchat", ""),
-        ("email", "EMAIL_PASSWORD"),
-    ];
-
-    let mut t = crate::table::Table::new(&["CHANNEL", "ENV VAR", "STATUS"]);
-    for (name, env_var) in channels {
-        let configured = config_str.contains(&format!("[channels.{name}]"));
-        let env_set = if env_var.is_empty() {
-            true
-        } else {
-            std::env::var(env_var).is_ok()
-        };
-        let status = match (configured, env_set) {
-            (true, true) => "Ready",
-            (true, false) => "Missing env",
-            (false, _) => "Not configured",
-        };
-        t.add_row(&[
-            name,
-            if env_var.is_empty() {
-                "\u{2014}"
-            } else {
-                env_var
-            },
-            status,
-        ]);
-    }
-    t.print();
-
-    println!("\nUse `librefang channel setup <channel>` to configure a channel.");
-}
-
-fn cmd_channel_setup(channel: Option<&str>) {
-    let channel = match channel {
-        Some(c) => c.to_string(),
-        None => {
-            // Interactive channel picker
-            ui::section(&i18n::t("section-channel-setup"));
-            ui::blank();
-            let channel_list = [
-                ("email", "Email (IMAP/SMTP)"),
-            ];
-
-            for (i, (name, desc)) in channel_list.iter().enumerate() {
-                println!("    {:>2}. {:<12} {}", i + 1, name, desc.dimmed());
-            }
-            ui::blank();
-
-            let choice = prompt_input("  Choose channel [1]: ");
-            let idx = if choice.is_empty() {
-                0
-            } else {
-                choice
-                    .parse::<usize>()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .min(channel_list.len() - 1)
-            };
-            channel_list[idx].0.to_string()
-        }
-    };
-
-    // Every in-process channel wizard arm (discord, slack, whatsapp,
-    // email, signal, matrix, google_chat, …) has been removed
-    // alongside that channel's sidecar migration. Configure all
-    // channels via `[[sidecar_channels]]` in config.toml or through
-    // the dashboard's channel configure page (which renders the
-    // sidecar's `--describe` schema). The `librefang init <channel>`
-    // command now always falls through to the unknown-channel hint.
-    let other = channel.as_str();
-    ui::error_with_fix(
-        &i18n::t_args("channel-unknown", &[("name", other)]),
-        &i18n::t("channel-unknown-fix"),
-    );
-    std::process::exit(1);
-}
 
 // maybe_write_channel_config / notify_daemon_restart removed — they
 // supported the interactive in-process channel onboarding flow whose
 // callers were dropped when channels moved to sidecars, leaving both
 // helpers orphaned.
 
-fn channel_test_request_body(
-    channel_id: Option<&str>,
-    chat_id: Option<&str>,
-) -> Option<serde_json::Value> {
-    channel_id
-        .map(|id| serde_json::json!({ "channel_id": id }))
-        .or_else(|| chat_id.map(|id| serde_json::json!({ "chat_id": id })))
-}
 
-fn cmd_channel_test(channel: &str, channel_id: Option<&str>, chat_id: Option<&str>) {
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        let request = client.post(format!("{base}/api/channels/{channel}/test"));
-        let body = if let Some(payload) = channel_test_request_body(channel_id, chat_id) {
-            daemon_json(request.json(&payload).send())
-        } else {
-            daemon_json(request.send())
-        };
-        if body["status"].as_str() == Some("ok") {
-            println!(
-                "{}",
-                body["message"]
-                    .as_str()
-                    .unwrap_or("Channel test completed successfully.")
-            );
-        } else {
-            eprintln!(
-                "Failed: {}",
-                body["message"]
-                    .as_str()
-                    .or_else(|| body["error"].as_str())
-                    .unwrap_or("Unknown error")
-            );
-            std::process::exit(1);
-        }
-    } else {
-        eprintln!("Channel test requires a running daemon. Start with: librefang start");
-        std::process::exit(1);
-    }
-}
 
-fn cmd_channel_toggle(channel: &str, enable: bool) {
-    let action = if enable { "enabled" } else { "disabled" };
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        let endpoint = if enable { "enable" } else { "disable" };
-        let body = daemon_json(
-            client
-                .post(format!("{base}/api/channels/{channel}/{endpoint}"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Channel {channel} {action}.");
-        } else {
-            eprintln!(
-                "Failed: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
-            );
-        }
-    } else {
-        println!("Note: Channel {channel} will be {action} when the daemon starts.");
-        println!("Edit ~/.librefang/config.toml to persist this change.");
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Hand commands
@@ -13252,11 +13033,11 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
+        compare_release_tag, daemon_log_path_for_config,
         daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
         is_valid_env_var_name, normalize_daemon_addr, normalize_release_tag, parse_toml_integer,
         parse_version_core, pool_strategy_canon, resolve_device_auth_start, resolve_hand_instance,
-        AuthCommands, ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
+        AuthCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
         MemoryCommands, ReleaseComparison,
     };
     use clap::Parser;
@@ -13403,89 +13184,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_channel_test_accepts_target_channel_flag() {
-        let cli = Cli::parse_from([
-            "librefang",
-            "channel",
-            "test",
-            "discord",
-            "--channel",
-            "123456789",
-        ]);
-        match cli.command {
-            Some(Commands::Channel(ChannelCommands::Test {
-                name,
-                channel_id,
-                chat_id,
-            })) => {
-                assert_eq!(name, "discord");
-                assert_eq!(channel_id.as_deref(), Some("123456789"));
-                assert!(chat_id.is_none());
-            }
-            _ => panic!("unexpected command"),
-        }
-    }
-
-    #[test]
-    fn test_channel_test_accepts_chat_id_flag() {
-        let cli = Cli::parse_from([
-            "librefang",
-            "channel",
-            "test",
-            "telegram",
-            "--chat-id",
-            "999",
-        ]);
-        match cli.command {
-            Some(Commands::Channel(ChannelCommands::Test {
-                name,
-                channel_id,
-                chat_id,
-            })) => {
-                assert_eq!(name, "telegram");
-                assert!(channel_id.is_none());
-                assert_eq!(chat_id.as_deref(), Some("999"));
-            }
-            _ => panic!("unexpected command"),
-        }
-    }
-
-    #[test]
-    fn test_channel_test_rejects_both_target_flags() {
-        let cli = Cli::try_parse_from([
-            "librefang",
-            "channel",
-            "test",
-            "discord",
-            "--channel",
-            "123",
-            "--chat-id",
-            "456",
-        ]);
-        assert!(cli.is_err());
-    }
-
-    #[test]
-    fn test_channel_test_request_body_prefers_channel_id() {
-        assert_eq!(
-            channel_test_request_body(Some("C123"), None),
-            Some(json!({ "channel_id": "C123" }))
-        );
-    }
-
-    #[test]
-    fn test_channel_test_request_body_supports_chat_id() {
-        assert_eq!(
-            channel_test_request_body(None, Some("42")),
-            Some(json!({ "chat_id": "42" }))
-        );
-    }
-
-    #[test]
-    fn test_channel_test_request_body_empty_when_no_target() {
-        assert_eq!(channel_test_request_body(None, None), None);
-    }
 
     #[test]
     fn test_auth_chatgpt_accepts_device_auth_flag() {

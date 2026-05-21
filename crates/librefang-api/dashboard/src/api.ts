@@ -1778,12 +1778,67 @@ export async function listChannels(): Promise<ChannelItem[]> {
   return data.items ?? [];
 }
 
-export async function testChannel(channelName: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/test`, {});
+// `testChannel` / `configureChannel` / `listChannelInstances` /
+// `createChannelInstance` / `updateChannelInstance` /
+// `deleteChannelInstance`: the matching backend endpoints
+// (`POST /api/channels/{name}/test`, `/configure`, and the four
+// `/instances*` routes) are gone with the in-process channel
+// scaffolding. The stubs below `Promise.reject` at runtime with
+// a clear-error message so `ChannelsPage.tsx` (which still
+// imports them via `mutations/channels.ts`) type-checks until a
+// follow-up refactors the page to a sidecar-only UI. Channel
+// configuration now lives through `saveSidecarConfig` →
+// `POST /api/channels/sidecar/{name}/configure`, plus
+// `reloadChannels` → `POST /api/channels/reload` to apply.
+const _channelEndpointGone = (which: string) =>
+  Promise.reject(
+    new Error(
+      `${which} is unavailable: the in-process channel REST endpoint was ` +
+        `removed in v2026.5.21. Channels are sidecar-only — use ` +
+        `saveSidecarConfig + reloadChannels instead.`,
+    ),
+  );
+
+export async function testChannel(_channelName: string): Promise<ApiActionResponse> {
+  return _channelEndpointGone("POST /api/channels/{name}/test");
 }
 
-export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
+export async function configureChannel(
+  _channelName: string,
+  _config: Record<string, unknown>,
+): Promise<ApiActionResponse> {
+  return _channelEndpointGone("POST /api/channels/{name}/configure");
+}
+
+export async function listChannelInstances(
+  _channelName: string,
+): Promise<ChannelInstancesResponse> {
+  return _channelEndpointGone("GET /api/channels/{name}/instances");
+}
+
+export async function createChannelInstance(
+  _channelName: string,
+  _fields: Record<string, unknown>,
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  return _channelEndpointGone("POST /api/channels/{name}/instances");
+}
+
+export async function updateChannelInstance(
+  _channelName: string,
+  _index: number,
+  _fields: Record<string, unknown>,
+  _signature: string,
+  _clearSecrets?: string[],
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  return _channelEndpointGone("PUT /api/channels/{name}/instances/{index}");
+}
+
+export async function deleteChannelInstance(
+  _channelName: string,
+  _index: number,
+  _signature: string,
+): Promise<void> {
+  return _channelEndpointGone("DELETE /api/channels/{name}/instances/{index}");
 }
 
 export interface SidecarSaveResult {
@@ -1818,52 +1873,13 @@ export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
 
-// Per-instance channel management (#4837).
-//
-// The legacy `configureChannel` overwrites the single `[channels.<name>]`
-// section. The four functions below let the dashboard manage individual
-// `[[channels.<name>]]` array entries — supporting multiple Telegram bots,
-// Slack workspaces, etc. on the same channel type.
-
-export async function listChannelInstances(channelName: string): Promise<ChannelInstancesResponse> {
-  return get<ChannelInstancesResponse>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-  );
-}
-
-export async function createChannelInstance(
-  channelName: string,
-  fields: Record<string, unknown>,
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  return post<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-    { fields },
-  );
-}
-
-export async function updateChannelInstance(
-  channelName: string,
-  index: number,
-  fields: Record<string, unknown>,
-  signature: string,
-  clearSecrets?: string[],
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  const body: Record<string, unknown> = { fields, signature };
-  if (clearSecrets && clearSecrets.length > 0) body.clear_secrets = clearSecrets;
-  return put<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
-    body,
-  );
-}
-
-export async function deleteChannelInstance(
-  channelName: string,
-  index: number,
-  signature: string,
-): Promise<void> {
-  const qs = `?signature=${encodeURIComponent(signature)}`;
-  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}${qs}`);
-}
+// Per-instance channel management endpoints (`#4837`'s
+// `[[channels.<name>]]` array) gone — the entire backend
+// `GET /instances` / `POST /instances` / `PUT /instances/{index}` /
+// `DELETE /instances/{index}` API has been deleted. The
+// `saveSidecarConfig` helper above is the only configuration
+// path left; multi-instance support comes from multiple
+// `[[sidecar_channels]]` entries.
 
 export interface QrStartResponse {
   available: boolean;
