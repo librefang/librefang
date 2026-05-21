@@ -1543,6 +1543,18 @@ impl ChannelsResource {
         )
         .await
     }
+
+    pub async fn get_channel_qr(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &format!("/api/channels/{}/qr", name),
+            None,
+            &[],
+        )
+        .await
+    }
 }
 
 // ── Extensions ──
