@@ -431,6 +431,46 @@ def test_post_status_p1b_threads_when_thread_id_cached(monkeypatch):
     assert body["record"]["reply"] == {"root": parent, "parent": parent}
 
 
+def test_on_send_recovers_uri_from_user_librefang_user(monkeypatch):
+    """End-to-end on_send regression guard. The daemon-shape pre-fix
+    bug meant cmd.thread_id=None so the cached `{root, parent}` reply
+    struct was never looked up, and every reply posted as a top-level
+    skeet instead of a thread reply. librefang_user is the always-
+    round-tripped carrier — recover from there."""
+    import asyncio
+    a = _adapter()
+    parent = {"uri": "at://did:plc:alice/post/1", "cid": "bafy1"}
+    a._thread_cache.put(
+        "at://did:plc:alice/post/1",
+        {"root": parent, "parent": parent},
+    )
+    fake = _FakeUrlopen([
+        (200, {
+            "accessJwt": "access-1",
+            "refreshJwt": "refresh-1",
+            "did": "did:plc:bot",
+        }),
+        (200, {"uri": "at://did:plc:bot/post/reply", "cid": "bafyreply"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+
+    class _Cmd:
+        text = "threaded reply"
+        content = {"Text": "threaded reply"}
+        thread_id = None  # daemon-default
+        user = {
+            "platform_id": "alice",
+            "librefang_user": "at://did:plc:alice/post/1",
+        }
+
+    asyncio.run(a.on_send(_Cmd()))
+    body = fake.calls[1]["body"]
+    assert body["record"]["reply"] == {"root": parent, "parent": parent}, \
+        "on_send must thread via cmd.user.librefang_user when " \
+        "cmd.thread_id is None (the daemon default for sidecars " \
+        "that don't declare the `thread` capability)"
+
+
 def test_post_status_cold_cache_falls_back_to_unthreaded(monkeypatch):
     """Cache miss (e.g. sidecar restarted between mention arrival and
     user reply) must NOT crash — fall back to a non-threaded post,
