@@ -128,6 +128,15 @@ from typing import Any, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    http_request as _http_request,
+    MAX_BACKOFF_SECS,
+    parse_retry_after as _parse_retry_after_impl,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
 
 # Zulip's official message-text ceiling. Mirrors the Rust adapter's
 # ``MAX_MESSAGE_LEN`` (crates/librefang-channels/src/zulip.rs:21).
@@ -140,13 +149,6 @@ LONG_POLL_HTTP_TIMEOUT_SECS = POLL_TIMEOUT_SECS + 10
 SEND_TIMEOUT_SECS = 15.0
 
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-# Default fallback when Zulip 429s without a parseable Retry-After.
-# 30 s is conservative enough not to re-trigger throttling. Mirrors
-# the rocketchat / nextcloud / webex sidecars.
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 # Bounded dedupe cap on Zulip ``message.id``. Same policy as
 # reddit / rocketchat / nextcloud / webex.
 SEEN_MESSAGES_MAX = 10_000
@@ -157,35 +159,6 @@ SEEN_MESSAGES_EVICT = 5_000
 # no inbound context). Mirrors the Rust adapter's hard-coded
 # ``"LibreFang"`` at zulip.rs:463 for the same edge case.
 DEFAULT_STREAM_TOPIC = "LibreFang"
-
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Chunk ``text`` into <= limit pieces, preferring newline
-    splits. Mirrors the shared Rust ``split_message`` helper."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        window = rest[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
-def _split_csv(raw: str) -> list[str]:
-    """Comma-separated env-var → cleaned list. Strips whitespace,
-    drops empty entries. Order preserved."""
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
     """Zulip's 429 response carries ``Retry-After`` in seconds form.
     Falls back to ``default_secs`` when missing or garbled. Floor
@@ -406,9 +379,7 @@ class ZulipAdapter(SidecarAdapter):
         self.own_full_name: str = ""
 
         # Improvement #3: bounded dedupe on Zulip message.id.
-        self._seen_ids: set[str] = set()
-        self._seen_order: list[str] = []
-        self._seen_lock = threading.Lock()
+        self._seen = _SeenSet(max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT)
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -437,61 +408,17 @@ class ZulipAdapter(SidecarAdapter):
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
     ) -> tuple[int, Any, bytes, dict]:
-        """One-shot HTTP request. Returns
-        ``(status, parsed_json_or_None, raw_bytes, response_headers)``.
-        Response header keys are lower-cased so callers can do
-        case-insensitive lookups for ``Retry-After`` regardless of
-        server casing."""
-        req = urllib.request.Request(
-            url, data=body, headers=headers or {}, method=method,
+        """Thin wrapper around :func:`librefang.sidecar.common.http_request`."""
+        return _http_request(
+            url, method=method, body=body, headers=headers,
+            timeout=timeout,
         )
-        resp_headers: dict = {}
-        try:
-            with urllib.request.urlopen(  # noqa: S310 — configured URL
-                req, timeout=timeout,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                raw = resp.read()
-                if resp.headers is not None:
-                    resp_headers = {
-                        k.lower(): v for k, v in resp.headers.items()
-                    }
-        except urllib.error.HTTPError as e:
-            status = e.code
-            try:
-                raw = e.read()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if e.headers is not None:
-                resp_headers = {k.lower(): v for k, v in e.headers.items()}
-        if not raw:
-            return status, None, b"", resp_headers
-        try:
-            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw, resp_headers
 
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, msg_id: Optional[str]) -> bool:
-        """Return True iff ``msg_id`` is freshly seen (i.e. emit it).
-        Maintains a bounded set + insertion-order list (oldest-half
-        eviction at the cap). Mirrors reddit / rocketchat / nextcloud /
-        webex. ``None`` / empty ids are always treated as fresh
-        (they don't participate in dedupe — no key to track)."""
-        if not msg_id:
-            return True
-        with self._seen_lock:
-            if msg_id in self._seen_ids:
-                return False
-            self._seen_ids.add(msg_id)
-            self._seen_order.append(msg_id)
-            if len(self._seen_order) > SEEN_MESSAGES_MAX:
-                drop = self._seen_order[:SEEN_MESSAGES_EVICT]
-                self._seen_order = self._seen_order[SEEN_MESSAGES_EVICT:]
-                for k in drop:
-                    self._seen_ids.discard(k)
-            return True
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(msg_id)
 
     # ---- REST: validate, register, send -----------------------------
 

@@ -135,7 +135,7 @@ librefang message customer-support "A user says their payment failed."
 
 ## 4. 把渠道接到 Agent
 
-渠道配置写在 `~/.librefang/config.toml` 的 `[channels.<name>]` 下，不是 `[telegram]` 或 `[discord]` 顶层表。
+渠道配置写在 `~/.librefang/config.toml` 的 `[[sidecar_channels]]` array-of-tables 条目里。每条条目声明一个独立进程的 sidecar adapter（`name` / `command` / `args` / `channel_type`，加上 `[sidecar_channels.env]` 子表存放非 secret 环境变量）。Secret 类的环境变量写到 `~/.librefang/secrets.env`。
 
 这层对应的是 LibreFang 的“外部入口”能力：让 Agent 不只在 CLI 里用，而是能在 Telegram、Discord、Slack、WeChat 等地方直接工作。
 
@@ -164,10 +164,11 @@ TELEGRAM_BOT_TOKEN = "..."
 librefang restart
 ```
 
-如果已经有聊天目标，可以做一次联通性检查：
+要确认 sidecar 已起、能连上 Telegram，热加载后 tail 一下 sidecar 自己的日志（sidecar 把结构化状态打到 stdout）：
 
 ```bash
-librefang channel test telegram --chat-id 123456789
+curl -X POST http://127.0.0.1:4545/api/channels/reload
+librefang logs --filter sidecar/telegram --tail 50
 ```
 
 ---
@@ -355,5 +356,5 @@ JSON
 1. `librefang start`
 2. `librefang agent new <template>` 或 `librefang agent spawn ./agent.toml`
 3. `librefang message <agent> "..."`
-4. `librefang channel setup <channel>` 或编辑 `[channels.<name>]`
+4. `librefang channel setup <channel>` 或者直接编辑一条 `[[sidecar_channels]]`
 5. `librefang cron create ...` / `librefang workflow create ...`

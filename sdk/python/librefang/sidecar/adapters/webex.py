@@ -113,14 +113,8 @@ bot Bearer token from developer.webex.com).
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import os
-import select
-import socket
-import ssl
-import struct
 import threading
 import time
 import urllib.error
@@ -130,6 +124,24 @@ from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    http_request as _http_request,
+    MAX_BACKOFF_SECS,
+    parse_retry_after as _parse_retry_after_impl,
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
+from librefang.sidecar.ws import (
+    MAX_FRAME_PAYLOAD,
+    OP_CLOSE as _OP_CLOSE,
+    OP_CONT as _OP_CONT,
+    OP_PING as _OP_PING,
+    OP_PONG as _OP_PONG,
+    OP_TEXT as _OP_TEXT,
+    WebSocketClient as _WebSocketClient,
+)
 
 # Webex constants — mirror crate::webex defaults.
 DEFAULT_API_BASE = "https://webexapis.com/v1"
@@ -148,14 +160,6 @@ SEND_TIMEOUT_SECS = 15.0
 HANDSHAKE_TIMEOUT_SECS = 15.0
 
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-# Default fallback when Webex 429s without a parseable ``Retry-After``
-# header. Mirrors the rocketchat / nextcloud / mastodon sidecars
-# (#5303); 30 s is conservative enough that we don't immediately
-# re-hit the bruteforce throttle.
-RETRY_AFTER_DEFAULT_SECS = 30.0
-
 # Bounded dedupe cap on Mercury ``activity.object.id``. Same policy as
 # reddit / rocketchat / nextcloud. ``MAX`` is the high-water mark;
 # when reached, evict the oldest ``EVICT`` entries (so the steady-state
@@ -163,49 +167,7 @@ RETRY_AFTER_DEFAULT_SECS = 30.0
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
-# RFC 6455 — same constants as the discord / slack sidecars.
-_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-_OP_CONT = 0x0
-_OP_TEXT = 0x1
-_OP_BIN = 0x2
-_OP_CLOSE = 0x8
-_OP_PING = 0x9
-_OP_PONG = 0xA
-
-MAX_FRAME_PAYLOAD = 1 << 22  # 4 MiB
-
-# How long to block in select() per loop iteration before re-checking
-# shutdown. Mercury sends server pings periodically; the WS layer
-# answers them automatically via the recv_frame PING→PONG path.
 READ_TICK_SECS = 30.0
-
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Chunk `text` into <= limit pieces, preferring newline splits.
-    Mirrors the shared Rust ``split_message`` helper."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        window = rest[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < limit else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
-def _split_csv(raw: str) -> list[str]:
-    """Comma-separated env-var → cleaned list of strings."""
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
     """Webex's 429 response includes ``Retry-After`` (seconds).
     Fall back to ``default_secs`` when missing/garbled. Floor 1 s,
@@ -344,226 +306,6 @@ def parse_webex_message(
     )
 
 
-# ---------------------------------------------------------------------------
-# Stdlib WebSocket client — same RFC 6455 reader as the discord / slack
-# sidecars (#5299 / #5302). The header dict feeds custom Authorization on
-# the upgrade request (Mercury requires Bearer auth pre-handshake).
-# ---------------------------------------------------------------------------
-
-
-class _WebSocketClient:
-    def __init__(
-        self,
-        url: str,
-        *,
-        headers: Optional[dict] = None,
-        handshake_timeout: float = HANDSHAKE_TIMEOUT_SECS,
-    ) -> None:
-        self.url = url
-        self.headers = dict(headers or {})
-        self._sock: Optional[socket.socket] = None
-        self._leftover = b""
-        self._handshake_timeout = handshake_timeout
-        self._send_lock = threading.Lock()
-        self.closed = False
-
-    @staticmethod
-    def _parse_url(url: str) -> tuple[str, int, str, bool]:
-        u = urllib.parse.urlparse(url)
-        scheme = u.scheme.lower()
-        if scheme not in ("ws", "wss"):
-            raise ValueError(f"not a websocket url: {url!r}")
-        if not u.hostname:
-            raise ValueError(f"websocket url missing host: {url!r}")
-        is_tls = scheme == "wss"
-        port = u.port or (443 if is_tls else 80)
-        path = u.path or "/"
-        if u.query:
-            path += "?" + u.query
-        return u.hostname, port, path, is_tls
-
-    def __enter__(self) -> "_WebSocketClient":
-        host, port, path, is_tls = self._parse_url(self.url)
-        sock = socket.create_connection((host, port), timeout=self._handshake_timeout)
-        if is_tls:
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        lines = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}:{port}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-        ]
-        for k, v in self.headers.items():
-            lines.append(f"{k}: {v}")
-        req = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
-        sock.sendall(req)
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                sock.close()
-                raise RuntimeError("connection closed during ws handshake")
-            buf += chunk
-            if len(buf) > 65536:
-                sock.close()
-                raise RuntimeError("ws handshake response too large")
-        head, _, leftover = buf.partition(b"\r\n\r\n")
-        head_lines = head.split(b"\r\n")
-        status = head_lines[0]
-        if not status.startswith(b"HTTP/1.1 101 "):
-            sock.close()
-            raise RuntimeError(
-                f"ws handshake failed: {status.decode('ascii', 'replace')}"
-            )
-        expected = base64.b64encode(
-            hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()
-        ).decode("ascii")
-        got = None
-        for line in head_lines[1:]:
-            name, _, val = line.partition(b":")
-            if name.strip().lower() == b"sec-websocket-accept":
-                got = val.strip().decode("ascii", "replace")
-                break
-        if got != expected:
-            sock.close()
-            raise RuntimeError("ws handshake Sec-WebSocket-Accept mismatch")
-        self._sock = sock
-        self._leftover = leftover
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        self.closed = True
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-    def settimeout(self, timeout: Optional[float]) -> None:
-        if self._sock is not None:
-            self._sock.settimeout(timeout)
-
-    def wait_readable(self, timeout: float) -> bool:
-        if self._leftover:
-            return True
-        sock = self._sock
-        if sock is None:
-            return False
-        pending = getattr(sock, "pending", None)
-        if callable(pending):
-            try:
-                if pending() > 0:
-                    return True
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            r, _, _ = select.select([sock], [], [], max(0.0, timeout))
-        except (OSError, ValueError):
-            return False
-        return bool(r)
-
-    def _recv_exact(self, n: int) -> bytes:
-        if n <= 0:
-            return b""
-        buf = bytearray()
-        while len(buf) < n:
-            if self._leftover:
-                take = min(n - len(buf), len(self._leftover))
-                buf.extend(self._leftover[:take])
-                self._leftover = self._leftover[take:]
-                continue
-            assert self._sock is not None
-            chunk = self._sock.recv(n - len(buf))
-            if not chunk:
-                raise EOFError("websocket closed mid-frame")
-            buf.extend(chunk)
-        return bytes(buf)
-
-    def _send_frame(self, opcode: int, payload: bytes) -> None:
-        assert self._sock is not None
-        header = bytearray([0x80 | (opcode & 0x0F)])
-        ln = len(payload)
-        if ln < 126:
-            header.append(0x80 | ln)
-        elif ln < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack(">H", ln))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack(">Q", ln))
-        mask = os.urandom(4)
-        header.extend(mask)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        with self._send_lock:
-            self._sock.sendall(bytes(header) + masked)
-
-    def send_text(self, s: str) -> None:
-        self._send_frame(_OP_TEXT, s.encode("utf-8"))
-
-    def send_close(self) -> None:
-        try:
-            self._send_frame(_OP_CLOSE, b"")
-        except OSError:
-            pass
-
-    def recv_frame(self) -> tuple[Optional[str], Optional[tuple[int, bytes]]]:
-        h2 = self._recv_exact(2)
-        fin = (h2[0] & 0x80) != 0
-        opcode = h2[0] & 0x0F
-        masked = (h2[1] & 0x80) != 0
-        ln = h2[1] & 0x7F
-        if ln == 126:
-            ln = struct.unpack(">H", self._recv_exact(2))[0]
-        elif ln == 127:
-            ln = struct.unpack(">Q", self._recv_exact(8))[0]
-        if ln > MAX_FRAME_PAYLOAD:
-            raise RuntimeError(
-                f"websocket frame payload {ln} exceeds cap {MAX_FRAME_PAYLOAD}"
-            )
-        mask_key = self._recv_exact(4) if masked else None
-        payload = self._recv_exact(ln)
-        if mask_key is not None:
-            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-        if opcode == _OP_PING:
-            self._send_frame(_OP_PONG, payload)
-            return None, None
-        if opcode == _OP_PONG:
-            return None, None
-        if opcode == _OP_CLOSE:
-            code = 1005
-            reason = b""
-            if len(payload) >= 2:
-                code = struct.unpack(">H", payload[:2])[0]
-                reason = payload[2:]
-            return None, (code, reason)
-        if opcode == _OP_TEXT:
-            buf = bytearray(payload)
-            while not fin:
-                h2 = self._recv_exact(2)
-                fin = (h2[0] & 0x80) != 0
-                opcode2 = h2[0] & 0x0F
-                masked2 = (h2[1] & 0x80) != 0
-                ln2 = h2[1] & 0x7F
-                if ln2 == 126:
-                    ln2 = struct.unpack(">H", self._recv_exact(2))[0]
-                elif ln2 == 127:
-                    ln2 = struct.unpack(">Q", self._recv_exact(8))[0]
-                if ln2 > MAX_FRAME_PAYLOAD:
-                    raise RuntimeError("ws continuation payload too large")
-                mk = self._recv_exact(4) if masked2 else None
-                payload2 = self._recv_exact(ln2)
-                if mk is not None:
-                    payload2 = bytes(b ^ mk[i % 4] for i, b in enumerate(payload2))
-                if opcode2 != _OP_CONT:
-                    raise RuntimeError(f"ws unexpected interleaved opcode {opcode2}")
-                buf.extend(payload2)
-            return buf.decode("utf-8", "replace"), None
-        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -625,9 +367,7 @@ class WebexAdapter(SidecarAdapter):
         self.bot_display_name: Optional[str] = None
 
         # Improvement #3: bounded dedupe on activity.object.id.
-        self._seen_ids: set[str] = set()
-        self._seen_order: list[str] = []
-        self._seen_lock = threading.Lock()
+        self._seen = _SeenSet(max_size=SEEN_MESSAGES_MAX, evict=SEEN_MESSAGES_EVICT)
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -649,59 +389,23 @@ class WebexAdapter(SidecarAdapter):
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
     ) -> tuple[int, Any, bytes, dict]:
-        """One-shot HTTP request. Returns
-        ``(status, parsed_json_or_None, raw_bytes, response_headers)``.
-        Response headers are lower-cased so 429 ``Retry-After`` can be
-        looked up uniformly regardless of server casing."""
-        req = urllib.request.Request(
-            url, data=body, headers=headers or {}, method=method,
+        """Thin wrapper around :func:`librefang.sidecar.common.http_request`."""
+        return _http_request(
+            url, method=method, body=body, headers=headers,
+            timeout=timeout,
         )
-        resp_headers: dict = {}
-        try:
-            with urllib.request.urlopen(  # noqa: S310 — configured URL
-                req, timeout=timeout,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                raw = resp.read()
-                if resp.headers is not None:
-                    resp_headers = {
-                        k.lower(): v for k, v in resp.headers.items()
-                    }
-        except urllib.error.HTTPError as e:
-            status = e.code
-            try:
-                raw = e.read()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if e.headers is not None:
-                resp_headers = {k.lower(): v for k, v in e.headers.items()}
-        if not raw:
-            return status, None, b"", resp_headers
-        try:
-            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw, resp_headers
 
     # ---- dedupe ------------------------------------------------------
 
     def _mark_seen(self, message_id: str) -> bool:
-        """Return True iff ``message_id`` is freshly seen (i.e. emit it).
-        Maintains a bounded LRU-ish set keyed on Mercury
-        ``activity.object.id``. Improvement #3."""
+        """Return True iff freshly seen. Shim around
+        :class:`librefang.sidecar.common.SeenSet` with webex's
+        historical empty-id → False override (drop the event
+        instead of treating an empty id as fresh — different from
+        the other adapters)."""
         if not message_id:
             return False
-        with self._seen_lock:
-            if message_id in self._seen_ids:
-                return False
-            self._seen_ids.add(message_id)
-            self._seen_order.append(message_id)
-            if len(self._seen_order) > SEEN_MESSAGES_MAX:
-                # Evict the oldest half so we don't thrash at the cap.
-                drop = self._seen_order[:SEEN_MESSAGES_EVICT]
-                self._seen_order = self._seen_order[SEEN_MESSAGES_EVICT:]
-                for k in drop:
-                    self._seen_ids.discard(k)
-            return True
+        return self._seen.mark(message_id)
 
     # ---- REST: auth, message fetch, send ----------------------------
 
