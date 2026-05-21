@@ -915,13 +915,13 @@ impl LibreFangKernel {
             }
         }
 
-        // Start WhatsApp Web gateway if WhatsApp channel is configured
-        if cfg.channels.whatsapp.is_some() {
-            let kernel = Arc::clone(self);
-            spawn_logged("whatsapp_gateway_starter", async move {
-                crate::whatsapp_gateway::start_whatsapp_gateway(&kernel).await;
-            });
-        }
+        // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp).
+        // Operators on Web/QR mode now declare the Baileys gateway
+        // separately as a `[[sidecar_channels]]` entry (or run it as
+        // an external service), so the kernel no longer embeds /
+        // auto-spawns the Node.js process. See SIDECAR_CATALOG in
+        // librefang-api/src/routes/channels.rs and the migration
+        // notes in CHANGELOG.
     }
 
     /// Start the heartbeat monitor background task.
@@ -1261,27 +1261,11 @@ impl LibreFangKernel {
         // Signal background tasks to stop (e.g., approval expiry sweep)
         let _ = self.shutdown_tx.send(true);
 
-        // Kill WhatsApp gateway child process if running
-        if let Ok(guard) = self.whatsapp_gateway_pid.lock() {
-            if let Some(pid) = *guard {
-                info!("Stopping WhatsApp Web gateway (PID {pid})...");
-                // Best-effort kill — don't block shutdown on failure
-                #[cfg(unix)]
-                {
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGTERM);
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/T", "/F"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-            }
-        }
+        // whatsapp_gateway_pid kill path removed alongside the
+        // whatsapp sidecar migration — the Baileys gateway (if
+        // still in use) is now a separately-managed
+        // `[[sidecar_channels]]` entry and its lifecycle is
+        // tied to the standard sidecar supervisor.
 
         self.agents.supervisor.shutdown();
 
