@@ -274,6 +274,107 @@ struct Caps {
     header_rules: Vec<(String, Vec<(String, String)>)>,
 }
 
+/// Detect the canonical Python-side failure mode that fires when
+/// `librefang-sdk` is not importable from the interpreter the daemon
+/// spawned for the sidecar. We narrow on BOTH the `ModuleNotFoundError`
+/// (or module-spec lookup) phrase AND the `librefang` token so a
+/// random adapter that prints "librefang" in stderr for unrelated
+/// reasons doesn't trip the install-hint translation and mask the
+/// real bug. This is intentionally Python-shaped — non-Python
+/// sidecars fall through to the raw passthrough.
+///
+/// Shared with `librefang-api::routes::sidecar_describe` (which
+/// re-uses this single detector + `format_librefang_sdk_missing_hint`
+/// so the discovery-time and runtime-time install hints stay in
+/// lockstep). Keep both call sites in sync — if Python's traceback
+/// format changes, update HERE only.
+pub fn looks_like_librefang_sdk_missing(line: &str) -> bool {
+    let module_not_found =
+        line.contains("ModuleNotFoundError") && line.contains("No module named 'librefang'");
+    let spec_lookup_failed =
+        line.contains("Error while finding module specification for 'librefang.sidecar");
+    module_not_found || spec_lookup_failed
+}
+
+/// Render the single canonical "install librefang-sdk" hint for a
+/// given interpreter command. Used by both the boot-time discovery
+/// translator (in `librefang-api`) and the runtime stderr loop (in
+/// this crate) so operators see exactly the same message regardless
+/// of which path tripped — and editing one updates both.
+///
+/// Single-quoted (not backticked) — the daemon WARN log channel
+/// renders plain text, so markdown backticks appear literally to
+/// operators and read worse than single quotes.
+pub fn format_librefang_sdk_missing_hint(command: &str) -> String {
+    format!(
+        "librefang-sdk is not installed in the Python interpreter \
+         resolved by '{command}'. Install with 'pip install \
+         librefang-sdk' (or 'pip install -e sdk/python/' from a \
+         source checkout). The daemon and your shell can resolve \
+         different python3 binaries under mise / pyenv / conda — \
+         verify with '{command} -c \"import librefang.sidecar; \
+         print(librefang.__file__)\"'."
+    )
+}
+
+/// What `StderrTranslator::handle_line` decided to do with a given
+/// stderr line. Extracted from the inline `warn!`/`debug!` macro
+/// calls so the WARN-then-DEBUG dedupe behavior is unit-testable
+/// without spinning up a tracing subscriber.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StderrAction {
+    /// Emit at WARN level — the line is either the first
+    /// install-hint-worthy crash signal or an unrelated stderr
+    /// line worth surfacing to operators.
+    Warn(String),
+    /// Emit at DEBUG level — subsequent install-hint-worthy lines
+    /// from the same crash (Python's traceback prints across 2-3
+    /// lines and we don't want to triple-WARN per restart).
+    Debug(String),
+}
+
+/// Per-spawn stderr line classifier. Owns the dedupe state for the
+/// install-hint translation so the stderr-reader task in
+/// `spawn_once` stays a thin loop and the WARN-vs-DEBUG decision
+/// is testable in isolation.
+pub struct StderrTranslator {
+    /// Sidecar interpreter command (e.g. `python3`). Referenced in
+    /// the install hint so operators see exactly which binary the
+    /// daemon resolved.
+    command: String,
+    /// Flips to true after we emit the install hint once for this
+    /// spawn. Subsequent matching lines from the same crash drop
+    /// to DEBUG so a 3-line Python traceback doesn't fan out to 3
+    /// identical WARNs per restart attempt.
+    install_hint_emitted: bool,
+}
+
+impl StderrTranslator {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            install_hint_emitted: false,
+        }
+    }
+
+    /// Classify one stderr line. Side-effecting (toggles internal
+    /// dedupe state on the first install-hint match); idempotent
+    /// thereafter on matching lines (always returns `Debug`).
+    pub fn handle_line(&mut self, line: &str) -> StderrAction {
+        if looks_like_librefang_sdk_missing(line) {
+            if !self.install_hint_emitted {
+                self.install_hint_emitted = true;
+                return StderrAction::Warn(format!(
+                    "[sidecar stderr] {}",
+                    format_librefang_sdk_missing_hint(&self.command),
+                ));
+            }
+            return StderrAction::Debug(format!("[sidecar stderr] {line}"));
+        }
+        StderrAction::Warn(format!("[sidecar stderr] {line}"))
+    }
+}
+
 /// Write one newline-delimited JSON command to the child's stdin.
 /// Shared by `SidecarAdapter::send_command` and the stdout reader
 /// (which needs to emit `ReadyAck` without a `&self`).
@@ -554,11 +655,19 @@ async fn spawn_once(
     }
 
     let stderr_name = ctx.name.clone();
+    let mut stderr_translator = StderrTranslator::new(&ctx.command);
     tokio::spawn(async move {
         let reader = BufReader::new(child_stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            warn!(adapter = %stderr_name, "[sidecar stderr] {line}");
+            match stderr_translator.handle_line(&line) {
+                StderrAction::Warn(msg) => {
+                    warn!(adapter = %stderr_name, "{msg}");
+                }
+                StderrAction::Debug(msg) => {
+                    debug!(adapter = %stderr_name, "{msg}");
+                }
+            }
         }
     });
 
@@ -1501,6 +1610,172 @@ fn derive_sidecar_sender_identity(
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    #[test]
+    fn looks_like_librefang_sdk_missing_matches_canonical_traceback_lines() {
+        // The two specific Python traceback shapes operators see
+        // when librefang-sdk is not installed in the daemon's
+        // interpreter. Both come straight from CPython's runpy.
+        assert!(looks_like_librefang_sdk_missing(
+            "/usr/bin/python3: Error while finding module specification \
+             for 'librefang.sidecar.adapters.telegram' \
+             (ModuleNotFoundError: No module named 'librefang')"
+        ));
+        assert!(looks_like_librefang_sdk_missing(
+            "ModuleNotFoundError: No module named 'librefang'"
+        ));
+        assert!(looks_like_librefang_sdk_missing(
+            "Error while finding module specification for \
+             'librefang.sidecar.adapters.feishu'"
+        ));
+    }
+
+    #[test]
+    fn looks_like_librefang_sdk_missing_does_not_fire_on_unrelated_imports() {
+        // An adapter's own typo'd ImportError must surface
+        // verbatim — silencing it with the install hint would
+        // mask the real bug.
+        assert!(!looks_like_librefang_sdk_missing(
+            "ImportError: cannot import name 'foo' from \
+             'librefang.sidecar.adapters.telegram'"
+        ));
+        assert!(!looks_like_librefang_sdk_missing(
+            "ModuleNotFoundError: No module named 'requests'"
+        ));
+        // The word "librefang" appearing in unrelated stderr
+        // output must not by itself trigger the hint — the
+        // detector requires BOTH the canonical phrase AND the
+        // librefang token.
+        assert!(!looks_like_librefang_sdk_missing(
+            "[INFO] librefang sidecar adapter started normally"
+        ));
+        assert!(!looks_like_librefang_sdk_missing(""));
+    }
+
+    #[test]
+    fn format_librefang_sdk_missing_hint_interpolates_command_twice() {
+        // The hint references the resolved interpreter command in
+        // BOTH the "resolved by" phrase AND the verification
+        // snippet at the end. Both substitutions must use the
+        // exact command string the daemon ran so operators can
+        // copy-paste the verify command directly.
+        let hint = format_librefang_sdk_missing_hint(
+            "/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3",
+        );
+        assert!(
+            hint.contains(
+                "resolved by '/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3'"
+            ),
+            "hint must name the resolved interpreter in the first \
+             sentence; got: {hint}"
+        );
+        assert!(
+            hint.contains(
+                "verify with '/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3 -c"
+            ),
+            "hint's verify snippet must use the same interpreter; \
+             got: {hint}"
+        );
+        // No backticks (would render literally in plain-text log
+        // channel) — single quotes only.
+        assert!(
+            !hint.contains('`'),
+            "hint must not contain backticks; got: {hint}"
+        );
+    }
+
+    #[test]
+    fn stderr_translator_first_match_warns_subsequent_match_lines_debug() {
+        // A 3-line Python traceback through the same crash must
+        // emit exactly ONE WARN (the install hint) and route the
+        // 2 trailing matching lines to DEBUG. Without the dedupe
+        // the operator would see 3 identical WARNs per restart
+        // attempt — and the restart loop fires every few seconds
+        // by default.
+        let mut t = StderrTranslator::new("python3");
+        // CPython prints the spec-lookup line first, then the
+        // bare ModuleNotFoundError, then sometimes a separator.
+        let line_a = "/usr/bin/python3: Error while finding module specification \
+                      for 'librefang.sidecar.adapters.telegram' \
+                      (ModuleNotFoundError: No module named 'librefang')";
+        let line_b = "ModuleNotFoundError: No module named 'librefang'";
+        let line_c = "  File \"/usr/lib/python3.13/runpy.py\", line 198, in _run_module_as_main";
+        let line_d = "ModuleNotFoundError: No module named 'librefang'";
+        match t.handle_line(line_a) {
+            StderrAction::Warn(msg) => {
+                assert!(msg.contains("librefang-sdk is not installed"));
+                assert!(msg.starts_with("[sidecar stderr] "));
+            }
+            other => panic!("first matching line must WARN; got {other:?}"),
+        }
+        // Second matching line → DEBUG (raw passthrough preserved
+        // so a debug-level operator can see the full traceback).
+        match t.handle_line(line_b) {
+            StderrAction::Debug(msg) => {
+                assert!(msg.contains("ModuleNotFoundError"));
+                assert!(msg.starts_with("[sidecar stderr] "));
+            }
+            other => panic!("second matching line must DEBUG; got {other:?}"),
+        }
+        // Unrelated stderr line (a non-matching traceback frame)
+        // is still WARN even after the install hint fired — only
+        // matching lines drop to DEBUG.
+        match t.handle_line(line_c) {
+            StderrAction::Warn(msg) => {
+                assert!(msg.contains("runpy.py"));
+            }
+            other => panic!("non-matching line must WARN; got {other:?}"),
+        }
+        // And a fourth matching line again → DEBUG.
+        match t.handle_line(line_d) {
+            StderrAction::Debug(_) => {}
+            other => panic!("fourth matching line must DEBUG; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stderr_translator_non_matching_lines_always_warn() {
+        // An adapter that crashes for a NON-SDK reason (typo'd
+        // import, missing required env, raised exception in the
+        // adapter's own code) must surface every stderr line at
+        // WARN so operators see the real failure verbatim.
+        let mut t = StderrTranslator::new("python3");
+        for line in [
+            "Traceback (most recent call last):",
+            "  File \"/path/adapter.py\", line 12, in <module>",
+            "    import requests",
+            "ModuleNotFoundError: No module named 'requests'",
+            "ImportError: cannot import name 'foo'",
+        ] {
+            match t.handle_line(line) {
+                StderrAction::Warn(_) => {}
+                StderrAction::Debug(msg) => panic!(
+                    "non-SDK stderr line was downgraded to DEBUG: \
+                     {msg} (would hide real adapter bugs from operators)"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn stderr_translator_uses_supplied_command_in_hint() {
+        // The hint's "resolved by '<command>'" sentence must
+        // reference the SAME command the translator was
+        // constructed with, not a hardcoded 'python3' fallback.
+        // Otherwise operators with mise / pyenv / conda see a
+        // misleading hint that doesn't match the binary actually
+        // failing.
+        let mut t = StderrTranslator::new("/Users/alice/.pyenv/versions/3.13.0/bin/python3");
+        match t.handle_line("ModuleNotFoundError: No module named 'librefang'") {
+            StderrAction::Warn(msg) => {
+                assert!(
+                    msg.contains("/Users/alice/.pyenv/versions/3.13.0/bin/python3"),
+                    "hint did not propagate the constructor's command; got: {msg}"
+                );
+            }
+            other => panic!("expected WARN; got {other:?}"),
+        }
+    }
 
     /// #5227 follow-up — chat-vs-user identity split for sidecar
     /// messages. Telegram-sidecar group: distinct chat_id and user_id
