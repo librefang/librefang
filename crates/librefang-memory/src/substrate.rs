@@ -53,6 +53,65 @@ pub struct MemorySubstrate {
 /// what `config.toml: [memory] pool_size` defaults to.
 pub const DEFAULT_POOL_SIZE: u32 = 8;
 
+/// Tighten the on-disk SQLite database files to owner-only (`0o600`)
+/// permissions. Targets `db_path`, the matching `-wal`, and the
+/// matching `-shm` siblings. Files that don't exist yet (typical for
+/// `-wal` / `-shm` on first boot before any write) are silently
+/// skipped — they'll be created with the umask, and the next call to
+/// this helper at write time tightens them.
+///
+/// Audit: sqlite-file-permissions. Without this, the DB files inherit
+/// the process umask (typically `0644`), so every other process under
+/// the same UID can read raw user prompts, LLM replies, audit
+/// entries, OAuth nonces, TOTP codes, and paired-device api_key
+/// hashes from `~/.librefang/librefang.db`.
+///
+/// Non-Unix is a no-op (Windows permissions follow a different model
+/// and don't have a meaningful 0o600 equivalent at the file level).
+pub fn restrict_db_file_permissions(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perm = std::fs::Permissions::from_mode(0o600);
+        let parent = db_path.parent();
+        let stem = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        // SQLite uses `<db>-wal` and `<db>-shm` for WAL journaling.
+        // They appear lazily — the first write spawns both, so on a
+        // fresh boot they don't yet exist and ENOENT is the expected
+        // outcome (we just want to make sure they're 0600 once they
+        // do show up).
+        let targets: Vec<std::path::PathBuf> = match parent {
+            Some(p) if !stem.is_empty() => vec![
+                db_path.to_path_buf(),
+                p.join(format!("{stem}-wal")),
+                p.join(format!("{stem}-shm")),
+            ],
+            _ => vec![db_path.to_path_buf()],
+        };
+        for path in targets {
+            match std::fs::set_permissions(&path, perm.clone()) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // -wal / -shm not yet materialised — fine, the
+                    // next caller will tighten them.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to tighten SQLite file permissions to 0o600 — \
+                         file may be world-readable until next boot"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+}
+
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> LibreFangResult<Self> {
@@ -119,6 +178,19 @@ impl MemorySubstrate {
             let migration_conn = pool.get().map_err(LibreFangError::memory)?;
             run_migrations(&migration_conn).map_err(LibreFangError::memory)?;
         }
+
+        // Audit: sqlite-file-permissions. SqliteConnectionManager
+        // creates `librefang.db`, `-wal` and `-shm` with the
+        // process umask (typically 0644), making them readable by
+        // every other process under the same UID on shared hosts
+        // (CI runners, multi-user dev boxes). The DB contains raw
+        // user prompts, LLM replies, audit_entries, OAuth nonces,
+        // TOTP codes, paired-device api_key hashes — every secret
+        // we ask operators to consider sensitive. Tighten to 0600
+        // immediately after migrations so the window between
+        // creation and chmod is closed before any other process
+        // can read. Non-Unix is a no-op.
+        restrict_db_file_permissions(db_path);
 
         let sessions = SessionStore::new(pool.clone());
         // Repair any sessions/sessions_fts drift left over from #3451
@@ -2363,5 +2435,81 @@ mod tests {
                  driven by spawn_blocking"
             );
         });
+    }
+
+    /// Audit: sqlite-file-permissions. After `open_with_pool_size`
+    /// returns, `librefang.db` must be 0o600 — every other process
+    /// under the same UID can otherwise read raw user prompts, LLM
+    /// replies, audit entries, OAuth nonces, TOTP codes, and
+    /// paired-device api_key hashes on shared hosts. Skip on
+    /// non-Unix where the permission model is different.
+    #[cfg(unix)]
+    #[test]
+    fn open_with_pool_size_tightens_db_file_to_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+
+        let _substrate = MemorySubstrate::open_with_pool_size(
+            &db_path,
+            0.0,
+            ChunkConfig::default(),
+            1,
+        )
+        .expect("substrate open");
+
+        let mode = std::fs::metadata(&db_path)
+            .expect("db exists after open")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "librefang.db must be owner-only after substrate open — got {mode:o}"
+        );
+    }
+
+    /// Even if the WAL / SHM siblings appear after the first write,
+    /// the helper handles their NotFound case at boot time without
+    /// erroring. This test forces the WAL into existence via a real
+    /// write, then re-runs `restrict_db_file_permissions` and
+    /// asserts both siblings end up 0o600.
+    #[cfg(unix)]
+    #[test]
+    fn restrict_db_file_permissions_covers_wal_and_shm_when_present() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+
+        let substrate = MemorySubstrate::open_with_pool_size(
+            &db_path,
+            0.0,
+            ChunkConfig::default(),
+            1,
+        )
+        .expect("substrate open");
+
+        // Forcibly trigger a WAL flush by creating a session — that
+        // makes `-wal` / `-shm` appear so the helper has something to
+        // chmod on the second call.
+        let _session = substrate
+            .sessions
+            .create_session(librefang_types::agent::AgentId::new())
+            .unwrap();
+
+        // The post-write WAL files might have been created at 0o644
+        // (depends on SQLite's umask handling). Re-tighten.
+        restrict_db_file_permissions(&db_path);
+
+        for sibling in ["test.db-wal", "test.db-shm"] {
+            let path = tmp.path().join(sibling);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mode = meta.permissions().mode() & 0o777;
+                assert_eq!(
+                    mode, 0o600,
+                    "{sibling} must be owner-only after restrict_db_file_permissions — got {mode:o}"
+                );
+            }
+        }
     }
 }

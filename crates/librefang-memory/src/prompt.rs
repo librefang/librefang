@@ -126,6 +126,12 @@ impl PromptStore {
             .max_size(pool_size.max(1))
             .build(manager)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // Audit: sqlite-file-permissions — same rationale as in
+        // `librefang_memory::substrate::open_with_pool_size`. The
+        // PromptStore DB persists agent system prompts which can
+        // contain credentials/secrets baked into instructions; it
+        // must not be world-readable.
+        crate::substrate::restrict_db_file_permissions(db_path.as_ref());
         Ok(Self { pool })
     }
 
