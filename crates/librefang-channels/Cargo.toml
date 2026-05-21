@@ -47,6 +47,21 @@ rustls-native-certs = { workspace = true }
 # `features = ["ring"]` pulled an unused second crypto backend.
 rustls = { workspace = true }
 
+# Embeds `sdk/python/librefang/` into the daemon binary so a new
+# user with just `python3` on PATH can enable a sidecar channel
+# without first running `pip install librefang-sdk`. See
+# `embedded_sdk.rs` for the runtime extraction + PYTHONPATH-injection
+# behaviour. Same crate the dashboard SPA bundle uses
+# (`librefang-api` dep, version pinned at the workspace level).
+include_dir = "0.7"
+# Content hash of the embedded SDK tree — drives the
+# `<home>/sidecar-python/<hash>/` directory name so a daemon upgrade
+# extracts to a fresh subdirectory. The wider `librefang-channels`
+# cleanup in #5473 pruned `sha2` from this crate alongside the
+# webhook-verifying in-process adapters; `embedded_sdk.rs` is the
+# only re-consumer.
+sha2 = { workspace = true }
+
 # Sidecar migration cleanup: with every channel adapter moved
 # out-of-process (`librefang.sidecar.adapters.*`), the crypto and
 # transport deps the in-process adapters needed have no remaining

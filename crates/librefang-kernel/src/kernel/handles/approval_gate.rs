@@ -121,6 +121,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
+            chat_id: None,
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
@@ -131,7 +132,12 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             tool_use_id: None,
         };
 
-        // Publish an ApprovalRequested event so channel adapters can notify users
+        // Publish an ApprovalRequested event so channel adapters can notify users.
+        // Blocking path: the `KernelHandle::request_approval` signature does
+        // not carry sender context (it's used by tools that wait inline),
+        // so sender_id / channel are `None` here. Channel listener falls
+        // back to its `notification_recipients` + `AgentBinding` fan-out
+        // for these — same behaviour as pre-fix.
         {
             use librefang_types::event::{
                 ApprovalRequestedEvent, Event, EventPayload, EventTarget,
@@ -145,6 +151,9 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     tool_name: tool_name.to_string(),
                     description: description.clone(),
                     risk_level: format!("{:?}", risk_level),
+                    sender_id: None,
+                    channel: None,
+                    chat_id: None,
                 }),
             );
             self.events.event_bus.publish(event).await;
@@ -267,6 +276,17 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         let agent_display = self.approval_agent_display(agent_id);
         let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
         let request_id = uuid::Uuid::new_v4();
+        // The deferred payload built in `tool_runner::dispatch.rs`
+        // carries the channel + sender from the agent_loop's
+        // `SenderContext`. Pre-fix these were hardcoded to `None`,
+        // which is what stranded Telegram approvals — the channel
+        // listener had no idea which chat to route the
+        // `[Approve] [Deny]` keyboard to and silently dropped the
+        // notification (only a DEBUG line, nothing visible to the
+        // operator).
+        let routed_sender_id = deferred.sender_id.clone();
+        let routed_channel = deferred.channel.clone();
+        let routed_chat_id = deferred.chat_id.clone();
         let req = TypedRequest {
             id: request_id,
             agent_id: agent_id.to_string(),
@@ -279,8 +299,9 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
-            sender_id: None,
-            channel: None,
+            sender_id: routed_sender_id.clone(),
+            channel: routed_channel.clone(),
+            chat_id: routed_chat_id.clone(),
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
@@ -296,7 +317,13 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             .submit_request(req.clone(), deferred)
             .map_err(|e| e.to_string())?;
 
-        // Publish event + push notification (same as blocking path)
+        // Publish event + push notification (same as blocking path).
+        // The channel listener subscribes to the EventBus (NOT the
+        // approval_manager's own broadcast); the new sender_id +
+        // channel fields are what let it route the `[Approve] [Deny]`
+        // keyboard straight back to the originating chat without
+        // needing any `notification_recipients` / `AgentBinding`
+        // operator-inbox configuration.
         {
             use librefang_types::event::{
                 ApprovalRequestedEvent, Event, EventPayload, EventTarget,
@@ -310,6 +337,9 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     tool_name: tool_name.to_string(),
                     description: description.clone(),
                     risk_level: format!("{:?}", risk_level),
+                    sender_id: routed_sender_id,
+                    channel: routed_channel,
+                    chat_id: routed_chat_id,
                 }),
             );
             self.events.event_bus.publish(event).await;
