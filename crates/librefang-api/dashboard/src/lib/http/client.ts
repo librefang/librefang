@@ -36,6 +36,7 @@ export {
   getBudgetStatus,
   // channels & comms
   listChannels,
+  listChannelInstances,
   getCommsTopology,
   listCommsEvents,
   // config & registry
@@ -163,6 +164,8 @@ export type {
   UserBudgetWindow,
   UserBudgetPayload,
   ListSessionsResult,
+  ChannelInstance,
+  ChannelInstancesResponse,
   SidecarSaveResult,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
@@ -205,6 +208,11 @@ export {
   // analytics
   updateBudget,
   // channels & comms
+  configureChannel,
+  createChannelInstance,
+  updateChannelInstance,
+  deleteChannelInstance,
+  testChannel,
   reloadChannels,
   saveSidecarConfig,
   sendCommsMessage,

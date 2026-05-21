@@ -85,7 +85,8 @@ vi.mock("@tanstack/react-router", () => ({
 // union — partial mocks (data + isPending + a couple of flags) fail
 // strict typecheck. Same for the `UseMutationResult` returned by each
 // mutation hook. Cast to a generic vi.fn-compatible shape is the
-// idiomatic escape hatch here.
+// idiomatic escape hatch here; ChannelsPage.test.tsx uses the same
+// pattern intentionally.
 const useUsersMock = useUsers as unknown as ReturnType<typeof vi.fn>;
 const useCreateUserMock = useCreateUser as unknown as ReturnType<typeof vi.fn>;
 const useUpdateUserMock = useUpdateUser as unknown as ReturnType<typeof vi.fn>;
@@ -150,9 +151,10 @@ function setMutationDefaults() {
 }
 
 // Renders the current global drawer body once into a stable host so tests
-// can query the open drawer's content alongside the page. Avoids the
-// dual desktop+mobile mount that <PushDrawer /> does (which would yield
-// duplicate matches for every query inside the drawer body).
+// can query the open drawer's content alongside the page. Mirrors the
+// pattern in ChannelsPage.test.tsx — avoids the dual desktop+mobile mount
+// that <PushDrawer /> does (which would yield duplicate matches for every
+// query inside the drawer body).
 function DrawerSlot(): React.ReactNode {
   const content = useDrawerStore(s => s.content);
   const isOpen = useDrawerStore(s => s.isOpen);
