@@ -4184,6 +4184,52 @@
         }
       }
     },
+    "/api/channels/{name}/qr": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "GET /api/channels/{name}/qr — Return the latest QR-login state\npublished by the sidecar.",
+        "description": "The sidecar drives the QR start/poll cycle itself and emits\n`qr_ready` / `qr_status` events; this handler just reads the\ncached `ChannelStatus.qr` and returns it to the dashboard.\n\nStatus codes:\n- `200` — sidecar has published at least one QR event; payload is\n  the current `QrState` (which may be in any lifecycle phase).\n- `204` — sidecar is running but has not published a QR session\n  yet (e.g. WeChat sidecar authenticated from a cached\n  `WECHAT_BOT_TOKEN`, no QR needed). The dashboard treats this as\n  \"no scan required\" and closes the dialog.\n- `404` — no sidecar is currently registered under that name.\n  With the in-process registry retired, a \"known channel name\"\n  check would just duplicate \"is there a running adapter?\", so we\n  collapse the two cases — easier to read in a dashboard error\n  panel (\"Sidecar not running\") than two indistinguishable 404s.",
+        "operationId": "get_channel_qr",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel adapter name (e.g. wechat, whatsapp)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "QR-login state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Sidecar running, no QR session yet"
+          },
+          "404": {
+            "description": "Sidecar not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/clawhub/browse": {
       "get": {
         "tags": [
