@@ -23,4 +23,3 @@
 google_chat
 sidecar
 webhook
-whatsapp

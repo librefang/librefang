@@ -798,8 +798,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 }
             };
         }
-        ch!(whatsapp);
-        ch!(teams);
+        // whatsapp / teams migrated to sidecars; their fields no
+        // longer exist on ChannelsConfig. The `ch!` macro probes
+        // `c.<name>.is_empty()` so referencing them after removal
+        // is a compile error — left to surface here, not in CI,
+        // because the previous teams PR merged with --admin
+        // (skipping CI) and the matrix-style cleanup of this file
+        // was missed.
         ch!(google_chat);
         ch!(webhook);
         serde_json::Value::Object(map)

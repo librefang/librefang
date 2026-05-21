@@ -302,27 +302,17 @@ admin_role = "admin"
         assert!(back.stable_prefix_mode);
     }
 
-    #[test]
-    fn test_validate_missing_env_vars() {
-        let mut config = KernelConfig::default();
-        config.channels.whatsapp = OneOrMany(vec![WhatsAppConfig {
-            access_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_WA_TOKEN".to_string(),
-            ..Default::default()
-        }]);
-        let warnings = config.validate();
-        assert!(
-            warnings.iter().any(|w| w.contains("WhatsApp")),
-            "expected a WhatsApp warning in: {warnings:?}"
-        );
-    }
+    // test_validate_missing_env_vars removed — its in-process witness
+    // (WhatsApp) migrated to a sidecar; the remaining in-process
+    // channel configs (`google_chat`, `webhook`) keep their env-var
+    // checks but no longer drive a missing-var WARN via the
+    // ChannelsConfig surface this test used to exercise.
 
-    #[test]
-    fn test_whatsapp_config_defaults() {
-        let wa = WhatsAppConfig::default();
-        assert_eq!(wa.access_token_env, "WHATSAPP_ACCESS_TOKEN");
-        assert_eq!(wa.webhook_port, 8443);
-        assert!(wa.allowed_users.is_empty());
-    }
+    // test_whatsapp_config_defaults / test_whatsapp_config_serde
+    // removed — whatsapp migrated to a sidecar
+    // (librefang.sidecar.adapters.whatsapp) and the in-process
+    // WhatsAppConfig was deleted alongside the
+    // `channels.whatsapp` field on ChannelsConfig.
 
     // test_signal_config_defaults removed — signal migrated to a
     // sidecar (librefang.sidecar.adapters.signal) and the in-process
@@ -341,35 +331,24 @@ admin_role = "admin"
     // now live on the sidecar's env contract; round-trip is exercised
     // by `tests/test_email_adapter.py::test_tls_accept_invalid_certs_*`.
 
-    #[test]
-    fn test_whatsapp_config_serde() {
-        let wa = WhatsAppConfig {
-            phone_number_id: "12345".to_string(),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&wa).unwrap();
-        let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.phone_number_id, "12345");
-    }
-
     // test_matrix_config_serde removed — matrix migrated to a sidecar.
 
     #[test]
     fn test_channels_config_with_new_channels() {
-        // Witness rotated again: Matrix #5368 → Email → Teams → here
-        // (WhatsApp + GoogleChat, both still in-process). The
-        // assertion is on ChannelsConfig serde shape, not on any
-        // adapter-specific behaviour.
+        // Witness rotated again: Matrix #5368 → Email → Teams →
+        // WhatsApp (sidecar-migrated) → here (GoogleChat + Webhook,
+        // both still in-process). The assertion is on ChannelsConfig
+        // serde shape, not on any adapter-specific behaviour.
         let config = KernelConfig {
             channels: ChannelsConfig {
-                whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
                 google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
+                webhook: OneOrMany(vec![WebhookConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert!(config.channels.whatsapp.is_some());
         assert!(config.channels.google_chat.is_some());
+        assert!(config.channels.webhook.is_some());
     }
 
     // test_teams_config_defaults removed — teams migrated to a
@@ -828,49 +807,43 @@ admin_role = "admin"
     }
 
     // OneOrMany single-table + array-of-tables tests rotated from
-    // matrix (deleted by #5368) → dingtalk → whatsapp (after the
-    // dingtalk sidecar migration). The assertion is on OneOrMany's
-    // TOML parse behaviour, not on any adapter-specific field
-    // shape — any remaining in-process channel works as the
-    // witness.
+    // matrix (#5368) → dingtalk → whatsapp → webhook (the last
+    // remaining in-process channel with a OneOrMany list shape).
+    // The assertion is on OneOrMany's TOML parse behaviour, not on
+    // any adapter-specific field shape — any remaining in-process
+    // channel works as the witness.
     #[test]
     fn test_one_or_many_single_toml_table() {
         let toml_str = r#"
-            [channels.whatsapp]
-            access_token_env = "MY_WA_TOKEN"
-            account_id = "bot1"
+            [channels.webhook]
+            secret_env = "MY_WEBHOOK_SECRET"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.whatsapp.is_some());
-        assert_eq!(config.channels.whatsapp.len(), 1);
-        let wa = config.channels.whatsapp.first().unwrap();
-        assert_eq!(wa.access_token_env, "MY_WA_TOKEN");
-        assert_eq!(wa.account_id.as_deref(), Some("bot1"));
+        assert!(config.channels.webhook.is_some());
+        assert_eq!(config.channels.webhook.len(), 1);
+        let wh = config.channels.webhook.first().unwrap();
+        assert_eq!(wh.secret_env, "MY_WEBHOOK_SECRET");
     }
 
     #[test]
     fn test_one_or_many_array_of_tables() {
         let toml_str = r#"
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN_1"
-            account_id = "bot1"
+            [[channels.webhook]]
+            secret_env = "WH_SECRET_1"
             default_agent = "assistant"
 
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN_2"
-            account_id = "bot2"
+            [[channels.webhook]]
+            secret_env = "WH_SECRET_2"
             default_agent = "coder"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.whatsapp.is_some());
-        assert_eq!(config.channels.whatsapp.len(), 2);
+        assert!(config.channels.webhook.is_some());
+        assert_eq!(config.channels.webhook.len(), 2);
 
-        let bots: Vec<_> = config.channels.whatsapp.iter().collect();
-        assert_eq!(bots[0].access_token_env, "WA_TOKEN_1");
-        assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
+        let bots: Vec<_> = config.channels.webhook.iter().collect();
+        assert_eq!(bots[0].secret_env, "WH_SECRET_1");
         assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].access_token_env, "WA_TOKEN_2");
-        assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
+        assert_eq!(bots[1].secret_env, "WH_SECRET_2");
         assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
     }
 
@@ -885,39 +858,35 @@ admin_role = "admin"
     #[test]
     fn test_one_or_many_empty_default() {
         let config = KernelConfig::default();
-        assert!(config.channels.whatsapp.is_none());
-        assert!(config.channels.whatsapp.is_empty());
-        assert_eq!(config.channels.whatsapp.len(), 0);
-        assert!(config.channels.whatsapp.first().is_none());
-        assert!(config.channels.whatsapp.as_ref().is_none());
+        assert!(config.channels.webhook.is_none());
+        assert!(config.channels.webhook.is_empty());
+        assert_eq!(config.channels.webhook.len(), 0);
+        assert!(config.channels.webhook.first().is_none());
+        assert!(config.channels.webhook.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![WhatsAppConfig::default()]);
+        let single = OneOrMany(vec![WebhookConfig::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<WhatsAppConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WebhookConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![WhatsAppConfig::default(), WhatsAppConfig::default()]);
+        let multi = OneOrMany(vec![WebhookConfig::default(), WebhookConfig::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<WhatsAppConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<WebhookConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<WhatsAppConfig> = OneOrMany::default();
+        let empty: OneOrMany<WebhookConfig> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
 
-    #[test]
-    fn test_account_id_in_channel_configs() {
-        // Verify account_id field exists and defaults to None.
-        // Matrix witness deleted by #5368, Feishu by #5380, Email +
-        // DingTalk + WeChat by their sidecar migrations; remaining
-        // in-process witnesses that expose `account_id` are below.
-        assert!(WhatsAppConfig::default().account_id.is_none());
-    }
+    // test_account_id_in_channel_configs removed — its witnesses
+    // (WhatsApp + WeChat + DingTalk) all migrated to sidecars. The
+    // remaining in-process channel configs (google_chat, webhook)
+    // don't expose `account_id` so there's nothing left to assert.
 
     #[test]
     fn test_redact_proxy_url_with_credentials() {
@@ -1479,7 +1448,7 @@ admin_role = "admin"
     }
 
     // ---------------------------------------------------------------
-    // #5130 — typos inside repeated tables ([[channels.whatsapp]],
+    // #5130 — typos inside repeated tables ([[channels.webhook]],
     // [[mcp_servers]], …) used to be silently dropped because the
     // strict-mode walker only descended into single-table paths.
     // `deny_unknown_fields` on the per-element struct catches them at
@@ -1489,17 +1458,16 @@ admin_role = "admin"
     #[test]
     fn strict_config_rejects_typo_in_repeated_channel_table_5130() {
         let toml_src = r#"
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN"
-            verify_token_env = "WA_VERIFY"
-            phone_number_id = "123"
+            [[channels.webhook]]
+            secret_env = "WH_SECRET"
+            listen_port = 8090
             # Typo: should be `default_agent`. Before #5130, this
             # silently deserialised into the struct's Default and the
             # operator's intent was lost.
             defaul_agent = "research"
         "#;
         let err = toml::from_str::<KernelConfig>(toml_src).expect_err(
-            "typo inside [[channels.whatsapp]] must be rejected by deny_unknown_fields",
+            "typo inside [[channels.webhook]] must be rejected by deny_unknown_fields",
         );
         let msg = err.to_string();
         assert!(
@@ -1529,18 +1497,15 @@ admin_role = "admin"
     fn well_formed_repeated_channel_table_still_parses_5130() {
         // Drift sentinel: deny_unknown_fields must not regress the
         // happy path. If a future refactor renames a field on
-        // WhatsAppConfig / McpServerConfigEntry without updating this
+        // WebhookConfig / McpServerConfigEntry without updating this
         // fixture, the test will fail loudly. (DiscordConfig,
-        // SlackConfig, and MattermostConfig were in this set
-        // originally; all three were migrated to sidecars in v2026.5.)
+        // SlackConfig, MattermostConfig, WhatsAppConfig were in this
+        // set originally; all migrated to sidecars in v2026.5.)
         let cfg: KernelConfig = toml::from_str(
             r#"
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN"
-            verify_token_env = "WA_VERIFY"
-            phone_number_id = "123"
-            webhook_port = 8443
-            gateway_url_env = "WA_GATEWAY"
+            [[channels.webhook]]
+            secret_env = "WH_SECRET"
+            listen_port = 8090
 
             [[mcp_servers]]
             name = "filesystem"
@@ -1548,7 +1513,7 @@ admin_role = "admin"
             "#,
         )
         .expect("well-formed repeated tables must still parse with deny_unknown_fields");
-        assert_eq!(cfg.channels.whatsapp.len(), 1);
+        assert_eq!(cfg.channels.webhook.len(), 1);
         assert_eq!(cfg.mcp_servers.len(), 1);
     }
 }

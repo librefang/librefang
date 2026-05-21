@@ -1172,15 +1172,6 @@
           "default": null,
           "description": "Generic webhook configuration(s)."
         },
-        "whatsapp": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_WhatsAppConfig"
-            }
-          ],
-          "default": null,
-          "description": "WhatsApp Cloud API configuration(s)."
-        },
         "zulip": {
           "allOf": [
             {
@@ -5001,126 +4992,6 @@
         }
       ]
     },
-    "OneOrMany_WhatsAppConfig": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "WhatsApp Cloud API channel adapter configuration.",
-          "properties": {
-            "access_token_env": {
-              "default": "WHATSAPP_ACCESS_TOKEN",
-              "description": "Env var name holding the access token (Cloud API mode).",
-              "type": "string"
-            },
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "allowed_users": {
-              "default": [],
-              "description": "Allowed phone numbers (empty = allow all).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "conversation_ttl_hours": {
-              "default": 24,
-              "description": "Conversation tracker TTL in hours (Web gateway mode). Active stranger conversations expire after this period of inactivity.",
-              "format": "uint32",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "gateway_url_env": {
-              "default": "WHATSAPP_WEB_GATEWAY_URL",
-              "description": "Env var name holding the WhatsApp Web gateway URL (QR/Web mode). When set, outgoing messages are routed through the gateway instead of Cloud API.",
-              "type": "string"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "owner_numbers": {
-              "default": [],
-              "description": "Owner phone numbers for owner-routing mode (digits only, no '+' prefix). When set, messages from non-owner numbers are forwarded to the first owner number with sender context, and the sender receives an auto-ack.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "phone_number_id": {
-              "default": "",
-              "description": "WhatsApp Business phone number ID (Cloud API mode).",
-              "type": "string"
-            },
-            "verify_token_env": {
-              "default": "WHATSAPP_VERIFY_TOKEN",
-              "description": "Env var name holding the webhook verify token (Cloud API mode).",
-              "type": "string"
-            },
-            "webhook_port": {
-              "default": 8443,
-              "description": "Port to listen for webhook callbacks (Cloud API mode).",
-              "format": "uint16",
-              "minimum": 0.0,
-              "type": "integer"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/WhatsAppConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_ZulipConfig": {
       "oneOf": [
         {
@@ -8154,116 +8025,6 @@
       },
       "type": "object"
     },
-    "WhatsAppConfig": {
-      "additionalProperties": false,
-      "description": "WhatsApp Cloud API channel adapter configuration.",
-      "properties": {
-        "access_token_env": {
-          "default": "WHATSAPP_ACCESS_TOKEN",
-          "description": "Env var name holding the access token (Cloud API mode).",
-          "type": "string"
-        },
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "allowed_users": {
-          "default": [],
-          "description": "Allowed phone numbers (empty = allow all).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "conversation_ttl_hours": {
-          "default": 24,
-          "description": "Conversation tracker TTL in hours (Web gateway mode). Active stranger conversations expire after this period of inactivity.",
-          "format": "uint32",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "gateway_url_env": {
-          "default": "WHATSAPP_WEB_GATEWAY_URL",
-          "description": "Env var name holding the WhatsApp Web gateway URL (QR/Web mode). When set, outgoing messages are routed through the gateway instead of Cloud API.",
-          "type": "string"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "owner_numbers": {
-          "default": [],
-          "description": "Owner phone numbers for owner-routing mode (digits only, no '+' prefix). When set, messages from non-owner numbers are forwarded to the first owner number with sender context, and the sender receives an auto-ack.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "phone_number_id": {
-          "default": "",
-          "description": "WhatsApp Business phone number ID (Cloud API mode).",
-          "type": "string"
-        },
-        "verify_token_env": {
-          "default": "WHATSAPP_VERIFY_TOKEN",
-          "description": "Env var name holding the webhook verify token (Cloud API mode).",
-          "type": "string"
-        },
-        "webhook_port": {
-          "default": 8443,
-          "description": "Port to listen for webhook callbacks (Cloud API mode).",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "ZulipConfig": {
       "description": "Zulip channel adapter configuration.",
       "properties": {
@@ -8593,7 +8354,6 @@
         "slack": null,
         "webex": null,
         "webhook": null,
-        "whatsapp": null,
         "zulip": null
       },
       "description": "Channel bridge configuration (Discord, Slack, etc.)."

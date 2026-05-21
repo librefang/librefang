@@ -185,85 +185,86 @@ The Slack adapter shows live "I'm working on it" feedback by adding 👀 to the 
 
 ---
 
-## WhatsApp
+## WhatsApp (sidecar)
+
+WhatsApp migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.whatsapp`, stdlib-only). The in-process `[channels.whatsapp]` block is no longer recognised. Both modes are preserved: **Cloud API** (Meta's official Business API) and **Web/QR mode** (the Node.js `@librefang/whatsapp-gateway` Baileys process).
 
 ### Prerequisites
 
-- A Meta Business account with WhatsApp Cloud API access
+- For Cloud API: a Meta Business account with WhatsApp Cloud API access (phone number ID, access token, app secret)
+- For Web/QR mode: Node.js >= 18 on the daemon host and a personal WhatsApp account
+- `python3` on the daemon host (no third-party Python packages required)
 
-### Setup
+### Cloud API mode setup
 
-1. Go to [Meta for Developers](https://developers.facebook.com/).
-2. Create a Business App.
-3. Add the WhatsApp product.
-4. Set up a test phone number (or use a production one).
-5. Copy:
-   - Phone Number ID
-   - Permanent Access Token
-   - Choose a Verify Token (any string you choose)
-6. Set environment variables:
+1. Go to [Meta for Developers](https://developers.facebook.com/) and create a Business App with the WhatsApp product.
+2. Set up a phone number; note the **Phone Number ID** and **Permanent Access Token**. Pick any string for the **Verify Token**.
+3. In the app's Settings, copy the **App Secret** — that's the HMAC-SHA256 key for `X-Hub-Signature-256`.
+4. Add to `config.toml`:
+
+```toml
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_PHONE_NUMBER_ID = "your-phone-id"
+WHATSAPP_WEBHOOK_PORT = "8460"
+# WHATSAPP_DM_POLICY = "respond"
+# WHATSAPP_GROUP_POLICY = "all"
+```
+
+5. Put `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` in `~/.librefang/secrets.env`.
+6. In the Meta dashboard, set the Webhook URL to `https://your-domain.com:8460/webhook` (or whatever `WHATSAPP_WEBHOOK_PORT` / `WHATSAPP_WEBHOOK_PATH` you chose). Subscribe to `messages`. Use the same Verify Token.
+7. Restart the daemon.
+
+The sidecar runs its own webhook server, verifies `X-Hub-Signature-256` against the App Secret on every inbound, and sends outbound via `https://graph.facebook.com/v17.0/{phone_id}/messages`. Unlike the legacy Rust adapter (whose `start()` was a stub that never parsed inbound), this sidecar implements the full Cloud API webhook handler.
+
+### Web/QR mode setup
+
+1. Install + run the Baileys gateway separately:
 
 ```bash
-export WA_PHONE_ID=your-phone-id              # Environment variable
-export WA_ACCESS_TOKEN=your-access-token
-export WA_VERIFY_TOKEN=your-verify-token
-librefang vault set WA_PHONE_ID               # Encrypted vault (recommended)
-librefang vault set WA_ACCESS_TOKEN
-librefang vault set WA_VERIFY_TOKEN
-librefang config set-key whatsapp             # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+npx @librefang/whatsapp-gateway
+# Listens on http://127.0.0.1:3009 by default
 ```
 
-7. Add to config:
+2. Scan the QR code printed by the gateway with WhatsApp → Linked Devices.
+3. Add to `config.toml`:
 
 ```toml
-[channels.whatsapp]
-mode = "cloud_api"
-phone_number_id_env = "WA_PHONE_ID"
-access_token_env = "WA_ACCESS_TOKEN"
-verify_token_env = "WA_VERIFY_TOKEN"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_GATEWAY_URL = "http://localhost:3009"
 ```
 
-8. Set up a webhook in the Meta dashboard pointing to your server's public URL:
-   - URL: `https://your-domain.com:4545/channels/whatsapp/webhook`
-   - Verify Token: the value you chose above
-   - Subscribe to: `messages`
+4. Restart the daemon.
 
-9. Restart the daemon.
+In Web/QR mode the gateway POSTs inbound directly to LibreFang's REST API (`/api/agents/{id}/message`), bypassing the sidecar; outbound replies route through the sidecar to `{gateway_url}/message/send`. The kernel **no longer auto-spawns the gateway** (the embedded `whatsapp_gateway.rs` module was removed in this migration) — you must run it as a separate process.
 
-### How It Works
+### Group chat & DM policy
 
-The WhatsApp adapter registers webhook routes on the shared API server (default port 4545) to receive incoming webhooks from the WhatsApp Cloud API. It handles webhook verification (GET) and message reception (POST). Responses are sent via the Cloud API's `messages` endpoint.
+The sidecar applies the same DM × group policy as the legacy Rust adapter:
 
-### Group Chat Support
+| `WHATSAPP_DM_POLICY` | Behaviour |
+|---|---|
+| `respond` (default) | Respond to all DMs |
+| `allowed_only` | Respond only when sender's phone is in `WHATSAPP_ALLOWED_USERS` |
+| `ignore` | Drop all DMs |
 
-WhatsApp group messages are automatically detected. The bot's behavior in groups is controlled by the `group_policy` setting in channel overrides:
+| `WHATSAPP_GROUP_POLICY` | Behaviour |
+|---|---|
+| `all` (default) | Respond to all group messages |
+| `mention_only` | Respond only when bot phone or `WHATSAPP_BOT_NAME` appears in the text |
+| `commands_only` | Respond only to `/cmd` messages |
+| `ignore` | Drop all group messages |
 
-| Policy | Behavior |
-|--------|----------|
-| `mention_only` (default) | Only respond when @mentioned |
-| `all` | Respond to all group messages |
-| `commands_only` | Only respond to slash commands |
-| `ignore` | Ignore all group messages |
-
-`mention_only` matches the bot phone number or bot name in the message body — set `bot_phone` and `bot_name` (or pass via `with_bot_phone()` / `with_bot_name()` in code) so the matcher knows what to look for. `trigger_only` instead matches `group_trigger_patterns` (regex list).
-
-Example:
-
-```toml
-[channels.whatsapp.overrides]
-group_policy = "mention_only"
-bot_phone = "+15551234567"
-bot_name = "librefang"
-# Or use trigger_only with regex patterns:
-# group_policy = "trigger_only"
-# group_trigger_patterns = ["(?i)\\bbot\\b", "(?i)\\bhelp\\b"]
-```
-
-### Voice Messages
-
-The WhatsApp adapter can send voice replies via `send_voice(to, audio, mime_type)`. In Cloud API mode it uploads to `/{phone_number_id}/media` then sends an `audio` message with the returned `media_id`; in gateway mode it base64-encodes and POSTs to `/message/send-voice`. See [WhatsApp Voice + DM/Group Policies](/integrations/channels#whatsapp-voice--dmgroup-policies) on the channels overview.
+For `mention_only` set `WHATSAPP_BOT_PHONE` (with `+`, e.g. `+15551234567`) and / or `WHATSAPP_BOT_NAME` (case-insensitive substring).
 
 ---
 

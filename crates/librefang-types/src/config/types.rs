@@ -6376,8 +6376,8 @@ impl std::fmt::Debug for NetworkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// WhatsApp Cloud API configuration(s).
-    pub whatsapp: OneOrMany<WhatsAppConfig>,
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
@@ -6461,7 +6461,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            whatsapp: OneOrMany::default(),
             google_chat: OneOrMany::default(),
             webhook: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
@@ -6491,75 +6490,10 @@ impl ChannelsConfig {
     }
 }
 
-/// WhatsApp Cloud API channel adapter configuration.
-//
-// `deny_unknown_fields` catches typos inside `[[channels.whatsapp]]`
-// elements at deserialize time. The detect_unknown_nested_fields walker
-// can't see into repeated-table elements (#5130), so the only way to
-// surface a typo here is for serde itself to reject it. This is the
-// canonical statement of the rationale; the other channel configs in
-// this module refer back to `WhatsAppConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct WhatsAppConfig {
-    /// Env var name holding the access token (Cloud API mode).
-    pub access_token_env: String,
-    /// Env var name holding the webhook verify token (Cloud API mode).
-    pub verify_token_env: String,
-    /// WhatsApp Business phone number ID (Cloud API mode).
-    pub phone_number_id: String,
-    /// Port to listen for webhook callbacks (Cloud API mode).
-    pub webhook_port: u16,
-    /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
-    /// When set, outgoing messages are routed through the gateway instead of Cloud API.
-    pub gateway_url_env: String,
-    /// Allowed phone numbers (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
-    /// When set, messages from non-owner numbers are forwarded to the first
-    /// owner number with sender context, and the sender receives an auto-ack.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub owner_numbers: Vec<String>,
-    /// Conversation tracker TTL in hours (Web gateway mode).
-    /// Active stranger conversations expire after this period of inactivity.
-    #[serde(default = "default_conversation_ttl_hours")]
-    pub conversation_ttl_hours: u32,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-fn default_conversation_ttl_hours() -> u32 {
-    24
-}
-
-fn default_local_probe_interval_secs() -> u64 {
-    60
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            access_token_env: "WHATSAPP_ACCESS_TOKEN".to_string(),
-            verify_token_env: "WHATSAPP_VERIFY_TOKEN".to_string(),
-            phone_number_id: String::new(),
-            webhook_port: 8443,
-            gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            owner_numbers: vec![],
-            conversation_ttl_hours: default_conversation_ttl_hours(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// the in-process `WhatsAppConfig` + `[channels.whatsapp]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
 // the in-process `SignalConfig` + `[channels.signal]` block were

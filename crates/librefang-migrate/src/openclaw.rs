@@ -1685,46 +1685,30 @@ fn migrate_channels_from_json(
     }
 
     // --- WhatsApp ---
+    //
+    // WhatsApp was migrated to a sidecar — both the Cloud API mode
+    // and the Web/QR (Baileys) gateway mode are now driven by the
+    // Python sidecar (`librefang.sidecar.adapters.whatsapp`). The
+    // OpenClaw block doesn't auto-map to `[[sidecar_channels]]`
+    // cleanly because the sidecar reads secrets from
+    // `~/.librefang/secrets.env` and non-secret knobs from
+    // `[sidecar_channels.env]`. Surface a skipped item, same shape
+    // as the Signal / Matrix / Teams / Mattermost removals.
     if let Some(ref wa) = oc_channels.whatsapp {
         if wa.enabled.unwrap_or(true) {
-            // WhatsApp uses Baileys credential dir — copy it, warn user
-            if let Some(ref auth_dir) = wa.auth_dir {
-                let src_path = PathBuf::from(auth_dir);
-                if src_path.exists() {
-                    let dest_creds = target.join("credentials").join("whatsapp");
-                    if !dry_run {
-                        if let Err(e) = copy_dir_recursive(&src_path, &dest_creds) {
-                            report
-                                .warnings
-                                .push(format!("Failed to copy WhatsApp credentials: {e}"));
-                        }
-                    }
-                    report.imported.push(MigrateItem {
-                        kind: ItemKind::Secret,
-                        name: "whatsapp/credentials".to_string(),
-                        destination: dest_creds.display().to_string(),
-                    });
-                    report.warnings.push(
-                        "WhatsApp Baileys credentials copied — you may need to re-authenticate"
-                            .to_string(),
-                    );
-                }
-            }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "access_token_env",
-                toml::Value::String("WHATSAPP_ACCESS_TOKEN".into()),
-            )];
-            if let Some(arr) = allow_from_to_toml_array(wa.allow_from.as_ref()) {
-                fields.push(("allowed_users", arr));
-            }
-            channels_table.insert(
-                "whatsapp".to_string(),
-                build_channel_table(fields, wa.dm_policy.as_deref(), wa.group_policy.as_deref()),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "WhatsApp in-process adapter was migrated to a sidecar. \
+                          Your OpenClaw whatsapp block was NOT migrated — declare \
+                          it as `[[sidecar_channels]]` pointing at \
+                          `librefang.sidecar.adapters.whatsapp`. If you were using \
+                          the Web/QR (Baileys) gateway, also run \
+                          `@librefang/whatsapp-gateway` as a separate process and \
+                          point WHATSAPP_GATEWAY_URL at it."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "whatsapp".to_string(),
-                destination: "config.toml [channels.whatsapp]".to_string(),
+                reason,
             });
         }
     }
@@ -2866,20 +2850,19 @@ fn parse_legacy_channels(
                 });
             }
             "whatsapp" => {
-                let token_env = ch
-                    .access_token_env
-                    .clone()
-                    .unwrap_or_else(|| "WHATSAPP_ACCESS_TOKEN".to_string());
-                let fields: Vec<(&str, toml::Value)> =
-                    vec![("access_token_env", toml::Value::String(token_env))];
-                channels_table.insert(
-                    "whatsapp".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // WhatsApp was migrated to a sidecar — emit as
+                // skipped (same shape as the IRC / Matrix / Teams
+                // / Signal / Mattermost removals).
+                let reason = "WhatsApp in-process adapter was migrated to a sidecar. \
+                              Your messaging/whatsapp config was NOT migrated — \
+                              declare it as `[[sidecar_channels]]` pointing at \
+                              `librefang.sidecar.adapters.whatsapp`."
+                    .to_string();
+                report.warnings.push(reason.clone());
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "whatsapp".to_string(),
-                    destination: "config.toml [channels.whatsapp]".to_string(),
+                    reason,
                 });
             }
             "signal" => {
@@ -3644,15 +3627,15 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 channels in the JSON5 fixture; 11 are skipped (telegram,
+        // 13 channels in the JSON5 fixture; 12 are skipped (telegram,
         // discord, slack, signal, matrix, irc, mattermost, feishu,
-        // teams all migrated to sidecar adapters, plus imessage +
-        // bluebubbles which the migrator always skips). That leaves 2
-        // in-process imports: whatsapp, google_chat. (The JSON5 keys
-        // `googlechat` / `msteams` are aliased to `google_chat` /
-        // `teams` for parsing but `msteams` now emits a SkippedItem
-        // instead of a `[channels.teams]` block.)
-        assert_eq!(channel_items.len(), 2);
+        // teams, whatsapp all migrated to sidecar adapters, plus
+        // imessage + bluebubbles which the migrator always skips).
+        // That leaves 1 in-process import: google_chat. (The JSON5
+        // keys `googlechat` / `msteams` are aliased to `google_chat`
+        // / `teams` for parsing but `msteams` now emits a
+        // SkippedItem instead of a `[channels.teams]` block.)
+        assert_eq!(channel_items.len(), 1);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3679,7 +3662,16 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "slack"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.whatsapp]"));
+        // WhatsApp migrated to a sidecar; the migrator records a
+        // skipped entry instead of emitting a [channels.whatsapp] block.
+        assert!(
+            !config_toml.contains("[channels.whatsapp]"),
+            "WhatsApp is no longer an in-process adapter; the migrator must not \
+             emit a [channels.whatsapp] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "whatsapp"
+            && s.reason.contains("sidecar")));
         // Signal migrated to a sidecar; the migrator records a skipped
         // entry instead of a [channels.signal] block (same shape as the
         // IRC / Mattermost removals).

@@ -79,32 +79,47 @@ SLACK_BOT_TOKEN = "xoxb-..."
 
 完整的 supervisor 字段（restart、backoff、ready timeout、message buffer 等）参见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
-#### `[channels.whatsapp]`
+#### WhatsApp（Sidecar）
+
+WhatsApp 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.whatsapp`，仅依赖标准库）。原 `[channels.whatsapp]` 块不再识别。sidecar 同时覆盖 **Cloud API** 和 **Web/QR（Baileys）网关** 两种模式。
+
+**Cloud API 模式**（推荐生产使用）：
 
 ```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-# webhook_port = 8443  # 已弃用：Webhook 现共享 API 端口
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # 用于 QR/Web 模式
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # 可选的管理员手机号
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_PHONE_NUMBER_ID = "123456789012345"
+WHATSAPP_WEBHOOK_PORT = "8460"
+# WHATSAPP_WEBHOOK_PATH = "/webhook"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "production"
+# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore
+# WHATSAPP_GROUP_POLICY = "all"           # all / mention_only / commands_only / ignore
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | 存放 WhatsApp Cloud API 访问令牌的环境变量。 |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `phone_number_id` | string | `""` | WhatsApp Business 手机号 ID。 |
-| `webhook_port` | u16 | `8443` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | 存放 WhatsApp Web 网关 URL 的环境变量。设置后，发送消息将通过 QR/Web 网关而非 Cloud API 路由。 |
-| `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `owner_numbers` | list of strings | `[]` | 对此 Bot 实例拥有管理权限的手机号列表。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+`WHATSAPP_ACCESS_TOKEN`、`WHATSAPP_VERIFY_TOKEN`（用于 Meta Webhook 订阅握手）、`WHATSAPP_APP_SECRET`（入站 `X-Hub-Signature-256` 的 HMAC 密钥）写入 `~/.librefang/secrets.env`。sidecar 在 `WHATSAPP_WEBHOOK_PORT`（默认 8460）上自己跑 webhook server —— Meta 后台填的 Webhook 订阅 URL 变成 `https://<host>:<WHATSAPP_WEBHOOK_PORT><WHATSAPP_WEBHOOK_PATH>`。
+
+原 Rust 适配器的 `start()`（whatsapp.rs:454-483）只是一个 TODO 桩——只 log "webhook ready"，从未解析入站事件。sidecar 实现了真正的 handler，所以 Cloud API 入站现在不靠任何外部 forwarder 就能工作。
+
+**Web/QR 模式**（个人号场景，无需 Meta 开发者账号）：
+
+```toml
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_GATEWAY_URL = "http://localhost:3009"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "personal"
+```
+
+Baileys 网关（`@librefang/whatsapp-gateway`，Node.js，监听 `WHATSAPP_GATEWAY_URL`）**需要单独启动** —— kernel 不再内嵌或自动 spawn 它。入站消息由网关直接 POST 到 LibreFang REST API（`POST /api/agents/{id}/message`），绕过 sidecar；出站回复经 sidecar 路由到 `{gateway_url}/message/send`。
 
 #### Signal（Sidecar）
 

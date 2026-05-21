@@ -259,17 +259,8 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for wa in self.channels.whatsapp.iter() {
-            if std::env::var(&wa.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "WhatsApp configured but {} is not set",
-                    wa.access_token_env
-                ));
-            }
-        }
+        // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+        // env-var presence is now validated inside the sidecar process.
         // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
         // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
         // email migrated to a sidecar (librefang.sidecar.adapters.email);

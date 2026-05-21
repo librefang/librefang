@@ -28,7 +28,6 @@ macro_rules! for_each_channel_field {
         // CLAUDE.md "Deterministic prompt ordering".
         $mac!(google_chat, "google_chat");
         $mac!(webhook, "webhook");
-        $mac!(whatsapp, "whatsapp");
     };
 }
 
@@ -459,7 +458,6 @@ mod tests {
         const EXPECTED: &[&str] = &[
             "google_chat",
             "webhook",
-            "whatsapp",
         ];
 
         assert_eq!(
