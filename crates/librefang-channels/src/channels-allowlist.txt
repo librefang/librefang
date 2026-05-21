@@ -20,5 +20,4 @@
 # explicit maintainer approval — it is not routine.
 #
 # One basename per line, no `.rs`. Keep sorted.
-google_chat
 sidecar
