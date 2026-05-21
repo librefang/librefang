@@ -1516,17 +1516,32 @@ impl BridgeManager {
                                         }
                                     };
 
-                                    let short_id = &approval.request_id[..8.min(approval.request_id.len())];
-                                    let msg = format!(
-                                        "Approval required for agent {}\n\
-                                         Tool: {}\n\
-                                         Risk: {}\n\
-                                         {}\n\n\
-                                         Reply /approve {short_id} or /reject {short_id}",
-                                        approval.agent_id,
-                                        approval.tool_name,
-                                        approval.risk_level,
-                                        approval.description,
+                                    // Two-button inline keyboard. The button
+                                    // `action` is the slash command itself —
+                                    // when a user taps, the Telegram /
+                                    // Slack / Feishu sidecar emits a
+                                    // `callback_query` (or platform analogue)
+                                    // that lands in this crate's bridge as a
+                                    // `ChannelContent::ButtonCallback` whose
+                                    // `action` starts with `/`. The existing
+                                    // inbound dispatcher at `content_to_text`
+                                    // routes that straight through the
+                                    // `/approve` / `/reject` command handler.
+                                    // No new protocol bits required — the
+                                    // round-trip already existed; pre-fix the
+                                    // listener just sent plain text and never
+                                    // gave users buttons to click. The
+                                    // capability check + text fallback is in
+                                    // `ChannelAdapter::send_interactive` so
+                                    // adapters that don't declare
+                                    // `interactive` (IRC, SMS, …) still get
+                                    // the actionable text body unchanged.
+                                    let approval_keyboard = build_approval_interactive(
+                                        &approval.agent_id,
+                                        &approval.request_id,
+                                        &approval.tool_name,
+                                        &approval.risk_level,
+                                        &approval.description,
                                     );
 
                                     for adapter in &adapters {
@@ -1700,8 +1715,21 @@ impl BridgeManager {
                                             continue;
                                         }
                                         for user in &recipients {
+                                            // `send_interactive` has a built-in
+                                            // text fallback for adapters that
+                                            // don't override it (or whose
+                                            // sidecar didn't declare
+                                            // `interactive` capability) —
+                                            // see `ChannelAdapter::send_interactive`
+                                            // in `types.rs`. So this single
+                                            // call covers both surfaces:
+                                            // Telegram / Slack get a real
+                                            // inline keyboard, IRC / SMS get
+                                            // the plain text body (which
+                                            // already carries the slash-command
+                                            // instructions for them to act on).
                                             if let Err(e) = adapter
-                                                .send(user, ChannelContent::Text(msg.clone()))
+                                                .send_interactive(user, &approval_keyboard)
                                                 .await
                                             {
                                                 warn!(
@@ -1716,7 +1744,7 @@ impl BridgeManager {
                                                     adapter = adapter.name(),
                                                     request_id = %approval.request_id,
                                                     recipient = %user.platform_id,
-                                                    "Delivered approval notification"
+                                                    "Delivered approval notification (inline buttons; adapters without `interactive` capability render the text body verbatim)"
                                                 );
                                             }
                                         }
@@ -1891,6 +1919,60 @@ impl BridgeManager {
 }
 
 /// Resolve channel type to its config string key.
+/// Build the inline-keyboard payload the approval listener fans out
+/// to every bound adapter. The `text` is platform-agnostic prose;
+/// `buttons` carries the two slash-command actions that the existing
+/// inbound `ButtonCallback` dispatcher (`bridge.rs::content_to_text`)
+/// already routes straight to the `/approve` / `/reject` handlers.
+///
+/// Adapters that declare the `interactive` capability render this as
+/// a real inline keyboard (Telegram, Slack Block Kit, Feishu cards);
+/// adapters that don't fall back via the default
+/// `ChannelAdapter::send_interactive` impl in `types.rs:647-661`,
+/// which prepends the button labels to the text body. The
+/// slash-command instructions live in the text body so the
+/// text-fallback path stays actionable.
+///
+/// Factored out for unit-testing — the listener loop itself spins up
+/// real tokio tasks against live adapters, which is too heavy a
+/// scaffold for asserting payload shape.
+pub(crate) fn build_approval_interactive(
+    agent_id: &str,
+    request_id: &str,
+    tool_name: &str,
+    risk_level: &str,
+    description: &str,
+) -> crate::types::InteractiveMessage {
+    let short_id = &request_id[..8.min(request_id.len())];
+    let text = format!(
+        "Approval required for agent {agent_id}\n\
+         Tool: {tool_name}\n\
+         Risk: {risk_level}\n\
+         {description}\n\n\
+         Tap a button below, or reply \
+         /approve {short_id} or /reject {short_id} \
+         (add a TOTP code if required: \
+         /approve {short_id} <6-digit>)"
+    );
+    crate::types::InteractiveMessage {
+        text,
+        buttons: vec![vec![
+            crate::types::InteractiveButton {
+                label: "Approve".to_string(),
+                action: format!("/approve {short_id}"),
+                style: Some("primary".to_string()),
+                url: None,
+            },
+            crate::types::InteractiveButton {
+                label: "Deny".to_string(),
+                action: format!("/reject {short_id}"),
+                style: Some("danger".to_string()),
+                url: None,
+            },
+        ]],
+    }
+}
+
 fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     match channel {
         crate::types::ChannelType::Telegram => "telegram",
@@ -5755,6 +5837,89 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
         f();
+    }
+
+    // ── Approval-notification inline keyboard (PR: telegram-approval-buttons) ──
+    //
+    // The bridge's approval listener wraps every fan-out in an
+    // `InteractiveMessage` built by `build_approval_interactive`.
+    // Adapters that declare `interactive` capability render that as
+    // inline buttons (Telegram, Slack, Feishu); ones that don't fall
+    // back via the default `ChannelAdapter::send_interactive` impl,
+    // which exposes the slash commands as text. These tests pin both
+    // the wire shape and the slash-command actions inside the buttons.
+
+    #[test]
+    fn build_approval_interactive_shapes_two_buttons_in_one_row() {
+        let msg = build_approval_interactive(
+            "agent-uuid-here",
+            "req-abcdef1234567890",
+            "file_write",
+            "high",
+            "Write to /etc/hosts",
+        );
+        assert_eq!(msg.buttons.len(), 1, "single row expected");
+        assert_eq!(
+            msg.buttons[0].len(),
+            2,
+            "row should carry exactly Approve + Deny"
+        );
+        assert_eq!(msg.buttons[0][0].label, "Approve");
+        assert_eq!(msg.buttons[0][1].label, "Deny");
+        // Style hints — adapters that honor them (Slack Block Kit) get
+        // a green primary / red danger rendering; ones that don't
+        // (Telegram, currently) ignore the field harmlessly.
+        assert_eq!(msg.buttons[0][0].style.as_deref(), Some("primary"));
+        assert_eq!(msg.buttons[0][1].style.as_deref(), Some("danger"));
+    }
+
+    #[test]
+    fn build_approval_interactive_actions_are_slash_commands_with_short_id() {
+        // `content_to_text` (this file) treats a `ButtonCallback` whose
+        // `action` starts with `/` as a slash command — that's the
+        // entire round-trip. The action MUST be `/approve <8-char>` /
+        // `/reject <8-char>` so the existing `/approve` handler at
+        // `bridge.rs::5673+` picks it up unchanged.
+        let msg = build_approval_interactive(
+            "agent",
+            "0123456789abcdef-truncated",
+            "tool",
+            "low",
+            "desc",
+        );
+        let approve = &msg.buttons[0][0].action;
+        let deny = &msg.buttons[0][1].action;
+        assert_eq!(approve, "/approve 01234567");
+        assert_eq!(deny, "/reject 01234567");
+        // Telegram's `callback_data` is capped at 64 bytes; both
+        // commands stay well under it (16-17 bytes each).
+        assert!(approve.len() <= 64);
+        assert!(deny.len() <= 64);
+    }
+
+    #[test]
+    fn build_approval_interactive_text_carries_fallback_slash_instructions() {
+        // Adapters without `interactive` capability render the
+        // `text` field verbatim via the trait default impl. The text
+        // MUST still tell the operator how to act (because their
+        // platform won't draw a tappable button).
+        let msg = build_approval_interactive("agent", "abcdefgh123456", "tool", "low", "desc");
+        assert!(msg.text.contains("/approve abcdefgh"));
+        assert!(msg.text.contains("/reject abcdefgh"));
+        // TOTP hint surfaced for the require-TOTP variant — a single
+        // button click can't carry a 6-digit code, so users need the
+        // slash form for those.
+        assert!(msg.text.contains("TOTP"));
+    }
+
+    #[test]
+    fn build_approval_interactive_tolerates_short_request_ids() {
+        // The existing listener slices `request_id[..8.min(len)]`.
+        // Make sure the helper inherits the same defensive truncation
+        // so a short / malformed request id doesn't panic.
+        let msg = build_approval_interactive("agent", "abc", "tool", "low", "desc");
+        assert_eq!(msg.buttons[0][0].action, "/approve abc");
+        assert_eq!(msg.buttons[0][1].action, "/reject abc");
     }
 
     #[test]
