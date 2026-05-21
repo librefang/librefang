@@ -90,6 +90,24 @@ pub struct AuthenticatedApiUser {
 /// HTTP surface must agree, otherwise an Admin API key can change
 /// configuration / rotate the bearer token / reload the daemon that a
 /// Owner is responsible for.
+/// True when the response log should demote a 4xx from WARN to DEBUG
+/// because the (status, path) pair is a known-noisy false positive,
+/// not a real signal worth alerting on.
+///
+/// Today the only case is **401 on `/api/metrics`**: the endpoint is
+/// auth-gated and `getMetricsText` in the dashboard polls it every
+/// 10 s from `useTelemetryMetrics`. Any client whose bearer expired
+/// (or never had one — Prometheus scrapers, ad-hoc `curl` watchers)
+/// produces a steady WARN stream that drowns out the real auth
+/// signal the blanket-4xx-WARN was designed to surface.
+///
+/// `uri` is the raw `OriginalUri` string (with optional query). The
+/// query is stripped before comparing so `/api/metrics?foo=bar`
+/// still suppresses correctly.
+fn is_noisy_metrics_unauth(status: u16, uri: &str) -> bool {
+    status == 401 && uri.split('?').next().is_some_and(|p| p == "/api/metrics")
+}
+
 fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // Only non-GET methods are candidates — reads are handled separately.
     if *method == axum::http::Method::GET {
@@ -344,16 +362,42 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             "API request"
         );
     } else if status >= 400 {
-        warn!(
-            request_id = %request_id,
-            method = %method,
-            path = %uri,
-            status = status,
-            latency_ms = elapsed.as_millis() as u64,
-            agent_id = %agent_id_field,
-            session_id = %session_id_field,
-            "API request"
-        );
+        // The blanket WARN-on-4xx surfaces auth storms and real client
+        // bugs — but it also surfaces a known-noisy false positive:
+        // unauthenticated polls of `/api/metrics`. The dashboard's
+        // TelemetryPage refetches every 10s, and any client whose
+        // bearer token expired (or who never logged in — Prometheus
+        // scrapers, ad-hoc `curl` watchers) hammers a steady WARN
+        // stream that drowns out the real auth signal we want to see.
+        //
+        // Demote that specific case to DEBUG. The endpoint returns
+        // operational telemetry (uptime, agent counts, token usage —
+        // see `routes/config.rs::prometheus_metrics`), so a 401 here
+        // is "you don't have the token", not "you're attacking us".
+        // Genuinely interesting 4xx on other paths still WARNs.
+        if is_noisy_metrics_unauth(status, &uri) {
+            debug!(
+                request_id = %request_id,
+                method = %method,
+                path = %uri,
+                status = status,
+                latency_ms = elapsed.as_millis() as u64,
+                agent_id = %agent_id_field,
+                session_id = %session_id_field,
+                "API request"
+            );
+        } else {
+            warn!(
+                request_id = %request_id,
+                method = %method,
+                path = %uri,
+                status = status,
+                latency_ms = elapsed.as_millis() as u64,
+                agent_id = %agent_id_field,
+                session_id = %session_id_field,
+                "API request"
+            );
+        }
     } else if method == axum::http::Method::GET {
         debug!(
             request_id = %request_id,
@@ -1349,6 +1393,39 @@ mod tests {
     #[test]
     fn test_request_id_header_constant() {
         assert_eq!(REQUEST_ID_HEADER, "x-request-id");
+    }
+
+    #[test]
+    fn is_noisy_metrics_unauth_matches_401_on_metrics_path() {
+        // Bare path.
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics"));
+        // With query string — Prometheus scrapers sometimes append
+        // `?token=…` / `?format=…`; the suppression must still apply.
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics?token=xyz"));
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics?"));
+    }
+
+    #[test]
+    fn is_noisy_metrics_unauth_rejects_other_statuses_and_paths() {
+        // 403 / 404 / 500 etc. on /api/metrics keep WARNing — those
+        // are real operational signals, not auth poll noise.
+        assert!(!is_noisy_metrics_unauth(403, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(404, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(500, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(200, "/api/metrics"));
+        // 401 on other paths must NOT be suppressed — those are the
+        // genuine auth storms the blanket WARN was built to surface.
+        assert!(!is_noisy_metrics_unauth(401, "/api/agents"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/config/reload"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/admin/shutdown"));
+        // Prefix-only matches must not slip through — `/api/metrics2`,
+        // `/api/metrics/foo`, etc. are different endpoints (or future
+        // sub-paths).
+        assert!(!is_noisy_metrics_unauth(401, "/api/metrics2"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/metrics/foo"));
+        // Empty / nonsense paths don't match.
+        assert!(!is_noisy_metrics_unauth(401, ""));
+        assert!(!is_noisy_metrics_unauth(401, "/"));
     }
 
     #[test]
