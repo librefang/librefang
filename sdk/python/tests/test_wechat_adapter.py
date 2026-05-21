@@ -805,3 +805,132 @@ async def test_on_command_typing_empty_user_drops(monkeypatch):
     cmd = TypingCmd(channel_id="")
     await a.on_command(cmd)
     assert sent == []
+
+
+# ---- QR-login event emission (PR: dashboard QR rewire) ---------------
+#
+# The sidecar drives the QR lifecycle itself and emits `qr_ready` /
+# `qr_status` so the daemon can cache `ChannelStatus.qr` for the
+# dashboard's `GET /api/channels/{name}/qr` projection. These tests
+# pin the contract: the right events fire on the right transitions,
+# with the right payloads (qrcode string surfaced, terminal failure
+# / expiry message populated, captured token logged at DEBUG only —
+# never on the protocol event, see `protocol.qr_status` docstring).
+
+
+def _make_qr_responses(*pairs):
+    """Build a counted-response queue for `_http_request`.
+
+    Each `pairs` entry is `(status, body_dict)`; bodies are encoded as
+    JSON so the existing `_http_request` JSON-decode path in wechat.py
+    behaves the same as a real iLink response."""
+    queue = list(pairs)
+
+    def _fake(url, **kw):
+        if not queue:
+            raise RuntimeError(f"qr fake exhausted: {url}")
+        status, body = queue.pop(0)
+        raw = json.dumps(body).encode("utf-8")
+        return (status, body, raw, {})
+
+    return _fake
+
+
+def test_qr_login_emits_ready_then_confirmed_without_token_on_wire(monkeypatch):
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (200, {"qrcode": "opaque-token"}),                        # GET qrcode
+            (200, {"status": "confirmed", "bot_token": "tok_live"}),  # poll → confirmed
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    captured: list = []
+    token = a._qr_login(emit=captured.append)
+
+    # The token is returned to the in-process caller (used to drive
+    # the rest of the wechat session) but MUST NOT appear in the
+    # outbound protocol event — that's the safety invariant.
+    assert token == "tok_live"
+
+    methods = [e["method"] for e in captured]
+    assert methods == ["qr_ready", "qr_status"], f"unexpected order: {methods}"
+
+    ready = captured[0]["params"]
+    assert ready["qr_code"] == "opaque-token"
+    # Sidecar passes expires_at as ISO 8601; format is wall-clock
+    # derived, so just shape-check.
+    assert "expires_at" in ready and "T" in ready["expires_at"]
+
+    confirmed = captured[1]["params"]
+    assert confirmed["status"] == "confirmed"
+    assert "bot_token" not in confirmed, (
+        "bot_token MUST NOT ride the qr_status event — the current "
+        "configure endpoint would wipe other schema-managed fields on "
+        "a partial save. See `protocol.qr_status` docstring."
+    )
+    # The confirmed message must guide the operator to the manual
+    # secrets.env step in lieu of auto-persist.
+    assert "WECHAT_BOT_TOKEN" in (confirmed.get("message") or "")
+    assert "secrets.env" in (confirmed.get("message") or "")
+
+
+def test_qr_login_emits_expired_on_platform_expiry(monkeypatch):
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (200, {"qrcode": "opaque-token"}),
+            (200, {"status": "expired"}),
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    captured: list = []
+    with pytest.raises(RuntimeError):
+        a._qr_login(emit=captured.append)
+
+    statuses = [
+        e["params"]["status"] for e in captured if e["method"] == "qr_status"
+    ]
+    assert statuses == ["expired"]
+    expired = next(e for e in captured if e["method"] == "qr_status")
+    assert expired["params"].get("bot_token") is None
+
+
+def test_qr_login_emits_failed_on_qrcode_request_error(monkeypatch):
+    # iLink returns a non-200 — sidecar must emit a terminal `failed`
+    # rather than just raise into the void (which would leave the
+    # dashboard's `qr` projection stuck on `pending` forever).
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (500, {"error": "internal"}),
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    captured: list = []
+    with pytest.raises(RuntimeError):
+        a._qr_login(emit=captured.append)
+
+    assert captured, "must emit at least one event on failure"
+    methods = [e["method"] for e in captured]
+    assert methods == ["qr_status"], (
+        f"failure pre-ready must emit ONLY qr_status (not qr_ready); "
+        f"got: {methods}"
+    )
+    assert captured[-1]["params"]["status"] == "failed"
+
+
+def test_qr_login_without_emit_still_returns_token(monkeypatch):
+    # Backward-compat: the existing pytest paths that drive `_qr_login`
+    # directly without an emit callback must continue to work — the
+    # emit parameter is `Optional[Callable[[dict], None]] = None`.
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (200, {"qrcode": "opaque-token"}),
+            (200, {"status": "confirmed", "bot_token": "tok_live"}),
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    token = a._qr_login()  # no emit
+    assert token == "tok_live"
