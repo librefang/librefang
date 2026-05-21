@@ -1136,68 +1136,150 @@ mod tests {
             );
         }
 
-        // Seed one row per agent-keyed table for two distinct
-        // agents — the target (to be removed) and a control (must
-        // survive). For `agents` itself, INSERT a row with the
-        // target's id; other tables get the agent id in their
-        // agent_id / source_agent column.
+        // Tables that carry an agent-scoping column but are deliberately
+        // NOT purged by the agent cascade. Keep this list tiny and
+        // documented — any discovered agent-keyed table that is neither
+        // cascaded nor listed here trips the purge assertion below.
+        //   - `group_roster`: its `agent_id` is *nullable*; rows model
+        //     group-chat membership keyed by chat, not agent ownership,
+        //     so removing an agent must not delete a chat's roster. Out
+        //     of scope for the agent cascade.
+        let not_cascaded: std::collections::HashSet<&str> =
+            ["group_roster"].into_iter().collect();
+
+        // The agent-scoping column for a given table.
+        let id_col = |table: &str| -> &'static str {
+            match table {
+                "agents" => "id",
+                "events" => "source_agent",
+                _ => "agent_id",
+            }
+        };
+
+        // Tables the cascade is expected to purge: every discovered
+        // agent-keyed table minus the documented exceptions, plus
+        // `agents` itself (keyed by `id`, not discovered above).
+        // `agents` goes FIRST so it exists before we seed tables that
+        // foreign-key it (e.g. prompt_experiments.agent_id → agents.id);
+        // foreign_keys is ON in this build.
+        let mut to_purge: Vec<String> = vec!["agents".to_string()];
+        to_purge.extend(
+            agent_keyed
+                .iter()
+                .filter(|t| !not_cascaded.contains(t.as_str()))
+                .cloned(),
+        );
+
+        // Seed one *valid, complete* row per purge-expected table for two
+        // distinct agents — the target (removed) and a control (must
+        // survive). The previous version inserted only the agent column
+        // with `INSERT OR IGNORE`, so every table with another NOT NULL
+        // column silently seeded zero rows and the purge assertion was
+        // vacuous. Walk the schema and supply a distinct value for every
+        // NOT NULL column instead.
         let target = AgentId::new();
         let control = AgentId::new();
         let target_str = target.to_string();
         let control_str = control.to_string();
 
+        // Monotonic counter → every supplied value is unique, so UNIQUE
+        // constraints never collide between the two seeded rows.
+        let mut seq: i64 = 0;
+
         for ag in [&target_str, &control_str] {
-            for table in &agent_keyed {
-                // Use INSERT OR IGNORE so per-table NOT NULL columns
-                // that we cannot anticipate don't break the seeding —
-                // the rows we DO successfully insert give the cascade
-                // something to chew on. For each table we just write
-                // the agent_id (or source_agent) column.
-                let col = {
+            for table in &to_purge {
+                let agent_col = id_col(table);
+                // (name, declared_type, notnull) for every column.
+                let info: Vec<(String, String, bool)> = {
                     let mut stmt = conn
                         .prepare(&format!("PRAGMA table_info({table})"))
                         .unwrap();
-                    let cols: Vec<String> = stmt
-                        .query_map([], |row| row.get::<_, String>(1))
-                        .unwrap()
-                        .map(|r| r.unwrap())
-                        .collect();
-                    if cols.iter().any(|c| c == "agent_id") {
-                        "agent_id"
-                    } else {
-                        "source_agent"
-                    }
+                    stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)? != 0,
+                        ))
+                    })
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect()
                 };
-                // `INSERT OR IGNORE INTO <t> (<col>) VALUES (?1)` —
-                // tables with NOT NULL siblings will silently skip
-                // (that's fine, we already have full coverage for
-                // those via the explicit unit tests). What matters
-                // is the tables where the insert DOES succeed: the
-                // cascade must purge them.
-                let _ = conn.execute(
-                    &format!("INSERT OR IGNORE INTO {table} ({col}) VALUES (?1)"),
-                    rusqlite::params![ag],
+
+                let mut cols: Vec<String> = Vec::new();
+                let mut vals: Vec<rusqlite::types::Value> = Vec::new();
+                for (name, decl_type, notnull) in &info {
+                    if name == agent_col {
+                        cols.push(name.clone());
+                        vals.push(rusqlite::types::Value::Text((*ag).clone()));
+                        continue;
+                    }
+                    if !notnull {
+                        continue; // nullable → leave NULL
+                    }
+                    seq += 1;
+                    let upper = decl_type.to_uppercase();
+                    let v = if upper.contains("INT") {
+                        rusqlite::types::Value::Integer(seq)
+                    } else if upper.contains("REAL")
+                        || upper.contains("FLOA")
+                        || upper.contains("DOUB")
+                    {
+                        rusqlite::types::Value::Real(seq as f64)
+                    } else if upper.contains("BLOB") {
+                        rusqlite::types::Value::Blob(format!("seed-{seq}").into_bytes())
+                    } else {
+                        rusqlite::types::Value::Text(format!("seed-{seq}"))
+                    };
+                    cols.push(name.clone());
+                    vals.push(v);
+                }
+
+                let placeholders = (1..=cols.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "INSERT INTO {table} ({}) VALUES ({placeholders})",
+                    cols.join(", ")
                 );
+                conn.execute(&sql, rusqlite::params_from_iter(vals.iter()))
+                    .unwrap_or_else(|e| {
+                        panic!("seed insert failed for table '{table}': {e}\n  sql: {sql}")
+                    });
             }
         }
 
+        // Pre-cascade guard: prove the seed actually landed a target row
+        // in every purge-expected table — this is exactly what the old
+        // test lacked, which made the post-cascade `== 0` trivially true.
+        for table in &to_purge {
+            let col = id_col(table);
+            let seeded: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                    rusqlite::params![&target_str],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                seeded >= 1,
+                "seed produced no target row in '{table}'; its purge assertion \
+                 would be vacuous",
+            );
+        }
+
         // Run the cascade in a transaction (mirrors substrate.rs:1446-1447).
-        let tx = pool.get().unwrap();
-        // We need a `&mut Connection` for `transaction()`; the
-        // pooled `PooledConnection` derefs mutably.
-        let mut tx_conn = tx;
+        let mut tx_conn = pool.get().unwrap();
         let tx = tx_conn.transaction().unwrap();
         crate::session::execute_session_agent_deletes(&tx, &target_str).unwrap();
         execute_structured_agent_deletes(&tx, &target_str).unwrap();
         tx.commit().unwrap();
 
-        // Assert: every agent-keyed table has zero target rows AND
-        // at least one control row (the control row may have been
-        // skipped at seed if the table had unsatisfied NOT NULLs,
-        // but for tables where seeding succeeded, the control must
-        // still be present after the cascade).
-        for table in &agent_keyed {
-            let col = if table == "events" { "source_agent" } else { "agent_id" };
+        // Post-cascade: every purge-expected table loses the target's
+        // rows and keeps the control's.
+        for table in &to_purge {
+            let col = id_col(table);
             let target_count: i64 = conn
                 .query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
@@ -1207,22 +1289,23 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 target_count, 0,
-                "cascade missed target rows in table '{table}' (col={col}) — \
+                "cascade missed target rows in agent-keyed table '{table}' (col={col}) — \
                  add a `DELETE FROM {table} WHERE {col} = ?1` line in \
                  execute_structured_agent_deletes (or execute_session_agent_deletes \
-                 if the table is session-scoped)",
+                 if session-scoped); if the table is intentionally not agent-scoped, \
+                 add it to `not_cascaded` with a reason",
+            );
+            let control_count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                    rusqlite::params![&control_str],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                control_count, 1,
+                "cascade over-deleted: control agent's row vanished from '{table}'",
             );
         }
-
-        // Also assert `agents` row for target is gone (it gets
-        // deleted by the final stmt in the cascade).
-        let agents_target: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agents WHERE id = ?1",
-                rusqlite::params![&target_str],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(agents_target, 0, "target agent row must be deleted");
     }
 }
