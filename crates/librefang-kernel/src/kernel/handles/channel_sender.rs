@@ -89,8 +89,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // generic `format_for_channel` path with the Markdown default
         // (see `default_output_format_for_channel("wecom")`) gives the
         // sidecar exactly that.
-        let formatted =
-            librefang_channels::formatter::format_for_channel(message, default_format);
+        let formatted = librefang_channels::formatter::format_for_channel(message, default_format);
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
 
