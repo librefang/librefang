@@ -45,6 +45,40 @@ pub struct MemorySubstrate {
     chunk_config: ChunkConfig,
 }
 
+/// Canonical PRAGMA set applied to every SqliteConnectionManager
+/// connection on first checkout. Extracted as a `pub(crate)` const
+/// so any future "second pool" on the same DB inherits the full
+/// set — most importantly `foreign_keys=ON`, which is **per-
+/// connection** in SQLite (not per-database), so an independent
+/// pool that omits it silently bypasses every FK declared by the
+/// migrations.
+///
+/// Audit: prompt-store-second-pool-no-fk. The `PromptStore` pool
+/// used to set only journal_mode / busy_timeout / cache_size /
+/// mmap_size; writes through that pool silently bypassed the FKs
+/// declared by `migrate_v13` on `prompt_experiments` /
+/// `experiment_variants` / `experiment_metrics`. Reusing this
+/// const closes that door for every current and future caller.
+///
+/// Field-by-field:
+///   - `journal_mode=WAL` — multi-reader concurrency.
+///   - `busy_timeout=5000` — writers wait 5s for the reserved lock
+///     instead of failing fast.
+///   - `cache_size=-2000` — caps per-connection page cache at
+///     ~2 MiB (so total ceiling is `pool_size × 2 MiB`).
+///   - `mmap_size=0` — disables mmap'd reads (kept for parity
+///     with the pre-pool config).
+///   - `foreign_keys=ON` — enforces the schema FKs every
+///     migration since v1 relies on.
+///   - `synchronous=NORMAL` — WAL-default durability/perf
+///     tradeoff.
+pub(crate) const DEFAULT_CONNECTION_PRAGMAS: &str = "PRAGMA journal_mode=WAL; \
+     PRAGMA busy_timeout=5000; \
+     PRAGMA cache_size=-2000; \
+     PRAGMA mmap_size=0; \
+     PRAGMA foreign_keys=ON; \
+     PRAGMA synchronous=NORMAL;";
+
 /// Default pool size when callers do not pass an explicit value.
 ///
 /// Mirrors `default_memory_pool_size` in `librefang-types::config` so that
@@ -95,16 +129,8 @@ impl MemorySubstrate {
         // decision); foreign_keys=ON enforces the schema FKs the migrations
         // rely on; synchronous=NORMAL is the WAL-default durability/perf
         // tradeoff.
-        let manager = SqliteConnectionManager::file(db_path).with_init(|c| {
-            c.execute_batch(
-                "PRAGMA journal_mode=WAL; \
-                 PRAGMA busy_timeout=5000; \
-                 PRAGMA cache_size=-2000; \
-                 PRAGMA mmap_size=0; \
-                 PRAGMA foreign_keys=ON; \
-                 PRAGMA synchronous=NORMAL;",
-            )
-        });
+        let manager = SqliteConnectionManager::file(db_path)
+            .with_init(|c| c.execute_batch(DEFAULT_CONNECTION_PRAGMAS));
         // Clamp to >= 1: r2d2 panics on `max_size = 0`, and a deserialised
         // `pool_size = 0` (operator typo) should fail soft, not crash boot.
         let max_size = pool_size.max(1);
