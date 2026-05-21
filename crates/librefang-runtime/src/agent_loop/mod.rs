@@ -433,6 +433,19 @@ pub async fn run_agent_loop(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // Platform conversation id (chat_id / group id) stamped by the
+    // kernel alongside sender_user_id + sender_channel for the
+    // approval-flow group-chat support (see
+    // `librefang-kernel/src/kernel/messaging.rs` stamp site). Falls
+    // back to None for pre-PR producers; the approval-resume path
+    // (DeferredToolExecution.chat_id) treats None the same as the
+    // DM-coincides case and routes via sender_id, so the missing
+    // chat_id is non-regressive.
+    let sender_chat_id: Option<String> = manifest
+        .metadata
+        .get("sender_chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     // #5227: chat-qualified scope stamped by the kernel alongside
     // `sender_channel`. Production callers go through `messaging.rs`
     // (`compose_sender_scope` / `for_sender_scope`) which stamps both
@@ -1378,6 +1391,7 @@ pub async fn run_agent_loop(
                         process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        sender_chat_id: sender_chat_id.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
                         context_budget: &context_budget,
                         context_engine,
