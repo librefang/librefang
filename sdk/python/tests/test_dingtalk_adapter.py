@@ -434,14 +434,54 @@ async def test_on_send_uses_cached_session_webhook():
 
 
 @pytest.mark.asyncio
-async def test_on_send_falls_back_to_user_session_webhook():
+async def test_on_send_recovers_session_webhook_from_user_librefang_user():
+    """The production daemon rebuilds ``cmd.user`` from
+    ``ChannelUser{platform_id, display_name, librefang_user}`` and
+    sets ``cmd.channel_id = user.platform_id`` (NOT message_id). So
+    ``on_send`` MUST recover the per-message reply URL from
+    ``cmd.user["librefang_user"]`` (the field
+    ``parse_dingtalk_event`` populates via ``protocol.message(
+    librefang_user=session_webhook)``). Cache-by-message_id path is
+    only a secondary route and not hit by the real bridge.
+
+    Regression guard: the first sidecar landing had this backwards —
+    it tried ``_session_webhooks[cmd.channel_id]`` first and read
+    ``cmd.user["session_webhook"]`` (a key that doesn't exist in the
+    daemon's serialization) as fallback, silently dropping every
+    reply. See PR #5417 self-review."""
     a = _adapter()
     await a.on_send(_FakeSend(
+        # Real daemon shape: channel_id is sender's staffId, not the
+        # inbound message_id — the cache lookup misses.
+        channel_id="alice",
         text="hello",
-        user={"session_webhook": "https://oapi.dingtalk.com/sb?u=1"},
+        user={
+            "platform_id": "alice",
+            "display_name": "Alice",
+            "librefang_user": "https://oapi.dingtalk.com/robot/sendBySession?s=42",
+        },
     ))
     url, chunk = a._send_queue.get_nowait()
-    assert url.endswith("u=1")
+    assert url.endswith("s=42"), \
+        "on_send must recover the URL from cmd.user.librefang_user " \
+        "(not cmd.user.session_webhook, not _session_webhooks[channel_id])"
+    assert chunk == "hello"
+
+
+@pytest.mark.asyncio
+async def test_on_send_ignores_non_http_librefang_user():
+    """`librefang_user` is reused across many channels (Telegram puts the
+    Telegram username there, etc.). on_send must only treat it as a
+    sessionWebhook URL when it actually looks like an HTTP(S) URL —
+    otherwise we'd POST replies to garbage destinations."""
+    a = _adapter()
+    await a.on_send(_FakeSend(
+        channel_id="alice",
+        text="hi",
+        user={"platform_id": "alice", "librefang_user": "alice"},
+    ))
+    with pytest.raises(queue.Empty):
+        a._send_queue.get_nowait()
 
 
 @pytest.mark.asyncio

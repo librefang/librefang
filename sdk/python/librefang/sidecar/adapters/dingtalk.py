@@ -254,9 +254,16 @@ def parse_dingtalk_event(
     if account_id:
         metadata["account_id"] = account_id
     if session_webhook:
-        # Stash the per-message reply URL so on_send can route the
-        # outbound to the right sessionWebhook (Rust stuffs it into
-        # ChannelUser.librefang_user; we surface it explicitly).
+        # Surface the per-message reply URL in BOTH places:
+        #
+        # 1. As `metadata.session_webhook` — preserved for any caller
+        #    that wants to log / inspect the URL.
+        # 2. As `ChannelUser.librefang_user` — this is the field the
+        #    daemon round-trips back through `cmd.user["librefang_user"]`
+        #    on `Send`, so `on_send` can recover the URL without
+        #    relying on a per-process `_session_webhooks` cache that
+        #    the bridge wouldn't address into. The deleted Rust adapter
+        #    used the same field (`dingtalk.rs:233-238` / `:357`).
         metadata["session_webhook"] = session_webhook
 
     return protocol.message(
@@ -266,6 +273,10 @@ def parse_dingtalk_event(
         message_id=msg_id,
         platform="dingtalk",
         is_group=is_group,
+        # See comment above — `librefang_user` is the round-trip channel
+        # for the per-message reply URL. Empty when DingTalk did not
+        # send a `sessionWebhook` (proactive non-reply or expired).
+        librefang_user=session_webhook or None,
         metadata=metadata,
     )
 
@@ -599,21 +610,30 @@ class DingTalkAdapter(SidecarAdapter):
         await loop.run_in_executor(None, self._producer_blocking, emit)
 
     async def on_send(self, cmd) -> None:
-        # The bridge round-trips the inbound message_id back as
-        # cmd.channel_id, which we use to look up the cached
-        # sessionWebhook. Fall back to metadata if the daemon happens
-        # to forward it explicitly.
+        # The daemon round-trips `ChannelUser.librefang_user` (which
+        # `parse_dingtalk_event` populates with the per-message
+        # `sessionWebhook` URL) back through `cmd.user["librefang_user"]`
+        # on `Send`. That's the primary recovery path — matches the
+        # deleted Rust adapter's `stream_reply_url(user)` helper
+        # (`dingtalk.rs:233-238`).
+        #
+        # The per-process `_session_webhooks` cache is a secondary path
+        # for clients that send `cmd.channel_id = message_id`, but the
+        # production bridge sets `channel_id = user.platform_id` instead,
+        # so cmd.user is the load-bearing one. Try cache first anyway
+        # (cheap dict lookup, covers stream_id-routed clients), then
+        # user.librefang_user.
         session_webhook = None
         msg_id = cmd.channel_id or ""
         if msg_id:
             with self._session_lock:
                 session_webhook = self._session_webhooks.pop(msg_id, None)
-        if not session_webhook:
-            # Last resort — let the agent peek at user metadata
-            # (proactive sends from agent that didn't come via inbound).
-            session_webhook = (
-                cmd.user.get("session_webhook") if cmd.user else None
-            )
+        if not session_webhook and cmd.user:
+            librefang_user = cmd.user.get("librefang_user")
+            if isinstance(librefang_user, str) and librefang_user.startswith(
+                ("http://", "https://"),
+            ):
+                session_webhook = librefang_user
         if not session_webhook:
             log.warn(
                 "dingtalk on_send: no sessionWebhook for message; dropping",

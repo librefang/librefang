@@ -2631,10 +2631,8 @@ max_versions_per_agent = 50
 | `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
 | `TWIST_TOKEN` | Twist | Twist API 令牌。 |
 | `MUMBLE_PASSWORD` | Mumble | Mumble 服务器密码。 |
-| `DINGTALK_APP_KEY` | DingTalk | 钉钉 App Key / Client ID（stream 模式）。 |
-| `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（stream 模式）。 |
-| `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌（webhook 模式）。 |
-| `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥（webhook 模式）。 |
+| `DINGTALK_APP_KEY` | DingTalk | 钉钉 App Key / Client ID（sidecar 适配器 `librefang.sidecar.adapters.dingtalk`，仅 stream 模式）。 |
+| `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（sidecar 适配器 `librefang.sidecar.adapters.dingtalk`，仅 stream 模式）。 |
 | `GITTER_TOKEN` | Gitter | Gitter 认证令牌。 |
 | `NTFY_TOKEN` | ntfy | ntfy 认证令牌（公共主题可选）。 |
 | `GOTIFY_APP_TOKEN` | Gotify | Gotify 应用令牌（发送）。 |
@@ -2675,7 +2673,7 @@ max_versions_per_agent = 50
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
-| DingTalk | `app_key_env`（stream）或 `access_token_env`（webhook） |
+| DingTalk | _sidecar — 由 `librefang.sidecar.adapters.dingtalk` 的 `DINGTALK_APP_KEY` / `DINGTALK_APP_SECRET` env 检查负责_ |
 | Gitter | `token_env` |
 | ntfy | `token_env`（仅当 `token_env` 非空时；公共主题无需认证） |
 | Gotify | `app_token_env` |

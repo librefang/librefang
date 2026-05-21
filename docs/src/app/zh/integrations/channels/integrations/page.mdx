@@ -47,72 +47,38 @@ sidecar 作为 LibreFang 的被监管子进程运行。它在 `LINE_WEBHOOK_PORT
 
 ## 钉钉
 
-支持两种接收模式：
-- **Stream 模式**（默认，推荐）：通过钉钉 Stream 协议建立 WebSocket 长连接。无需公网 IP 或端口。
-- **Webhook 模式**（传统）：HTTP 回调服务器。需要公网可访问的 URL。
+钉钉由 Python sidecar 适配器（`librefang.sidecar.adapters.dingtalk`）提供，**仅 stream 模式**。in-process `[channels.dingtalk]` 配置块已在 sidecar 迁移中移除；请改为通过 `[[sidecar_channels]]` 条目声明。原 in-process `webhook` 模式（基于 `timestamp + secret + body` 的 HMAC-SHA256）已**未**迁移 —— 请在钉钉管理后台将机器人切换到 stream 订阅。
 
 ### 前置条件
 
 - 在[钉钉开放平台](https://open.dingtalk.com/document/)创建的应用
-- **Stream 模式**：需要应用的 App Key 和 App Secret
-- **Webhook 模式**：需要自定义机器人的 webhook 访问令牌和签名密钥
+- 应用的 App Key 和 App Secret
+- 守护进程主机上有 `python3`（无第三方包要求 —— stdlib-only sidecar）
 
-### 设置步骤（Stream 模式 -- 推荐）
+### 设置步骤
 
 1. 前往[钉钉开放平台](https://open.dingtalk.com/)，创建应用（或使用现有应用）。
 2. 启用 **机器人** 能力，记录 **App Key**（Client ID）和 **App Secret**（Client Secret）。
-3. 设置环境变量：
-
-```bash
-export DINGTALK_APP_KEY=your-app-key          # 环境变量
-export DINGTALK_APP_SECRET=your-app-secret
-librefang vault set DINGTALK_APP_KEY          # 加密金库（推荐）
-librefang vault set DINGTALK_APP_SECRET
-```
-
-4. 添加到配置文件：
+3. 添加到 `config.toml`：
 
 ```toml
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "dingtalk"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.dingtalk"]
+channel_type = "dingtalk"
+[sidecar_channels.env]
+DINGTALK_APP_KEY = "dingxxx..."
+# DINGTALK_ACCOUNT_ID = "prod-bot"     # 可选，多机器人路由键
+# DINGTALK_ALLOWED_USERS = "staff1,staff2"   # 可选，staffId 白名单
 ```
 
+4. 把 `DINGTALK_APP_SECRET` 放入 `~/.librefang/secrets.env`（仪表板的"通道"页面会替你写入）。
 5. 重启守护进程。
-
-### 设置步骤（Webhook 模式）
-
-1. 在钉钉中，打开群聊，前往 **群设置 > 智能群助手 > 添加机器人**。
-2. 选择 **自定义机器人**，启用 **安全设置**（建议使用签名模式）。
-3. 记录 webhook 访问令牌和签名密钥。
-4. 设置环境变量：
-
-```bash
-export DINGTALK_ACCESS_TOKEN=your-token       # 环境变量
-export DINGTALK_SECRET=your-signing-secret
-librefang vault set DINGTALK_ACCESS_TOKEN     # 加密金库（推荐）
-librefang vault set DINGTALK_SECRET
-```
-
-5. 添加到配置文件：
-
-```toml
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-default_agent = "assistant"
-```
-
-6. 重启守护进程。
 
 ### 工作原理
 
-在 **Stream 模式** 下，适配器向钉钉网关 API（`/v1.0/gateway/connections/open`）注册以获取 WebSocket 端点和票据，然后维持持久的 WebSocket 连接，接收机器人消息回调并响应 ACK 帧。心跳 ping/pong 自动处理。
-
-在 **Webhook 模式** 下，适配器通过 HTTP 回调接收来自钉钉机器人 API 的消息。每个请求使用配置的密钥通过 HMAC-SHA256 签名进行验证。响应通过带有签名时间戳的钉钉 webhook URL 发送。
+sidecar 通过 `POST /v1.0/gateway/connections/open` 向钉钉网关注册以获取 WebSocket 端点和票据，建立 WS 连接后对每一帧 CALLBACK 立即 ACK，并向钉钉随每条入站事件返回的 per-message `sessionWebhook` URL POST 回复。SYSTEM ping/pong 心跳自动处理。重连为 3 → 60 秒指数退避。
 
 ---
 
