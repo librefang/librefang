@@ -664,16 +664,14 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a GoogleChat config.
-        // Witness rotated: dingtalk → whatsapp → webhook → google_chat
-        // (the last remaining in-process channel). The assertion is
-        // on the ReloadChannels hot action firing, not on any
-        // adapter-specific behaviour.
-        b.channels.google_chat =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::GoogleChatConfig {
-                service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
-                ..Default::default()
-            }]);
+        // Witness rotation history: dingtalk → whatsapp → webhook →
+        // google_chat → here (`file_download_max_bytes`), the only
+        // non-`OneOrMany` field still on `ChannelsConfig` after all
+        // in-process channels migrated to sidecars. The assertion
+        // is on the ReloadChannels hot action firing for ANY change
+        // to the `channels` block, not on any adapter-specific
+        // shape. (`sidecar_channels` is covered by the next test.)
+        b.channels.file_download_max_bytes = a.channels.file_download_max_bytes + 1;
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadChannels));
