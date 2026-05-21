@@ -205,11 +205,6 @@ walkdir = "2"
 
 # Security
 sha2 = { version = "0.10", features = ["oid"] }
-# sha1 0.10 is paired with hmac 0.12 via digest 0.10. sha1 0.11+ moved to
-# digest 0.11 and is incompatible with our hmac version.
-sha1 = "0.10"
-aes = "0.9"
-cbc = "0.2"
 hmac = "0.12"
 hex = "0.4"
 subtle = "2"
@@ -250,9 +245,6 @@ colored = "3"
 aes-gcm = "0.10"
 argon2 = { version = "0.5", features = ["rand"] }
 
-# HTML entity decoding
-html-escape = "0.2"
-
 # Lightweight regex
 regex = "1"
 regex-lite = "0.1"
@@ -283,7 +275,6 @@ flate2 = "1"
 tar = "0.4"
 
 # Testing
-tokio-test = "0.4"
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 

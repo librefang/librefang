@@ -5,10 +5,7 @@
 //!
 //! Every channel runs out-of-process as a sidecar; the per-channel
 //! `default_agent` lookup is therefore single-pass over
-//! `cfg.sidecar_channels` via [`sidecar_default_agent`]. The previous
-//! `for_each_channel_field!` macro (which expanded the per-`ChannelsConfig`-field
-//! scan loop) is gone — its body was empty after every in-process channel
-//! migrated to a sidecar.
+//! `cfg.sidecar_channels` via [`sidecar_default_agent`].
 
 use librefang_runtime::kernel_handle;
 
@@ -16,15 +13,12 @@ use super::super::LibreFangKernel;
 
 /// Resolve the `default_agent` name for a sidecar channel matching `channel`.
 ///
-/// Sidecar channels (telegram / discord / slack / … after their migration
-/// out of `cfg.channels`) are not covered by [`for_each_channel_field!`], so
-/// [`resolve_channel_owner`](LibreFangKernel::resolve_channel_owner) would
-/// otherwise return `None` for them and the `channel_send` mirror (#4824)
-/// would silently stop working post-migration. A sidecar entry's effective
-/// channel name is its `channel_type` (falling back to `name`), mirroring how
-/// `channel_bridge` derives the `ChannelType`. The first matching entry that
-/// carries a non-empty `default_agent` wins — deterministic because
-/// `sidecar_channels` is an ordered `Vec`.
+/// A sidecar entry's effective channel name is its `channel_type` (falling
+/// back to `name`), mirroring how `channel_bridge` derives the
+/// `ChannelType`. The first matching entry that carries a non-empty
+/// `default_agent` wins — deterministic because `sidecar_channels` is an
+/// ordered `Vec`. The `channel_send` mirror introduced in #4824 routes
+/// through this lookup post-sidecar-migration.
 fn sidecar_default_agent<'a>(
     sidecar_channels: &'a [librefang_types::config::SidecarChannelConfig],
     channel: &str,
@@ -95,8 +89,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // generic `format_for_channel` path with the Markdown default
         // (see `default_output_format_for_channel("wecom")`) gives the
         // sidecar exactly that.
-        let formatted =
-            librefang_channels::formatter::format_for_channel(message, default_format);
+        let formatted = librefang_channels::formatter::format_for_channel(message, default_format);
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
 
@@ -371,10 +364,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         _chat_id: &str,
     ) -> Option<librefang_types::agent::AgentId> {
         // Every channel runs as a sidecar; the `default_agent` lookup is
-        // a single pass over `cfg.sidecar_channels`. The previous
-        // `for_each_channel_field!` macro scanned the now-empty per-
-        // channel field list on `ChannelsConfig` and was deleted along
-        // with the last in-process adapter.
+        // a single pass over `cfg.sidecar_channels`.
         let cfg = self.config.load_full();
         let agent_name = sidecar_default_agent(&cfg.sidecar_channels, channel)?;
         self.agents.registry.find_by_name(agent_name).map(|e| e.id)
@@ -383,12 +373,6 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
 
 #[cfg(test)]
 mod tests {
-    // `for_each_channel_field_macro_uses_dictionary_order` retired —
-    // the macro it guarded (`for_each_channel_field!`) is gone now
-    // that every in-process channel has migrated to a sidecar.
-    // Reintroduce alongside the macro if a future in-process
-    // channel brings the shape back.
-
     use super::sidecar_default_agent;
     use librefang_types::config::SidecarChannelConfig;
 
