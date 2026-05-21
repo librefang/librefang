@@ -720,7 +720,10 @@ def test_on_send_uses_platform_id_as_room(monkeypatch):
 
 
 def test_on_send_threads_via_thread_id(monkeypatch):
-    """P1 round-trip: cmd.thread_id → tmid on the outbound."""
+    """Forward-compat fallback (a future threading=true + `thread` cap
+    opt-in would deliver thread_id directly). In production today, the
+    bridge strips cmd.thread_id to None for cap-less sidecars — see
+    the regression-guard test below."""
     a = _adapter()
     fake = _FakeUrlopen([(200, {"success": True})])
     monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
@@ -732,6 +735,26 @@ def test_on_send_threads_via_thread_id(monkeypatch):
     )))
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["tmid"] == "PARENT_MSG"
+
+
+def test_on_send_recovers_tmid_from_user_librefang_user(monkeypatch):
+    """Regression guard: the daemon-shape pre-fix bug meant
+    cmd.thread_id=None so the bot's threaded reply landed at channel
+    root despite the module docstring claiming to fix exactly that.
+    librefang_user is the always-round-tripped carrier."""
+    a = _adapter()
+    fake = _FakeUrlopen([(200, {"success": True})])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="threaded reply",
+        thread_id=None,  # daemon-default
+        user={"platform_id": "ROOM1", "librefang_user": "PARENT_MSG"},
+    )))
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["tmid"] == "PARENT_MSG", \
+        "on_send must recover tmid from cmd.user.librefang_user " \
+        "when cmd.thread_id is None"
 
 
 def test_on_send_falls_back_to_channel_id(monkeypatch):

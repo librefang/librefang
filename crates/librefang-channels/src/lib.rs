@@ -29,14 +29,14 @@ pub use message_truncator::{
 };
 
 // Individual channel adapters — feature-gated (alphabetical order)
-#[cfg(feature = "channel-dingtalk")]
-pub mod dingtalk;
+// dingtalk migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.dingtalk); no longer an in-process channel.
 // discord migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.discord); no longer an in-process channel.
-#[cfg(feature = "channel-email")]
-pub mod email;
-#[cfg(feature = "channel-feishu")]
-pub mod feishu;
+// email migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.email); no longer an in-process channel.
+// feishu migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.feishu); no longer an in-process channel.
 #[cfg(feature = "channel-google-chat")]
 pub mod google_chat;
 // line migrated to an out-of-process sidecar adapter
@@ -51,17 +51,17 @@ pub mod google_chat;
 // (librefang.sidecar.adapters.signal); no longer an in-process channel.
 // slack migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.slack); no longer an in-process channel.
-#[cfg(feature = "channel-teams")]
-pub mod teams;
+// teams migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.teams); no longer an in-process channel.
 // webex migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.webex); no longer an in-process channel.
-#[cfg(feature = "channel-webhook")]
-pub mod webhook;
-#[cfg(feature = "channel-wechat")]
-pub mod wechat;
-#[cfg(feature = "channel-wecom")]
-pub mod wecom;
-#[cfg(feature = "channel-whatsapp")]
-pub mod whatsapp;
+// webhook migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.webhook); no longer an in-process channel.
+// wechat migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.wechat); no longer an in-process channel.
+// wecom migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.wecom); no longer an in-process channel.
+// whatsapp migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.whatsapp); no longer an in-process channel.
 // zulip migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.zulip); no longer an in-process channel.

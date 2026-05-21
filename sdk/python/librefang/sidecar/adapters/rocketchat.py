@@ -480,6 +480,13 @@ class RocketChatAdapter(SidecarAdapter):
             channel_id=room_id,
             message_id=msg_id or None,
             is_group=True,
+            # `librefang_user` is the always-round-tripped carrier for
+            # the `tmid` thread correlation. The daemon strips
+            # `cmd.thread_id` to None for cap-less sidecars, so the
+            # original `thread_id` route silently lost the thread
+            # context. Kept for forward-compat with a future
+            # `threading=true` + `thread` cap opt-in.
+            librefang_user=thread_id,
             thread_id=thread_id,
             metadata=metadata,
         )
@@ -726,10 +733,23 @@ class RocketChatAdapter(SidecarAdapter):
         if not room_id:
             room_id = str(getattr(cmd, "channel_id", "") or "")
 
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
-        tmid = thread_id or None
+        # Primary recovery: cmd.user["librefang_user"] (always round-
+        # tripped). Fallback: cmd.thread_id (forward-compat). Rocket.Chat
+        # msg ids are MongoDB ObjectId-shape (17-char alphanumeric) —
+        # generic URL/whitespace/@ guard is enough.
+        tmid: "Optional[str]" = None
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                tmid = candidate
+        if tmid is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            tmid = thread_id or None
 
         await asyncio.get_event_loop().run_in_executor(
             None, self._post_message, room_id, text, tmid,

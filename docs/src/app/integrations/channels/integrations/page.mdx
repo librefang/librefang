@@ -51,72 +51,38 @@ The sidecar runs as a supervised subprocess of LibreFang. It serves a standalone
 
 ## DingTalk
 
-Supports two modes:
-- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
-- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
+DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), **stream mode only**. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration; declare DingTalk as a `[[sidecar_channels]]` entry instead. The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — switch the robot to stream subscription in the DingTalk admin console.
 
 ### Prerequisites
 
 - A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
-- For **stream mode**: App Key and App Secret from your DingTalk application
-- For **webhook mode**: A custom robot with webhook access token and signing secret
+- App Key and App Secret from your DingTalk application
+- `python3` on the daemon host (no third-party packages required — stdlib-only sidecar)
 
-### Setup (Stream Mode -- Recommended)
+### Setup
 
 1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
 2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
-3. Set environment variables:
-
-```bash
-export DINGTALK_APP_KEY=your-app-key          # Environment variable
-export DINGTALK_APP_SECRET=your-app-secret
-librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
-librefang vault set DINGTALK_APP_SECRET
-```
-
-4. Add to config:
+3. Add to `config.toml`:
 
 ```toml
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "dingtalk"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.dingtalk"]
+channel_type = "dingtalk"
+[sidecar_channels.env]
+DINGTALK_APP_KEY = "dingxxx..."
+# DINGTALK_ACCOUNT_ID = "prod-bot"     # optional, multi-bot routing key
+# DINGTALK_ROBOT_CODE = ""             # optional, defaults to app_key
 ```
 
+4. Put `DINGTALK_APP_SECRET` in `~/.librefang/secrets.env` (the dashboard's Channels page writes it for you).
 5. Restart the daemon.
-
-### Setup (Webhook Mode)
-
-1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
-2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
-3. Note the webhook access token and signing secret.
-4. Set environment variables:
-
-```bash
-export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
-export DINGTALK_SECRET=your-signing-secret
-librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
-librefang vault set DINGTALK_SECRET
-```
-
-5. Add to config:
-
-```toml
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-default_agent = "assistant"
-```
-
-6. Restart the daemon.
 
 ### How It Works
 
-In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
-
-In **webhook mode**, the adapter receives messages via HTTP callback on the shared API server at `/channels/dingtalk/webhook`. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+The sidecar registers with the DingTalk gateway via `POST /v1.0/gateway/connections/open` to obtain a WebSocket endpoint + ticket, opens the WS connection, ACKs every CALLBACK frame inline, and posts replies to the per-message `sessionWebhook` URL that DingTalk delivers with each inbound event. Heartbeat SYSTEM ping/pong is handled automatically. Reconnect is 3 → 60 s exponential backoff.
 
 ---
 
@@ -162,40 +128,44 @@ The sidecar fetches an access token from `https://bots.qq.com/app/getAppAccessTo
 
 ---
 
-## WeCom
+## WeCom (sidecar)
+
+WeCom (WeChat Work / Enterprise WeChat) migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.wecom`). The legacy callback mode (HTTP webhook + AES-CBC-256 inbound decryption) is no longer supported — Python's stdlib has no AES, and the sidecar SDK is stdlib-only by policy. Operators who relied on callback mode must switch the bot to WebSocket mode in the WeCom admin console.
 
 ### Prerequisites
 
-- A WeCom (WeChat Work) enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
+- A WeCom enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
+- `librefang-sdk` installed in the Python environment that runs the sidecar (`pip install -e sdk/python` from the repo root, or `pip install librefang-sdk` once the package is published)
 
 ### Setup
 
-1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**.
-2. Note the **Bot ID** and **Secret** from the bot settings page.
-3. Set the secret environment variable:
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**. Note the **Bot ID** and **Secret** from the bot settings page.
+2. Put the secret in `~/.librefang/secrets.env`:
 
 ```bash
-export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
-librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
-librefang config set-key wecom                # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
+WECOM_BOT_SECRET=your-bot-secret
 ```
 
-4. Add to config:
+3. Add the sidecar to `config.toml`:
 
 ```toml
-[channels.wecom]
-bot_id = "YOUR_BOT_ID"
-secret_env = "WECOM_BOT_SECRET"
-# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
-# default_agent = "assistant"    # Optional: route messages to specific agent
+[[sidecar_channels]]
+name = "wecom"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wecom"]
+channel_type = "wecom"
+
+[sidecar_channels.env]
+WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_ALLOWED_USERS = "alice,bob"   # optional CSV; empty = all
+# WECOM_ACCOUNT_ID    = "prod-bot"    # optional multi-bot routing
 ```
 
-5. Restart the daemon.
+4. Restart the daemon.
 
 ### How It Works
 
-The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
+The WeCom sidecar connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket, subscribes with `cmd: "aibot_subscribe"` carrying the Bot ID and Secret, and sends a `cmd: "ping"` heartbeat every 30 s. Inbound messages arrive as `cmd: "aibot_msg_callback"` JSON frames; replies use `cmd: "aibot_respond_msg"` (passive reply to a cached inbound `req_id`, one-shot) or `cmd: "aibot_send_msg"` (proactive). Outbound bodies are always `msgtype: "markdown"` since the intelligent-bot `aibot_respond_msg` does not accept `msgtype: "text"`. Inbound `req_id`s are deduped via a bounded set (capacity 10000 / evict 5000) so a WS reconnect that races with platform redelivery does not double-emit.
 
 ---
 
@@ -309,51 +279,54 @@ The sidecar polls `GET /ocs/v2.php/apps/spreed/api/v1/chat/<token>?lookIntoFutur
 
 ---
 
-## Webhook
+## Webhook (sidecar)
+
+Webhook migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.webhook`, stdlib-only). Same HMAC-SHA256 + timestamp + SSRF-guard semantics, plus inbound dedupe on `message_id` and 429 `Retry-After` that the Rust adapter didn't have.
 
 ### Prerequisites
 
-- A target URL that accepts HTTP POST requests (no external service registration needed)
+- An optional target URL that accepts HTTP POST requests, for outbound delivery
+- A shared HMAC-SHA256 secret
+- `python3` on the daemon host (no third-party packages required)
 
 ### Setup
 
-1. Choose a URL where webhook payloads should be sent.
-2. Choose a shared secret for HMAC-SHA256 signature verification.
-3. Set environment variables:
-
-```bash
-export WEBHOOK_URL=https://your-service.example.com/hook  # Environment variable
-export WEBHOOK_SECRET=your-shared-secret
-librefang vault set WEBHOOK_URL               # Encrypted vault (recommended)
-librefang vault set WEBHOOK_SECRET
-librefang config set-key webhook              # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
-```
-
-4. Add to config:
+1. Choose a shared secret for HMAC-SHA256 signature verification.
+2. Add to `config.toml`:
 
 ```toml
-[channels.webhook]
-url_env = "WEBHOOK_URL"
-secret_env = "WEBHOOK_SECRET"
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+# WEBHOOK_LISTEN_PATH = "/webhook"
+# WEBHOOK_CALLBACK_URL = "https://your-service.example.com/hook"
 ```
 
-5. Restart the daemon.
+3. Put `WEBHOOK_SECRET` in `~/.librefang/secrets.env`.
+4. Restart the daemon.
 
 ### How It Works
 
-The Webhook adapter provides a generic bidirectional HTTP integration. Incoming messages are received as HTTP POST requests on the shared API server at `/channels/webhook/webhook`, verified via HMAC-SHA256 using the shared secret. Responses are delivered as HTTP POST payloads to the configured URL, also signed with HMAC-SHA256.
+The sidecar runs its own `BaseHTTPRequestHandler`-over-`ThreadingTCPServer` listener on `WEBHOOK_LISTEN_PORT`. Incoming POSTs are verified by HMAC-SHA256 (`X-Webhook-Signature: sha256=<hex>`) over the raw request body, with an optional `X-Webhook-Timestamp` (milliseconds since epoch, ±5 min skew) for replay protection. Outbound replies go to `WEBHOOK_CALLBACK_URL` (when set) signed the same way. The SSRF guard rejects private / loopback / link-local / multicast / cloud-metadata callback URLs at startup AND on every outbound POST.
 
 ### `deliver_only` Pass-through Mode
 
-The webhook channel can also run as a zero-LLM pass-through: incoming payloads bypass the agent loop entirely (no sanitiser, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
+The webhook sidecar can run as a zero-LLM pass-through: incoming payloads bypass the agent loop entirely (no sanitiser, no rate limiter, no agent lookup) and forward straight to a target channel.
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # required when deliver_only is true
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # required when WEBHOOK_DELIVER_ONLY=1
 ```
 
-When `deliver_only = true` but `deliver` is unset, librefang emits a startup `warn` and the webhook stays inactive. See [Webhook `deliver_only` Mode](/integrations/channels#webhook-deliver_only-mode) on the channels overview for the internal `__deliver_only__` / `__deliver_target__` metadata signalling.
+The sidecar **fail-closes at startup** when `WEBHOOK_DELIVER_ONLY=1` but `WEBHOOK_DELIVER` is empty — the Rust validator at the same path only warn-and-continued, leaving inbound messages silently dropped at runtime. See [Webhook `deliver_only` Mode](/integrations/channels#webhook-deliver_only-mode) on the channels overview for the internal `__deliver_only__` / `__deliver_target__` metadata signalling that the kernel's `bridge.rs` reads to short-circuit the LLM call.

@@ -390,10 +390,32 @@ def parse_qq_event(
         user_name=username,
         content=msg_content,
         message_id=msg_id_raw or None,
-        # Improvement #4: surface the reply endpoint and msg_id on
-        # standard protocol fields so the bridge round-trips them on
-        # outbound without any QQ-specific encoding.
+        # Improvement #4 (revised): the inbound QQ message id MUST round-
+        # trip to ``on_send`` so the reply can be marked as a passive
+        # response (QQ Bot OpenAPI v2 routes anything missing ``msg_id``
+        # to the proactive-message quota, which unlicensed bots have
+        # set to zero and licensed bots cap hard). Two carriers:
+        #
+        # * ``channel_id`` — the reply endpoint URL. The bridge sets
+        #   ``cmd.channel_id`` from ``user.platform_id`` (the daemon's
+        #   contract; see ``crates/librefang-channels/src/sidecar.rs``
+        #   in ``derive_sidecar_sender_identity``), so we stash the
+        #   endpoint there *via* ``user.platform_id`` below.
+        #
+        # * ``ChannelUser.librefang_user`` — the per-message ``msg_id``.
+        #   This field is preserved bytewise across the bridge
+        #   (`sidecar.rs:766` on inbound deserialise / `:1204` on
+        #   outbound serialise via ``user: user.clone()``), so it's
+        #   the only daemon-honoured channel for per-message reply
+        #   correlation that doesn't depend on the operator setting
+        #   ``threading = true`` AND the sidecar declaring the
+        #   ``thread`` capability (QQ declares neither).
+        #
+        # ``thread_id`` is kept for forward compat with a future
+        # ``threading=true`` opt-in, but on_send no longer relies on
+        # it — see the matching docstring on ``on_send``.
         channel_id=reply_endpoint,
+        librefang_user=msg_id_raw or None,
         thread_id=msg_id_raw or None,
         is_group=is_group,
         metadata=metadata,
@@ -840,15 +862,42 @@ class QqAdapter(SidecarAdapter):
         await loop.run_in_executor(None, self._gateway_loop, emit)
 
     async def on_send(self, cmd) -> None:
-        # Improvement #4: the inbound event sets ``channel_id`` to the
-        # QQ reply endpoint and ``thread_id`` to the source ``msg_id``;
-        # the bridge round-trips both back to us on outbound.
+        # Improvement #4 (revised — was using cmd.thread_id, which the
+        # daemon NULLs out unless `[channels.qq.overrides] threading = true`
+        # AND the sidecar declares the `thread` capability, neither of
+        # which QQ does — so every reply was going out with no `msg_id`,
+        # tripping QQ Bot OpenAPI v2's proactive-message quota and
+        # silently rate-limiting / rejecting the reply).
+        #
+        # Primary recovery: `cmd.user["librefang_user"]` carries the
+        # inbound `msg_id` (see `parse_qq_event` and the matching
+        # docstring there) — this field round-trips bytewise through
+        # the bridge regardless of capabilities / overrides.
+        #
+        # Fallback to `cmd.thread_id` so a future `threading=true`
+        # opt-in keeps working, and so the existing test-suite
+        # fakes that fabricate `thread_id` continue to pass.
         reply_endpoint = (
             cmd.channel_id
             or (cmd.user.get("platform_id") if cmd.user else "")
             or ""
         )
-        msg_id = getattr(cmd, "thread_id", None) or None
+        msg_id = None
+        if cmd.user:
+            candidate = cmd.user.get("librefang_user")
+            # Guard: `librefang_user` is shared across channels
+            # (Telegram puts the @username string there, etc.). Reject
+            # anything that looks like a username, URL, or has internal
+            # whitespace — QQ message ids are opaque strings that don't
+            # carry slashes, whitespace, or URI schemes.
+            if (isinstance(candidate, str) and candidate
+                    and "/" not in candidate
+                    and " " not in candidate
+                    and "\t" not in candidate
+                    and not candidate.startswith(("http://", "https://"))):
+                msg_id = candidate
+        if msg_id is None:
+            msg_id = getattr(cmd, "thread_id", None) or None
         if not reply_endpoint:
             log.warn("qq on_send: empty reply_endpoint, dropping")
             return

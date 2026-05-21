@@ -259,41 +259,14 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for wa in self.channels.whatsapp.iter() {
-            if std::env::var(&wa.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "WhatsApp configured but {} is not set",
-                    wa.access_token_env
-                ));
-            }
-        }
+        // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+        // env-var presence is now validated inside the sidecar process.
         // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
         // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-        for em in self.channels.email.iter() {
-            if std::env::var(&em.password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Email configured but {} is not set",
-                    em.password_env
-                ));
-            }
-        }
-        for t in self.channels.teams.iter() {
-            if std::env::var(&t.app_password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Teams configured but {} is not set",
-                    t.app_password_env
-                ));
-            }
-        }
+        // email migrated to a sidecar (librefang.sidecar.adapters.email);
+        // env-var presence is now validated inside the sidecar process.
+        // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+        // env-var presence is now validated inside the sidecar process.
         // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
         // env-var presence is now validated inside the sidecar process.
         for gc in self.channels.google_chat.iter() {
@@ -314,80 +287,18 @@ impl KernelConfig {
         // Wave 3 channels
         // line migrated to a sidecar (librefang.sidecar.adapters.line);
         // env-var presence is now validated inside the sidecar process.
-        for fs in self.channels.feishu.iter() {
-            if std::env::var(&fs.app_secret_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Feishu configured but {} is not set",
-                    fs.app_secret_env
-                ));
-            }
-        }
+        // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 4 channels
         // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
         // env-var presence is now validated inside the sidecar process.
         // Wave 5 channels
-        for dt in self.channels.dingtalk.iter() {
-            use super::DingTalkReceiveMode;
-            match dt.receive_mode {
-                DingTalkReceiveMode::Stream => {
-                    if std::env::var(&dt.app_key_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk stream mode configured but {} is not set",
-                            dt.app_key_env
-                        ));
-                    }
-                    if std::env::var(&dt.app_secret_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk stream mode configured but {} is not set",
-                            dt.app_secret_env
-                        ));
-                    }
-                }
-                DingTalkReceiveMode::Webhook => {
-                    if std::env::var(&dt.access_token_env)
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        warnings.push(format!(
-                            "DingTalk configured but {} is not set",
-                            dt.access_token_env
-                        ));
-                    }
-                }
-            }
-        }
-        for wh in self.channels.webhook.iter() {
-            if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Webhook configured but {} is not set",
-                    wh.secret_env
-                ));
-            }
-            if wh.deliver_only {
-                match wh.deliver.as_deref() {
-                    None => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
-                         set deliver = \"<channel>\" (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some("log") => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
-                         delivery channel — use a real channel name (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some(_) => {}
-                }
-            }
-        }
+        // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+        // env-var presence is now validated inside the sidecar process.
+        // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+        // env-var presence + deliver_only-needs-target are now validated
+        // inside the sidecar process at startup (fail-closed `SystemExit(2)`
+        // when WEBHOOK_DELIVER_ONLY=1 but WEBHOOK_DELIVER is empty).
 
         // Web search provider validation
         match self.web.search_provider {

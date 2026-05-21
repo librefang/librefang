@@ -198,10 +198,15 @@ debounce_ms = 500
 # SLACK_APP_TOKEN = "xapp-..."
 # SLACK_BOT_TOKEN = "xoxb-..."
 
-# [channels.wechat]                   # Personal WeChat via iLink protocol
-# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: skip QR login on restart
-# default_agent = "assistant"
-# allowed_users = []                  # format: "hash@im.wechat"
+# WeChat (personal account via iLink) migrated to a sidecar:
+# [[sidecar_channels]]
+# name = "wechat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wechat"]
+# channel_type = "wechat"
+# [sidecar_channels.env]
+# WECHAT_BOT_TOKEN = ""                # leave blank to trigger QR login
+# WECHAT_ALLOWED_USERS = ""            # comma-separated hash@im.wechat
 
 # ── MCP Servers (external tool integration) ──────────────────
 # [[mcp_servers]]

@@ -852,7 +852,12 @@ def test_on_send_uses_platform_id_as_room(monkeypatch):
 
 
 def test_on_send_threads_via_thread_id(monkeypatch):
-    """P1 round-trip: cmd.thread_id → replyTo on the outbound."""
+    """Forward-compat fallback: even with the daemon-default
+    `threading=false`, this test's fabricated `thread_id` still
+    reaches on_send because no `librefang_user` is present to
+    take precedence. (In production with a real bridge round-trip
+    the librefang_user path wins — see the regression-guard test
+    below.)"""
     a = _adapter()
     fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"}, "data": {}}})])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
@@ -864,6 +869,26 @@ def test_on_send_threads_via_thread_id(monkeypatch):
     )))
     parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
     assert parsed == {"message": "threaded reply", "replyTo": "42"}
+
+
+def test_on_send_recovers_reply_to_from_user_librefang_user(monkeypatch):
+    """Regression guard: the daemon-shape pre-fix bug meant
+    `cmd.thread_id=None` so every chunked reply landed at room root
+    despite the module docstring claiming to fix exactly that. The
+    bridge round-trips librefang_user bytewise — recover from there."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"}, "data": {}}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi",
+        thread_id=None,  # daemon-default
+        user={"platform_id": "ROOM1", "librefang_user": "42"},
+    )))
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed == {"message": "hi", "replyTo": "42"}, \
+        "on_send must thread via cmd.user.librefang_user when " \
+        "cmd.thread_id is None (which is the daemon default)"
 
 
 def test_on_send_falls_back_to_channel_id(monkeypatch):

@@ -328,3 +328,77 @@ class WebSocketClient:
             return buf.decode("utf-8", "replace"), None
         # Binary / unknown — ignore.
         return None, None
+
+    def recv_any_frame(
+        self,
+    ) -> tuple[Optional[str], Optional[bytes], Optional[tuple[int, bytes]]]:
+        """Like :meth:`recv_frame` but also surfaces binary frames.
+
+        Returns ``(text, binary, close)`` — exactly one is non-None
+        per call, or all-None for opcodes we still skip (pong).
+        Adapters that need to see protobuf-wrapped binary payloads
+        (Feishu gateway, etc.) use this; everyone else uses
+        ``recv_frame`` which keeps the simpler 2-tuple shape.
+        """
+        h2 = self._recv_exact(2)
+        fin = (h2[0] & 0x80) != 0
+        opcode = h2[0] & 0x0F
+        masked = (h2[1] & 0x80) != 0
+        ln = h2[1] & 0x7F
+        if ln == 126:
+            ln = struct.unpack(">H", self._recv_exact(2))[0]
+        elif ln == 127:
+            ln = struct.unpack(">Q", self._recv_exact(8))[0]
+        if ln > MAX_FRAME_PAYLOAD:
+            raise RuntimeError(
+                f"websocket frame payload {ln} exceeds cap "
+                f"{MAX_FRAME_PAYLOAD}; failing the stream"
+            )
+        mask_key = self._recv_exact(4) if masked else None
+        payload = self._recv_exact(ln)
+        if mask_key is not None:
+            payload = bytes(
+                b ^ mask_key[i % 4] for i, b in enumerate(payload)
+            )
+        if opcode == OP_PING:
+            self._send_frame(OP_PONG, payload)
+            return None, None, None
+        if opcode == OP_PONG:
+            return None, None, None
+        if opcode == OP_CLOSE:
+            code = 1005
+            reason = b""
+            if len(payload) >= 2:
+                code = struct.unpack(">H", payload[:2])[0]
+                reason = payload[2:]
+            return None, None, (code, reason)
+        if opcode in (OP_TEXT, OP_BIN):
+            buf = bytearray(payload)
+            while not fin:
+                h2 = self._recv_exact(2)
+                fin = (h2[0] & 0x80) != 0
+                opcode2 = h2[0] & 0x0F
+                masked2 = (h2[1] & 0x80) != 0
+                ln2 = h2[1] & 0x7F
+                if ln2 == 126:
+                    ln2 = struct.unpack(">H", self._recv_exact(2))[0]
+                elif ln2 == 127:
+                    ln2 = struct.unpack(">Q", self._recv_exact(8))[0]
+                if ln2 > MAX_FRAME_PAYLOAD:
+                    raise RuntimeError("ws continuation payload too large")
+                mk = self._recv_exact(4) if masked2 else None
+                payload2 = self._recv_exact(ln2)
+                if mk is not None:
+                    payload2 = bytes(
+                        b ^ mk[i % 4] for i, b in enumerate(payload2)
+                    )
+                if opcode2 != OP_CONT:
+                    raise RuntimeError(
+                        f"ws unexpected interleaved opcode {opcode2}"
+                    )
+                buf.extend(payload2)
+            if opcode == OP_TEXT:
+                return buf.decode("utf-8", "replace"), None, None
+            return None, bytes(buf), None
+        # Unknown opcode — skip.
+        return None, None, None
