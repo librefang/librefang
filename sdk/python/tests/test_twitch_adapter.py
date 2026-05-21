@@ -812,12 +812,33 @@ def _make_send(channel_id: str = "", thread_id=None,
 
 
 def test_on_send_uses_channel_id_and_thread_id():
-    """on_send should forward channel_id + thread_id to the wire path,
-    yielding a @reply-parent-msg-id-tagged PRIVMSG on the right channel."""
+    """Forward-compat fallback: a future threading=true + `thread` cap
+    opt-in would deliver thread_id directly. In production today, the
+    bridge strips cmd.thread_id to None for cap-less sidecars — see
+    the regression-guard test below."""
     import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(channel_id="#librefang", thread_id="src-7", text="ack")
+    asyncio.run(a.on_send(cmd))
+    sent = b"".join(fake.sent).decode("utf-8")
+    assert sent == "@reply-parent-msg-id=src-7 PRIVMSG #librefang :ack\r\n"
+
+
+def test_on_send_recovers_reply_parent_from_user_librefang_user():
+    """Regression guard: the daemon-shape pre-fix bug meant
+    cmd.thread_id=None so the @reply-parent-msg-id tag was never
+    attached and chat UI lost the inline reply preview. librefang_user
+    is the always-round-tripped carrier."""
+    import asyncio
+    a = _adapter()
+    fake = _install_fake_sock(a)
+    cmd = _make_send(
+        channel_id="#librefang",
+        thread_id=None,  # daemon-default
+        text="ack",
+        user={"platform_id": "#librefang", "librefang_user": "src-7"},
+    )
     asyncio.run(a.on_send(cmd))
     sent = b"".join(fake.sent).decode("utf-8")
     assert sent == "@reply-parent-msg-id=src-7 PRIVMSG #librefang :ack\r\n"

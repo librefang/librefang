@@ -579,56 +579,22 @@ mod tests {
         );
     }
 
-    /// Drift detection: an invalid **nested enum value** (like a stale
-    /// `group_policy = "respond"` from an old OpenFang) fails deserialization
-    /// and produces a warning.
-    #[test]
-    fn test_schema_drift_check_flags_bad_enum_value() {
-        let src = TempDir::new().unwrap();
-        let dst = TempDir::new().unwrap();
+    // test_schema_drift_check_flags_bad_enum_value removed — its
+    // fixture leaned on `[channels.whatsapp.overrides] group_policy`
+    // for an invalid-enum-value witness. WhatsApp migrated to a
+    // sidecar; the generic deserialize-failure path (any malformed
+    // TOML at KernelConfig deserialize time) is still exercised by
+    // `test_schema_drift_check_flags_unknown_fields` below.
 
-        std::fs::write(
-            src.path().join("config.toml"),
-            "config_version = 2\n\
-             api_listen = \"0.0.0.0:4545\"\n\
-             \n\
-             [channels.whatsapp]\n\
-             access_token_env = \"WA_TOKEN\"\n\
-             verify_token_env = \"WA_VERIFY\"\n\
-             phone_number_id = \"123\"\n\
-             \n\
-             [channels.whatsapp.overrides]\n\
-             group_policy = \"respond\"\n",
-        )
-        .unwrap();
-
-        let options = MigrateOptions {
-            source: MigrateSource::OpenFang,
-            source_dir: src.path().to_path_buf(),
-            target_dir: dst.path().to_path_buf(),
-            dry_run: false,
-        };
-        let report = migrate(&options).unwrap();
-
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|w| w.contains("does not cleanly deserialize")),
-            "expected deserialize-failure warning for bad group_policy, got: {:?}",
-            report.warnings
-        );
-    }
-
-    /// Since #5129 / #5130 the locked-down structs (`WhatsAppConfig`,
-    /// `McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`,
+    /// Since #5129 / #5130 the locked-down structs
+    /// (`McpServerConfigEntry`) carry `#[serde(deny_unknown_fields)]`,
     /// so an unknown field nested inside any of them now surfaces as
     /// a "does not cleanly deserialize" warning at migrate time.
-    /// (DiscordConfig, SlackConfig, and MattermostConfig were
-    /// originally in this set; all three were migrated to sidecars in
-    /// v2026.5 so the structs no longer exist.) The remaining nested
-    /// config structs are still tolerant and silently drop unknown
-    /// fields — see #5130 for the explicit scoping decision.
+    /// (DiscordConfig, SlackConfig, MattermostConfig, WhatsAppConfig
+    /// were originally in this set; all migrated to sidecars in
+    /// v2026.5.) The remaining nested channel config structs are
+    /// still tolerant and silently drop unknown fields — see #5130
+    /// for the explicit scoping decision.
     #[test]
     fn test_schema_drift_check_catches_nested_unknown_fields_in_locked_down_sections() {
         let src = TempDir::new().unwrap();
@@ -639,10 +605,8 @@ mod tests {
             "config_version = 2\n\
              api_listen = \"0.0.0.0:4545\"\n\
              \n\
-             [channels.whatsapp]\n\
-             access_token_env = \"WA_TOKEN\"\n\
-             verify_token_env = \"WA_VERIFY\"\n\
-             phone_number_id = \"123\"\n\
+             [[mcp_servers]]\n\
+             name = \"filesystem\"\n\
              nickname = \"this-field-does-not-exist\"\n",
         )
         .unwrap();
@@ -655,9 +619,10 @@ mod tests {
         };
         let report = migrate(&options).unwrap();
 
-        // The deny_unknown_fields attribute on WhatsAppConfig surfaces the
-        // unknown nested key as a deserialize-failure warning. The bad field
-        // name must appear in the message so operators can locate the typo.
+        // The deny_unknown_fields attribute on McpServerConfigEntry
+        // surfaces the unknown nested key as a deserialize-failure
+        // warning. The bad field name must appear so operators can
+        // locate the typo.
         assert!(
             report
                 .warnings
