@@ -94,6 +94,7 @@ impl MockKernel {
             timeout_secs: 60,
             sender_id: None,
             channel: None,
+            chat_id: None,
             route_to: vec![],
             escalation_count: 0,
             session_id: Some(lf_session_id.0.to_string()),
@@ -104,7 +105,7 @@ impl MockKernel {
             // synthetic.
             tool_use_id: Some("toolu_acp_integration_test".into()),
         };
-        let _ = self.approval_tx.send(ApprovalEvent::Created(req));
+        let _ = self.approval_tx.send(ApprovalEvent::Created(Box::new(req)));
         id
     }
 }
