@@ -2394,10 +2394,8 @@ pub async fn start_channel_bridge_with_config(
     // Every channel adapter is now a sidecar; `_config` (the
     // `[channels]` block from `KernelConfig`) is kept on the
     // signature for callers that still pass it (hot-reload, etc.)
-    // but is no longer consulted — the `check_channel!` env-
-    // presence macro + `has_any` flag + per-channel construction
-    // blocks that this function used to host all moved to the
-    // sidecar loop below.
+    // but is no longer consulted — adapter construction lives in
+    // the sidecar loop below.
     let sidecar_cfg = kernel.config_ref();
     if sidecar_cfg.sidecar_channels.is_empty() {
         return (None, Vec::new(), axum::Router::new());
