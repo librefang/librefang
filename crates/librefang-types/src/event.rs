@@ -125,6 +125,19 @@ pub struct ApprovalRequestedEvent {
     /// pre-fix `notification_recipients` + `AgentBinding` fan-out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// Platform conversation id (Telegram `chat_id`, Discord
+    /// `channel_id`, WhatsApp JID, …) the originating message arrived
+    /// on. The bridge's approval listener prefers this over `sender_id`
+    /// for the direct-route target so a group-chat-originated tool
+    /// call gets its `[Approve] [Deny]` keyboard back in the originating
+    /// **group**, not in the human's DM with the bot.
+    ///
+    /// `None` when the source had no separately-tracked chat_id (DMs
+    /// where `sender_id == chat_id`, pre-PR clients, non-channel
+    /// sources); the listener falls back to `sender_id` in that case
+    /// so the DM happy path is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
 }
 
 /// Payload for `EventPayload::ApprovalResolved`.

@@ -1492,6 +1492,7 @@ impl LibreFangKernel {
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            chat_id: deferred.chat_id.as_deref(),
             // Restore the originating SessionId from v36's persisted
             // `deferred_payload` so a post-restart `Allow once` resumes
             // through the *original* editor's `acp_fs_client` /

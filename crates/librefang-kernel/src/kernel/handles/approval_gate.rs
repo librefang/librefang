@@ -121,6 +121,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
+            chat_id: None,
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
@@ -152,6 +153,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                     sender_id: None,
                     channel: None,
+                    chat_id: None,
                 }),
             );
             self.events.event_bus.publish(event).await;
@@ -284,6 +286,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // operator).
         let routed_sender_id = deferred.sender_id.clone();
         let routed_channel = deferred.channel.clone();
+        let routed_chat_id = deferred.chat_id.clone();
         let req = TypedRequest {
             id: request_id,
             agent_id: agent_id.to_string(),
@@ -298,6 +301,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: routed_sender_id.clone(),
             channel: routed_channel.clone(),
+            chat_id: routed_chat_id.clone(),
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
@@ -335,6 +339,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                     sender_id: routed_sender_id,
                     channel: routed_channel,
+                    chat_id: routed_chat_id,
                 }),
             );
             self.events.event_bus.publish(event).await;

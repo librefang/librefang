@@ -1637,8 +1637,32 @@ impl BridgeManager {
                                             if src_channel == ct_str
                                                 && !src_sender.is_empty()
                                             {
+                                                // Group-chat fix:
+                                                // prefer `chat_id` (group id)
+                                                // when present, fall back to
+                                                // `sender_id` for DMs and for
+                                                // pre-PR producers that
+                                                // didn't stamp chat_id. The
+                                                // `platform_id` on
+                                                // `ChannelUser` is the
+                                                // address the channel adapter
+                                                // sends to — Telegram
+                                                // sidecar's send-path treats
+                                                // it as `chat_id` against the
+                                                // Bot API, so passing the
+                                                // group's chat_id here puts
+                                                // the keyboard back in the
+                                                // group conversation instead
+                                                // of the human's DM with the
+                                                // bot.
+                                                let target_id = approval
+                                                    .chat_id
+                                                    .as_deref()
+                                                    .filter(|c| !c.is_empty())
+                                                    .unwrap_or(src_sender)
+                                                    .to_string();
                                                 let direct_recipient = ChannelUser {
-                                                    platform_id: src_sender.to_string(),
+                                                    platform_id: target_id,
                                                     display_name: String::new(),
                                                     librefang_user: None,
                                                 };
@@ -5952,11 +5976,15 @@ mod tests {
             tool_name: "file_write".to_string(),
             description: "desc".to_string(),
             risk_level: "high".to_string(),
-            sender_id: Some("telegram-chat-12345".to_string()),
+            sender_id: Some("telegram-user-12345".to_string()),
             channel: Some("telegram".to_string()),
+            chat_id: Some("telegram-group-67890".to_string()),
         };
-        assert_eq!(evt.sender_id.as_deref(), Some("telegram-chat-12345"));
+        assert_eq!(evt.sender_id.as_deref(), Some("telegram-user-12345"));
         assert_eq!(evt.channel.as_deref(), Some("telegram"));
+        // chat_id distinct from sender_id — pins the group-chat shape
+        // where the human's platform_id differs from the conversation id.
+        assert_eq!(evt.chat_id.as_deref(), Some("telegram-group-67890"));
 
         // And the JSON shape: new fields are `#[serde(default,
         // skip_serializing_if = Option::is_none)]` so an event without
@@ -5970,6 +5998,7 @@ mod tests {
             risk_level: "low".to_string(),
             sender_id: None,
             channel: None,
+            chat_id: None,
         };
         let json = serde_json::to_string(&bare).unwrap();
         assert!(
@@ -5979,6 +6008,10 @@ mod tests {
         assert!(
             !json.contains(r#""channel""#),
             "absent channel must be omitted, got: {json}"
+        );
+        assert!(
+            !json.contains("chat_id"),
+            "absent chat_id must be omitted, got: {json}"
         );
     }
 
