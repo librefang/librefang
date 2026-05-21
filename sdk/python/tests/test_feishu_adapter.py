@@ -683,6 +683,62 @@ def test_send_text_http_error_raises(monkeypatch):
         a._send_text("oc_x", "hi")
 
 
+def test_http_json_honours_retry_after_on_429(monkeypatch):
+    """Feishu / Lark publish quotas (im.message.send: 1000/min per
+    app, plus a tenant-wide bucket) surface as 429 with Retry-After.
+    Before the fix the 4-tuple `_http_json` ignored 429 entirely and
+    fell through to the `code != 0` arm, raising and dropping the
+    chunk. The fix honours Retry-After and retries once via the
+    shared `parse_retry_after` helper."""
+    fake = _FakeUrlopen([
+        (429, {}, {"Retry-After": "3"}),
+        (200, {"code": 0, "data": {}}),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(fs.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(fs.time, "sleep", sleeps.append)
+    a = _adapter()
+    _seed_token(a)
+    a._send_text("oc_x", "hi")
+    assert sleeps == [3.0]
+    # Retry actually re-posts to the same endpoint with the same
+    # payload (not a stale snapshot).
+    assert len(fake.calls) == 2
+    body = json.loads(fake.calls[1]["body_raw"])
+    assert body["receive_id"] == "oc_x"
+
+
+def test_http_json_surfaces_second_429(monkeypatch):
+    """After honouring Retry-After once, a second 429 surfaces as a
+    normal error response (callers already handle non-2xx) — no
+    infinite retry loop."""
+    fake = _FakeUrlopen([
+        (429, {}, {"Retry-After": "1"}),
+        (429, {}, {"Retry-After": "1"}),
+    ])
+    monkeypatch.setattr(fs.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(fs.time, "sleep", lambda _s: None)
+    a = _adapter()
+    _seed_token(a)
+    with pytest.raises(RuntimeError):
+        a._send_text("oc_x", "hi")
+    assert len(fake.calls) == 2
+
+
+def test_http_json_429_without_retry_after_uses_default(monkeypatch):
+    fake = _FakeUrlopen([
+        (429, {}, {}),
+        (200, {"code": 0, "data": {}}),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(fs.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(fs.time, "sleep", sleeps.append)
+    a = _adapter()
+    _seed_token(a)
+    a._send_text("oc_x", "hi")
+    assert sleeps == [fs.RETRY_AFTER_DEFAULT_SECS]
+
+
 def test_send_card_uses_interactive_msg_type(monkeypatch):
     fake = _FakeUrlopen([(200, {"code": 0})])
     monkeypatch.setattr(fs.urllib.request, "urlopen", fake)

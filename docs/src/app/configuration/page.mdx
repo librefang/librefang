@@ -973,21 +973,9 @@ MATTERMOST_SERVER_URL = "https://mattermost.example.com"
 
 `MATTERMOST_TOKEN` belongs in `~/.librefang/secrets.env`.
 
-#### `[channels.google_chat]`
+#### Google Chat
 
-```toml
-[channels.google_chat]
-service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
-space_ids = []
-webhook_port = 8444
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | Env var holding the service account JSON key. |
-| `space_ids` | list of strings | `[]` | Google Chat space IDs to listen in. |
-| `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Google Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.google_chat`). The in-process `[channels.google_chat]` config block was removed in the sidecar migration. Declare Google Chat as a `[[sidecar_channels]]` entry instead — see [Google Chat in the channels configuration guide](/configuration/channels#google-chat).
 
 #### Twitch
 
@@ -1172,21 +1160,9 @@ DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.
 
 The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — operators who relied on webhook mode must switch to stream subscription in the DingTalk admin console.
 
-#### `[channels.ntfy]`
+#### ntfy
 
-```toml
-[channels.ntfy]
-server_url = "https://ntfy.sh"
-topic = "my-agent-topic"
-token_env = "NTFY_TOKEN"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `"https://ntfy.sh"` | ntfy server URL. Can be self-hosted. |
-| `topic` | string | `""` | Topic to subscribe/publish to. |
-| `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+ntfy is provided by the Python sidecar adapter (`librefang.sidecar.adapters.ntfy`). The in-process `[channels.ntfy]` config block was removed in the sidecar migration. Declare ntfy as a `[[sidecar_channels]]` entry instead — see [ntfy in the channels configuration guide](/configuration/channels#ntfy).
 
 #### Gotify
 
@@ -1430,9 +1406,13 @@ slack = "U0ABCDEFG"
 
 ---
 
-### Channel Overrides
+### Channel Overrides (legacy — removed)
 
-Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
+The `[channels.<name>.overrides]` sub-table is **no longer recognised** — see the [migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed). The historical reference below documents the **pre-migration** shape only.
+
+### Channel Overrides (historical reference)
+
+Every channel adapter (pre-migration) supported an `[channels.<name>.overrides]` sub-table that customized agent behavior per-channel.
 
 ```toml
 [channels.discord.overrides]
