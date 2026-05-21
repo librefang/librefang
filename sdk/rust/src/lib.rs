@@ -1508,6 +1508,18 @@ impl ChannelsResource {
         .await
     }
 
+    pub async fn list_channel_registry(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/channels/registry".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn reload_channels(&self) -> Result<Value> {
         do_req(
             &self.client,
@@ -1526,148 +1538,6 @@ impl ChannelsResource {
             &self.base_url,
             reqwest::Method::POST,
             &format!("/api/channels/sidecar/{}/configure", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn wechat_qr_start(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/channels/wechat/qr/start".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn wechat_qr_status(&self, qr_code: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/channels/wechat/qr/status".to_string(),
-            None,
-            &[("qr_code", qr_code)],
-        )
-        .await
-    }
-
-    pub async fn whatsapp_qr_start(&self) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &"/api/channels/whatsapp/qr/start".to_string(),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn whatsapp_qr_status(&self, session_id: Option<&str>) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &"/api/channels/whatsapp/qr/status".to_string(),
-            None,
-            &[("session_id", session_id)],
-        )
-        .await
-    }
-
-    pub async fn configure_channel(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/channels/{}/configure", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn remove_channel(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
-            &format!("/api/channels/{}/configure", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn list_channel_instances(&self, name: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &format!("/api/channels/{}/instances", name),
-            None,
-            &[],
-        )
-        .await
-    }
-
-    pub async fn create_channel_instance(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/channels/{}/instances", name),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn update_channel_instance_handler(
-        &self,
-        name: &str,
-        index: &str,
-        data: Value,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::PUT,
-            &format!("/api/channels/{}/instances/{}", name, index),
-            Some(data),
-            &[],
-        )
-        .await
-    }
-
-    pub async fn delete_channel_instance(
-        &self,
-        name: &str,
-        index: &str,
-        signature: Option<&str>,
-    ) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::DELETE,
-            &format!("/api/channels/{}/instances/{}", name, index),
-            None,
-            &[("signature", signature)],
-        )
-        .await
-    }
-
-    pub async fn test_channel(&self, name: &str, data: Value) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::POST,
-            &format!("/api/channels/{}/test", name),
             Some(data),
             &[],
         )
