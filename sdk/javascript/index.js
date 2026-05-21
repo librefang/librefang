@@ -531,48 +531,16 @@ class ChannelsResource {
     return this._c._request("GET", "/api/channels");
   }
 
+  async listChannelRegistry() {
+    return this._c._request("GET", "/api/channels/registry");
+  }
+
   async reloadChannels() {
     return this._c._request("POST", "/api/channels/reload");
   }
 
   async configureSidecarChannel(name, data) {
     return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
-  }
-
-  async whatsappQrStart() {
-    return this._c._request("POST", "/api/channels/whatsapp/qr/start");
-  }
-
-  async whatsappQrStatus(query) {
-    return this._c._request("GET", "/api/channels/whatsapp/qr/status", undefined, query);
-  }
-
-  async configureChannel(name, data) {
-    return this._c._request("POST", `/api/channels/${name}/configure`, data, undefined);
-  }
-
-  async removeChannel(name) {
-    return this._c._request("DELETE", `/api/channels/${name}/configure`);
-  }
-
-  async listChannelInstances(name) {
-    return this._c._request("GET", `/api/channels/${name}/instances`);
-  }
-
-  async createChannelInstance(name, data) {
-    return this._c._request("POST", `/api/channels/${name}/instances`, data, undefined);
-  }
-
-  async updateChannelInstanceHandler(name, index, data) {
-    return this._c._request("PUT", `/api/channels/${name}/instances/${index}`, data, undefined);
-  }
-
-  async deleteChannelInstance(name, index, query) {
-    return this._c._request("DELETE", `/api/channels/${name}/instances/${index}`, undefined, query);
-  }
-
-  async testChannel(name, data) {
-    return this._c._request("POST", `/api/channels/${name}/test`, data, undefined);
   }
 }
 

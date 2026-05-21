@@ -533,6 +533,13 @@ class NextcloudAdapter(SidecarAdapter):
             channel_id=room_token,
             message_id=str(msg_id) if msg_id else None,
             is_group=True,
+            # `librefang_user` is the always-round-tripped carrier for
+            # the per-message reply correlation (Talk's `replyTo` form
+            # param). `thread_id` is kept for forward-compat with a
+            # future `threading=true` + `thread` capability path, but
+            # the daemon strips it to `None` for cap-less sidecars —
+            # see the matching `on_send` recovery.
+            librefang_user=thread_id,
             thread_id=thread_id,
             metadata=metadata,
         )
@@ -780,10 +787,24 @@ class NextcloudAdapter(SidecarAdapter):
         if not room_token:
             room_token = str(getattr(cmd, "channel_id", "") or "")
 
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
-        reply_to = thread_id or None
+        # Primary recovery: cmd.user["librefang_user"] (always
+        # round-tripped). Fallback: cmd.thread_id (forward-compat
+        # threading=true + `thread` capability path). Talk msg ids
+        # are pure-digit numeric strings — generic URL/whitespace
+        # guard is enough.
+        reply_to: "Optional[str]" = None
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                reply_to = candidate
+        if reply_to is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            reply_to = thread_id or None
 
         await asyncio.get_event_loop().run_in_executor(
             None, self._post_message, room_token, text, reply_to,

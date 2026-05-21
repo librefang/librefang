@@ -259,49 +259,18 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        for wa in self.channels.whatsapp.iter() {
-            if std::env::var(&wa.access_token_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "WhatsApp configured but {} is not set",
-                    wa.access_token_env
-                ));
-            }
-        }
+        // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+        // env-var presence is now validated inside the sidecar process.
         // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
         // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
         // email migrated to a sidecar (librefang.sidecar.adapters.email);
         // env-var presence is now validated inside the sidecar process.
-        for t in self.channels.teams.iter() {
-            if std::env::var(&t.app_password_env)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                warnings.push(format!(
-                    "Teams configured but {} is not set",
-                    t.app_password_env
-                ));
-            }
-        }
+        // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+        // env-var presence is now validated inside the sidecar process.
         // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
         // env-var presence is now validated inside the sidecar process.
-        for gc in self.channels.google_chat.iter() {
-            let has_env = !std::env::var(&gc.service_account_env)
-                .unwrap_or_default()
-                .is_empty();
-            let has_key_path = gc
-                .service_account_key_path
-                .as_ref()
-                .is_some_and(|p| !p.is_empty());
-            if !has_env && !has_key_path {
-                warnings.push(format!(
-                    "Google Chat configured but neither {} nor service_account_key_path is set",
-                    gc.service_account_env
-                ));
-            }
-        }
+        // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+        // env-var presence is now validated inside the sidecar process.
         // Wave 3 channels
         // line migrated to a sidecar (librefang.sidecar.adapters.line);
         // env-var presence is now validated inside the sidecar process.
@@ -313,29 +282,10 @@ impl KernelConfig {
         // Wave 5 channels
         // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
         // env-var presence is now validated inside the sidecar process.
-        for wh in self.channels.webhook.iter() {
-            if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Webhook configured but {} is not set",
-                    wh.secret_env
-                ));
-            }
-            if wh.deliver_only {
-                match wh.deliver.as_deref() {
-                    None => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
-                         set deliver = \"<channel>\" (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some("log") => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
-                         delivery channel — use a real channel name (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some(_) => {}
-                }
-            }
-        }
+        // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+        // env-var presence + deliver_only-needs-target are now validated
+        // inside the sidecar process at startup (fail-closed `SystemExit(2)`
+        // when WEBHOOK_DELIVER_ONLY=1 but WEBHOOK_DELIVER is empty).
 
         // Web search provider validation
         match self.web.search_provider {
