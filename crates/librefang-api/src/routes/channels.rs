@@ -25,14 +25,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
         .route("/channels/{name}/test", axum::routing::post(test_channel))
         .route("/channels/reload", axum::routing::post(reload_channels))
-        .route(
-            "/channels/whatsapp/qr/start",
-            axum::routing::post(whatsapp_qr_start),
-        )
-        .route(
-            "/channels/whatsapp/qr/status",
-            axum::routing::get(whatsapp_qr_status),
-        )
+        // whatsapp_qr_start / whatsapp_qr_status removed alongside the
+        // WhatsApp in-process adapter when it migrated to a sidecar
+        // (librefang.sidecar.adapters.whatsapp). The Baileys gateway
+        // (when in use) now owns the QR-login flow end-to-end — its
+        // own HTTP API exposes the QR string for the dashboard to
+        // proxy if needed.
         // wechat_qr_start / wechat_qr_status removed alongside the
         // WeChat in-process adapter when it migrated to a sidecar
         // (librefang.sidecar.adapters.wechat). The sidecar now drives
@@ -147,23 +145,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // telegram, discord, and slack migrated to out-of-process sidecar
     // adapters (librefang.sidecar.adapters.{telegram,discord,slack});
     // no longer in-process channels.
-    ChannelMeta {
-        name: "whatsapp", display_name: "WhatsApp", icon: "WA",
-        description: "Connect your personal WhatsApp via QR scan",
-        category: "messaging", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Scan QR code with your phone — no developer account needed",
-        setup_type: "qr",
-        fields: &[
-            // Business API fallback fields — all advanced (hidden behind "Use Business API" toggle)
-            ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_ACCESS_TOKEN"), required: false, placeholder: "EAAx...", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "phone_number_id", label: "Phone Number ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "1234567890", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8443", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
-        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"",
-    },
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG below.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG below.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
@@ -177,21 +160,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // adapters (librefang.sidecar.adapters.{mastodon,bluesky,reddit} in
     // the SDK package); no longer in-process channels.
     // ── Enterprise (10) ─────────────────────────────────────────────
-    ChannelMeta {
-        name: "teams", display_name: "Microsoft Teams", icon: "MS",
-        description: "Teams Bot Framework adapter",
-        category: "enterprise", difficulty: "Medium", setup_time: "~10 min",
-        quick_setup: "Paste your Azure Bot App ID and Password",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "00000000-0000-...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("TEAMS_APP_PASSWORD"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "3978", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
-        config_template: "[channels.teams]\napp_id = \"\"\napp_password_env = \"TEAMS_APP_PASSWORD\"",
-    },
+    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+    // see SIDECAR_CATALOG below.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG below.
     ChannelMeta {
@@ -222,21 +192,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
     // in the SDK package); no longer in-process channels.
-    ChannelMeta {
-        name: "webhook", display_name: "Webhook", icon: "WH",
-        description: "Generic HMAC-signed webhook adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Optionally set an HMAC secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "secret_env", label: "HMAC Secret", field_type: FieldType::Secret, env_var: Some("WEBHOOK_SECRET"), required: false, placeholder: "my-secret", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "listen_port", label: "Listen Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8460", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://example.com/webhook", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enter an HMAC secret (or leave blank)", "Click Save — that's it!"],
-        config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
-    },
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG below.
     // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
     // see SIDECAR_CATALOG below.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
@@ -248,10 +205,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
-        "whatsapp" => config.whatsapp.is_some(),
-        "teams" => config.teams.is_some(),
         "google_chat" => config.google_chat.is_some(),
-        "webhook" => config.webhook.is_some(),
         _ => false,
     }
 }
@@ -337,7 +291,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "teams" | "google_chat" | "webhook" => Some("/webhook"),
+        "google_chat" => Some("/webhook"),
         _ => None,
     }
 }
@@ -616,6 +570,27 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WeChat personal-account adapter via the iLink (ClawBot) gateway (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.wechat"],
+    },
+    SidecarCatalogEntry {
+        name: "teams",
+        display_name: "Microsoft Teams",
+        description: "Teams Bot Framework v3 adapter (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.teams"],
+    },
+    SidecarCatalogEntry {
+        name: "whatsapp",
+        display_name: "WhatsApp",
+        description: "WhatsApp adapter — Meta Cloud API + Web/QR (Baileys) gateway dual-mode (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.whatsapp"],
+    },
+    SidecarCatalogEntry {
+        name: "webhook",
+        display_name: "Webhook",
+        description: "Generic HMAC-signed HTTP webhook adapter (out-of-process sidecar, Python stdlib only)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.webhook"],
     },
 ];
 
@@ -1110,20 +1085,8 @@ fn channel_config_values(
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "whatsapp" => config
-            .whatsapp
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "teams" => config
-            .teams
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        "webhook" => config
-            .webhook
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
@@ -1138,10 +1101,7 @@ fn channel_config_values(
 /// `instance_count`.
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
-        "whatsapp" => config.whatsapp.len(),
-        "teams" => config.teams.len(),
         "google_chat" => config.google_chat.len(),
-        "webhook" => config.webhook.len(),
         _ => 0,
     }
 }
@@ -1165,10 +1125,7 @@ fn channel_instances_serialized(
             .collect()
     }
     match name {
-        "whatsapp" => ser(&config.whatsapp),
-        "teams" => ser(&config.teams),
         "google_chat" => ser(&config.google_chat),
-        "webhook" => ser(&config.webhook),
         _ => Vec::new(),
     }
 }
@@ -2535,220 +2492,11 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp QR login flow (OpenClaw-style)
 // ---------------------------------------------------------------------------
-#[utoipa::path(
-    post,
-    path = "/api/channels/whatsapp/qr/start",
-    tag = "channels",
-    responses(
-        (status = 200, description = "WhatsApp QR session started", body = crate::types::JsonObject)
-    )
-)]
-/// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
-///
-/// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
-/// this proxies the request and returns a base64 QR code data URL. If no gateway
-/// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start() -> impl IntoResponse {
-    // Check for WhatsApp Web gateway URL in config or env
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "available": false,
-            "message": "WhatsApp Web gateway not running. Start the gateway or use Business API mode.",
-            "help": "The WhatsApp Web gateway auto-starts with the daemon when configured. Ensure Node.js >= 18 is installed and WhatsApp is configured in config.toml. Set WHATSAPP_WEB_GATEWAY_URL to use an external gateway."
-        }));
-    }
-
-    // Try to reach the gateway and start a QR session.
-    // Uses a raw HTTP request via tokio TcpStream to avoid adding reqwest as a runtime dep.
-    let start_url = format!("{}/login/start", gateway_url.trim_end_matches('/'));
-    match gateway_http_post(&start_url).await {
-        Ok(body) => {
-            let qr_url = body
-                .get("qr_data_url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let sid = body
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Scan this QR code with WhatsApp → Linked Devices");
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "available": true,
-                "qr_data_url": qr_url,
-                "session_id": sid,
-                "message": msg,
-                "connected": connected,
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "message": format!("Could not reach WhatsApp Web gateway: {e}"),
-            "help": "Make sure the gateway is running at the configured URL"
-        })),
-    }
-}
-#[utoipa::path(
-    get,
-    path = "/api/channels/whatsapp/qr/status",
-    tag = "channels",
-    params(
-        ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
-    ),
-    responses(
-        (status = 200, description = "WhatsApp QR scan status", body = crate::types::JsonObject)
-    )
-)]
-/// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
-///
-/// After calling `/qr/start`, the frontend polls this to check if the user
-/// has scanned the QR code and the WhatsApp Web session is connected.
-pub async fn whatsapp_qr_status(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
-
-    if gateway_url.is_empty() {
-        return Json(serde_json::json!({
-            "connected": false,
-            "message": "Gateway not available"
-        }));
-    }
-
-    let session_id = params.get("session_id").cloned().unwrap_or_default();
-    let status_url = format!(
-        "{}/login/status?session_id={}",
-        gateway_url.trim_end_matches('/'),
-        session_id
-    );
-
-    match gateway_http_get(&status_url).await {
-        Ok(body) => {
-            let connected = body
-                .get("connected")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let msg = body
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Waiting for scan...");
-            let expired = body
-                .get("expired")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Json(serde_json::json!({
-                "connected": connected,
-                "message": msg,
-                "expired": expired,
-            }))
-        }
-        Err(_) => Json(serde_json::json!({ "connected": false, "message": "Gateway unreachable" })),
-    }
-}
-
-/// Lightweight HTTP POST to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_post(url_with_path: &str) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // Split into base URL + path from the full URL like "http://127.0.0.1:3009/login/start"
-    let without_scheme = url_with_path
-        .strip_prefix("http://")
-        .or_else(|| url_with_path.strip_prefix("https://"))
-        .unwrap_or(url_with_path);
-    let (host_port, path) = if let Some(idx) = without_scheme.find('/') {
-        (&without_scheme[..idx], &without_scheme[idx..])
-    } else {
-        (without_scheme, "/")
-    };
-    let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-        (h, p.parse().unwrap_or(3009u16))
-    } else {
-        (host_port, 3009u16)
-    };
-
-    let mut stream = tokio::net::TcpStream::connect(format!("{host}:{port}"))
-        .await
-        .map_err(|e| format!("Connect failed: {e}"))?;
-
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {e}"))?;
-
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("Read failed: {e}"))?;
-    let response = String::from_utf8_lossy(&buf);
-
-    // Find the JSON body after the blank line separating headers from body
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body_str = &response[idx + 4..];
-        serde_json::from_str(body_str.trim()).map_err(|e| format!("Parse failed: {e}"))
-    } else {
-        Err("No HTTP body in response".to_string())
-    }
-}
-
-/// Lightweight HTTP GET to a gateway URL. Returns parsed JSON body.
-async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let without_scheme = url_with_path
-        .strip_prefix("http://")
-        .or_else(|| url_with_path.strip_prefix("https://"))
-        .unwrap_or(url_with_path);
-    let (host_port, path_and_query) = if let Some(idx) = without_scheme.find('/') {
-        (&without_scheme[..idx], &without_scheme[idx..])
-    } else {
-        (without_scheme, "/")
-    };
-    let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-        (h, p.parse().unwrap_or(3009u16))
-    } else {
-        (host_port, 3009u16)
-    };
-
-    let mut stream = tokio::net::TcpStream::connect(format!("{host}:{port}"))
-        .await
-        .map_err(|e| format!("Connect failed: {e}"))?;
-
-    let req = format!(
-        "GET {path_and_query} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {e}"))?;
-
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("Read failed: {e}"))?;
-    let response = String::from_utf8_lossy(&buf);
-
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body_str = &response[idx + 4..];
-        serde_json::from_str(body_str.trim()).map_err(|e| format!("Parse failed: {e}"))
-    } else {
-        Err("No HTTP body in response".to_string())
-    }
-}
+// WhatsApp QR endpoints removed — the WhatsApp adapter migrated
+// to a sidecar (librefang.sidecar.adapters.whatsapp). The Baileys
+// gateway (when in use) owns the QR login flow end-to-end now.
+// ---------------------------------------------------------------------------
 
 // WeChat QR endpoints removed — the WeChat adapter migrated to
 // a sidecar (librefang.sidecar.adapters.wechat). The sidecar
@@ -2854,15 +2602,16 @@ mod test_channel_status_tests {
     #[tokio::test]
     async fn missing_required_env_returns_412() {
         let _lock = ENV_LOCK.lock().await;
-        // Teams requires TEAMS_APP_PASSWORD. With it unset we must
-        // surface a 412 — NOT a 200 with a "status: error" body,
-        // which silently passes dashboard `fetch().ok` checks
-        // (#3507). Witness rotated from Email (deleted in the email
-        // sidecar migration) → Teams, which still ships in-process
-        // with a `required: true` secret env var.
-        let _g = EnvGuard::unset("TEAMS_APP_PASSWORD");
+        // Google Chat requires GOOGLE_CHAT_SERVICE_ACCOUNT. With it
+        // unset we must surface a 412 — NOT a 200 with a "status:
+        // error" body, which silently passes dashboard
+        // `fetch().ok` checks (#3507). Witness rotated: Email →
+        // Teams → WhatsApp (all sidecar-migrated) → GoogleChat,
+        // the only remaining in-process channel with a
+        // `required: true` secret env var.
+        let _g = EnvGuard::unset("GOOGLE_CHAT_SERVICE_ACCOUNT");
 
-        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(
@@ -2878,9 +2627,12 @@ mod test_channel_status_tests {
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
-        let _g = EnvGuard::set("TEAMS_APP_PASSWORD", "not-a-real-password");
+        let _g = EnvGuard::set(
+            "GOOGLE_CHAT_SERVICE_ACCOUNT",
+            "/nonexistent/sa.json",
+        );
 
-        let resp = test_channel(Path("teams".to_string()), axum::body::Bytes::new())
+        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2907,15 +2659,17 @@ mod instance_helper_tests {
     use super::*;
 
     fn matrix_meta() -> &'static ChannelMeta {
-        // Matrix migrated to a sidecar in v2026.5; rotate to whatsapp
-        // (still in-process, still uses `access_token_env`) so the
-        // resolve_secret_env_overrides + instance_signature unit tests
-        // keep a real ChannelMeta witness.
-        find_channel_meta("whatsapp").expect("whatsapp is in the registry")
+        // Matrix migrated to a sidecar in v2026.5; rotated through
+        // whatsapp (also sidecar-migrated) to google_chat — the
+        // remaining in-process channel with a `required: true`
+        // secret env var, so the resolve_secret_env_overrides +
+        // instance_signature unit tests keep a real ChannelMeta
+        // witness. Function name kept for git-blame continuity.
+        find_channel_meta("google_chat").expect("google_chat is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
-        serde_json::json!({ "access_token_env": env_name })
+        serde_json::json!({ "service_account_env": env_name })
     }
 
     /// First-instance create on an empty channel returns the bare default
@@ -2925,8 +2679,8 @@ mod instance_helper_tests {
         let meta = matrix_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -2940,13 +2694,13 @@ mod instance_helper_tests {
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
-            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN_2"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -2959,13 +2713,13 @@ mod instance_helper_tests {
     fn resolve_overrides_preserves_existing_env_name_on_update() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
-            inst_with_env("MY_CUSTOM_WA_TOKEN"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            inst_with_env("MY_CUSTOM_GC_SA"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_WA_TOKEN"),
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("MY_CUSTOM_GC_SA"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -2979,16 +2733,16 @@ mod instance_helper_tests {
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("WHATSAPP_ACCESS_TOKEN"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("WHATSAPP_ACCESS_TOKEN_3"),
+            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
-            overrides.get("access_token_env").map(|s| s.as_str()),
-            Some("WHATSAPP_ACCESS_TOKEN_2")
+            overrides.get("service_account_env").map(|s| s.as_str()),
+            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2")
         );
     }
 

@@ -2,10 +2,13 @@
 
 ## Microsoft Teams
 
+Teams 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.teams`，仅依赖标准库）。原 `[channels.teams]` 块不再识别。
+
 ### 前置条件
 
 - 拥有 [Azure Bot Service](https://learn.microsoft.com/en-us/microsoftteams/platform/) 访问权限的 Microsoft Azure 账户
 - 已注册的 Azure AD 应用，具备 Client ID 和 Secret
+- 守护进程主机上有 `python3`（无须任何 Python 第三方包）
 
 ### 设置步骤
 
@@ -13,32 +16,28 @@
 2. 在 **Configuration** 中记录 **Microsoft App ID**。
 3. 前往 **Certificates & secrets**，创建新的客户端密钥并立即复制。
 4. 在 Teams 管理中心为组织启用 Bot，或上传自定义应用 manifest。
-5. 设置环境变量：
-
-```bash
-export TEAMS_APP_ID=your-azure-app-id         # 环境变量
-export TEAMS_APP_SECRET=your-azure-client-secret
-librefang vault set TEAMS_APP_ID              # 加密金库（推荐）
-librefang vault set TEAMS_APP_SECRET
-librefang config set-key teams                # .env 文件
-# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
-```
-
-6. 添加到配置文件：
+5. 在 Teams 后台的 **Outgoing Webhook** 设置（或 Channels 配置）里复制 **Security Token**（base64）—— 用于校验每条入站请求的 HMAC-SHA256。
+6. 添加到 `config.toml`：
 
 ```toml
-[channels.teams]
-app_id_env = "TEAMS_APP_ID"
-app_secret_env = "TEAMS_APP_SECRET"
-default_agent = "ops"
+[[sidecar_channels]]
+name = "teams"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.teams"]
+channel_type = "teams"
+[sidecar_channels.env]
+TEAMS_APP_ID = "00000000-0000-0000-0000-000000000000"
+TEAMS_WEBHOOK_PORT = "8459"
+# TEAMS_ALLOWED_TENANTS = "tenant-a,tenant-b"   # 留空允许所有
 ```
 
-7. 在 Azure 中将消息端点配置为指向 LibreFang 实例的公网 URL（例如 `https://your-domain.com:4545/channels/teams/webhook`）。
-8. 重启守护进程。
+7. 将 `TEAMS_APP_PASSWORD`（客户端密钥）+ `TEAMS_SECURITY_TOKEN` 写入 `~/.librefang/secrets.env`（仪表盘 Channels 页填表时会自动写入）。
+8. 在 Azure Bot Channel 配置里把消息端点指向你 sidecar 的公网 URL —— 例如 `https://your-domain.com:8459/webhook`。
+9. 重启守护进程。
 
 ### 工作原理
 
-Teams 适配器使用 Microsoft Bot Framework v3 webhook 协议配合 OAuth2 令牌交换。传入消息通过 HTTPS POST webhook 到达，适配器通过验证 Azure AD 签发的 JWT Bearer Token 对每个请求进行认证。响应通过 Bot Framework REST API 发送。
+sidecar 自己跑 webhook server（标准库 `BaseHTTPRequestHandler`），用 base64-decoded `TEAMS_SECURITY_TOKEN` 校验每条入站的 `Authorization: HMAC <…>` 签名后解析 Bot Framework activity。出站回复通过 OAuth2 client-credentials 流获取 bearer token（5 分钟缓冲缓存），POST 到 `{serviceUrl}/v3/conversations/{id}/activities`。每个 conversation 的 `serviceUrl` 从最近一条入站消息缓存，回复落到正确的 Microsoft 区域（相对 Rust 版的改进 —— 它一律走默认 `smba.trafficmanager.net`）。
 
 ---
 

@@ -892,32 +892,9 @@ SLACK_BOT_TOKEN = "xoxb-..."
 
 Sidecar 保留原内置适配器的运行语义——Socket Mode WebSocket + Web API、`allowed_channels` 过滤（DM 豁免）、Block Kit 交互回调、thread 回复上下文、eyes / check 反应、通过 `SLACK_ACCOUNT_ID` 的多 Bot 路由。基于 `channel_role_mapping.slack` 的工作区角色 RBAC 不再在线读取——详见 CHANGELOG 中的 regression 说明。
 
-#### `[channels.whatsapp]`
+#### WhatsApp（Sidecar）
 
-```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-webhook_port = 8443
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # 用于 QR/Web 模式
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # 可选的管理员手机号
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | 存放 WhatsApp Cloud API 访问令牌的环境变量。 |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `phone_number_id` | string | `""` | WhatsApp Business 手机号 ID。 |
-| `webhook_port` | u16 | `8443` | 监听 Webhook 回调的端口。 |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | 存放 WhatsApp Web 网关 URL 的环境变量。设置后，发送消息将通过 QR/Web 网关而非 Cloud API 路由。 |
-| `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `owner_numbers` | list of strings | `[]` | 对此 Bot 实例拥有管理权限的手机号列表。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+WhatsApp 已迁移至 Python sidecar（`librefang.sidecar.adapters.whatsapp`）。原 `[channels.whatsapp]` 块不再识别。两种模式（Meta Cloud API + Web/QR Baileys 网关）均保留。详见[频道配置指南中的 WhatsApp 部分](/zh/configuration/channels#whatsappsidecar)。
 
 #### Signal（Sidecar）
 
@@ -964,23 +941,9 @@ MATRIX_USER_ID = "@librefang:matrix.org"
 
 Email 现以 Python sidecar 适配器（`librefang.sidecar.adapters.email`）提供。原 in-process `[channels.email]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明——详见[频道配置指南中的 Email 部分](/zh/configuration/channels#email-imap--smtp-sidecar)。
 
-#### `[channels.teams]`
+#### Microsoft Teams（Sidecar）
 
-```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-webhook_port = 3978
-allowed_tenants = []
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | string | `""` | Azure Bot 应用 ID。 |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | 存放 Azure Bot Framework 应用密码的环境变量。 |
-| `webhook_port` | u16 | `3978` | Bot Framework 入站 Webhook 端口。 |
-| `allowed_tenants` | list of strings | `[]` | 允许的 Azure AD 租户 ID 列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+Teams 现以 Python sidecar 适配器（`librefang.sidecar.adapters.teams`）提供。原 in-process `[channels.teams]` 配置块已被移除。请改为通过 `[[sidecar_channels]]` 条目声明——详见[频道配置指南中的 Microsoft Teams 部分](/zh/configuration/channels#microsoft-teamssidecar)。
 
 #### Mattermost（Sidecar）
 
@@ -1232,21 +1195,9 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN`（发送）和 `GOTIFY_CLIENT_TOKEN`（订阅）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Gotify 表单时会自动写入。
 
-#### `[channels.webhook]`
+#### Webhook（Sidecar）
 
-```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | 存放用于验证入站 Webhook 的 HMAC 签名密钥的环境变量。 |
-| `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
-| `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+Webhook 已迁移到 Python sidecar（`librefang.sidecar.adapters.webhook`）。原 `[channels.webhook]` 块不再识别。改为声明 `[[sidecar_channels]]`——详见[频道配置指南中的 Webhook 部分](/zh/configuration/channels#webhooksidecar)。
 
 #### QQ Bot（Sidecar）
 

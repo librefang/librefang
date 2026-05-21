@@ -7996,7 +7996,6 @@ fn cmd_channel_list() {
     // `[[sidecar_channels]]` rather than [channels.{discord,slack}] now.
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
-        ("whatsapp", "WA_ACCESS_TOKEN"),
         ("email", "EMAIL_PASSWORD"),
     ];
 
@@ -8036,7 +8035,6 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
-                ("whatsapp", "WhatsApp Cloud API"),
                 ("email", "Email (IMAP/SMTP)"),
             ];
 
@@ -8068,41 +8066,11 @@ fn cmd_channel_setup(channel: Option<&str>) {
         // (librefang.sidecar.adapters.slack) in v2026.5; the in-process
         // wizard arm was removed. Configure via [[sidecar_channels]] in
         // config.toml or through the dashboard's channel configure page.
-        "whatsapp" => {
-            ui::section(&i18n::t("section-setup-whatsapp"));
-            ui::blank();
-            println!("  WhatsApp Cloud API (recommended for production):");
-            println!("  1. Go to https://developers.facebook.com");
-            println!("  2. Create a Business App");
-            println!("  3. Add WhatsApp product");
-            println!("  4. Set up a test phone number");
-            println!("  5. Copy Phone Number ID and Access Token");
-            ui::blank();
-
-            let phone_id = prompt_input("  Phone Number ID: ");
-            let access_token = prompt_input("  Access Token: ");
-            let verify_token = prompt_input("  Verify Token: ");
-
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("whatsapp", config_block);
-
-            for (key, val) in [
-                ("WA_PHONE_ID", &phone_id),
-                ("WA_ACCESS_TOKEN", &access_token),
-                ("WA_VERIFY_TOKEN", &verify_token),
-            ] {
-                if !val.is_empty() {
-                    match dotenv::save_env_key(key, val) {
-                        Ok(()) => ui::success(&i18n::t_args("channel-key-saved", &[("key", key)])),
-                        Err(_) => println!("    export {key}={val}"),
-                    }
-                }
-            }
-
-            ui::blank();
-            ui::success(&i18n::t_args("channel-configured", &[("name", "WhatsApp")]));
-            notify_daemon_restart();
-        }
+        // whatsapp was migrated to a sidecar adapter
+        // (librefang.sidecar.adapters.whatsapp); the in-process wizard
+        // arm was removed. Configure via [[sidecar_channels]] in
+        // config.toml or through the dashboard's channel configure
+        // page (which renders the sidecar's --describe schema).
         // email was migrated to a sidecar adapter
         // (librefang.sidecar.adapters.email); the in-process wizard
         // arm was removed. Configure via [[sidecar_channels]] in

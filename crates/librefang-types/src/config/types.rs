@@ -6373,16 +6373,16 @@ impl std::fmt::Debug for NetworkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// WhatsApp Cloud API configuration(s).
-    pub whatsapp: OneOrMany<WhatsAppConfig>,
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // email migrated to a sidecar (librefang.sidecar.adapters.email);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Microsoft Teams configuration(s).
-    pub teams: OneOrMany<TeamsConfig>,
+    // teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     /// Google Chat configuration(s).
@@ -6400,8 +6400,8 @@ pub struct ChannelsConfig {
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Generic webhook configuration(s).
-    pub webhook: OneOrMany<WebhookConfig>,
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
@@ -6458,10 +6458,7 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            whatsapp: OneOrMany::default(),
-            teams: OneOrMany::default(),
             google_chat: OneOrMany::default(),
-            webhook: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6489,75 +6486,10 @@ impl ChannelsConfig {
     }
 }
 
-/// WhatsApp Cloud API channel adapter configuration.
-//
-// `deny_unknown_fields` catches typos inside `[[channels.whatsapp]]`
-// elements at deserialize time. The detect_unknown_nested_fields walker
-// can't see into repeated-table elements (#5130), so the only way to
-// surface a typo here is for serde itself to reject it. This is the
-// canonical statement of the rationale; the other channel configs in
-// this module refer back to `WhatsAppConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct WhatsAppConfig {
-    /// Env var name holding the access token (Cloud API mode).
-    pub access_token_env: String,
-    /// Env var name holding the webhook verify token (Cloud API mode).
-    pub verify_token_env: String,
-    /// WhatsApp Business phone number ID (Cloud API mode).
-    pub phone_number_id: String,
-    /// Port to listen for webhook callbacks (Cloud API mode).
-    pub webhook_port: u16,
-    /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
-    /// When set, outgoing messages are routed through the gateway instead of Cloud API.
-    pub gateway_url_env: String,
-    /// Allowed phone numbers (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
-    /// When set, messages from non-owner numbers are forwarded to the first
-    /// owner number with sender context, and the sender receives an auto-ack.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub owner_numbers: Vec<String>,
-    /// Conversation tracker TTL in hours (Web gateway mode).
-    /// Active stranger conversations expire after this period of inactivity.
-    #[serde(default = "default_conversation_ttl_hours")]
-    pub conversation_ttl_hours: u32,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-fn default_conversation_ttl_hours() -> u32 {
-    24
-}
-
-fn default_local_probe_interval_secs() -> u64 {
-    60
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            access_token_env: "WHATSAPP_ACCESS_TOKEN".to_string(),
-            verify_token_env: "WHATSAPP_VERIFY_TOKEN".to_string(),
-            phone_number_id: String::new(),
-            webhook_port: 8443,
-            gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            owner_numbers: vec![],
-            conversation_ttl_hours: default_conversation_ttl_hours(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// the in-process `WhatsAppConfig` + `[channels.whatsapp]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
 // the in-process `SignalConfig` + `[channels.signal]` block were
@@ -6574,53 +6506,10 @@ impl Default for WhatsAppConfig {
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Microsoft Teams (Bot Framework v3) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TeamsConfig {
-    /// Azure Bot App ID.
-    pub app_id: String,
-    /// Env var name holding the app password.
-    pub app_password_env: String,
-    /// Env var name holding the outgoing webhook security token (base64-encoded).
-    /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// Required by default; setting `signature_required = false` opts out (dev only).
-    #[serde(default)]
-    pub security_token_env: String,
-    /// Reject adapter startup unless a security token is configured (default `true`).
-    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
-    #[serde(default = "default_true")]
-    pub signature_required: bool,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Allowed tenant IDs (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_tenants: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TeamsConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_password_env: "TEAMS_APP_PASSWORD".to_string(),
-            security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
-            signature_required: true,
-            webhook_port: 3978,
-            allowed_tenants: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+// the in-process `TeamsConfig` + `[channels.teams]` block were removed
+// in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // the in-process `MattermostConfig` + `[channels.mattermost]` block were
@@ -6704,49 +6593,9 @@ impl Default for GoogleChatConfig {
 // in-process `QqConfig` + `[channels.qq]` block were removed in this
 // migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
-/// Generic webhook channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WebhookConfig {
-    /// Env var name holding the HMAC signing secret.
-    pub secret_env: String,
-    /// Port to listen for incoming webhooks.
-    pub listen_port: u16,
-    /// URL to POST outgoing messages to.
-    pub callback_url: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// When true, incoming POST bodies are forwarded directly to the delivery
-    /// target channel without invoking the LLM or any agent. Requires
-    /// `deliver` to be set to a valid channel name (not "log").
-    #[serde(default)]
-    pub deliver_only: bool,
-    /// Target channel name for direct delivery (e.g. "telegram", "discord").
-    /// Required when `deliver_only` is true.
-    #[serde(default)]
-    pub deliver: Option<String>,
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            secret_env: "WEBHOOK_SECRET".to_string(),
-            listen_port: 8460,
-            callback_url: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-            deliver_only: false,
-            deliver: None,
-        }
-    }
-}
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook); the
+// in-process `WebhookConfig` + `[channels.webhook]` block were removed in
+// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Terminal / CLI access control configuration.
 ///

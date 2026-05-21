@@ -1685,46 +1685,30 @@ fn migrate_channels_from_json(
     }
 
     // --- WhatsApp ---
+    //
+    // WhatsApp was migrated to a sidecar — both the Cloud API mode
+    // and the Web/QR (Baileys) gateway mode are now driven by the
+    // Python sidecar (`librefang.sidecar.adapters.whatsapp`). The
+    // OpenClaw block doesn't auto-map to `[[sidecar_channels]]`
+    // cleanly because the sidecar reads secrets from
+    // `~/.librefang/secrets.env` and non-secret knobs from
+    // `[sidecar_channels.env]`. Surface a skipped item, same shape
+    // as the Signal / Matrix / Teams / Mattermost removals.
     if let Some(ref wa) = oc_channels.whatsapp {
         if wa.enabled.unwrap_or(true) {
-            // WhatsApp uses Baileys credential dir — copy it, warn user
-            if let Some(ref auth_dir) = wa.auth_dir {
-                let src_path = PathBuf::from(auth_dir);
-                if src_path.exists() {
-                    let dest_creds = target.join("credentials").join("whatsapp");
-                    if !dry_run {
-                        if let Err(e) = copy_dir_recursive(&src_path, &dest_creds) {
-                            report
-                                .warnings
-                                .push(format!("Failed to copy WhatsApp credentials: {e}"));
-                        }
-                    }
-                    report.imported.push(MigrateItem {
-                        kind: ItemKind::Secret,
-                        name: "whatsapp/credentials".to_string(),
-                        destination: dest_creds.display().to_string(),
-                    });
-                    report.warnings.push(
-                        "WhatsApp Baileys credentials copied — you may need to re-authenticate"
-                            .to_string(),
-                    );
-                }
-            }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "access_token_env",
-                toml::Value::String("WHATSAPP_ACCESS_TOKEN".into()),
-            )];
-            if let Some(arr) = allow_from_to_toml_array(wa.allow_from.as_ref()) {
-                fields.push(("allowed_users", arr));
-            }
-            channels_table.insert(
-                "whatsapp".to_string(),
-                build_channel_table(fields, wa.dm_policy.as_deref(), wa.group_policy.as_deref()),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "WhatsApp in-process adapter was migrated to a sidecar. \
+                          Your OpenClaw whatsapp block was NOT migrated — declare \
+                          it as `[[sidecar_channels]]` pointing at \
+                          `librefang.sidecar.adapters.whatsapp`. If you were using \
+                          the Web/QR (Baileys) gateway, also run \
+                          `@librefang/whatsapp-gateway` as a separate process and \
+                          point WHATSAPP_GATEWAY_URL at it."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "whatsapp".to_string(),
-                destination: "config.toml [channels.whatsapp]".to_string(),
+                reason,
             });
         }
     }
@@ -1826,45 +1810,26 @@ fn migrate_channels_from_json(
     }
 
     // --- Teams ---
+    //
+    // Teams was migrated to a sidecar — users migrating from OpenClaw
+    // should re-create the integration as a `[[sidecar_channels]]`
+    // entry pointing at `librefang.sidecar.adapters.teams`. We still
+    // detect the legacy block so the operator gets a clear signal
+    // instead of silent data loss.
     if let Some(ref tm) = oc_channels.teams {
         if tm.enabled.unwrap_or(true) {
-            if let Some(ref pw) = tm.app_password {
-                emit_secret(&secrets_path, dry_run, "TEAMS_APP_PASSWORD", pw, report);
-            }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "app_password_env",
-                toml::Value::String("TEAMS_APP_PASSWORD".into()),
-            )];
-            if let Some(ref id) = tm.app_id {
-                fields.push(("app_id", toml::Value::String(id.clone())));
-            }
-            if let Some(ref tenant) = tm.tenant_id {
-                fields.push((
-                    "allowed_tenants",
-                    toml::Value::Array(vec![toml::Value::String(tenant.clone())]),
-                ));
-            }
-            if allow_from_to_toml_array(tm.allow_from.as_ref()).is_some() {
-                report.warnings.push(
-                    "Teams: OpenClaw 'allow_from' could not be auto-mapped — \
-                     TeamsConfig has no per-user allowlist, only 'allowed_tenants' (tenant IDs)."
-                        .to_string(),
-                );
-            }
-            channels_table.insert(
-                "teams".to_string(),
-                build_channel_table(fields, tm.dm_policy.as_deref(), None),
-            );
-            report.warnings.push(
-                "Teams: signature_required defaults to true. Set TEAMS_SECURITY_TOKEN \
-                 (base64 outgoing-webhook token from the Teams portal) before \
-                 starting the daemon, or the adapter will refuse to register."
-                    .to_string(),
-            );
-            report.imported.push(MigrateItem {
+            let reason = "Teams in-process adapter was migrated to a sidecar. \
+                          Your OpenClaw Teams block was NOT migrated — declare \
+                          it as `[[sidecar_channels]]` pointing at \
+                          `librefang.sidecar.adapters.teams` (see \
+                          docs/configuration/channels for the migration \
+                          template)."
+                .to_string();
+            report.warnings.push(reason.clone());
+            report.skipped.push(SkippedItem {
                 kind: ItemKind::Channel,
                 name: "teams".to_string(),
-                destination: "config.toml [channels.teams]".to_string(),
+                reason,
             });
         }
     }
@@ -2885,20 +2850,19 @@ fn parse_legacy_channels(
                 });
             }
             "whatsapp" => {
-                let token_env = ch
-                    .access_token_env
-                    .clone()
-                    .unwrap_or_else(|| "WHATSAPP_ACCESS_TOKEN".to_string());
-                let fields: Vec<(&str, toml::Value)> =
-                    vec![("access_token_env", toml::Value::String(token_env))];
-                channels_table.insert(
-                    "whatsapp".to_string(),
-                    build_channel_table(fields, None, None),
-                );
-                report.imported.push(MigrateItem {
+                // WhatsApp was migrated to a sidecar — emit as
+                // skipped (same shape as the IRC / Matrix / Teams
+                // / Signal / Mattermost removals).
+                let reason = "WhatsApp in-process adapter was migrated to a sidecar. \
+                              Your messaging/whatsapp config was NOT migrated — \
+                              declare it as `[[sidecar_channels]]` pointing at \
+                              `librefang.sidecar.adapters.whatsapp`."
+                    .to_string();
+                report.warnings.push(reason.clone());
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "whatsapp".to_string(),
-                    destination: "config.toml [channels.whatsapp]".to_string(),
+                    reason,
                 });
             }
             "signal" => {
@@ -2988,15 +2952,20 @@ fn parse_legacy_channels(
                 });
             }
             "msteams" => {
-                let fields: Vec<(&str, toml::Value)> = vec![(
-                    "app_password_env",
-                    toml::Value::String("TEAMS_APP_PASSWORD".into()),
-                )];
-                channels_table.insert("teams".to_string(), build_channel_table(fields, None, None));
-                report.imported.push(MigrateItem {
+                // Teams was migrated to a sidecar — emit as
+                // skipped (same shape as IRC / Mattermost /
+                // Signal / Matrix / Feishu / Email / WeCom /
+                // WeChat / DingTalk removals before it).
+                let reason = "Teams in-process adapter was migrated to a sidecar. \
+                              Your OpenClaw msteams block was NOT migrated — \
+                              declare it as `[[sidecar_channels]]` pointing at \
+                              `librefang.sidecar.adapters.teams`."
+                    .to_string();
+                report.warnings.push(reason.clone());
+                report.skipped.push(SkippedItem {
                     kind: ItemKind::Channel,
                     name: "teams".to_string(),
-                    destination: "config.toml [channels.teams]".to_string(),
+                    reason,
                 });
             }
             "imessage" => {
@@ -3658,14 +3627,15 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Channel)
             .collect();
-        // 13 channels in the JSON5 fixture; 10 are skipped (telegram,
-        // discord, slack, signal, matrix, irc, mattermost, feishu all
-        // migrated to sidecar adapters, plus imessage + bluebubbles
-        // which the migrator always skips). That leaves 3 in-process
-        // imports — listed by destination-table name, since the JSON5
-        // keys `googlechat` / `msteams` are aliased to `google_chat` /
-        // `teams` on write: whatsapp, google_chat, teams.
-        assert_eq!(channel_items.len(), 3);
+        // 13 channels in the JSON5 fixture; 12 are skipped (telegram,
+        // discord, slack, signal, matrix, irc, mattermost, feishu,
+        // teams, whatsapp all migrated to sidecar adapters, plus
+        // imessage + bluebubbles which the migrator always skips).
+        // That leaves 1 in-process import: google_chat. (The JSON5
+        // keys `googlechat` / `msteams` are aliased to `google_chat`
+        // / `teams` for parsing but `msteams` now emits a
+        // SkippedItem instead of a `[channels.teams]` block.)
+        assert_eq!(channel_items.len(), 1);
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "telegram"
             && s.reason.contains("sidecar")));
@@ -3692,7 +3662,16 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "slack"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.whatsapp]"));
+        // WhatsApp migrated to a sidecar; the migrator records a
+        // skipped entry instead of emitting a [channels.whatsapp] block.
+        assert!(
+            !config_toml.contains("[channels.whatsapp]"),
+            "WhatsApp is no longer an in-process adapter; the migrator must not \
+             emit a [channels.whatsapp] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "whatsapp"
+            && s.reason.contains("sidecar")));
         // Signal migrated to a sidecar; the migrator records a skipped
         // entry instead of a [channels.signal] block (same shape as the
         // IRC / Mattermost removals).
@@ -3747,7 +3726,16 @@ mod tests {
         assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
             && s.name == "feishu"
             && s.reason.contains("sidecar")));
-        assert!(config_toml.contains("[channels.teams]"));
+        // Teams migrated to a sidecar; the migrator records a
+        // skipped entry instead of emitting a [channels.teams] block.
+        assert!(
+            !config_toml.contains("[channels.teams]"),
+            "Teams is no longer an in-process adapter; the migrator must not \
+             emit a [channels.teams] block the kernel would reject"
+        );
+        assert!(report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+            && s.name == "teams"
+            && s.reason.contains("sidecar")));
         assert!(
             config_toml.contains("[channels.google_chat]"),
             "missing google_chat in config: {config_toml}"
@@ -3781,7 +3769,9 @@ mod tests {
         assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
-        assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
+        // Teams migrated to a sidecar — TEAMS_APP_PASSWORD no longer
+        // lands in secrets.env.
+        assert!(!secrets.contains("TEAMS_APP_PASSWORD="));
 
         // NO raw tokens in config.toml
         assert!(
@@ -3969,8 +3959,9 @@ mod tests {
         // `mm.token_env == "MATTERMOST_TOKEN"` here. Both are now
         // recorded as skipped sidecar channels (see secrets.env
         // assertions below for the token round-trip).
-        let teams = cfg.channels.teams.iter().next().expect("teams configured");
-        assert_eq!(teams.allowed_tenants, vec!["tenant-xyz".to_string()]); // was "tenant_id" scalar before
+        // Teams migrated to a sidecar — `cfg.channels.teams` no
+        // longer exists. The migrator records the legacy `teams:`
+        // block as a SkippedItem.
         // Feishu migrated to a sidecar (#5380); `cfg.channels.feishu`
         // no longer exists. The migrator records the legacy `feishu:`
         // block as a skipped channel — mirror the matrix/signal
@@ -4844,7 +4835,9 @@ mod tests {
         assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
         assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
-        assert!(secrets.contains("TEAMS_APP_PASSWORD=teams-pw-secret"));
+        // Teams migrated to a sidecar — TEAMS_APP_PASSWORD no longer
+        // lands in secrets.env.
+        assert!(!secrets.contains("TEAMS_APP_PASSWORD="));
 
         // config.toml must NOT contain any raw secrets
         let config_toml = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
