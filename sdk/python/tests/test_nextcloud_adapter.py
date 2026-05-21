@@ -32,6 +32,8 @@ os.environ.setdefault("NEXTCLOUD_SERVER_URL", "https://cloud.example.com")
 os.environ.setdefault("NEXTCLOUD_TOKEN", "test-token")
 from librefang.sidecar.adapters import nextcloud as nc  # noqa: E402
 
+from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+
 
 def _adapter(**env):
     defaults = {
@@ -163,80 +165,6 @@ def test_split_message_32000_cap_matches_rust():
 
 
 # ---- _FakeUrlopen scaffolding --------------------------------------
-
-
-class _HdrShim:
-    """Mimic the parts of ``email.message.Message`` that ``_http``
-    touches — only ``.items()``. urllib's real response headers are a
-    Message; tests want a dict shape, so wrap it."""
-
-    def __init__(self, hdrs: dict):
-        self._hdrs = hdrs or {}
-
-    def items(self):
-        return list(self._hdrs.items())
-
-
-class _FakeUrlopen:
-    """Capture urllib.request.urlopen calls and return scripted
-    responses. Each script entry is ``(status, body)`` or
-    ``(status, body, response_headers)``; the 2-tuple form keeps
-    existing tests unchanged."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    def __call__(self, req, timeout=None):
-        body_bytes = req.data
-        try:
-            decoded = body_bytes.decode("utf-8") if body_bytes else None
-        except Exception:
-            decoded = None
-        self.calls.append({
-            "url": req.full_url,
-            "method": req.get_method(),
-            "headers": {k.lower(): v for k, v in req.header_items()},
-            "body_raw": decoded,
-        })
-        if not self.script:
-            raise AssertionError(
-                f"unexpected extra urlopen call to {req.full_url}"
-            )
-        entry = self.script.pop(0)
-        if len(entry) == 3:
-            status, body, resp_hdrs = entry
-        else:
-            status, body = entry
-            resp_hdrs = {}
-        if status >= 400:
-            raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim(resp_hdrs),
-                io.BytesIO(json.dumps(body or {}).encode("utf-8")),
-            )
-        if body is None:
-            payload = b""
-        elif isinstance(body, (dict, list)):
-            payload = json.dumps(body).encode("utf-8")
-        else:
-            payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
-
-
-class _FakeResp:
-    def __init__(self, status, body=b"", headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers if headers is not None else _HdrShim({})
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
 
 
 def _msg(
@@ -518,8 +446,8 @@ def test_poll_once_emits_messages_and_advances_watermark(monkeypatch):
     # Watermark advanced to the newest id seen.
     assert a._room_watermarks["R1"] == 11
     # Both message ids tracked for dedupe.
-    assert 10 in a._seen_messages_set
-    assert 11 in a._seen_messages_set
+    assert 10 in a._seen.ids
+    assert 11 in a._seen.ids
 
 
 def test_poll_once_dedupes_id_repeats(monkeypatch):
@@ -561,7 +489,7 @@ def test_poll_once_self_skipped(monkeypatch):
     assert [e["params"]["message_id"] for e in emitted] == ["21"]
     # Even self-skipped msg id 20 is still marked seen so we don't
     # reparse it.
-    assert 20 in a._seen_messages_set
+    assert 20 in a._seen.ids
 
 
 def test_poll_once_injects_account_id(monkeypatch):
@@ -789,24 +717,24 @@ def test_seen_messages_capacity_eviction():
     for i in range(1, nc.SEEN_MESSAGES_MAX + 2):
         a._mark_seen(i)
     # ids 1..SEEN_MESSAGES_EVICT should have been evicted on overflow.
-    assert 1 not in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_EVICT not in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_EVICT + 1 in a._seen_messages_set
-    assert nc.SEEN_MESSAGES_MAX + 1 in a._seen_messages_set
-    assert len(a._seen_messages) == len(a._seen_messages_set)
+    assert 1 not in a._seen.ids
+    assert nc.SEEN_MESSAGES_EVICT not in a._seen.ids
+    assert nc.SEEN_MESSAGES_EVICT + 1 in a._seen.ids
+    assert nc.SEEN_MESSAGES_MAX + 1 in a._seen.ids
+    assert len(a._seen.order) == len(a._seen.ids)
 
 
 def test_seen_messages_idempotent_mark():
     a = _adapter()
     a._mark_seen(5)
     a._mark_seen(5)
-    assert a._seen_messages.count(5) == 1
+    assert a._seen.order.count(5) == 1
 
 
 def test_seen_messages_empty_id_ignored():
     a = _adapter()
     a._mark_seen(0)
-    assert a._seen_messages == []
+    assert a._seen.order == []
 
 
 # ---- _post_message: outbound + threading --------------------------
@@ -924,7 +852,12 @@ def test_on_send_uses_platform_id_as_room(monkeypatch):
 
 
 def test_on_send_threads_via_thread_id(monkeypatch):
-    """P1 round-trip: cmd.thread_id → replyTo on the outbound."""
+    """Forward-compat fallback: even with the daemon-default
+    `threading=false`, this test's fabricated `thread_id` still
+    reaches on_send because no `librefang_user` is present to
+    take precedence. (In production with a real bridge round-trip
+    the librefang_user path wins — see the regression-guard test
+    below.)"""
     a = _adapter()
     fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"}, "data": {}}})])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
@@ -936,6 +869,26 @@ def test_on_send_threads_via_thread_id(monkeypatch):
     )))
     parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
     assert parsed == {"message": "threaded reply", "replyTo": "42"}
+
+
+def test_on_send_recovers_reply_to_from_user_librefang_user(monkeypatch):
+    """Regression guard: the daemon-shape pre-fix bug meant
+    `cmd.thread_id=None` so every chunked reply landed at room root
+    despite the module docstring claiming to fix exactly that. The
+    bridge round-trips librefang_user bytewise — recover from there."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, {"ocs": {"meta": {"status": "ok"}, "data": {}}})])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi",
+        thread_id=None,  # daemon-default
+        user={"platform_id": "ROOM1", "librefang_user": "42"},
+    )))
+    parsed = dict(urllib.parse.parse_qsl(fake.calls[0]["body_raw"]))
+    assert parsed == {"message": "hi", "replyTo": "42"}, \
+        "on_send must thread via cmd.user.librefang_user when " \
+        "cmd.thread_id is None (which is the daemon default)"
 
 
 def test_on_send_falls_back_to_channel_id(monkeypatch):

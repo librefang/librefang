@@ -63,6 +63,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -72,6 +73,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 DEFAULT_SERVICE_URL = "https://bsky.social"
 # Bluesky post length cap (graphemes per spec; we approximate with
@@ -79,12 +85,6 @@ DEFAULT_SERVICE_URL = "https://bsky.social"
 MAX_MESSAGE_LEN = 300
 POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
-# Default fallback when Bluesky 429s without a `Retry-After` header.
-# AT Protocol's XRPC layer typically sends one (seconds form, alongside
-# `RateLimit-Reset` epoch); fall back to a sane wait so we don't busy-
-# loop at 1 s when the header is absent or unparseable.
-RETRY_AFTER_DEFAULT_SECS = 30.0
 # Sessions last ~2h on bsky.social; refresh 5 min before the 90-min
 # safety mark used by the Rust adapter.
 SESSION_LIFE_SECS = 5400
@@ -92,51 +92,45 @@ SESSION_REFRESH_BUFFER_SECS = 300
 # Thread-context cache size. 200 entries × ~200 B = ~40 KB, negligible.
 THREAD_CACHE_MAX = 200
 
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Same shape as the ntfy / mastodon / Rust ``split_message`` helper."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
 class _LruCache:
     """Tiny fixed-size LRU. OrderedDict-backed: re-insert on get to mark
     as recently used; pop oldest on overflow. Sidecar-local, lost on
     process restart — that's acceptable because a missing reply ref just
-    degrades to a non-threaded post (which is the old Rust behaviour)."""
+    degrades to a non-threaded post (which is the old Rust behaviour).
+
+    Thread-safe: `on_send` dispatches `_post_status` via
+    `run_in_executor(None, ...)` which uses the default
+    ThreadPoolExecutor, so concurrent replies on the same adapter can
+    hit `put` / `get` from multiple worker threads. Without a lock the
+    `move_to_end + assignment` and `popitem` sequences would race —
+    CPython's GIL gives per-bytecode atomicity but not multi-step
+    atomicity over OrderedDict's internal linked list. The
+    `threading.Lock` guard makes each mutator atomic from the
+    caller's perspective."""
 
     def __init__(self, max_size: int):
         self._max = max_size
         self._d: OrderedDict[str, dict] = OrderedDict()
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> dict | None:
-        if key in self._d:
-            self._d.move_to_end(key)
-            return self._d[key]
-        return None
+        with self._lock:
+            if key in self._d:
+                self._d.move_to_end(key)
+                return self._d[key]
+            return None
 
     def put(self, key: str, value: dict) -> None:
-        if key in self._d:
-            self._d.move_to_end(key)
-        self._d[key] = value
-        while len(self._d) > self._max:
-            self._d.popitem(last=False)
+        with self._lock:
+            if key in self._d:
+                self._d.move_to_end(key)
+            self._d[key] = value
+            while len(self._d) > self._max:
+                self._d.popitem(last=False)
 
     def __len__(self) -> int:
-        return len(self._d)
+        with self._lock:
+            return len(self._d)
 
 
 class BlueskyAdapter(SidecarAdapter):
@@ -477,9 +471,15 @@ class BlueskyAdapter(SidecarAdapter):
             content=content,
             message_id=uri,
             is_group=False,
-            # Surface the URI as thread_id so LibreFang threads outbound
-            # replies through to on_send via cmd.thread_id; the sidecar
-            # then reconstructs the reply struct from its cache.
+            # `librefang_user` is the always-round-tripped carrier for
+            # the at:// URI that on_send uses to look up the cached
+            # `{root, parent}` reply struct. Without it, the daemon
+            # would strip `cmd.thread_id` to None for cap-less
+            # sidecars and the reply would post as a top-level skeet
+            # instead of a thread reply. `thread_id` kept for
+            # forward-compat with a future `threading=true` + cap
+            # opt-in.
+            librefang_user=uri or None,
             thread_id=uri or None,
             metadata=metadata,
         )
@@ -595,6 +595,113 @@ class BlueskyAdapter(SidecarAdapter):
 
     # ---- outbound: createRecord --------------------------------------
 
+    def _recover_reply_ref(self, uri: str, bearer: str) -> dict | None:
+        """Re-derive a `{root, parent}` AT Protocol reply struct from
+        a notification URI when the in-process `_thread_cache` doesn't
+        have it (sidecar restarted between the inbound mention and the
+        outbound reply — closes #5452).
+
+        Single XRPC call to `app.bsky.feed.getPosts?uris=<uri>` returns
+        the post's `cid` AND its existing `record.reply` chain (if any),
+        which is exactly what `_compute_reply_ref` needs to mirror its
+        in-process cache miss branch. The result is `put()` back into
+        `_thread_cache` before return so any follow-up chunks in the
+        same `_post_status` call don't re-fetch.
+
+        Transient-failure handling — both auth and rate limits get one
+        retry before we give up:
+          * **401**: refresh the bearer (same pattern `_post_status`
+            uses on createRecord 401) and retry the XRPC once. Without
+            this, a session token rotated between sidecar boot and the
+            outbound reply would silently downgrade every queued reply
+            to a top-level skeet even though the caller's subsequent
+            createRecord refresh would have saved them.
+          * **429**: honour ``Retry-After`` (same `_retry_after_secs`
+            helper the polling + send paths use), sleep, retry once.
+            Without this, a transient rate-limit on getPosts silently
+            downgrades the reply.
+
+        Returns `None` only when:
+          * the URI is malformed / doesn't start with `at://`, OR
+          * the retried XRPC call still returns non-2xx, OR
+          * the response body is malformed (missing `posts`, missing
+            `cid`).
+
+        The caller treats `None` as "post as top-level skeet" — same
+        degradation we had pre-restart (and pre-fix). Logging a WARN
+        on the recovery failure is the caller's job since the WARN
+        message needs the URI for diagnosis."""
+        if not isinstance(uri, str) or not uri.startswith("at://"):
+            return None
+        encoded = urllib.parse.quote(uri, safe="")
+        url = (
+            f"{self.service_url}/xrpc/app.bsky.feed.getPosts"
+            f"?uris={encoded}"
+        )
+        status, body, hdrs = self._get_json(url, bearer=bearer)
+        # 401 → refresh session + retry once. Mirrors the pattern at
+        # line ~693 in _post_status's createRecord 401 handling.
+        if status == 401:
+            log.warn(
+                "bluesky 401 on getPosts recovery; refreshing session "
+                "and retrying once",
+                uri=uri,
+            )
+            self._access_jwt = None
+            try:
+                bearer, _ = self._get_token()
+            except Exception as e:  # noqa: BLE001
+                log.warn(
+                    "bluesky session refresh failed during recovery",
+                    uri=uri, error=str(e),
+                )
+                return None
+            status, body, hdrs = self._get_json(url, bearer=bearer)
+        # 429 → honour Retry-After then retry once. Mirrors the
+        # pattern at lines 292/331/493 (verify_credentials / poll /
+        # createRecord).
+        if status == 429:
+            wait = self._retry_after_secs(hdrs)
+            log.warn(
+                "bluesky 429 on getPosts recovery; sleeping then "
+                "retrying once",
+                retry_after_secs=wait, uri=uri,
+            )
+            time.sleep(wait)
+            status, body, hdrs = self._get_json(url, bearer=bearer)
+        if status < 200 or status >= 300 or not isinstance(body, dict):
+            return None
+        posts = body.get("posts")
+        if not isinstance(posts, list) or not posts:
+            return None
+        post = posts[0]
+        if not isinstance(post, dict):
+            return None
+        cid = str(post.get("cid") or "")
+        post_uri = str(post.get("uri") or uri)
+        if not cid:
+            return None
+        parent = {"uri": post_uri, "cid": cid}
+        # Mirror `_compute_reply_ref`'s root-resolution: if the post we
+        # just fetched is itself a reply, its `record.reply.root` is
+        # the canonical thread root; otherwise the post is itself the
+        # root.
+        record = post.get("record")
+        if isinstance(record, dict):
+            existing = record.get("reply")
+            if (isinstance(existing, dict)
+                    and isinstance(existing.get("root"), dict)):
+                ref = {"root": existing["root"], "parent": parent}
+            else:
+                ref = {"root": parent, "parent": parent}
+        else:
+            ref = {"root": parent, "parent": parent}
+        # Re-populate the cache so subsequent chunks within the same
+        # `_post_status` call (or any other reply targeting the same
+        # URI in the near future) skip the XRPC round-trip.
+        self._thread_cache.put(uri, ref)
+        return ref
+
     def _post_status(self, text: str, thread_id: str | None) -> None:
         """Create one or more `app.bsky.feed.post` records. When
         `thread_id` matches a cached notification URI, attach the
@@ -602,10 +709,29 @@ class BlueskyAdapter(SidecarAdapter):
         re-using the thread context for every chunk — the Rust adapter
         did not chain chunks, but since the user opted into improved
         threading (P1=b), we use the same reply ref for each chunk so
-        the whole multi-part reply stays under one thread parent."""
+        the whole multi-part reply stays under one thread parent.
+
+        On a `_thread_cache` miss (sidecar restarted between the
+        inbound and this outbound — see #5452), the reply ref is
+        recovered via one XRPC `app.bsky.feed.getPosts` round-trip.
+        If recovery also fails, the post still lands but as a top-
+        level skeet (current degradation) with a WARN so operators
+        can spot the failure rather than the bot silently mis-
+        threading."""
         token, did = self._get_token()
         url = f"{self.service_url}/xrpc/com.atproto.repo.createRecord"
         reply_ref = self._thread_cache.get(thread_id) if thread_id else None
+        if reply_ref is None and thread_id:
+            reply_ref = self._recover_reply_ref(thread_id, token)
+            if reply_ref is None:
+                log.warn(
+                    "bluesky reply ref unrecoverable; posting top-level "
+                    "skeet (cache miss + XRPC re-fetch failed; thread "
+                    "context lost — likely sidecar restart followed by "
+                    "post deletion, instance unreachable, rate limit, "
+                    "or auth issue)",
+                    uri=thread_id,
+                )
         import datetime
         for chunk in _split_message(text, MAX_MESSAGE_LEN):
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -659,11 +785,26 @@ class BlueskyAdapter(SidecarAdapter):
             text = "(Unsupported content type)"
         else:
             text = cmd.text or ""
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] (always round-
+        # tripped). Fallback: cmd.thread_id (forward-compat). Bluesky
+        # URIs have a deterministic `at://` prefix — strong sanity
+        # guard.
+        uri_key: "Optional[str]" = None
+        user = getattr(cmd, "user", None) or {}
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            if (isinstance(candidate, str)
+                    and candidate.startswith("at://")
+                    and " " not in candidate):
+                uri_key = candidate
+        if uri_key is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            uri_key = thread_id
+
         await asyncio.get_event_loop().run_in_executor(
-            None, self._post_status, text, thread_id,
+            None, self._post_status, text, uri_key,
         )
 
 
