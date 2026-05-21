@@ -1779,6 +1779,73 @@ export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
 
+/** One QR-login lifecycle state, mirrors `QrStatusKind` in the
+ * `librefang-channels` crate. Wire form is snake_case per the
+ * `#[serde(rename_all = "snake_case")]` on the Rust enum. */
+export type QrStatusKind =
+  | "pending"
+  | "scanning"
+  | "confirmed"
+  | "expired"
+  | "failed";
+
+/** Projection of `ChannelStatus.qr` returned by
+ * `GET /api/channels/{name}/qr`. Lifecycle:
+ * - `pending` — sidecar fetched a QR; render and wait.
+ * - `scanning` — user scanned, platform is finalising.
+ * - `confirmed` — login succeeded; the sidecar's in-memory session
+ *    continues with the captured credential. The operator follows
+ *    the `message` ("set WECHAT_BOT_TOKEN in secrets.env to skip QR
+ *    next time") to persist; auto-persist was dropped because the
+ *    only available endpoint is a full-form upsert that would wipe
+ *    other schema-managed env keys on a partial save.
+ * - `expired` / `failed` — terminal failure; show `message`.
+ *
+ * `updated_at` advances on every state transition so consumers can
+ * use it as a cheap diff signal between polls. */
+export interface QrState {
+  status: QrStatusKind;
+  qr_code: string;
+  qr_url?: string;
+  message?: string;
+  expires_at?: string;
+  updated_at: string;
+}
+
+/** Fetch the current QR-login state for a channel.
+ *
+ * Returns `null` when the sidecar is running but has not published a
+ * QR session yet (HTTP 204 — e.g. WeChat sidecar still authenticating
+ * from a cached `WECHAT_BOT_TOKEN`). 404 is surfaced as a thrown
+ * `ApiError` like every other route — the caller distinguishes
+ * "unknown channel" (impossible if the dashboard listed it) from
+ * "sidecar not running" via the message.
+ *
+ * The pre-migration `wechatQrStart` / `wechatQrStatus` /
+ * `whatsappQrStart` / `whatsappQrStatus` quadruple was removed when
+ * those adapters migrated to sidecars — the sidecar now drives the
+ * QR lifecycle itself and emits `qr_ready` / `qr_status` events, the
+ * daemon caches `ChannelStatus.qr`, and this single endpoint reads it. */
+export async function getChannelQr(channelName: string): Promise<QrState | null> {
+  // The route returns 204 No Content when the sidecar is running but
+  // has not published a QR session — e.g. WeChat already authenticated
+  // from a cached `WECHAT_BOT_TOKEN`, no scan needed. The shared
+  // `get<T>` helper doesn't model that branch (it always parses JSON),
+  // so this endpoint uses `fetch` directly.
+  const response = await fetch(
+    `/api/channels/${encodeURIComponent(channelName)}/qr`,
+    { headers: buildHeaders() },
+  );
+  if (response.status === 204) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as QrState;
+}
+
+
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
   return data.items ?? [];
