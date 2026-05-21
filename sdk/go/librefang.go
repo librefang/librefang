@@ -654,48 +654,16 @@ func (r *ChannelsResource) ListChannels() (interface{}, error) {
 	return r.client.request("GET", "/api/channels", nil, nil)
 }
 
+func (r *ChannelsResource) ListChannelRegistry() (interface{}, error) {
+	return r.client.request("GET", "/api/channels/registry", nil, nil)
+}
+
 func (r *ChannelsResource) ReloadChannels() (interface{}, error) {
 	return r.client.request("POST", "/api/channels/reload", nil, nil)
 }
 
 func (r *ChannelsResource) ConfigureSidecarChannel(name string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/channels/sidecar/%s/configure", name), data, nil)
-}
-
-func (r *ChannelsResource) WhatsappQrStart() (interface{}, error) {
-	return r.client.request("POST", "/api/channels/whatsapp/qr/start", nil, nil)
-}
-
-func (r *ChannelsResource) WhatsappQrStatus(query map[string]string) (interface{}, error) {
-	return r.client.request("GET", "/api/channels/whatsapp/qr/status", nil, query)
-}
-
-func (r *ChannelsResource) ConfigureChannel(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/configure", name), data, nil)
-}
-
-func (r *ChannelsResource) RemoveChannel(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/configure", name), nil, nil)
-}
-
-func (r *ChannelsResource) ListChannelInstances(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/channels/%s/instances", name), nil, nil)
-}
-
-func (r *ChannelsResource) CreateChannelInstance(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/instances", name), data, nil)
-}
-
-func (r *ChannelsResource) UpdateChannelInstanceHandler(name string, index string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/channels/%s/instances/%s", name, index), data, nil)
-}
-
-func (r *ChannelsResource) DeleteChannelInstance(name string, index string, query map[string]string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/instances/%s", name, index), nil, query)
-}
-
-func (r *ChannelsResource) TestChannel(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/test", name), data, nil)
 }
 
 // ── Extensions Resource

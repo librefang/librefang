@@ -228,6 +228,20 @@ def parse_wecom_event(
     if account_id:
         metadata["account_id"] = account_id
 
+    # `librefang_user` is the always-round-tripped carrier for the
+    # per-user `req_id` (which unlocks the passive
+    # `aibot_respond_msg` send). The previous routing relied on
+    # `self._pending_req_ids[user_id]` only — an in-memory dict that
+    # vanished on sidecar restart, leaving the bot's first reply
+    # after restart with no cached `req_id` and falling back to
+    # `aibot_send_msg` (the active-message path, which counts against
+    # WeCom's per-bot active-message quota and is heavily rate-limited
+    # for unlicensed bots). librefang_user round-trips bytewise
+    # through the bridge so it survives serde + restart cleanly.
+    # See `on_send` for the precedence: in-memory cache first (still
+    # gets evicted on use, mirroring `aibot_respond_msg`'s one-shot
+    # semantics), then `librefang_user` as the restart-survivable
+    # fallback.
     return protocol.message(
         user_id=from_user,
         user_name=from_user,
@@ -235,6 +249,7 @@ def parse_wecom_event(
         message_id=req_id,
         platform="wecom",
         is_group=is_group,
+        librefang_user=req_id or None,
         metadata=metadata,
     )
 
@@ -385,10 +400,18 @@ class WeComAdapter(SidecarAdapter):
 
     # ---- send-frame routing ------------------------------------------
 
-    def _enqueue_text(self, user_id: str, text: str) -> None:
+    def _enqueue_text(
+        self, user_id: str, text: str, *,
+        req_id_hint: Optional[str] = None,
+    ) -> None:
         """Enqueue text chunks as outbound WS frames. Uses
-        ``aibot_respond_msg`` once per cached ``req_id``, then falls
-        back to ``aibot_send_msg`` for the remainder."""
+        ``aibot_respond_msg`` once per cached ``req_id`` (in-memory
+        cache primary), then falls back to a `req_id_hint` (from
+        `cmd.user.librefang_user` — survives sidecar restart), then
+        finally to ``aibot_send_msg`` for the remainder.
+        ``aibot_respond_msg`` is the passive-reply path; missing
+        ``req_id`` falls through to the active-message quota which
+        unlicensed bots have set to zero."""
         if not text:
             # ``split_message("", N)`` returns ``[""]`` not ``[]``;
             # gate up front so empty/whitespace-stripped sends don't
@@ -397,6 +420,10 @@ class WeComAdapter(SidecarAdapter):
         chunks = _split_message(text, WECOM_MAX_MESSAGE_LEN)
         with self._pending_lock:
             req_id = self._pending_req_ids.pop(user_id, None)
+        # If the in-memory cache was empty (e.g. sidecar restarted
+        # between inbound and reply), try the round-tripped hint.
+        if req_id is None and req_id_hint:
+            req_id = req_id_hint
         first = chunks[0]
         if req_id:
             self._send_queue.put(_build_reply_frame(req_id, first))
@@ -608,7 +635,24 @@ class WeComAdapter(SidecarAdapter):
 
         if not text:
             return
-        self._enqueue_text(user_id, text)
+
+        # Restart-survivable req_id recovery: cmd.user["librefang_user"]
+        # carries the inbound req_id (set in parse_wecom_event). The
+        # in-memory _pending_req_ids cache vanishes on sidecar restart
+        # so without this the bot's first reply after restart would
+        # silently downgrade to aibot_send_msg (active-message quota).
+        # Guard: librefang_user is shared across channels; reject
+        # URL-shaped or whitespace-bearing values.
+        req_id_hint: Optional[str] = None
+        if cmd.user:
+            candidate = cmd.user.get("librefang_user")
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                req_id_hint = candidate
+
+        self._enqueue_text(user_id, text, req_id_hint=req_id_hint)
 
 
 if __name__ == "__main__":

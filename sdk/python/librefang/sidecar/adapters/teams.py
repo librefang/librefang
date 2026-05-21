@@ -257,17 +257,21 @@ def parse_teams_activity(
     metadata: dict[str, Any] = {}
     if service_url:
         metadata["serviceUrl"] = service_url
-    if is_group:
-        metadata["is_group"] = True
     if account_id is not None:
         metadata["account_id"] = account_id
 
+    # `is_group` is a TOP-LEVEL field on the sidecar protocol's
+    # Message struct (crates/librefang-channels/src/sidecar.rs:99-100),
+    # NOT a metadata key. The previous version stuffed it into
+    # metadata so the kernel's `msg.is_group` stayed `false` and
+    # group conversations were silently mis-routed as DMs.
     return protocol.message(
         user_id=conversation_id,
         user_name=from_name,
         content=content,
         message_id=activity_id or None,
         channel_id=conversation_id,
+        is_group=is_group,
         metadata=metadata,
     )
 

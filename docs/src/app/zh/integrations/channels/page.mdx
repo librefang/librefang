@@ -102,12 +102,11 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 ## 通道覆盖
 
-每个通道适配器都支持 `ChannelOverrides`，可在两个层级自定义按通道行为：
+`ChannelOverrides` 用来让 agent 按通道自定义行为。Sidecar 迁移后**通道级**这一层已经移除（`[channels.<name>.overrides]` 子表挂在已删的进程内 `ChannelsConfig` 上），只剩 `agent.toml` 里的 **agent 级** 覆盖。原来通道级表里的大多数 knob 现在改到对应 sidecar 的 `[sidecar_channels.env]` 环境变量里 —— 详见[频道配置指南里的迁移对照表](/zh/configuration/channels#通道行为覆盖旧版--已移除)。
 
-- **通道级** 在 `config.toml` —— 对使用该通道的所有 agent 生效。加 `[channels.<name>.overrides]` 段。
 - **Agent 级** 在 `agent.toml` —— 只对该 agent 在所有通道上生效。加顶层 `[channel_overrides]` 段。
 
-**解析顺序**：agent 级 → 通道级 → 内置默认。哪一层设了哪一层赢；没设的字段穿透到下一层（跟 `exec_policy` 一样的模式）。
+**解析顺序**（迁移后）：agent 级 → sidecar env → 内置默认。哪一层设了哪一层赢。
 
 ```toml
 # agent.toml —— 每个 agent 自己的覆盖（比如 "这个 agent 永远回 DM"）
@@ -118,7 +117,10 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml —— 该通道上对所有 agent 的默认
+# config.toml —— 通道级覆盖（历史 —— 已不再被识别）。
+# #5463 之前，使用该通道的每个 agent 都继承下面这套默认。保留只为
+# 迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）
+# 或写到 sidecar 的 `[sidecar_channels.env]` 环境变量（如 `*_DM_POLICY`）。
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -210,8 +212,11 @@ usage_footer = "compact"
 | `Bracket` | `[agent-name] 回复内容` |
 | `BoldBracket` | `**[agent-name]** 回复内容`（粗体渲染依赖通道的输出格式） |
 
+把 `prefix_agent_name` 设到 agent 清单（`agent.toml`）的 `[channel_overrides]` 里；迁移前的 `[channels.<name>.overrides]` 位置已不再被识别。
+
 ```toml
-[channels.discord.overrides]
+# agent.toml
+[channel_overrides]
 prefix_agent_name = "BoldBracket"
 ```
 
@@ -242,28 +247,32 @@ Feishu 之前会静默删掉传入文本里的 `@_user_N` 占位符。Feishu ada
 
 已下线的进程内 Rust adapter 支持下载媒体 URL、base64 编码后塞进 `POST /v2/send` 的 `base64_attachments`，覆盖 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup`。Sidecar 迁移（`librefang.sidecar.adapters.signal`）之后，非文本内容暂时统一退回 `(Unsupported content type)` 占位符；恢复 base64 round-trip 是后续工作。
 
-## WhatsApp 语音 + DM/群消息策略
+## WhatsApp DM / 群消息策略
 
-WhatsApp adapter 暴露：
+迁移到 sidecar（`librefang.sidecar.adapters.whatsapp`）后，DM / 群组策略改通过 `[[sidecar_channels]]` 块上的环境变量配置：
 
-- `send_voice(to, audio, mime_type)` — Cloud API 模式经 `/{phone_number_id}/media` 上传，再用返回的 `media_id` 发 `audio` 消息；Gateway 模式 base64 编码后 POST 到 `/message/send-voice`。
-- adapter 上的 `dm_policy: DmPolicy`（默认 `Respond`）和 `group_policy: GroupPolicy`（默认 `MentionOnly`），形状跟 Telegram 一致。Builder 方法：`with_dm_policy()`、`with_group_policy()`、`with_bot_phone()`、`with_bot_name()`。
-- `WhatsAppAdapter::should_handle_message(is_group, text) -> bool` 给 bridge / webhook 入口过滤用。
+- `WHATSAPP_DM_POLICY`：`respond`（默认）/ `allowed_only` / `ignore`。`allowed_only` 与 `WHATSAPP_ALLOWED_USERS` 配合使用。
+- `WHATSAPP_GROUP_POLICY`：`all`（默认）/ `mention_only` / `commands_only` / `ignore`。`mention_only` 模式下检查文本是否包含 `WHATSAPP_BOT_PHONE`（带/不带 `@`、去 `+`）或 `WHATSAPP_BOT_NAME`，大小写不敏感。
 
-`MentionOnly` 检查消息文本是否含 bot phone 或 bot name；`TriggerOnly` 检查 `group_trigger_patterns`；`Always` 和 `Never` 短路。
+**Cloud API 模式** 出站支持 voice / image / file / location（通过标准 sidecar `Content` 变体）。**Web/QR（Baileys）模式** 把非文本内容降级为文本（voice URL → `(Voice message: <url>)`、无标题 image → `(Image — not supported in Web mode)`），对应原 Rust 适配器 `whatsapp.rs:493-519` 的 gateway-mode fallback。
 
 ## Webhook `deliver_only` 模式
 
-webhook 通道可作为 pass-through 跑：传入 payload 完全绕过 LLM（无 sanitizer、无 rate limiter、无 agent 查找），直接转发到目标通道。适合只需要让消息落到 Telegram / Slack 等地方的推送通知和带外告警。
+Webhook sidecar 可作为 pass-through 跑：传入 payload 完全绕过 LLM（无 sanitizer、无 rate limiter、无 agent 查找），直接转发到目标通道。适合只需要让消息落到 Telegram / Slack 等地方的推送通知和带外告警。
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # deliver_only 为 true 时必填
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # WEBHOOK_DELIVER_ONLY=1 时必填
 ```
 
-`deliver_only = true` 但 `deliver` 未设时，librefang 启动时打 warn，webhook 保持不激活。扇出在内部用 `__deliver_only__` / `__deliver_target__` metadata 信号化，adapter trait 签名保持不变。
+`WEBHOOK_SECRET` 写入 `~/.librefang/secrets.env`。`WEBHOOK_DELIVER_ONLY=1` 时若 `WEBHOOK_DELIVER` 为空，sidecar **启动时 fail-closed**——原 Rust validator 同位置只 warn-and-continue，结果运行时入站被静默丢弃。扇出在内部用 `__deliver_only__` / `__deliver_target__` metadata 信号化，kernel `bridge.rs` 路由读这两个字段后短路 LLM 调用。
 
 ## 通道文件下载
 

@@ -396,6 +396,68 @@ async def test_on_send_uses_cached_context_token(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_on_send_recovers_context_token_from_user_librefang_user_when_cache_cold(
+    monkeypatch,
+):
+    """Regression guard for sidecar-restart fragility: the in-memory
+    ``_user_context_tokens`` cache vanishes on restart, so the bot's
+    first reply after restart would otherwise post with an empty
+    ``context_token`` (iLink may reject or post out-of-thread).
+    The bridge round-trips ``ChannelUser.librefang_user`` bytewise,
+    so the parse-side stash of ``context_token`` there is the
+    restart-survivable fallback. This test simulates that:
+    in-memory cache empty (post-restart), but the daemon delivers
+    ``cmd.user.librefang_user`` from the inbound that triggered the
+    reply — on_send MUST recover from there."""
+    sent: list = []
+
+    def _fake_http(url, **kw):
+        sent.append(json.loads(kw["body"].decode("utf-8")))
+        return (200, {"errcode": 0}, b"", {})
+
+    monkeypatch.setattr(wc, "_http_request", _fake_http)
+    a = _adapter()
+    # Simulate post-restart state: in-memory cache empty.
+    assert a._user_context_tokens == {}
+    await a.on_send(_send_cmd(
+        text="hi",
+        content={"Text": "hi"},
+        user={
+            "platform_id": "alice@im.wechat",
+            "librefang_user": "ctx_from_inbound",
+        },
+    ))
+    assert sent[0]["msg"]["context_token"] == "ctx_from_inbound", \
+        "on_send must recover context_token from cmd.user.librefang_user " \
+        "when the in-memory cache is empty (post-restart scenario)"
+
+
+@pytest.mark.asyncio
+async def test_on_send_ignores_url_shaped_librefang_user(monkeypatch):
+    """``librefang_user`` is shared across channels — dingtalk puts a
+    sessionWebhook URL there, telegram puts ``@username``. Must reject
+    cross-channel pollution before sending a corrupted context_token."""
+    sent: list = []
+
+    def _fake_http(url, **kw):
+        sent.append(json.loads(kw["body"].decode("utf-8")))
+        return (200, {"errcode": 0}, b"", {})
+
+    monkeypatch.setattr(wc, "_http_request", _fake_http)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        text="hi",
+        content={"Text": "hi"},
+        user={
+            "platform_id": "alice@im.wechat",
+            "librefang_user": "https://oapi.dingtalk.com/sb?s=42",
+        },
+    ))
+    # URL-shaped librefang_user rejected → context_token empty.
+    assert sent[0]["msg"]["context_token"] == ""
+
+
+@pytest.mark.asyncio
 async def test_on_send_empty_user_drops(monkeypatch):
     calls: list = []
     monkeypatch.setattr(

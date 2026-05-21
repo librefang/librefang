@@ -102,12 +102,11 @@ Env vars for each channel are listed in their respective setup sections below.
 
 ## Channel Overrides
 
-Every channel adapter supports `ChannelOverrides`, which let you customize per-channel behaviour at two levels:
+`ChannelOverrides` let an agent customize its behaviour per-channel. Post-sidecar migration the **channel-level** layer is gone (the `[channels.<name>.overrides]` sub-table lived on the deleted in-process `ChannelsConfig`); only **agent-level overrides** in `agent.toml` survive. Most knobs that the old channel-level table exposed are now set per-sidecar through `[sidecar_channels.env]` instead — see [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
 
-- **Channel-level** in `config.toml` — applies to every agent that uses that channel. Add a `[channels.<name>.overrides]` section.
 - **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
 
-**Resolution order**: agent-level → channel-level → built-in default. Whichever sets the field wins; missing fields fall through to the next layer (same pattern as `exec_policy`).
+**Resolution order** (post-migration): agent-level → sidecar env var → built-in default. Whichever sets the field wins.
 
 ```toml
 # agent.toml — per-agent override (e.g. "this agent answers every DM")
@@ -118,7 +117,11 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml — channel-level default for every agent on that channel
+# config.toml — channel-level overrides (HISTORICAL — no longer
+# accepted). Pre-#5463, every agent on that channel inherited these
+# defaults. The block is shown for migration reference only; set the
+# equivalent on the agent (`agent.toml [channel_overrides]`) or on
+# the sidecar (`[sidecar_channels.env]` env vars like `*_DM_POLICY`).
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -210,8 +213,11 @@ Set `prefix_agent_name` in `ChannelOverrides` to prepend the agent's name to eve
 | `Bracket` | `[agent-name] reply text` |
 | `BoldBracket` | `**[agent-name]** reply text` (bold rendering depends on the channel's output format) |
 
+Set `prefix_agent_name` in `[channel_overrides]` on the agent manifest (`agent.toml`); the pre-migration `[channels.<name>.overrides]` location is no longer accepted.
+
 ```toml
-[channels.discord.overrides]
+# agent.toml
+[channel_overrides]
 prefix_agent_name = "BoldBracket"
 ```
 
@@ -242,28 +248,32 @@ Feishu used to silently drop `@_user_N` placeholders from incoming text. The Fei
 
 The retired in-process Rust adapter delivered `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks by downloading the media URL and base64-encoding it into `base64_attachments` on `POST /v2/send`. After the sidecar migration (`librefang.sidecar.adapters.signal`) anything other than text degrades to a `(Unsupported content type)` placeholder; restoring the base64 round-trip end-to-end through the sidecar is a follow-up.
 
-## WhatsApp Voice + DM/Group Policies
+## WhatsApp DM / Group Policies
 
-The WhatsApp adapter exposes:
+After the sidecar migration (`librefang.sidecar.adapters.whatsapp`), the DM and group routing policies are configured via env vars on the `[[sidecar_channels]]` block:
 
-- `send_voice(to, audio, mime_type)` — Cloud API mode uploads via `/{phone_number_id}/media` then sends an `audio` message with the returned `media_id`; gateway mode base64-encodes and POSTs to `/message/send-voice`.
-- `dm_policy: DmPolicy` (default `Respond`) and `group_policy: GroupPolicy` (default `MentionOnly`) on the adapter — the same shape as Telegram. Builder methods: `with_dm_policy()`, `with_group_policy()`, `with_bot_phone()`, `with_bot_name()`.
-- `WhatsAppAdapter::should_handle_message(is_group, text) -> bool` for bridge / webhook entry-point filtering.
+- `WHATSAPP_DM_POLICY`: `respond` (default) / `allowed_only` / `ignore`. `allowed_only` cross-references `WHATSAPP_ALLOWED_USERS`.
+- `WHATSAPP_GROUP_POLICY`: `all` (default) / `mention_only` / `commands_only` / `ignore`. `mention_only` looks for `WHATSAPP_BOT_PHONE` (with / without `@` + `+` strip) or `WHATSAPP_BOT_NAME` anywhere in the message text, case-insensitive.
 
-`MentionOnly` checks whether the message text contains the bot phone or bot name; `TriggerOnly` checks `group_trigger_patterns`; `Always` and `Never` short-circuit.
+Voice / image / file outbound is supported in **Cloud API mode** (audio link, image link + caption, document link + filename, location) via the standard sidecar `Content` variants. **Web/QR (Baileys) mode** degrades non-text content to text (voice URL → `(Voice message: <url>)`, image without caption → `(Image — not supported in Web mode)`) matching the Rust adapter's gateway-mode fallback at `whatsapp.rs:493-519`.
 
 ## Webhook `deliver_only` Mode
 
-The webhook channel can run as a pass-through: incoming payloads bypass the LLM entirely (no sanitizer, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
+The webhook sidecar can run as a pass-through: incoming payloads bypass the LLM entirely (no sanitizer, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # required when deliver_only is true
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # required when WEBHOOK_DELIVER_ONLY=1
 ```
 
-When `deliver_only = true` but `deliver` is unset, librefang emits a startup warn and the webhook stays inactive. The fan-out is signalled internally via `__deliver_only__` / `__deliver_target__` metadata so adapter trait signatures stay unchanged.
+`WEBHOOK_SECRET` goes in `~/.librefang/secrets.env`. The sidecar **fail-closes at startup** when `WEBHOOK_DELIVER_ONLY=1` but `WEBHOOK_DELIVER` is empty — the Rust validator at the same path only emitted a warn-and-continue, which meant inbound messages were silently dropped at runtime. The fan-out is signalled internally via `__deliver_only__` / `__deliver_target__` metadata on the emitted message; the kernel's `bridge.rs` routing reads those keys and short-circuits the LLM call.
 
 ## Channel File Downloads
 
