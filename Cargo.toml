@@ -275,7 +275,6 @@ flate2 = "1"
 tar = "0.4"
 
 # Testing
-tokio-test = "0.4"
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 
