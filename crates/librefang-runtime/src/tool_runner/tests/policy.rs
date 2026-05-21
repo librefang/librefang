@@ -35,6 +35,7 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None,
         Some("bob"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -97,6 +98,7 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         Some("bob"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -159,6 +161,7 @@ async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
         None,
         Some("bob"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -216,6 +219,7 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         Some("alice"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -271,6 +275,7 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None,
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -468,6 +473,7 @@ async fn test_image_analyze_missing_file() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -574,6 +580,7 @@ async fn test_schedule_tools_without_kernel() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -796,6 +803,7 @@ async fn test_file_read_no_workspace_root_returns_error() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -843,6 +851,7 @@ async fn test_file_write_no_workspace_root_returns_error() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -887,6 +896,7 @@ async fn test_file_list_no_workspace_root_returns_error() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -940,6 +950,7 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -997,6 +1008,7 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1097,6 +1109,7 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1140,6 +1153,7 @@ async fn test_mcp_tool_allowed_passes_check() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1192,6 +1206,7 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1234,6 +1249,7 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1276,6 +1292,7 @@ async fn test_allowed_tools_star_allows_everything() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1317,6 +1334,7 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -1358,6 +1376,7 @@ async fn test_mcp_tool_wildcard_allowed() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id

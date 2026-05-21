@@ -40,6 +40,7 @@ async fn tool_runner_rbac_force_human_propagates_to_deferred() {
         None,
         Some("bob"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -93,6 +94,7 @@ async fn tool_runner_rbac_force_human_stays_false_for_global_require_approval() 
         None,
         Some("alice"),
         Some("telegram"),
+        None, // chat_id,
         None,
         None,
         None,
@@ -238,6 +240,7 @@ async fn test_file_read_missing() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -278,6 +281,7 @@ async fn test_file_read_path_traversal_blocked() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -315,6 +319,7 @@ async fn test_file_write_path_traversal_blocked() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -352,6 +357,7 @@ async fn test_file_list_path_traversal_blocked() {
         None, // process_registry
         None, // sender_id
         None, // channel
+        None, // chat_id
         None, // checkpoint_manager
         None, // interrupt
         None, // session_id
@@ -650,6 +656,7 @@ async fn test_file_read_allows_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -696,6 +703,7 @@ async fn test_file_list_allows_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -746,6 +754,7 @@ async fn test_file_read_allows_channel_download_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -792,6 +801,7 @@ async fn test_file_list_allows_channel_download_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -854,6 +864,7 @@ async fn test_image_analyze_allows_channel_download_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -913,6 +924,7 @@ async fn test_image_analyze_rejects_path_outside_staging_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -972,6 +984,7 @@ async fn test_image_analyze_rejects_dotdot_escape_from_staging_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1068,6 +1081,7 @@ async fn run_media_read_tool(
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1400,6 +1414,7 @@ async fn test_file_write_rejects_channel_download_dir() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1452,6 +1467,7 @@ async fn test_file_write_allows_rw_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1501,6 +1517,7 @@ async fn test_file_write_denies_readonly_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1553,6 +1570,7 @@ async fn test_file_read_outside_all_workspaces_still_blocked() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1607,6 +1625,7 @@ async fn test_apply_patch_allows_rw_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,
@@ -1658,6 +1677,7 @@ async fn test_apply_patch_denies_readonly_named_workspace_path() {
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         None,

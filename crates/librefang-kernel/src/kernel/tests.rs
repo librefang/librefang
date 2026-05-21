@@ -219,6 +219,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         timeout_secs: 60,
         sender_id: None,
         channel: None,
+        chat_id: None,
         route_to: vec![explicit_target],
         escalation_count: 1,
         session_id: None,

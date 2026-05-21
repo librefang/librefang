@@ -63,6 +63,16 @@ pub struct ToolExecContext<'a> {
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// Platform conversation id (Telegram chat_id, Discord channel_id,
+    /// WhatsApp JID) the originating user message arrived on. Distinct
+    /// from `sender_id` for group chats; coincides in DMs. Threaded
+    /// through `DeferredToolExecution.chat_id` so approval-resume routing
+    /// (the bridge listener fast-path and `wake_agent_after_approval`)
+    /// can target the originating conversation instead of always
+    /// hitting the human's DM with the bot. `None` for non-channel
+    /// call sites; the deferred payload falls back to `sender_id` in
+    /// that case.
+    pub chat_id: Option<&'a str>,
     /// LibreFang `SessionId` the tool call belongs to. When `Some`, the
     /// `file_read` / `file_write` builtins consult
     /// `kernel.acp_fs_client(session_id)` and route through the editor's
@@ -163,6 +173,10 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel,
+        // Only consumed by `execute_tool` upstream to thread into
+        // `DeferredToolExecution.chat_id`; the raw-execution path
+        // (`execute_tool_raw`, this fn) doesn't reference it.
+        chat_id: _,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -1331,6 +1345,7 @@ pub async fn execute_tool(
     process_registry: Option<&crate::process_registry::ProcessRegistry>,
     sender_id: Option<&str>,
     channel: Option<&str>,
+    chat_id: Option<&str>,
     checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
     session_id: Option<&str>,
@@ -1457,6 +1472,7 @@ pub async fn execute_tool(
                 exec_policy: exec_policy.cloned(),
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
+                chat_id: chat_id.map(|c| c.to_string()),
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
                 // When the user gate demanded approval, hand-tagged agents
                 // must NOT auto-approve — see kernel `submit_tool_approval`.
@@ -1543,6 +1559,7 @@ pub async fn execute_tool(
         process_registry,
         sender_id,
         channel,
+        chat_id,
         session_id: parsed_session_id,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,

@@ -1466,6 +1466,176 @@ impl LibreFangKernel {
         if !self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result) {
             self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
                 .await;
+            // Patching the session updates the on-disk tool_result but
+            // does NOT fire a new agent turn. After a channel-originated
+            // tool call, the LLM responded to the original `WaitingApproval`
+            // placeholder with "OK, waiting on approval" prose and the
+            // agent loop went idle — so the user sees the bot's
+            // `Approved [abc12345] file_write — …` confirmation from
+            // the channel listener and then silence forever (reported
+            // post-#5483 + #5484 by an operator: "approve 就没然后了").
+            //
+            // Wake the agent with a synthetic continuation. The text
+            // mirrors the in-flight `handle_mid_turn_signal` injection
+            // at `tool_call.rs::825-865` so the LLM sees the same
+            // payload shape whether it was live during the resolve or
+            // resumed from idle.
+            self.wake_agent_after_approval(&agent_id, &deferred, &decision, &result)
+                .await;
+        }
+    }
+
+    /// Synthesize a `[System]` continuation message and feed it to the
+    /// agent via `send_message_full` so the loop wakes up, sees the
+    /// just-patched tool_result, and generates a response that flows
+    /// back to the originating channel.
+    ///
+    /// No-op when:
+    /// - `(deferred.channel, deferred.sender_id)` is missing — non-channel
+    ///   sources (dashboard direct, cron, autonomous, inline-blocking
+    ///   `request_approval`) need their own resume path; we don't have
+    ///   a chat to route a response to.
+    /// - The kernel self-handle is unavailable (early boot / shutdown).
+    /// - `send_message_full` fails — logged at WARN; the patched
+    ///   session is still on disk so the next user-initiated turn will
+    ///   see the resolved result, just without an immediate response.
+    async fn wake_agent_after_approval(
+        &self,
+        agent_id: &AgentId,
+        deferred: &librefang_types::tool::DeferredToolExecution,
+        decision: &librefang_types::approval::ApprovalDecision,
+        result: &librefang_types::tool::ToolResult,
+    ) {
+        let (Some(channel), Some(sender_id)) =
+            (deferred.channel.as_deref(), deferred.sender_id.as_deref())
+        else {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                "Approval resolved with no channel/sender context — session patched but agent left idle (non-channel source; next user message will see the resolved result)"
+            );
+            return;
+        };
+
+        let kernel_handle = match self.self_handle.get().and_then(|w| w.upgrade()) {
+            Some(arc) => arc,
+            None => {
+                warn!(
+                    agent_id = %agent_id,
+                    "wake_agent_after_approval: kernel self-handle unavailable — agent will stay idle until next external trigger"
+                );
+                return;
+            }
+        };
+
+        // Prefer the originating chat_id over sender_id. In DMs they
+        // coincide and the previous synth-from-sender_id behaviour
+        // worked by accident; in groups `sender_id` is the human user
+        // and `chat_id` is the group conversation. Routing the reply
+        // via the group's chat_id puts the agent's follow-up back in
+        // the original thread, matching #5489's intent end-to-end.
+        let routing_chat_id = deferred
+            .chat_id
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .unwrap_or(sender_id);
+        let sender_ctx = librefang_channels::types::SenderContext {
+            channel: channel.to_string(),
+            user_id: sender_id.to_string(),
+            chat_id: Some(routing_chat_id.to_string()),
+            ..Default::default()
+        };
+
+        let result_preview = librefang_types::truncate_str(&result.content, 300);
+        let msg = format!(
+            "[System] Tool '{}' approval resolved ({}). Result: {}",
+            deferred.tool_name,
+            decision.as_str(),
+            result_preview
+        );
+
+        let loop_result = match self
+            .send_message_full(
+                *agent_id,
+                &msg,
+                kernel_handle,
+                None,
+                Some(&sender_ctx),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    tool_use_id = %deferred.tool_use_id,
+                    error = %e,
+                    "Failed to wake agent after approval resolution — session patched, will need an external trigger to continue"
+                );
+                return;
+            }
+        };
+
+        info!(
+            agent_id = %agent_id,
+            tool_use_id = %deferred.tool_use_id,
+            channel = channel,
+            response_len = loop_result.response.len(),
+            silent = loop_result.silent,
+            "Woke idle agent after approval resolution — routing agent reply back to originating chat"
+        );
+
+        // CRITICAL: send_message_full returns the agent's reply as
+        // `AgentLoopResult.response` but does NOT route it through
+        // the channel adapter — that's the channel bridge's job in
+        // the normal inbound flow (`bridge.rs` does
+        // `send_message_full(...)` then `send_response(adapter, ...)`).
+        // Skipping this step is what made "tap [Approve] → silence"
+        // surface in production: the agent loop ran and produced a
+        // perfect natural-language follow-up that nobody ever showed
+        // the user. Route it now via the channel registry, looking up
+        // the adapter the original tool call's `channel` field names.
+        if loop_result.silent || loop_result.response.is_empty() {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                "Agent's post-approval reply was silent/empty — nothing to forward to channel"
+            );
+            return;
+        }
+        let Some(adapter) = self.mesh.channel_adapters.get(channel) else {
+            warn!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                channel = channel,
+                "No active adapter for the originating channel — agent reply produced but cannot be delivered; session has the reply persisted so the next user turn surfaces it"
+            );
+            return;
+        };
+        let recipient = librefang_channels::types::ChannelUser {
+            platform_id: routing_chat_id.to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        };
+        if let Err(e) = adapter
+            .value()
+            .send(
+                &recipient,
+                librefang_channels::types::ChannelContent::Text(loop_result.response.clone()),
+            )
+            .await
+        {
+            warn!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                channel = channel,
+                recipient = %recipient.platform_id,
+                error = %e,
+                "Failed to deliver post-approval agent reply to channel — reply is still persisted in session history"
+            );
         }
     }
 
@@ -1506,6 +1676,7 @@ impl LibreFangKernel {
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            chat_id: deferred.chat_id.as_deref(),
             // Restore the originating SessionId from v36's persisted
             // `deferred_payload` so a post-restart `Allow once` resumes
             // through the *original* editor's `acp_fs_client` /
