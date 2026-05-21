@@ -922,6 +922,21 @@ impl LibreFangKernel {
                     serde_json::Value::String(ctx.channel.clone()),
                 );
             }
+            // Approval-flow group-chat support — mirror the stamp in
+            // `kernel::messaging::send_message_full_inner`. Without
+            // this, channel-initiated tool calls that flow through
+            // this path (the lower-level `execute_llm_agent` entry)
+            // would lose the chat_id and the approval listener would
+            // fall back to routing via sender_id (= human's
+            // platform_id), which collapses group chats into DMs.
+            if let Some(ref cid) = ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
             // #5227: stamp the chat-qualified scope (same formula as
             // `SessionId::for_sender_scope`). See `kernel::messaging::
             // send_message_full_inner` for the rationale and the list of
