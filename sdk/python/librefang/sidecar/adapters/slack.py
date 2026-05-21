@@ -79,7 +79,8 @@ from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
     http_request as _http_request,
     MAX_BACKOFF_SECS,
-    parse_retry_after as _parse_retry_after_impl,
+    parse_retry_after as _parse_retry_after,
+    RETRY_AFTER_DEFAULT_SECS,
     SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
@@ -474,16 +475,38 @@ class SlackAdapter(SidecarAdapter):
         body: Optional[bytes] = None,
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
+        retry_429: bool = True,
     ) -> tuple[int, Any, bytes]:
         """Thin wrapper around
         :func:`librefang.sidecar.common.http_request`. Slack's
         callers historically unpack the 3-tuple ``(status, parsed,
         raw)`` form — strip the response-headers dict the shared
-        helper returns so existing call sites don't break."""
-        status, parsed, raw, _resp_hdrs = _http_request(
+        helper returns so existing call sites don't break.
+
+        Honours ``Retry-After`` on 429 and retries the request once
+        before surfacing the rate limit to the caller. Slack's tiered
+        per-method limits (Tier 1 = 1/min, Tier 4 = 100/min) make
+        429s a routine occurrence on burst replies; without an
+        in-helper retry the existing ``status >= 300`` arm in
+        ``_post_message`` silently drops the chunk."""
+        status, parsed, raw, resp_hdrs = _http_request(
             url, method=method, body=body, headers=headers,
             timeout=timeout,
         )
+        if status == 429 and retry_429:
+            wait = _parse_retry_after(
+                resp_hdrs, default_secs=RETRY_AFTER_DEFAULT_SECS,
+            )
+            log.warn(
+                "slack 429; sleeping then retrying once",
+                url=url,
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            return self._http(
+                url, method=method, body=body, headers=headers,
+                timeout=timeout, retry_429=False,
+            )
         return status, parsed, raw
 
     # ---- REST: auth, socket-mode URL, send, reactions, role lookup --

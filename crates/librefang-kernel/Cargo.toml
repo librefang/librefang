@@ -69,7 +69,11 @@ name = "purge_sentinels"
 path = "bin/purge_sentinels.rs"
 
 [dev-dependencies]
-tokio-test = { workspace = true }
+# `test-util` enables `tokio::time::{pause,advance,resume}` and
+# `#[tokio::test(start_paused = true)]`, used by the workflow / cron
+# timing tests. (Not in the `full` feature set; previously pulled in
+# transitively by the now-removed `tokio-test` dev-dep.)
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 serial_test = "3"
 proptest = "1"

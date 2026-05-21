@@ -2,45 +2,23 @@
 //! to a registered channel adapter, plus roster CRUD. Adapter lookup keys
 //! by `"<channel>:<account_id>"` first then falls back to `<channel>` so
 //! multi-account installs don't collide.
+//!
+//! Every channel runs out-of-process as a sidecar; the per-channel
+//! `default_agent` lookup is therefore single-pass over
+//! `cfg.sidecar_channels` via [`sidecar_default_agent`].
 
 use librefang_runtime::kernel_handle;
 
 use super::super::LibreFangKernel;
 
-/// Invoke `$mac!(field_ident, "channel_name")` for every channel type in
-/// [`librefang_types::config::ChannelsConfig`].
-///
-/// Both `resolve_channel_owner` (this file) and `resolve_agent_home_channel`
-/// (`messaging.rs`) iterate the same list.  A single source of truth here
-/// means adding a new channel adapter only requires one edit — the compiler
-/// catches any missed call site automatically because the macro must compile
-/// in both contexts.
-///
-/// The `#[macro_export]` attribute makes this available as
-/// `crate::for_each_channel_field!` from anywhere in `librefang-kernel`.
-#[macro_export]
-macro_rules! for_each_channel_field {
-    ($mac:ident) => {
-        // Alphabetical order is mandatory — `resolve_agent_home_channel` uses
-        // first()-match semantics, so non-deterministic ordering across
-        // processes or compilations would silently change which agent wins
-        // when multiple channel instances share a `default_agent`. See
-        // CLAUDE.md "Deterministic prompt ordering".
-        $mac!(google_chat, "google_chat");
-    };
-}
-
 /// Resolve the `default_agent` name for a sidecar channel matching `channel`.
 ///
-/// Sidecar channels (telegram / discord / slack / … after their migration
-/// out of `cfg.channels`) are not covered by [`for_each_channel_field!`], so
-/// [`resolve_channel_owner`](LibreFangKernel::resolve_channel_owner) would
-/// otherwise return `None` for them and the `channel_send` mirror (#4824)
-/// would silently stop working post-migration. A sidecar entry's effective
-/// channel name is its `channel_type` (falling back to `name`), mirroring how
-/// `channel_bridge` derives the `ChannelType`. The first matching entry that
-/// carries a non-empty `default_agent` wins — deterministic because
-/// `sidecar_channels` is an ordered `Vec`.
+/// A sidecar entry's effective channel name is its `channel_type` (falling
+/// back to `name`), mirroring how `channel_bridge` derives the
+/// `ChannelType`. The first matching entry that carries a non-empty
+/// `default_agent` wins — deterministic because `sidecar_channels` is an
+/// ordered `Vec`. The `channel_send` mirror introduced in #4824 routes
+/// through this lookup post-sidecar-migration.
 fn sidecar_default_agent<'a>(
     sidecar_channels: &'a [librefang_types::config::SidecarChannelConfig],
     channel: &str,
@@ -386,94 +364,16 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         channel: &str,
         _chat_id: &str,
     ) -> Option<librefang_types::agent::AgentId> {
+        // Every channel runs as a sidecar; the `default_agent` lookup is
+        // a single pass over `cfg.sidecar_channels`.
         let cfg = self.config.load_full();
-        let channels = &cfg.channels;
-
-        // Scan each channel type for the first instance whose `default_agent`
-        // names this channel.  Inverted from `resolve_agent_home_channel`:
-        // channel name → agent name → AgentId.
-        //
-        // `for_each_channel_field!` expands the same exhaustive field list
-        // used by `resolve_agent_home_channel` in messaging.rs so both
-        // functions stay in sync automatically — adding a new channel adapter
-        // requires editing only `for_each_channel_field!`.
-        macro_rules! check {
-            ($field:ident, $channel_name:literal) => {{
-                if channel == $channel_name {
-                    for entry in channels.$field.iter() {
-                        if let Some(agent_name) = entry.default_agent.as_deref() {
-                            if let Some(registry_entry) =
-                                self.agents.registry.find_by_name(agent_name)
-                            {
-                                return Some(registry_entry.id);
-                            }
-                        }
-                    }
-                }
-            }};
-        }
-
-        crate::for_each_channel_field!(check);
-
-        // Sidecar channels live in `cfg.sidecar_channels`, not `cfg.channels`,
-        // so the macro above never matches them. Consult their `default_agent`
-        // (the same field that seeds inbound routing via
-        // `AgentRouter.channel_defaults`) so the #4824 `channel_send` mirror
-        // keeps resolving an owner after a channel moves to a sidecar.
-        if let Some(agent_name) = sidecar_default_agent(&cfg.sidecar_channels, channel) {
-            if let Some(registry_entry) = self.agents.registry.find_by_name(agent_name) {
-                return Some(registry_entry.id);
-            }
-        }
-
-        None
+        let agent_name = sidecar_default_agent(&cfg.sidecar_channels, channel)?;
+        self.agents.registry.find_by_name(agent_name).map(|e| e.id)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    /// Regression guard: `for_each_channel_field!` must expand in strict
-    /// alphabetical (dictionary) order.  `resolve_agent_home_channel` uses
-    /// first-match semantics, so the expansion order determines which agent
-    /// wins when multiple channel instances share a `default_agent`.
-    /// Non-alphabetical order is a silent non-determinism bug.
-    ///
-    /// If you add a new channel, insert it at its alphabetical position both
-    /// in the macro body above AND in `EXPECTED` below — the test will fail
-    /// to compile if the counts diverge, and fail at runtime if the order drifts.
-    #[test]
-    fn for_each_channel_field_macro_uses_dictionary_order() {
-        let mut collected: Vec<&'static str> = Vec::new();
-
-        macro_rules! gather {
-            ($field:ident, $name:literal) => {
-                collected.push($name);
-            };
-        }
-
-        crate::for_each_channel_field!(gather);
-
-        // Hardcoded sorted reference — must match the macro body exactly.
-        const EXPECTED: &[&str] = &[
-            "google_chat",
-        ];
-
-        assert_eq!(
-            collected, EXPECTED,
-            "for_each_channel_field! must expand in strict alphabetical order; \
-             re-sort the macro body in channel_sender.rs if this fails"
-        );
-
-        // Also verify it is already sorted (catches future drift even if
-        // EXPECTED is accidentally updated out of order).
-        let mut sorted = collected.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            collected, sorted,
-            "for_each_channel_field! expansion order is not alphabetically sorted"
-        );
-    }
-
     use super::sidecar_default_agent;
     use librefang_types::config::SidecarChannelConfig;
 
