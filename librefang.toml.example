@@ -229,15 +229,31 @@ debounce_ms = 500
 
 # ── Sidecar channel adapters (one block per channel) ─────────
 # All channel adapters now run as out-of-process Python sidecars
-# speaking newline-delimited JSON-RPC over stdio. Each block below
-# is independent — uncomment only the adapters you need. Secrets
-# belong in ~/.librefang/secrets.env, NOT here. The full env-var
-# inventory for an adapter lives in its SCHEMA — run
+# speaking newline-delimited JSON-RPC over stdio.
+#
+# PREREQUISITE — install the LibreFang Python SDK so the daemon
+# can spawn the sidecars and so the `python3 -m ...` discovery
+# at boot can read each adapter's SCHEMA:
+#   pip install librefang-sdk
+# Or, from a source checkout:
+#   pip install -e sdk/python/
+# Make sure you install into the SAME Python interpreter the
+# `command = "python3"` lines below will resolve to — daemons
+# launched under mise / pyenv / conda often pick a different
+# `python3` than the one your shell uses. Verify with
+#   python3 -c 'import librefang.sidecar; print(librefang.__file__)'
+# from the same shell that starts `librefang`.
+#
+# Each block below is independent — uncomment only the adapters
+# you need. Secrets belong in ~/.librefang/secrets.env, NOT here.
+# The full env-var inventory for an adapter lives in its SCHEMA:
 #   python3 -m librefang.sidecar.adapters.<name> --describe
-# to see every supported knob including optional and advanced
-# fields. Regenerate this listing with
-#   python3 scripts/gen_sidecar_samples.py
-# from `sdk/python/` after a SCHEMA change.
+#
+# (for librefang maintainers only — operators can ignore this)
+# Regenerate this listing from each adapter's SCHEMA with
+#   cd sdk/python && python3 ../../scripts/gen_sidecar_samples.py
+# from a librefang source checkout. Operators do not need to
+# run this — the listing is already in your sample file.
 
 # Bluesky — Bluesky / AT Protocol
 # Migrated from in-process to sidecar in #5277. Old `[channels.bluesky]` blocks are no longer recognised.
@@ -595,6 +611,10 @@ debounce_ms = 500
 # ZULIP_API_KEY = "..."  # abcd1234...
 # # ZULIP_STREAMS = "engineering, general"  # optional
 # # ZULIP_ACCOUNT_ID = "prod"  # optional
+
+
+
+
 
 
 # ── MCP Servers (external tool integration) ──────────────────
