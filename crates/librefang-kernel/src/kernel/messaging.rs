@@ -382,9 +382,7 @@ impl LibreFangKernel {
         let cfg = self.config.load_full();
 
         // Every channel is a sidecar; scan `cfg.sidecar_channels` for the
-        // first entry whose `default_agent` names this agent. First-match
-        // semantics match the previous in-process channel scan (which used
-        // the `for_each_channel_field!` macro, now retired). The effective
+        // first entry whose `default_agent` names this agent. The effective
         // channel key is `channel_type` when set, else the entry `name` —
         // same mapping `sidecar_default_agent` in channel_sender.rs uses
         // for the inverted lookup.

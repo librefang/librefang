@@ -716,116 +716,121 @@ librefang skill create
 
 ## Channel Commands
 
+Every channel runs as an out-of-process sidecar adapter — these
+commands drive the surviving daemon endpoints (`GET /api/channels`,
+`GET /api/channels/registry`, `POST /api/channels/sidecar/{name}/configure`,
+`POST /api/channels/reload`) instead of touching in-process
+adapter state.
+
 ### librefang channel list
 
-List configured channels and their status.
+List configured + discoverable channels via `GET /api/channels`.
 
 ```
 librefang channel list
 ```
 
-**Output columns:** CHANNEL, ENV VAR, STATUS.
+**Columns:** NAME, KIND, CONFIGURED, TOKEN (whether every required
+secret env var has a value), 24H MSGS.
 
-Checks `config.toml` for channel configuration sections and environment variables for required tokens. Status is one of: `Ready`, `Missing env`, `Not configured`.
+Requires a running daemon — falls through with an error if the
+daemon is not reachable. To inspect raw config without a daemon,
+read `~/.librefang/config.toml` directly.
 
-**Channels checked:** webchat, telegram, discord, slack, whatsapp, signal, matrix, email.
+---
+
+### librefang channel reload
+
+Trigger `POST /api/channels/reload` so the daemon re-reads
+`[[sidecar_channels]]` from `~/.librefang/config.toml` (plus any
+`include`-d files) without restarting. Use after a manual edit or
+after `librefang channel rm`.
+
+```
+librefang channel reload
+```
 
 ---
 
 ### librefang channel setup
 
-Interactive setup wizard for a channel integration.
+Interactive schema-driven sidecar configure.
 
 ```
-librefang channel setup [<CHANNEL>]
+librefang channel setup [<NAME>]
 ```
 
 **Arguments:**
 
 | Argument | Description |
 |---|---|
-| `<CHANNEL>` | Channel name. If omitted, displays an interactive picker. |
+| `<NAME>` | Sidecar adapter name (`telegram`, `ntfy`, …). Picker over unconfigured rows if omitted. |
 
-**Supported channels:** `telegram`, `discord`, `slack`, `whatsapp`, `email`, `signal`, `matrix`.
+Prompts for each field the sidecar's `--describe` schema lists:
 
-Each wizard:
-1. Displays step-by-step instructions for obtaining credentials.
-2. Prompts for tokens/credentials.
-3. Saves tokens to `~/.librefang/.env` with owner-only permissions.
-4. Appends the channel configuration block to `config.toml` (prompts for confirmation).
-5. Warns to restart the daemon if one is running.
+- **Non-secret fields with a current value** pre-fill from the
+  schema; an empty submission keeps the current value.
+- **Secret-typed fields with `has_value=true`** never echo back —
+  they render as `(set — leave blank to keep)`. An empty submission
+  preserves the stored secret.
+- **Required fields** mark themselves with `*` in the prompt.
+
+On submit, POSTs to `/api/channels/sidecar/{name}/configure`, which
+splits values across `~/.librefang/secrets.env` (secret-typed
+fields) and `[[sidecar_channels]]` in `config.toml` (everything
+else), then hot-reloads.
 
 **Example:**
 
 ```bash
-# Interactive picker
+# Interactive picker over unconfigured adapters
 librefang channel setup
 
-# Direct setup
+# Schema-driven configure for one adapter
 librefang channel setup telegram
-librefang channel setup discord
-librefang channel setup slack
 ```
 
 ---
 
-### librefang channel test
+### librefang channel rm
 
-Send a test message through a configured channel.
+Remove the matching `[[sidecar_channels]]` entry from
+`~/.librefang/config.toml`, then hot-reload so the running sidecar
+shuts down.
 
 ```
-librefang channel test <CHANNEL>
+librefang channel rm <NAME>
 ```
 
 **Arguments:**
 
 | Argument | Description |
 |---|---|
-| `<CHANNEL>` | Channel name to test. |
+| `<NAME>` | Sidecar entry `name` field to remove. |
 
-Requires a running daemon. Sends `POST /api/channels/<channel>/test`.
+Presence of the `[[sidecar_channels]]` block is the only on/off
+signal post-migration (the pre-#5463 `enable` / `disable` arms are
+not restored), so `rm` is how you turn an adapter off.
 
 **Example:**
 
 ```bash
-librefang channel test telegram
+librefang channel rm telegram
 ```
 
 ---
 
-### librefang channel enable
+### What's not restored
 
-Enable a channel integration.
+`librefang channel test` / `enable` / `disable` are intentionally
+**not** carried over from the pre-#5463 shape:
 
-```
-librefang channel enable <CHANNEL>
-```
-
-**Arguments:**
-
-| Argument | Description |
-|---|---|
-| `<CHANNEL>` | Channel name to enable. |
-
-In daemon mode: sends `POST /api/channels/<channel>/enable`. Without a daemon: prints a note that the change will take effect on next start.
-
----
-
-### librefang channel disable
-
-Disable a channel without removing its configuration.
-
-```
-librefang channel disable <CHANNEL>
-```
-
-**Arguments:**
-
-| Argument | Description |
-|---|---|
-| `<CHANNEL>` | Channel name to disable. |
-
-In daemon mode: sends `POST /api/channels/<channel>/disable`. Without a daemon: prints a note to edit `config.toml`.
+- **`test`** — sidecars surface their own health via stdout logs;
+  there is no in-band `/test` endpoint. Tail `librefang logs
+  --filter sidecar/<name>` instead.
+- **`enable` / `disable`** — sidecars start iff their
+  `[[sidecar_channels]]` block is in `config.toml`. `rm` is the
+  off-switch; `setup` (or hand-editing then `reload`) is on.
 
 ---
 
