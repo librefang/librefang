@@ -292,6 +292,7 @@ pub async fn create_approval(
         timeout_secs: policy.timeout_secs,
         sender_id: None,
         channel: None,
+        chat_id: None,
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: req.session_id,
