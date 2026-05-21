@@ -135,7 +135,7 @@ librefang message customer-support "A user says their payment failed."
 
 ## 4. Connect a Channel to an Agent
 
-Channel config lives under `[channels.<name>]` in `~/.librefang/config.toml`, not under top-level tables like `[telegram]` or `[discord]`.
+Channel config lives in `[[sidecar_channels]]` array-of-tables entries in `~/.librefang/config.toml`. Each entry declares one out-of-process sidecar adapter (`name`, `command`, `args`, `channel_type`, plus a `[sidecar_channels.env]` sub-table for non-secret env vars). Secret env vars belong in `~/.librefang/secrets.env`.
 
 This is LibreFang's external interface layer: the agent is no longer only a local CLI object, but something users can interact with from Telegram, Discord, Slack, WeChat, and similar systems.
 
@@ -164,10 +164,11 @@ Restart after editing config:
 librefang restart
 ```
 
-If you already have a chat target, you can test connectivity:
+To verify the sidecar started and is reaching Telegram, hot-reload then tail the sidecar's own log (sidecars print structured status to stdout):
 
 ```bash
-librefang channel test telegram --chat-id 123456789
+curl -X POST http://127.0.0.1:4545/api/channels/reload
+librefang logs --filter sidecar/telegram --tail 50
 ```
 
 ---
@@ -345,7 +346,7 @@ JSON
 ## 10. Important Source-Level Notes
 
 - Agent prompts belong under `[model].system_prompt`, not `[system_prompt].prompt`.
-- Channel config belongs under `[channels.<name>]`, for example `[channels.discord]`. Telegram is sidecar-only and uses `[[sidecar_channels]]` instead of `[channels.telegram]`.
+- Channel config belongs in `[[sidecar_channels]]` array-of-tables entries (every channel is now an out-of-process sidecar adapter — the in-process `[channels.<name>]` shape is gone).
 - Workflow steps use `agent_name` or `agent_id` plus `prompt`, not the older `type/agent/input` shape.
 - Scheduling is done with `librefang cron ...`, and webhook triggers with `librefang webhooks ...`.
 - The current CLI does not provide `librefang memory search` or `librefang kg query`.
@@ -355,5 +356,5 @@ If your goal is customer support, daily summaries, code review, or channel integ
 1. `librefang start`
 2. `librefang agent new <template>` or `librefang agent spawn ./agent.toml`
 3. `librefang message <agent> "..."`
-4. `librefang channel setup <channel>` or edit `[channels.<name>]`
+4. `librefang channel setup <channel>` or edit a `[[sidecar_channels]]` entry directly
 5. `librefang cron create ...` or `librefang workflow create ...`

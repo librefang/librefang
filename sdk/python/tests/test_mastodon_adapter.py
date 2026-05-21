@@ -180,13 +180,26 @@ def test_parse_notification_full_shape():
     }
 
 
-def test_parse_notification_thread_id_carries_in_reply_to():
+def test_parse_notification_thread_id_carries_mention_status_id():
+    """The mention's OWN status id is what the bot replies TO — the
+    pre-fix behaviour surfaced ``status.in_reply_to_id`` (the parent
+    the mention was responding to) which had two bugs at once: it
+    pointed at the wrong target AND the daemon's bridge strips
+    ``cmd.thread_id`` to ``None`` for cap-less sidecars, so the value
+    never reached ``on_send`` anyway. Both fixed by surfacing
+    ``status.id`` AND duplicating it on ``librefang_user``."""
     a = _adapter()
     a.own_account_id = "own-123"
     notif, _ = _notif_fixture(in_reply_to="status-prev")
     ev = a._parse_notification(notif)
     p = ev["params"]
-    assert p["thread_id"] == "status-prev"
+    # Reply target is the mention itself (`status_id` from the fixture),
+    # NOT what the mention was responding to (`in_reply_to_id`).
+    assert p["thread_id"] == "status-42"
+    assert p["librefang_user"] == "status-42"
+    # The pre-fix `in_reply_to_id` is still in metadata for any
+    # operator-side logging that needs it, but it must NOT govern the
+    # reply target.
     assert p["metadata"]["in_reply_to_id"] == "status-prev"
 
 
@@ -357,6 +370,34 @@ def test_post_status_reply_to_inbound_thread(monkeypatch):
     a._post_status("reply", in_reply_to_id="orig-status-123")
     c = fake.calls[0]
     assert c["params"]["in_reply_to_id"] == "orig-status-123"
+
+
+def test_on_send_recovers_in_reply_to_from_user_librefang_user(monkeypatch):
+    """End-to-end on_send regression guard. The daemon-shape pre-fix
+    bug meant cmd.thread_id=None so every reply posted as a top-level
+    toot instead of an in-reply-to. librefang_user is the always-
+    round-tripped carrier; recover from there. Also asserts the
+    bonus pre-existing fix — the reply targets the mention's own
+    status_id, not the parent the mention was responding to."""
+    import asyncio
+    a = _adapter()
+    fake = _FakeUrlopen()
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+
+    class _Cmd:
+        text = "reply"
+        content = {"Text": "reply"}
+        thread_id = None  # daemon-default
+        user = {
+            "platform_id": "alice",
+            "librefang_user": "mention-status-42",
+        }
+
+    asyncio.run(a.on_send(_Cmd()))
+    c = fake.calls[0]
+    assert c["params"]["in_reply_to_id"] == "mention-status-42", \
+        "on_send must recover in_reply_to_id from " \
+        "cmd.user.librefang_user when cmd.thread_id is None"
 
 
 def test_post_status_http_error_surfaced(monkeypatch):

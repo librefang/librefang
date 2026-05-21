@@ -347,18 +347,31 @@ channel_type = "slack"
 SLACK_APP_TOKEN = "xapp-..."
 SLACK_BOT_TOKEN = "xoxb-..."
 
-# [channels.qq]
-# app_id = "your-app-id"
-# app_secret_env = "QQ_BOT_APP_SECRET"
+# [[sidecar_channels]]
+# name = "qq"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.qq"]
+# channel_type = "qq"
+# [sidecar_channels.env]
+# QQ_APP_ID = "your-app-id"
 
-# [channels.wecom]
-# bot_id = "YOUR_BOT_ID"
-# secret_env = "WECOM_BOT_SECRET"
+# WeCom: see sidecar example below (was [channels.wecom])
+# [[sidecar_channels]]
+# name = "wecom"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wecom"]
+# channel_type = "wecom"
+# [sidecar_channels.env]
+# WECOM_BOT_ID = "aibxxxxxxx"
 
-# [channels.wechat]
-# bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
-# default_agent = "assistant"
-# allowed_users = []
+# WeChat migrated to a sidecar:
+# [[sidecar_channels]]
+# name = "wechat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wechat"]
+# channel_type = "wechat"
+# [sidecar_channels.env]
+# WECHAT_BOT_TOKEN = ""               # blank → triggers QR login
 
 # --- Browser Automation ---
 [browser]
@@ -889,32 +902,9 @@ multi-bot routing via `SLACK_ACCOUNT_ID`. Workspace-role RBAC via
 `channel_role_mapping.slack` is no longer live: see the regression
 note in the CHANGELOG.
 
-#### `[channels.whatsapp]`
+#### WhatsApp (sidecar)
 
-```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-webhook_port = 8443
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # optional admin phone numbers
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
-| `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
-| `webhook_port` | u16 | `8443` | Port to listen for incoming webhook callbacks. |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
-| `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+WhatsApp migrated to a Python sidecar (`librefang.sidecar.adapters.whatsapp`). The in-process `[channels.whatsapp]` block is no longer recognised. Both modes (Meta Cloud API + Web/QR Baileys gateway) are preserved. See [WhatsApp in the channels configuration guide](/configuration/channels#whatsapp-sidecar).
 
 #### Signal (sidecar)
 
@@ -937,71 +927,33 @@ SIGNAL_NUMBER  = "+15555550100"
 
 The sidecar enforces the same SSRF guard as the Rust adapter — `SIGNAL_API_URL` must resolve to a public address unless `SIGNAL_ALLOW_LOCAL=1` is set. Optional `SIGNAL_API_KEY` belongs in `~/.librefang/secrets.env`.
 
-#### `[channels.matrix]`
+#### Matrix (sidecar)
+
+Matrix migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.matrix`). The sidecar polls `/sync` on the configured homeserver via the Client-Server API. An existing `[channels.matrix]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-user_id = "@librefang:matrix.org"
-access_token_env = "MATRIX_ACCESS_TOKEN"
-allowed_rooms = []
+[[sidecar_channels]]
+name = "matrix"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.matrix"]
+channel_type = "matrix"
+[sidecar_channels.env]
+MATRIX_HOMESERVER_URL = "https://matrix.org"
+MATRIX_USER_ID = "@librefang:matrix.org"
+# MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # optional
+# MATRIX_ACCOUNT_ID = "prod-bot"                             # optional
+# MATRIX_MAX_UPLOAD_BYTES = "52428800"                       # optional, default 50 MiB
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `homeserver_url` | string | `"https://matrix.org"` | Matrix homeserver URL. |
-| `user_id` | string | `""` | Bot user ID (e.g., `"@librefang:matrix.org"`). |
-| `access_token_env` | string | `"MATRIX_ACCESS_TOKEN"` | Env var holding the Matrix access token. |
-| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all joined rooms. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Secret via `~/.librefang/secrets.env`: `MATRIX_ACCESS_TOKEN` (the bot's access token from the homeserver — same shape Element uses).
 
-#### `[channels.email]`
+#### Email (IMAP + SMTP) (sidecar)
 
-```toml
-[channels.email]
-imap_host = "imap.gmail.com"
-imap_port = 993
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-username = "bot@example.com"
-password_env = "EMAIL_PASSWORD"
-poll_interval_secs = 30
-folders = ["INBOX"]
-allowed_senders = []
-```
+Email is provided by the Python sidecar adapter (`librefang.sidecar.adapters.email`). The in-process `[channels.email]` config block was removed in the sidecar migration. Declare email as a `[[sidecar_channels]]` entry instead — see [Email in the channels configuration guide](/configuration/channels#email-imap--smtp-sidecar).
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `imap_host` | string | `""` | IMAP server hostname. |
-| `imap_port` | u16 | `993` | IMAP server port (993 for TLS). |
-| `smtp_host` | string | `""` | SMTP server hostname. |
-| `smtp_port` | u16 | `587` | SMTP server port (587 for STARTTLS). |
-| `username` | string | `""` | Email address for both IMAP and SMTP. |
-| `password_env` | string | `"EMAIL_PASSWORD"` | Env var holding the email password or app password. |
-| `poll_interval_secs` | u64 | `30` | IMAP polling interval in seconds. |
-| `folders` | list of strings | `["INBOX"]` | IMAP folders to monitor. |
-| `allowed_senders` | list of strings | `[]` | Only process emails from these senders. Empty = all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+#### Microsoft Teams (sidecar)
 
-#### `[channels.teams]`
-
-```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-security_token_env = "TEAMS_SECURITY_TOKEN"
-webhook_port = 3978
-allowed_tenants = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Azure Bot App ID. |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
-| `security_token_env` | string | `"TEAMS_SECURITY_TOKEN"` | Env var holding the **outgoing webhook security token** (base64-encoded, copied from the Teams portal). Used for HMAC-SHA256 verification of every inbound `Authorization: HMAC <…>` header. If unset or non-base64, signature verification is skipped and a warning is logged once at startup — production should always set this. |
-| `webhook_port` | u16 | `3978` | Port for the Bot Framework incoming webhook. |
-| `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Teams is provided by the Python sidecar adapter (`librefang.sidecar.adapters.teams`). The in-process `[channels.teams]` config block was removed in the sidecar migration. Declare Teams as a `[[sidecar_channels]]` entry instead — see [Microsoft Teams in the channels configuration guide](/configuration/channels#microsoft-teams-sidecar).
 
 #### Mattermost (sidecar)
 
@@ -1021,21 +973,9 @@ MATTERMOST_SERVER_URL = "https://mattermost.example.com"
 
 `MATTERMOST_TOKEN` belongs in `~/.librefang/secrets.env`.
 
-#### `[channels.google_chat]`
+#### Google Chat
 
-```toml
-[channels.google_chat]
-service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
-space_ids = []
-webhook_port = 8444
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | Env var holding the service account JSON key. |
-| `space_ids` | list of strings | `[]` | Google Chat space IDs to listen in. |
-| `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Google Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.google_chat`). The in-process `[channels.google_chat]` config block was removed in the sidecar migration. Declare Google Chat as a `[[sidecar_channels]]` entry instead — see [Google Chat in the channels configuration guide](/configuration/channels#google-chat).
 
 #### Twitch
 
@@ -1173,21 +1113,9 @@ BLUESKY_IDENTIFIER = "mybot.bsky.social"
 
 `BLUESKY_APP_PASSWORD` (Bluesky app password) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Bluesky form.
 
-#### `[channels.feishu]`
+#### Feishu / Lark (sidecar)
 
-```toml
-[channels.feishu]
-app_id = ""
-app_secret_env = "FEISHU_APP_SECRET"
-webhook_port = 8453
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Feishu/Lark app ID. |
-| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
-| `webhook_port` | u16 | `8453` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Feishu / Lark is provided by the Python sidecar adapter (`librefang.sidecar.adapters.feishu`). The in-process `[channels.feishu]` config block was removed in the sidecar migration. Declare Feishu / Lark as a `[[sidecar_channels]]` entry instead — see [Feishu / Lark in the channels integration guide](/integrations/channels/enterprise#feishu-lark).
 
 #### Nextcloud Talk
 
@@ -1226,52 +1154,15 @@ channel_type = "webex"
 
 `WEBEX_BOT_TOKEN` (the bot Bearer token from `developer.webex.com`) belongs in `~/.librefang/secrets.env` — the dashboard's Channels page writes it there when you fill the Webex form.
 
-#### `[channels.dingtalk]`
+#### DingTalk (sidecar)
 
-Supports two modes: **stream** (default, recommended) and **webhook** (legacy).
+DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.dingtalk`), stream mode only. The in-process `[channels.dingtalk]` config block was removed in the sidecar migration. Declare DingTalk as a `[[sidecar_channels]]` entry instead — see [DingTalk in the channels configuration guide](/configuration/channels#dingtalk-sidecar).
 
-```toml
-# Stream mode (recommended — no public IP needed)
-[channels.dingtalk]
-receive_mode = "stream"
-app_key_env = "DINGTALK_APP_KEY"
-app_secret_env = "DINGTALK_APP_SECRET"
+The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — operators who relied on webhook mode must switch to stream subscription in the DingTalk admin console.
 
-# Webhook mode (legacy)
-[channels.dingtalk]
-receive_mode = "webhook"
-access_token_env = "DINGTALK_ACCESS_TOKEN"
-secret_env = "DINGTALK_SECRET"
-webhook_port = 8457
-```
+#### ntfy
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `receive_mode` | string | `"stream"` | Connection mode: `"stream"` or `"webhook"`. |
-| `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
-| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
-| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). **Required** — webhook mode rejects requests without a numeric `timestamp` header (400), with a stale or mismatched signature (401). |
-| `webhook_port` | u16 | `8457` | Port for the incoming webhook (webhook mode only). |
-| `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-
-
-#### `[channels.ntfy]`
-
-```toml
-[channels.ntfy]
-server_url = "https://ntfy.sh"
-topic = "my-agent-topic"
-token_env = "NTFY_TOKEN"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `"https://ntfy.sh"` | ntfy server URL. Can be self-hosted. |
-| `topic` | string | `""` | Topic to subscribe/publish to. |
-| `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+ntfy is provided by the Python sidecar adapter (`librefang.sidecar.adapters.ntfy`). The in-process `[channels.ntfy]` config block was removed in the sidecar migration. Declare ntfy as a `[[sidecar_channels]]` entry instead — see [ntfy in the channels configuration guide](/configuration/channels#ntfy).
 
 #### Gotify
 
@@ -1290,83 +1181,51 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN` (publish) and `GOTIFY_CLIENT_TOKEN` (subscribe) belong in `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
-#### `[channels.webhook]`
+#### Webhook (sidecar)
+
+Webhook migrated to a Python sidecar (`librefang.sidecar.adapters.webhook`). The in-process `[channels.webhook]` block is no longer recognised. Declare as `[[sidecar_channels]]` instead — see [Webhook in the channels configuration guide](/configuration/channels#webhook-sidecar).
+
+#### QQ Bot (sidecar)
+
+QQ migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.qq`). The sidecar talks to the QQ Open Platform via WebSocket (gateway) + REST (token + outbound). An existing `[channels.qq]` block is no longer recognised — re-declare as `[[sidecar_channels]]`:
 
 ```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
+[[sidecar_channels]]
+name = "qq"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.qq"]
+channel_type = "qq"
+[sidecar_channels.env]
+QQ_APP_ID = "your-app-id"
+# QQ_ALLOWED_USERS = "openid-1,openid-2"   # optional
+# QQ_ACCOUNT_ID = "prod-bot"               # optional
+# QQ_INTENTS = "1073746435"                # optional bitmask override
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
-| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Secret via `~/.librefang/secrets.env`: `QQ_APP_SECRET` (the bot's `clientSecret` from the QQ Open Platform console).
 
-#### `[channels.qq]`
+#### WeCom (sidecar)
 
-QQ Bot channel adapter using the official QQ Bot Open Platform API.
+WeCom (formerly WeChat Work / Enterprise WeChat) migrated from an in-process Rust adapter to an out-of-process Python sidecar (`librefang.sidecar.adapters.wecom`). The sidecar connects via WebSocket to `wss://openws.work.weixin.qq.com` using the intelligent-bot Bot ID and Secret. The legacy **callback mode** (HTTP webhook + AES-CBC-256 inbound decryption) is no longer supported — Python's stdlib has no AES, and the sidecar SDK is stdlib-only by policy. Operators who relied on callback mode must switch the bot to WebSocket mode in the WeCom admin console.
 
 ```toml
-[channels.qq]
-app_id = "your-app-id"
-app_secret_env = "QQ_BOT_APP_SECRET"
-allowed_users = []
-# default_agent = "assistant"
-# account_id = "my-qq-bot"
+[[sidecar_channels]]
+name = "wecom"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.wecom"]
+channel_type = "wecom"
+
+[sidecar_channels.env]
+WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_ALLOWED_USERS = "alice,bob"
+# WECOM_ACCOUNT_ID    = "prod-bot"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | QQ Bot application ID registered on the QQ Open Platform. |
-| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | Env var holding the QQ Bot application secret. The actual secret is never stored in config. |
-| `allowed_users` | list of strings | `[]` | QQ user IDs allowed to interact. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+Secret via `~/.librefang/secrets.env`: `WECOM_BOT_SECRET` (the bot secret from the WeCom admin console).
 
-#### `[channels.wecom]`
+#### WeChat (sidecar)
 
-WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
-
-```toml
-[channels.wecom]
-bot_id = "YOUR_BOT_ID"
-secret_env = "WECOM_BOT_SECRET"
-# account_id = "my-wecom-bot"
-# default_agent = "assistant"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_id` | string | `""` | Bot ID from the WeCom admin console (intelligent bot). |
-| `secret_env` | string | `"WECOM_BOT_SECRET"` | Env var holding the bot secret. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
-
-#### `[channels.wechat]`
-
-WeChat personal account channel adapter using Tencent's iLink Bot API. Connects via QR code scan — no API keys or developer accounts required.
-
-```toml
-[channels.wechat]
-# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: persisted token from previous session
-allowed_users = []
-# default_agent = "assistant"
-# account_id = "my-wechat-bot"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_token_env` | string | `"WECHAT_BOT_TOKEN"` | Env var holding a persisted bot token from a previous QR login session. When set, skips QR login on restart. |
-| `allowed_users` | list of strings | `[]` | WeChat user IDs allowed to interact (format: `hash@im.wechat`). Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+WeChat (personal account via iLink) is provided by the Python sidecar adapter (`librefang.sidecar.adapters.wechat`). The in-process `[channels.wechat]` config block was removed in the sidecar migration. Declare WeChat as a `[[sidecar_channels]]` entry instead — see [WeChat in the channels configuration guide](/configuration/channels#wechat-sidecar).
 
 ---
 
@@ -1547,9 +1406,13 @@ slack = "U0ABCDEFG"
 
 ---
 
-### Channel Overrides
+### Channel Overrides (legacy — removed)
 
-Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
+The `[channels.<name>.overrides]` sub-table is **no longer recognised** — see the [migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed). The historical reference below documents the **pre-migration** shape only.
+
+### Channel Overrides (historical reference)
+
+Every channel adapter (pre-migration) supported an `[channels.<name>.overrides]` sub-table that customized agent behavior per-channel.
 
 ```toml
 [channels.discord.overrides]
@@ -2695,10 +2558,8 @@ Complete table of all environment variables referenced by the configuration. Non
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
 | `TWIST_TOKEN` | Twist | Twist API token. |
 | `MUMBLE_PASSWORD` | Mumble | Mumble server password. |
-| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (stream mode). |
-| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (stream mode). |
-| `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token (webhook mode). |
-| `DINGTALK_SECRET` | DingTalk | DingTalk signing secret (webhook mode). |
+| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (sidecar — `librefang.sidecar.adapters.dingtalk`, stream mode only). |
+| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (sidecar — `librefang.sidecar.adapters.dingtalk`, stream mode only). |
 | `GITTER_TOKEN` | Gitter | Gitter auth token. |
 | `NTFY_TOKEN` | ntfy | ntfy auth token (optional for public topics). |
 | `GOTIFY_APP_TOKEN` | Gotify | Gotify app token (sending). |
@@ -2739,7 +2600,7 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
-| DingTalk | `app_key_env` (stream) or `access_token_env` (webhook) |
+| DingTalk | _sidecar — validation handled by `librefang.sidecar.adapters.dingtalk`'s `DINGTALK_APP_KEY` / `DINGTALK_APP_SECRET` env check_ |
 | Gitter | `token_env` |
 | ntfy | `token_env` (only if `token_env` is non-empty; public topics are OK without auth) |
 | Webhook | `secret_env` |

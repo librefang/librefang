@@ -24,77 +24,10 @@ os.environ.setdefault("LINE_CHANNEL_SECRET", "test-secret")
 os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test-access-token")
 from librefang.sidecar.adapters import line as la  # noqa: E402
 
+from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
-
-
-class _HdrShim:
-    def __init__(self, hdrs):
-        self._hdrs = hdrs or {}
-
-    def items(self):
-        return list(self._hdrs.items())
-
-
-class _FakeResp:
-    def __init__(self, status, body=b"", headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers if headers is not None else _HdrShim({})
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-
-class _FakeUrlopen:
-    """Drop-in replacement for ``urllib.request.urlopen`` driven by a
-    pre-baked script of ``(status, body[, headers])`` tuples."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    def __call__(self, req, timeout=None):
-        body_bytes = req.data
-        try:
-            decoded = body_bytes.decode("utf-8") if body_bytes else None
-        except Exception:  # noqa: BLE001
-            decoded = None
-        self.calls.append({
-            "url": req.full_url,
-            "method": req.get_method(),
-            "headers": {k.lower(): v for k, v in req.header_items()},
-            "body_raw": decoded,
-            "timeout": timeout,
-        })
-        if not self.script:
-            raise AssertionError(
-                f"unexpected extra urlopen call to {req.full_url}"
-            )
-        entry = self.script.pop(0)
-        if len(entry) == 3:
-            status, body, resp_hdrs = entry
-        else:
-            status, body = entry
-            resp_hdrs = {}
-        if status >= 400:
-            raise urllib.error.HTTPError(
-                req.full_url, status, "Error", _HdrShim(resp_hdrs),
-                io.BytesIO(json.dumps(body or {}).encode("utf-8")),
-            )
-        if body is None:
-            payload = b""
-        elif isinstance(body, (dict, list)):
-            payload = json.dumps(body).encode("utf-8")
-        else:
-            payload = body if isinstance(body, bytes) else str(body).encode("utf-8")
-        return _FakeResp(status, payload, _HdrShim(resp_hdrs))
 
 
 def _adapter(**env):
@@ -483,7 +416,7 @@ def test_mark_seen_empty_id_returns_true_no_state_change():
     a = _adapter()
     assert a._mark_seen("") is True
     # Empty id must not be retained.
-    assert "" not in a._seen_ids
+    assert "" not in a._seen.ids
 
 
 def test_mark_seen_eviction_at_cap(monkeypatch):
@@ -496,11 +429,11 @@ def test_mark_seen_eviction_at_cap(monkeypatch):
     for i in range(11):  # 11 > MAX = 10, triggers eviction
         a._mark_seen(f"m-{i}")
     # First 4 should have been evicted.
-    assert "m-0" not in a._seen_ids
-    assert "m-3" not in a._seen_ids
+    assert "m-0" not in a._seen.ids
+    assert "m-3" not in a._seen.ids
     # The remainder are still there.
-    assert "m-4" in a._seen_ids
-    assert "m-10" in a._seen_ids
+    assert "m-4" in a._seen.ids
+    assert "m-10" in a._seen.ids
 
 
 # ---- _validate_token -------------------------------------------------
@@ -751,7 +684,7 @@ def test_handle_webhook_skips_non_message_event_without_dedupe_entry():
     status = a._handle_webhook_body(body, sig, emitted.append)
     assert status == 200
     assert emitted == []
-    assert a._seen_ids == set()
+    assert a._seen.ids == set()
 
 
 def test_handle_webhook_account_id_injected_into_metadata(monkeypatch):
@@ -841,6 +774,336 @@ async def test_on_send_falls_back_to_user_platform_id(monkeypatch):
         user={"platform_id": "Ufallback"},
     ))
     assert json.loads(fake.calls[0]["body_raw"])["to"] == "Ufallback"
+
+
+# ---- LINE reply API (free / no-quota path) --------------------------
+
+
+def test_parse_line_event_stashes_reply_token_via_librefang_user():
+    """`librefang_user` is the only inbound field the daemon's
+    bridge round-trips bytewise back to `cmd.user["librefang_user"]`
+    on outbound — `metadata.reply_token` does not survive the trip.
+    The fix stashes ``linereply:<token>:<event_ts_ms>`` here so
+    `on_send` can reconstruct the token + freshness window."""
+    event = {
+        "type": "message",
+        "replyToken": "RTOK123",
+        "timestamp": 1_700_000_000_000,
+        "source": {"type": "user", "userId": "U1"},
+        "message": {"id": "M1", "type": "text", "text": "hi"},
+    }
+    parsed = la.parse_line_event(event)
+    assert parsed is not None
+    params = parsed["params"]
+    assert params["librefang_user"] == (
+        f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    )
+    # The legacy `metadata.reply_token` continues to ship for
+    # consumers that key on it (no breaking change in the metadata
+    # shape).
+    assert params["metadata"]["reply_token"] == "RTOK123"
+
+
+def test_parse_line_event_omits_librefang_user_without_token():
+    event = {
+        "type": "message",
+        # No replyToken — postback / webhook-verify shape.
+        "timestamp": 1_700_000_000_000,
+        "source": {"type": "user", "userId": "U1"},
+        "message": {"id": "M1", "type": "text", "text": "hi"},
+    }
+    parsed = la.parse_line_event(event)
+    assert parsed is not None
+    assert "librefang_user" not in parsed["params"]
+
+
+def test_parse_reply_carry_returns_token_and_deadline_inside_window():
+    """A token whose embedded timestamp is within the safe 55 s
+    window is recovered for the reply API. The returned tuple also
+    carries the absolute epoch-ms deadline so `_post_reply` can skip
+    a 429 retry that would overshoot it."""
+    now_ms = 1_700_000_030_000  # 30 s after stash
+    carry = f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    result = la.LineAdapter._parse_reply_carry(carry, now_ms=now_ms)
+    assert result is not None
+    token, deadline_ms = result
+    assert token == "RTOK123"
+    assert deadline_ms == 1_700_000_000_000 + int(
+        la.LINE_REPLY_TOKEN_TTL_SECS * 1000
+    )
+
+
+def test_parse_reply_carry_rejects_expired_token():
+    now_ms = 1_700_000_000_000 + int(la.LINE_REPLY_TOKEN_TTL_SECS * 1000) + 1
+    carry = f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    # Older than the TTL → returns None so on_send degrades to push.
+    assert la.LineAdapter._parse_reply_carry(carry, now_ms=now_ms) is None
+
+
+def test_parse_reply_carry_rejects_cross_channel_garbage():
+    """`librefang_user` is shared across channels (dingtalk stores a
+    sessionWebhook URL there, telegram stores an @username, …) — a
+    misrouted value must not be fed to LINE's reply endpoint. The
+    `linereply:` prefix gate is the guard."""
+    # dingtalk sessionWebhook shape
+    assert la.LineAdapter._parse_reply_carry(
+        "https://oapi.dingtalk.com/robot/sendBySession?session=...",
+    ) is None
+    # telegram @handle shape
+    assert la.LineAdapter._parse_reply_carry("@alice") is None
+    # bare reply token with no prefix / no timestamp
+    assert la.LineAdapter._parse_reply_carry("RTOK123") is None
+    # mangled trailing segment
+    assert la.LineAdapter._parse_reply_carry(
+        f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:not-a-number",
+    ) is None
+    # non-string
+    assert la.LineAdapter._parse_reply_carry(None) is None
+    assert la.LineAdapter._parse_reply_carry(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_uses_reply_api_when_token_fresh(monkeypatch):
+    """When the inbound event was recent, the outbound `on_send`
+    POSTs to /v2/bot/message/reply (free; no quota burn) instead of
+    /v2/bot/message/push."""
+    fake = _FakeUrlopen([(200, {})])
+    sleeps: list[float] = []
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "sleep", sleeps.append)
+    # Pretend "now" is 10 s after the embedded timestamp.
+    now_ms = 1_700_000_010_000
+    monkeypatch.setattr(la.time, "time", lambda: now_ms / 1000.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/reply")
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body == {
+        "replyToken": "RTOK123",
+        "messages": [{"type": "text", "text": "howdy"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_falls_back_to_push_when_token_stale(monkeypatch):
+    """When the token has aged past the safe window, on_send skips
+    the reply API and falls through to the push path so the agent's
+    reply still lands."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    # Pretend "now" is 5 minutes past the embedded timestamp — well
+    # over the 55 s window.
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_300.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 1
+    # Push path, not reply.
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/push")
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["to"] == "U1"
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_falls_back_to_push_on_reply_4xx(monkeypatch):
+    """If LINE rejects the reply call (token already burned, etc.)
+    the sidecar must still get the agent's response out via push so
+    the user sees a reply. We assert two POSTs are issued: the
+    rejected reply attempt then the push fallback."""
+    fake = _FakeUrlopen([
+        # reply attempt is rejected — LINE returns 400 with "Invalid
+        # reply token".
+        (400, {"message": "Invalid reply token"}),
+        # push succeeds.
+        (200, {}),
+    ])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    monkeypatch.setattr(la.time, "sleep", lambda _s: None)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 2
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/reply")
+    assert fake.calls[1]["url"].endswith("/v2/bot/message/push")
+    body = json.loads(fake.calls[1]["body_raw"])
+    assert body["to"] == "U1"
+
+
+@pytest.mark.asyncio
+async def test_on_send_image_does_not_attempt_reply(monkeypatch):
+    """Image-and-caption is two pushes — the reply token would be
+    one-shot-locked on the first call and the caption would error.
+    Image path stays on push regardless of librefang_user shape."""
+    fake = _FakeUrlopen([(200, {}), (200, {})])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="",
+        content={"Image": {"url": "https://x/y.jpg",
+                            "caption": "see this",
+                            "mime_type": None}},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    # Both calls go through push, not reply.
+    assert len(fake.calls) == 2
+    for c in fake.calls:
+        assert c["url"].endswith("/v2/bot/message/push")
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_skips_reply_on_empty_text(monkeypatch):
+    """LINE rejects empty text on both reply and push. The pre-fix
+    push-only path made one wasted call; trying reply first would
+    double the waste. Guard: skip reply entirely when text is empty
+    (preserves the existing one-wasted-call behaviour and lets the
+    push path handle the empty case as it always has)."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="",
+        content={"Text": ""},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    # Exactly one call (push), reply is short-circuited.
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/push")
+
+
+def test_post_reply_short_circuits_when_text_exceeds_5_chunks(monkeypatch):
+    """LINE's reply endpoint accepts at most 5 messages per token.
+    A 6+-chunk payload can't be delivered via reply at all — the
+    helper must return False without an API call so on_send falls
+    back to push. Without this guard the wire call would fail with
+    a 400 and the agent would lose the reply-vs-push signal."""
+    a = _adapter()
+    # Six chunks at LINE_MSG_LIMIT each — well past the 5-cap.
+    big_text = "x" * (la.LINE_MSG_LIMIT * 6)
+    # urlopen is NOT monkeypatched — if _post_reply tried to call it
+    # the test would explode on the real socket attempt.
+    fake_calls = {"count": 0}
+
+    def _exploding_urlopen(*args, **kwargs):
+        fake_calls["count"] += 1
+        raise AssertionError(
+            "_post_reply must not make an HTTP call when chunks > 5"
+        )
+
+    monkeypatch.setattr(la.urllib.request, "urlopen", _exploding_urlopen)
+    result = a._post_reply("RTOK123", big_text)
+    assert result is False
+    assert fake_calls["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_on_send_falls_back_to_push_when_text_exceeds_5_chunks(monkeypatch):
+    """End-to-end: a >5-chunk reply lands via push (chunked) without
+    burning the reply token on a 400."""
+    # 6 chunks => 6 push calls.
+    fake = _FakeUrlopen([(200, {})] * 6)
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    a = _adapter()
+    big_text = "x" * (la.LINE_MSG_LIMIT * 6)
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text=big_text,
+        content={"Text": big_text},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    # 6 push calls, 0 reply calls.
+    assert len(fake.calls) == 6
+    for c in fake.calls:
+        assert c["url"].endswith("/v2/bot/message/push")
+
+
+def test_post_reply_skips_429_retry_when_sleep_would_overshoot_deadline(monkeypatch):
+    """A 429 ``Retry-After`` sleep that would land past the reply-
+    token deadline (~60 s from inbound) guarantees the retry hits
+    "Invalid reply token". Skipping the sleep + retry returns control
+    to on_send so push can deliver the agent's reply without burning
+    the Retry-After window first."""
+    a = _adapter()
+    # Reply token stashed at t=1700000000000; deadline = +55s = 1700000055000.
+    # Pretend "now" is 1700000050.0 (5 s before deadline). Retry-After=20s
+    # would land at 1700000070000ms — 15s past deadline.
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_050.0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(la.time, "sleep", sleeps.append)
+    fake = _FakeUrlopen([
+        (429, {"message": "rate limited"}, {"Retry-After": "20"}),
+    ])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    deadline_ms = 1_700_000_055_000  # ts_ms + 55s
+    result = a._post_reply("RTOK123", "hi", deadline_ms=deadline_ms)
+    # Skip the sleep, skip the retry, return False so push picks up.
+    assert result is False
+    assert sleeps == []  # no sleep — would have overshot
+    assert len(fake.calls) == 1  # one call (the 429), no retry
+
+
+def test_post_reply_still_retries_429_when_sleep_fits_under_deadline(monkeypatch):
+    """When Retry-After fits comfortably under the deadline we still
+    sleep + retry — the optimisation must not over-trigger and kill
+    the reply path on every 429."""
+    a = _adapter()
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(la.time, "sleep", sleeps.append)
+    fake = _FakeUrlopen([
+        (429, {"message": "rate limited"}, {"Retry-After": "2"}),
+        (200, {}),
+    ])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    deadline_ms = 1_700_000_055_000
+    result = a._post_reply("RTOK123", "hi", deadline_ms=deadline_ms)
+    # 2s sleep fits well under the 45-second remaining budget.
+    assert result is True
+    assert sleeps == [2.0]
+    assert len(fake.calls) == 2
 
 
 # ---- schema (--describe) --------------------------------------------

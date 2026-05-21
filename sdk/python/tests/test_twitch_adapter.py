@@ -454,11 +454,11 @@ def test_mark_seen_evicts_at_cap():
     for i in range(ta.SEEN_IDS_MAX + 5):
         a._mark_seen(f"id-{i}")
     # After eviction: size should be (SEEN_IDS_MAX + 5) - SEEN_IDS_EVICT.
-    assert len(a._seen_ids) == ta.SEEN_IDS_MAX + 5 - ta.SEEN_IDS_EVICT
+    assert len(a._seen.ids) == ta.SEEN_IDS_MAX + 5 - ta.SEEN_IDS_EVICT
     # The oldest IDs were dropped.
-    assert "id-0" not in a._seen_ids_set
+    assert "id-0" not in a._seen.ids
     # Recent IDs are retained.
-    assert f"id-{ta.SEEN_IDS_MAX + 4}" in a._seen_ids_set
+    assert f"id-{ta.SEEN_IDS_MAX + 4}" in a._seen.ids
 
 
 def test_mark_seen_idempotent():
@@ -466,9 +466,9 @@ def test_mark_seen_idempotent():
     grow the list."""
     a = _adapter()
     a._mark_seen("x")
-    n = len(a._seen_ids)
+    n = len(a._seen.ids)
     assert a._mark_seen("x") is False
-    assert len(a._seen_ids) == n
+    assert len(a._seen.ids) == n
 
 
 # ---- ready / capability flags -----------------------------------
@@ -812,12 +812,33 @@ def _make_send(channel_id: str = "", thread_id=None,
 
 
 def test_on_send_uses_channel_id_and_thread_id():
-    """on_send should forward channel_id + thread_id to the wire path,
-    yielding a @reply-parent-msg-id-tagged PRIVMSG on the right channel."""
+    """Forward-compat fallback: a future threading=true + `thread` cap
+    opt-in would deliver thread_id directly. In production today, the
+    bridge strips cmd.thread_id to None for cap-less sidecars — see
+    the regression-guard test below."""
     import asyncio
     a = _adapter()
     fake = _install_fake_sock(a)
     cmd = _make_send(channel_id="#librefang", thread_id="src-7", text="ack")
+    asyncio.run(a.on_send(cmd))
+    sent = b"".join(fake.sent).decode("utf-8")
+    assert sent == "@reply-parent-msg-id=src-7 PRIVMSG #librefang :ack\r\n"
+
+
+def test_on_send_recovers_reply_parent_from_user_librefang_user():
+    """Regression guard: the daemon-shape pre-fix bug meant
+    cmd.thread_id=None so the @reply-parent-msg-id tag was never
+    attached and chat UI lost the inline reply preview. librefang_user
+    is the always-round-tripped carrier."""
+    import asyncio
+    a = _adapter()
+    fake = _install_fake_sock(a)
+    cmd = _make_send(
+        channel_id="#librefang",
+        thread_id=None,  # daemon-default
+        text="ack",
+        user={"platform_id": "#librefang", "librefang_user": "src-7"},
+    )
     asyncio.run(a.on_send(cmd))
     sent = b"".join(fake.sent).decode("utf-8")
     assert sent == "@reply-parent-msg-id=src-7 PRIVMSG #librefang :ack\r\n"

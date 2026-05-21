@@ -517,7 +517,11 @@ mod tests {
         assert!(!is_rate_limit_exempt("/mcp"));
         assert!(!is_rate_limit_exempt("/hooks/wake"));
         assert!(!is_rate_limit_exempt("/hooks/agent"));
-        assert!(!is_rate_limit_exempt("/channels/feishu/webhook"));
+        // Witness rotated from dingtalk → teams after the dingtalk
+        // sidecar migration; the assertion is on the negative
+        // prefix-discipline of the exempt list, not on dingtalk
+        // specifically.
+        assert!(!is_rate_limit_exempt("/channels/teams/webhook"));
         // Prefix discipline: the exempt list must not leak onto siblings.
         assert!(!is_rate_limit_exempt("/dashboard-login"));
         assert!(!is_rate_limit_exempt("/dashboardz"));
