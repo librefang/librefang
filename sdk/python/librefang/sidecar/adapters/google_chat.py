@@ -551,15 +551,27 @@ class GoogleChatAdapter(SidecarAdapter):
                 ) from e
 
     async def on_send(self, cmd) -> None:
-        # `cmd.user_id` carries the space name (e.g. spaces/AAAA), set
-        # at inbound by `_handle_webhook` below.
-        space = cmd.user_id
-        text = cmd.text or ""
+        # `Send.channel_id` carries the space name (`spaces/AAAA`),
+        # which the framework derived from the inbound message
+        # event's `user_id` field (set by `_parse_webhook_event` to
+        # `space.name`). Fall back to `cmd.user.platform_id` so the
+        # sidecar still works behind a daemon that addresses by
+        # user. Mirrors the same fallback in teams.py / whatsapp.py.
+        space = cmd.channel_id or (
+            cmd.user.get("platform_id") if cmd.user else ""
+        ) or ""
+        if not space:
+            log.warn("google_chat on_send: empty space id, dropping")
+            return
         if not space.startswith("spaces/"):
             log.warn(
-                "google_chat: outbound dropped — user_id is not a space name",
-                user_id=space,
+                "google_chat on_send: channel_id is not a space name, dropping",
+                channel_id=space,
             )
+            return
+        text = cmd.text or ""
+        if not text:
+            log.debug("google_chat on_send: empty text, dropping")
             return
         # Stdlib HTTP is blocking; offload to a thread so we don't
         # hold the asyncio loop.

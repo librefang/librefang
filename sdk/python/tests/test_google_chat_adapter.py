@@ -420,3 +420,116 @@ def test_schema_account_id_is_advanced():
     )
     assert aid["advanced"] is True
     assert aid["required"] is False
+
+
+# ---- on_send dispatch (against the real Send dataclass) ---------------
+
+
+def _send_cmd(channel_id="spaces/AAAA", text="hi", content=None,
+              thread_id=None, user=None):
+    from librefang.sidecar.protocol import Send
+    return Send(channel_id, text, content, thread_id, user or {})
+
+
+@pytest.mark.asyncio
+async def test_on_send_basic_uses_channel_id(monkeypatch):
+    """The framework passes a `Send` whose `channel_id` is the
+    `user_id` of the inbound message event — for google_chat that
+    means `spaces/AAAA`. This test pins that `on_send` reads
+    `cmd.channel_id` and not some other field. A regression where
+    `on_send` reaches for `cmd.user_id` (no such attribute on
+    `Send`) would AttributeError on the first send."""
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    sent: list = []
+
+    def fake_urlopen(req, timeout=None):
+        sent.append((req.full_url, json.loads(req.data.decode("utf-8"))))
+
+        class _R:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _R()
+
+    monkeypatch.setattr(gc.urllib.request, "urlopen", fake_urlopen)
+    await a.on_send(_send_cmd(channel_id="spaces/AAAA", text="hello"))
+    assert len(sent) == 1
+    url, body = sent[0]
+    assert "/spaces/AAAA/messages" in url
+    assert body == {"text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_on_send_falls_back_to_user_platform_id(monkeypatch):
+    """When `channel_id` is empty, `on_send` falls back to
+    `cmd.user.platform_id`. Mirrors teams.py / whatsapp.py
+    behaviour so daemons that address by user still work."""
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    captured: list = []
+    monkeypatch.setattr(
+        gc.urllib.request, "urlopen",
+        lambda req, timeout=None: (
+            captured.append(req.full_url),
+            type("R", (), {
+                "read": lambda self: b"",
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            })(),
+        )[1],
+    )
+    await a.on_send(_send_cmd(
+        channel_id="", text="hi",
+        user={"platform_id": "spaces/BBBB"},
+    ))
+    assert len(captured) == 1
+    assert "/spaces/BBBB/messages" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_on_send_empty_channel_id_drops(monkeypatch):
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    calls: list = []
+    monkeypatch.setattr(
+        gc.urllib.request, "urlopen",
+        lambda req, timeout=None: (calls.append(req.full_url), None)[1],
+    )
+    await a.on_send(_send_cmd(channel_id="", user={}))
+    assert calls == [], "empty channel_id + empty user must drop without HTTP"
+
+
+@pytest.mark.asyncio
+async def test_on_send_non_space_channel_id_drops(monkeypatch):
+    """`channel_id` that doesn't start with `spaces/` is rejected
+    (defense against a daemon mistakenly routing a non-google-chat
+    conversation here)."""
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    calls: list = []
+    monkeypatch.setattr(
+        gc.urllib.request, "urlopen",
+        lambda req, timeout=None: (calls.append(req.full_url), None)[1],
+    )
+    await a.on_send(_send_cmd(channel_id="C12345", text="hi"))
+    assert calls == [], "non-space channel_id must drop without HTTP"
+
+
+@pytest.mark.asyncio
+async def test_on_send_empty_text_drops(monkeypatch):
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    calls: list = []
+    monkeypatch.setattr(
+        gc.urllib.request, "urlopen",
+        lambda req, timeout=None: (calls.append(req.full_url), None)[1],
+    )
+    await a.on_send(_send_cmd(text=""))
+    assert calls == []
