@@ -8094,44 +8094,10 @@ fn cmd_channel_setup(channel: Option<&str>) {
     }
 }
 
-/// Offer to append a channel config block to config.toml if it doesn't already exist.
-fn maybe_write_channel_config(channel: &str, config_block: &str) {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
-
-    if !config_path.exists() {
-        ui::hint(&i18n::t("hint-run-init"));
-        return;
-    }
-
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let section_header = format!("[channels.{channel}]");
-    if existing.contains(&section_header) {
-        ui::check_ok(&format!("{section_header} already in config.toml"));
-        return;
-    }
-
-    let answer = prompt_input("  Write to config.toml? [Y/n] ");
-    if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
-        let mut content = existing;
-        content.push_str(config_block);
-        if std::fs::write(&config_path, &content).is_ok() {
-            restrict_file_permissions(&config_path);
-            ui::check_ok(&format!("Added {section_header} to config.toml"));
-        } else {
-            ui::check_fail("Failed to write config.toml");
-        }
-    }
-}
-
-/// After channel config changes, warn user if daemon is running.
-fn notify_daemon_restart() {
-    if find_daemon().is_some() {
-        ui::check_warn("Restart the daemon to activate this channel");
-    } else {
-        ui::hint(&i18n::t("hint-start-daemon-cmd"));
-    }
-}
+// maybe_write_channel_config / notify_daemon_restart removed — they
+// supported the interactive in-process channel onboarding flow whose
+// callers were dropped when channels moved to sidecars, leaving both
+// helpers orphaned.
 
 fn channel_test_request_body(
     channel_id: Option<&str>,

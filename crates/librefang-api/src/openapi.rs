@@ -201,10 +201,9 @@ use crate::types;
         routes::create_channel_instance,
         routes::update_channel_instance_handler,
         routes::delete_channel_instance,
-        routes::whatsapp_qr_start,
-        routes::whatsapp_qr_status,
-        routes::wechat_qr_start,
-        routes::wechat_qr_status,
+        // whatsapp_qr_* / wechat_qr_* removed — those QR-pairing routes
+        // moved to the channel sidecars, so their utoipa path items no
+        // longer exist.
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,

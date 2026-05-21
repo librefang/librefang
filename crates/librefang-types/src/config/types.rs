@@ -4829,6 +4829,14 @@ fn default_auto_dream_timeout_secs() -> u64 {
     600
 }
 
+fn default_local_probe_interval_secs() -> u64 {
+    // 60 s. Cadence of the dashboard's local-model (Ollama) availability
+    // probe. Responsive enough to notice `brew services start/stop ollama`
+    // without hammering `/api/tags`. Zero or sub-probe-timeout values are
+    // clamped back to this default by the consumer.
+    60
+}
+
 impl Default for AutoDreamConfig {
     fn default() -> Self {
         Self {
@@ -5663,14 +5671,10 @@ fn default_true() -> bool {
 // `librefang.sidecar.adapters.wecom`).
 
 /// Default maximum backoff in seconds for channels using exponential backoff (60s).
-fn default_channel_max_backoff_secs() -> u64 {
-    60
-}
-
-/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
-fn default_channel_initial_backoff_2s() -> u64 {
-    2
-}
+// default_channel_max_backoff_secs / default_channel_initial_backoff_2s
+// removed — the channels that consumed them (WeChat, QQ, Feishu, etc.)
+// migrated to sidecars; their backoff cadence is now controlled by the
+// sidecar runtime, leaving these serde defaults orphaned.
 
 // default_signal_poll_interval_secs removed — Signal migrated to a
 // sidecar; the polling cadence is now controlled by

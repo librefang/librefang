@@ -722,16 +722,9 @@ fn build_channel_table(
     toml::Value::Table(table)
 }
 
-/// Convert an OpenClaw `allow_from` list into a TOML array of strings.
-/// Returns `None` if the list is empty or not present.
-fn allow_from_to_toml_array(allow_from: Option<&serde_json::Value>) -> Option<toml::Value> {
-    let list = allow_from.map(extract_string_list).unwrap_or_default();
-    if list.is_empty() {
-        return None;
-    }
-    let arr: Vec<toml::Value> = list.into_iter().map(toml::Value::String).collect();
-    Some(toml::Value::Array(arr))
-}
+// allow_from_to_toml_array removed — the channel migration paths that
+// emitted a TOML allow_from array migrated to sidecars, leaving this
+// helper without a caller.
 
 /// Split an OpenClaw model reference like `"provider/model"` into `(provider, model)`.
 /// If there's no slash, returns `("anthropic", input)` as a fallback.
@@ -2801,7 +2794,9 @@ fn parse_legacy_channels(
         }
 
         let yaml_str = std::fs::read_to_string(&yaml_path)?;
-        let ch: LegacyYamlChannelConfig = serde_yaml::from_str(&yaml_str).unwrap_or_default();
+        // Parsed for validation only — every channel below is now a sidecar
+        // skip, so the deserialized config itself is no longer consumed.
+        let _ch: LegacyYamlChannelConfig = serde_yaml::from_str(&yaml_str).unwrap_or_default();
 
         match *name {
             "telegram" => {
@@ -3747,9 +3742,13 @@ mod tests {
             .iter()
             .filter(|i| i.kind == ItemKind::Secret)
             .collect();
+        // 5 secrets now: TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN,
+        // SLACK_BOT_TOKEN, SLACK_APP_TOKEN, MATTERMOST_TOKEN. Matrix, IRC,
+        // Feishu and Teams migrated to sidecars and no longer extract their
+        // credentials into secrets.env (the sidecar owns them).
         assert!(
-            secret_items.len() >= 7,
-            "expected >=7 secrets, got {}",
+            secret_items.len() >= 5,
+            "expected >=5 secrets, got {}",
             secret_items.len()
         );
         assert!(target.path().join("secrets.env").exists());
@@ -3768,7 +3767,12 @@ mod tests {
         // secrets.env; the migrator now skips IRC entirely with a warning.
         assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
-        assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
+        // Feishu migrated to a sidecar — its skip path records a SkippedItem
+        // but no longer extracts FEISHU_APP_SECRET into secrets.env (the
+        // sidecar owns the credential). NB: Mattermost above still extracts
+        // MATTERMOST_TOKEN on skip; that per-channel asymmetry is intentional
+        // in the importer.
+        assert!(!secrets.contains("FEISHU_APP_SECRET="));
         // Teams migrated to a sidecar — TEAMS_APP_PASSWORD no longer
         // lands in secrets.env.
         assert!(!secrets.contains("TEAMS_APP_PASSWORD="));
@@ -3921,17 +3925,19 @@ mod tests {
             "migrate must stamp the current CONFIG_VERSION"
         );
 
-        // 5. Channel top-level allowlists are populated (not stuffed into overrides).
-        //    (Telegram and Discord are sidecar channels now and no longer
-        //    round-trip through `cfg.channels`; their tokens are migrated
-        //    to secrets.env.)
-        let wa = cfg
-            .channels
-            .whatsapp
-            .iter()
-            .next()
-            .expect("whatsapp configured");
-        assert_eq!(wa.allowed_users, vec!["+1555".to_string()]);
+        // 5. Sidecar-migrated channels no longer round-trip through
+        //    `cfg.channels`; they surface as skipped sidecar channels and
+        //    their tokens migrate to secrets.env. (Telegram and Discord
+        //    were the first to move.)
+        // WhatsApp migrated to a sidecar; `cfg.channels.whatsapp` no longer
+        // exists. The migrator records the legacy `whatsapp:` block as a
+        // skipped sidecar channel.
+        assert!(
+            report.skipped.iter().any(|s| s.kind == ItemKind::Channel
+                && s.name == "whatsapp"
+                && s.reason.contains("sidecar")),
+            "WhatsApp must surface as a skipped sidecar channel"
+        );
         // Signal migrated to a sidecar; `cfg.channels.signal` no longer
         // exists. The migrator records the legacy `signal:` block as a
         // skipped channel — covered by
@@ -4040,17 +4046,18 @@ mod tests {
     #[test]
     fn test_json5_channel_extraction() {
         let target = TempDir::new().unwrap();
-        // WhatsApp is the in-process witness here — telegram /
+        // google_chat is the in-process witness here — telegram /
         // discord / slack / mattermost are all sidecar-skipped, so
         // without an in-process channel the imported-count assertion
-        // below wouldn't have anything to count.
+        // below wouldn't have anything to count. (WhatsApp moved to a
+        // sidecar too, so it can no longer serve as the witness.)
         let json5_content = r#"{
   channels: {
     telegram: { botToken: "123", allowFrom: ["alice"], enabled: true },
     discord: { token: "abc", allowFrom: ["alice"], enabled: true },
     slack: { botToken: "xoxb", appToken: "xapp" },
     mattermost: { botToken: "mm-token", baseUrl: "https://mm.example.com" },
-    whatsapp: { dmPolicy: "open", allowFrom: ["phone1"] }
+    googlechat: { webhookPath: "/webhook/gchat", dmPolicy: "open" }
   }
 }"#;
         let root: OpenClawRoot = json5::from_str(json5_content).unwrap();
@@ -4075,9 +4082,9 @@ mod tests {
                 "expected {name} in report.skipped",
             );
         }
-        assert!(ch_table.contains_key("whatsapp"));
+        assert!(ch_table.contains_key("google_chat"));
 
-        // 1 channel import (whatsapp; telegram + discord + slack +
+        // 1 channel import (google_chat; telegram + discord + slack +
         // mattermost are all sidecar/skipped).
         assert_eq!(
             report
@@ -4517,6 +4524,14 @@ mod tests {
         let target = TempDir::new().unwrap();
 
         create_legacy_yaml_workspace(source.path());
+        // google_chat is the one remaining in-process channel; add it so the
+        // "a Channel was imported" assertion below has a witness (every other
+        // channel in the fixture migrated to a sidecar and is skipped).
+        std::fs::write(
+            source.path().join("messaging").join("googlechat.yaml"),
+            "type: googlechat\nwebhook_path: /webhook/gchat\ndefault_agent: coder\n",
+        )
+        .unwrap();
 
         let options = MigrateOptions {
             source: crate::MigrateSource::OpenClaw,
@@ -4834,7 +4849,12 @@ mod tests {
         // IRC removed in v2026.5 — IRC_PASSWORD is no longer emitted.
         assert!(!secrets.contains("IRC_PASSWORD="));
         assert!(secrets.contains("MATTERMOST_TOKEN=mm-token-abc"));
-        assert!(secrets.contains("FEISHU_APP_SECRET=feishu-secret-xyz"));
+        // Feishu migrated to a sidecar — its skip path records a SkippedItem
+        // but no longer extracts FEISHU_APP_SECRET into secrets.env (the
+        // sidecar owns the credential). NB: Mattermost above still extracts
+        // MATTERMOST_TOKEN on skip; that per-channel asymmetry is intentional
+        // in the importer.
+        assert!(!secrets.contains("FEISHU_APP_SECRET="));
         // Teams migrated to a sidecar — TEAMS_APP_PASSWORD no longer
         // lands in secrets.env.
         assert!(!secrets.contains("TEAMS_APP_PASSWORD="));
@@ -4859,16 +4879,19 @@ mod tests {
 
         // Secret items in report (was >=9 before IRC removal in v2026.5
         // dropped IRC_PASSWORD; was >=8 after; matrix sidecar migration
-        // (#5368) then dropped MATRIX_ACCESS_TOKEN, so 7 is the current
-        // post-removal floor).
+        // (#5368) dropped MATRIX_ACCESS_TOKEN; the Feishu and Teams sidecar
+        // migrations then dropped FEISHU_APP_SECRET and TEAMS_APP_PASSWORD,
+        // so 5 is the current post-removal floor: TELEGRAM_BOT_TOKEN,
+        // DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
+        // MATTERMOST_TOKEN).
         let secret_count = report
             .imported
             .iter()
             .filter(|i| i.kind == ItemKind::Secret)
             .count();
         assert!(
-            secret_count >= 7,
-            "expected >=7 Secret items, got {secret_count}"
+            secret_count >= 5,
+            "expected >=5 Secret items, got {secret_count}"
         );
     }
 
