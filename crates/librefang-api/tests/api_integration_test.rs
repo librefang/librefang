@@ -1415,10 +1415,13 @@ async fn test_agent_list_paginated_response_format() {
         body["offset"].is_number(),
         "Response should have 'offset' number"
     );
-    // limit should be null when not specified
-    assert!(
-        body["limit"].is_null(),
-        "limit should be null when not specified"
+    // Audit: agent-list-limit-none-unbounded. `limit` is now always a
+    // finite server-applied cap (DEFAULT_AGENT_LIST_LIMIT = 500), never
+    // null, so an unspecified `limit` can no longer return an
+    // unpaginated collection.
+    assert_eq!(
+        body["limit"], 500,
+        "limit should report the server-applied default cap (500) when not specified"
     );
 }
 
