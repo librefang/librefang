@@ -15,6 +15,7 @@ explicitly-acknowledged improvements:
 import io
 import json
 import os
+import time
 
 import pytest
 
@@ -471,23 +472,372 @@ def test_on_send_recovers_uri_from_user_librefang_user(monkeypatch):
         "that don't declare the `thread` capability)"
 
 
-def test_post_status_cold_cache_falls_back_to_unthreaded(monkeypatch):
-    """Cache miss (e.g. sidecar restarted between mention arrival and
-    user reply) must NOT crash — fall back to a non-threaded post,
-    matching the old Rust adapter."""
+def test_post_status_cold_cache_recovery_failure_falls_back_to_unthreaded(monkeypatch):
+    """Cache miss + XRPC re-fetch also fails (404 / post deleted /
+    auth still bad) → fall back to a non-threaded post. Must NOT
+    crash; matches the old Rust adapter's degradation."""
     a = _adapter()
     fake = _FakeUrlopen([
-        (200, {
+        (200, {  # createSession
             "accessJwt": "access-1",
             "refreshJwt": "refresh-1",
             "did": "did:plc:bot",
         }),
+        # getPosts re-fetch returns 404 (post deleted between inbound
+        # and our outbound retry — no recovery possible).
+        (404, {"error": "NotFound"}),
         (200, {"uri": "at://did:plc:bot/post/new", "cid": "bafynew"}),
     ])
     monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
     a._post_status("hello", thread_id="at://did:plc:unknown/post/x")
-    body = fake.calls[1]["body"]
+    # Three calls: createSession, getPosts (404), createRecord.
+    assert len(fake.calls) == 3
+    assert fake.calls[1]["url"].startswith(
+        "https://bsky.social/xrpc/app.bsky.feed.getPosts?uris="
+    )
+    body = fake.calls[2]["body"]
     assert "reply" not in body["record"]
+
+
+def test_post_status_cache_miss_recovers_reply_ref_via_xrpc(monkeypatch):
+    """#5452 fix: when `_thread_cache` was cleared (sidecar restarted
+    between the inbound mention and the outbound reply), a single
+    XRPC `app.bsky.feed.getPosts?uris=<uri>` re-fetches the post's
+    cid and reconstructs the `{root, parent}` reply struct so the
+    post still threads instead of becoming a top-level skeet visible
+    to all followers' feeds."""
+    a = _adapter()
+    # Cache is intentionally empty — simulates a fresh sidecar
+    # process where the prior _parse_notification's cache write was
+    # lost on restart.
+    assert len(a._thread_cache) == 0
+    fake = _FakeUrlopen([
+        (200, {  # createSession
+            "accessJwt": "access-1",
+            "refreshJwt": "refresh-1",
+            "did": "did:plc:bot",
+        }),
+        # getPosts re-fetch: returns the post (not itself a reply).
+        # _recover_reply_ref must derive `{root: parent, parent: parent}`
+        # from this single round-trip.
+        (200, {
+            "posts": [{
+                "uri": "at://did:plc:alice/post/1",
+                "cid": "bafy1-recovered",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "Hi @bot",
+                    "createdAt": "2026-05-21T00:00:00Z",
+                },
+                "author": {"did": "did:plc:alice", "handle": "alice"},
+            }],
+        }),
+        (200, {"uri": "at://did:plc:bot/post/reply", "cid": "bafyreply"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    a._post_status(
+        "threaded reply",
+        thread_id="at://did:plc:alice/post/1",
+    )
+    # getPosts encoded the URI as a query param.
+    assert "uris=at%3A%2F%2Fdid%3Aplc%3Aalice%2Fpost%2F1" in fake.calls[1]["url"]
+    assert (
+        fake.calls[1]["headers"]["authorization"] == "Bearer access-1"
+    )
+    # createRecord MUST carry the reconstructed reply struct.
+    body = fake.calls[2]["body"]
+    parent = {"uri": "at://did:plc:alice/post/1", "cid": "bafy1-recovered"}
+    assert body["record"]["reply"] == {"root": parent, "parent": parent}
+    # Cache must be re-populated so future replies to the same URI
+    # don't re-fetch.
+    assert a._thread_cache.get("at://did:plc:alice/post/1") == {
+        "root": parent, "parent": parent,
+    }
+
+
+def test_post_status_cache_miss_recovery_preserves_existing_thread_root(monkeypatch):
+    """When the cache-miss URI points at a post that IS itself a
+    reply, recovery MUST use that post's `record.reply.root` (the
+    thread's true origin), not the immediate parent — same shape
+    as `_compute_reply_ref` produces on the inbound path. Otherwise
+    deep-thread replies fork a new sub-thread on every cache miss."""
+    a = _adapter()
+    root_ref = {
+        "uri": "at://did:plc:carol/post/origin",
+        "cid": "bafyroot",
+    }
+    fake = _FakeUrlopen([
+        (200, {  # createSession
+            "accessJwt": "access-1",
+            "refreshJwt": "refresh-1",
+            "did": "did:plc:bot",
+        }),
+        # The fetched post IS a reply in an existing thread.
+        (200, {
+            "posts": [{
+                "uri": "at://did:plc:alice/post/reply",
+                "cid": "bafyalice-reply",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "reply text",
+                    "createdAt": "2026-05-21T00:00:00Z",
+                    "reply": {
+                        "root": root_ref,
+                        "parent": {
+                            "uri": "at://did:plc:bob/post/mid",
+                            "cid": "bafybob",
+                        },
+                    },
+                },
+            }],
+        }),
+        (200, {"uri": "at://did:plc:bot/post/reply", "cid": "bafyreply"}),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    a._post_status(
+        "deep reply",
+        thread_id="at://did:plc:alice/post/reply",
+    )
+    body = fake.calls[2]["body"]
+    # parent = the post we replied to (cid from the getPosts response).
+    expected_parent = {
+        "uri": "at://did:plc:alice/post/reply",
+        "cid": "bafyalice-reply",
+    }
+    # root = the thread origin from the fetched post's existing
+    # record.reply.root (NOT the post we replied to).
+    assert body["record"]["reply"] == {
+        "root": root_ref,
+        "parent": expected_parent,
+    }
+
+
+def test_post_status_cache_miss_recovery_caches_for_subsequent_chunks(monkeypatch):
+    """A multi-chunk reply with cache-miss must trigger EXACTLY ONE
+    XRPC re-fetch; subsequent chunks read from the re-populated
+    cache. Without this guard a 5-chunk reply would burn 5 extra
+    XRPC round-trips per restart-recovered reply."""
+    a = _adapter()
+    parent = {"uri": "at://did:plc:alice/post/1", "cid": "bafyrec"}
+    script = [
+        (200, {  # createSession
+            "accessJwt": "access-1",
+            "refreshJwt": "refresh-1",
+            "did": "did:plc:bot",
+        }),
+        # getPosts re-fetch fires ONCE.
+        (200, {
+            "posts": [{
+                "uri": "at://did:plc:alice/post/1",
+                "cid": "bafyrec",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "Hi",
+                    "createdAt": "2026-05-21T00:00:00Z",
+                },
+            }],
+        }),
+    ]
+    # Three createRecord chunks.
+    script.extend([
+        (200, {"uri": f"at://did:plc:bot/post/{i}", "cid": f"bafy{i}"})
+        for i in range(3)
+    ])
+    fake = _FakeUrlopen(script)
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    a._post_status(
+        "x" * (ba.MAX_MESSAGE_LEN * 3),
+        thread_id="at://did:plc:alice/post/1",
+    )
+    # 1 session + 1 getPosts + 3 createRecord = 5 calls. NOT
+    # 1 session + 3 × (getPosts + createRecord) = 7 calls.
+    assert len(fake.calls) == 5
+    # Only call #1 hits getPosts; the rest are createRecord.
+    assert "app.bsky.feed.getPosts" in fake.calls[1]["url"]
+    for i in range(2, 5):
+        assert "createRecord" in fake.calls[i]["url"]
+        # And each chunk reuses the reconstructed reply ref.
+        assert fake.calls[i]["body"]["record"]["reply"] == {
+            "root": parent, "parent": parent,
+        }
+
+
+def test_recover_reply_ref_rejects_non_at_uri():
+    """Sanity guard: librefang_user is shared across channels and a
+    misrouted value (dingtalk URL, telegram @handle, etc.) must not
+    be sent to bsky's XRPC. `_recover_reply_ref` returns None
+    without any HTTP call."""
+    a = _adapter()
+    assert a._recover_reply_ref(
+        "https://oapi.dingtalk.com/robot/sendBySession?session=...",
+        bearer="access-1",
+    ) is None
+    assert a._recover_reply_ref("@alice", bearer="access-1") is None
+    assert a._recover_reply_ref("", bearer="access-1") is None
+    # Even the empty cache must stay empty (no put() side-effect).
+    assert len(a._thread_cache) == 0
+
+
+def test_recover_reply_ref_refreshes_session_and_retries_on_401(monkeypatch):
+    """Token rotated between sidecar boot and this outbound — the
+    first getPosts gets 401 with the stale bearer; the helper
+    invalidates the token (sets `_access_jwt = None`, same pattern
+    `_post_status`'s own 401 path uses at line ~487/693) and
+    `_get_token` then triggers a fresh `_create_session`. Without
+    this, every queued reply after a session rotation would degrade
+    to a top-level skeet even though createRecord's own 401 handler
+    would later refresh successfully."""
+    a = _adapter()
+    # Seed a stale access token so _get_token's "still fresh" branch
+    # doesn't short-circuit before the refresh.
+    a._access_jwt = "stale-token"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = 0.0
+    fake = _FakeUrlopen([
+        # getPosts with stale token → 401
+        (401, {"error": "ExpiredToken"}),
+        # _create_session POST (triggered by _access_jwt = None)
+        (200, {
+            "accessJwt": "fresh-token",
+            "refreshJwt": "refresh-2",
+            "did": "did:plc:bot",
+        }),
+        # getPosts retry with fresh token → 200
+        (200, {
+            "posts": [{
+                "uri": "at://did:plc:alice/post/1",
+                "cid": "bafyfresh",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "hi",
+                    "createdAt": "2026-05-21T00:00:00Z",
+                },
+            }],
+        }),
+    ])
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    ref = a._recover_reply_ref(
+        "at://did:plc:alice/post/1", bearer="stale-token",
+    )
+    parent = {"uri": "at://did:plc:alice/post/1", "cid": "bafyfresh"}
+    assert ref == {"root": parent, "parent": parent}
+    # Three calls: getPosts(401), createSession, getPosts(200).
+    assert len(fake.calls) == 3
+    assert "getPosts" in fake.calls[0]["url"]
+    assert "createSession" in fake.calls[1]["url"]
+    assert "getPosts" in fake.calls[2]["url"]
+    # The retried getPosts must carry the FRESH token, not the
+    # stale one that just got rejected.
+    assert fake.calls[2]["headers"]["authorization"] == "Bearer fresh-token"
+
+
+def test_recover_reply_ref_honours_429_retry_after(monkeypatch):
+    """Transient rate limit on getPosts must NOT silently downgrade
+    the reply — same pattern the polling + send paths follow
+    (`_sleep_on_429_then_raise` family). Honour Retry-After then
+    retry once."""
+    a = _adapter()
+    a._access_jwt = "access-1"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = time.monotonic()
+    fake = _FakeUrlopen([
+        # First getPosts → 429 with Retry-After.
+        (429, {"error": "RateLimited"}, {"Retry-After": "3"}),
+        # Retry getPosts → 200.
+        (200, {
+            "posts": [{
+                "uri": "at://did:plc:alice/post/1",
+                "cid": "bafyrl",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "hi",
+                    "createdAt": "2026-05-21T00:00:00Z",
+                },
+            }],
+        }),
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ba.time, "sleep", sleeps.append)
+    ref = a._recover_reply_ref(
+        "at://did:plc:alice/post/1", bearer="access-1",
+    )
+    parent = {"uri": "at://did:plc:alice/post/1", "cid": "bafyrl"}
+    assert ref == {"root": parent, "parent": parent}
+    assert sleeps == [3.0]
+    assert len(fake.calls) == 2
+
+
+def test_recover_reply_ref_returns_none_on_malformed_posts_response(monkeypatch):
+    """Defensive guards: bsky returns 200 but with a posts list
+    that contains a non-dict, an empty list, missing cid, or no
+    posts key at all — every malformed shape must surface as
+    None so the caller degrades cleanly rather than crashing on
+    a `.get()` against a non-dict."""
+    a = _adapter()
+    a._access_jwt = "access-1"
+    a._session_did = "did:plc:bot"
+    a._session_created_at = time.monotonic()
+    for bad_body in (
+        {"posts": []},                                   # empty list
+        {"posts": [None]},                               # non-dict entry
+        {"posts": [{"uri": "at://x/y"}]},                # missing cid
+        {"posts": [{"uri": "at://x/y", "cid": ""}]},     # empty cid
+        {"otherKey": "value"},                           # no posts key
+    ):
+        fake = _FakeUrlopen([(200, bad_body)])
+        monkeypatch.setattr(ba.urllib.request, "urlopen", fake)
+        ref = a._recover_reply_ref(
+            "at://did:plc:alice/post/1", bearer="access-1",
+        )
+        assert ref is None, (
+            f"malformed response {bad_body!r} must surface as None; "
+            f"got: {ref!r}"
+        )
+
+
+def test_lru_cache_is_thread_safe_under_concurrent_put_get():
+    """`_post_status` runs in `run_in_executor(None, ...)` which
+    uses the default ThreadPoolExecutor — concurrent `put` / `get`
+    from worker threads is real. Without a lock the `move_to_end +
+    assignment + popitem` sequence races on OrderedDict's internal
+    linked list, dropping/duplicating entries. This test hammers
+    the cache from 8 threads doing 200 puts each to catch the
+    worst-case interleaving (deterministic enough to spot
+    corruption — pure data-race tests aren't always — but
+    consistent failure if the lock is removed)."""
+    import threading as _threading
+    cache = ba._LruCache(max_size=50)
+    threads = []
+    errors: list[str] = []
+
+    def writer(prefix: str) -> None:
+        try:
+            for i in range(200):
+                cache.put(f"{prefix}-{i}", {"i": i})
+                # Interleave reads with writes to stress
+                # move_to_end vs popitem ordering.
+                cache.get(f"{prefix}-{max(0, i - 5)}")
+        except Exception as e:
+            errors.append(f"{prefix}: {e!r}")
+
+    for k in range(8):
+        t = _threading.Thread(target=writer, args=(f"w{k}",), daemon=True)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "writer hung — possible lock deadlock"
+    assert errors == [], (
+        f"thread-safety regression: cache mutator raised under "
+        f"concurrent access — {errors}"
+    )
+    # Cache size must respect the cap regardless of concurrent
+    # writer interleavings. Without the lock, `popitem` could be
+    # skipped or the dict length could blow past max_size.
+    assert len(cache) <= 50, (
+        f"cache cap violated under concurrent writes: len={len(cache)}"
+    )
 
 
 def test_post_status_chunks_keep_same_reply_ref(monkeypatch):

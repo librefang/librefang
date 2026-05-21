@@ -664,17 +664,14 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a WhatsApp config.
-        // Witness rotated from DingTalk → WhatsApp after DingTalk
-        // migrated to a sidecar. (Discord / Slack / Matrix / Feishu /
-        // Email / WeCom / DingTalk are all sidecars now; the
-        // remaining in-process fixtures are WhatsApp / Teams /
-        // GoogleChat / WeChat / Webhook.)
-        b.channels.whatsapp =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::WhatsAppConfig {
-                access_token_env: "WHATSAPP_TOKEN".to_string(),
-                ..Default::default()
-            }]);
+        // Witness rotation history: dingtalk → whatsapp → webhook →
+        // google_chat → here (`file_download_max_bytes`), the only
+        // non-`OneOrMany` field still on `ChannelsConfig` after all
+        // in-process channels migrated to sidecars. The assertion
+        // is on the ReloadChannels hot action firing for ANY change
+        // to the `channels` block, not on any adapter-specific
+        // shape. (`sidecar_channels` is covered by the next test.)
+        b.channels.file_download_max_bytes = a.channels.file_download_max_bytes + 1;
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadChannels));
