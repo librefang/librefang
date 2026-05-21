@@ -104,7 +104,9 @@ from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, 
 from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
     MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
     http_request as _http_request,
+    parse_retry_after as _parse_retry_after,
     split_message as _split_message,
 )
 from librefang.sidecar.ws import WebSocketClient as _WebSocketClient
@@ -953,6 +955,7 @@ class FeishuAdapter(SidecarAdapter):
         body: Optional[dict] = None,
         token: Optional[str] = None,
         timeout: float = SEND_TIMEOUT_SECS,
+        retry_429: bool = True,
     ) -> tuple[int, Any, bytes, dict]:
         headers: dict = {
             "Content-Type": "application/json; charset=utf-8",
@@ -963,10 +966,29 @@ class FeishuAdapter(SidecarAdapter):
         body_bytes: Optional[bytes] = None
         if body is not None:
             body_bytes = json.dumps(body).encode("utf-8")
-        return _http_request(
+        status, parsed, raw, resp_hdrs = _http_request(
             url, method=method, body=body_bytes, headers=headers,
             timeout=timeout,
         )
+        # Honour Retry-After on 429 — feishu / lark publish hard rate
+        # limits per app (e.g. 1000/min for im.message.send) plus a
+        # tenant-wide bucket. Without this the next outbound burst
+        # extends the rate-limit window.
+        if status == 429 and retry_429:
+            wait = _parse_retry_after(
+                resp_hdrs, default_secs=RETRY_AFTER_DEFAULT_SECS,
+            )
+            log.warn(
+                "feishu 429; sleeping then retrying once",
+                url=url,
+                retry_after_secs=wait,
+            )
+            time.sleep(wait)
+            return self._http_json(
+                url, method=method, body=body, token=token,
+                timeout=timeout, retry_429=False,
+            )
+        return status, parsed, raw, resp_hdrs
 
     # ---- token + validation ------------------------------------------
 
