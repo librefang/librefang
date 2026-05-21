@@ -440,6 +440,32 @@ def test_get_verify_wrong_mode_rejected():
     assert status == 403
 
 
+def test_get_verify_empty_self_token_rejects(monkeypatch):
+    """When WHATSAPP_VERIFY_TOKEN is empty at startup, the handler
+    must fail closed (403) — operator was warned at startup; this
+    test pins that the close-the-door behaviour didn't regress.
+    Without the close: an attacker who guesses the subscription
+    handshake (or just sends empty hub.verify_token from a script)
+    could subscribe their own callback URL to the bot.
+
+    Regression guard for the WHATSAPP_VERIFY_TOKEN startup-warn fix
+    (audit nit #2)."""
+    warns: list = []
+    monkeypatch.setattr(wa.log, "warn",
+                        lambda msg, **kw: warns.append((msg, kw)))
+    a = _cloud_adapter(WHATSAPP_VERIFY_TOKEN="")
+    # __init__ must have logged a structured warn about the empty
+    # verify_token (the operator-side debuggability fix).
+    assert any("WHATSAPP_VERIFY_TOKEN unset" in m for m, _ in warns), \
+        "Startup must WARN when WHATSAPP_VERIFY_TOKEN is empty so " \
+        "operators see why Meta subscription handshake silently fails."
+    # And the handshake itself must fail closed.
+    status, _body = a._handle_get_verify(
+        "hub.mode=subscribe&hub.verify_token=&hub.challenge=ECHO"
+    )
+    assert status == 403
+
+
 def test_post_webhook_signature_disabled_accepts_any():
     """When WHATSAPP_APP_SECRET is empty, signature is skipped —
     operator was warned at startup."""

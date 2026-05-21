@@ -19,8 +19,11 @@ operation:
   inbound itself (POSTs directly to LibreFang's REST API at
   ``/api/agents/{id}/message``, bypassing the channel adapter
   entirely), so the sidecar's webhook server is unused in this
-  mode. Voice messages with raw audio bytes go through
-  ``{gateway_url}/message/send-voice`` with base64-encoded audio.
+  mode. The sidecar handles text + URL-based media on the gateway
+  via ``{gateway_url}/message/send``; raw-bytes voice upload is
+  not implemented (the daemon's ``ChannelContent::Voice`` only
+  ever carries a URL at the dispatch boundary — see
+  ``crates/librefang-channels/src/sidecar.rs::send`` parity).
 
 Behaviour parity (citations against
 ``crates/librefang-channels/src/whatsapp.rs`` on the pre-migration
@@ -33,18 +36,10 @@ tree):
   (``type: "location", location: {latitude, longitude}``). All
   authed via ``Authorization: Bearer <access_token>``.
 
-* Cloud API media upload (``send_voice`` path): multipart POST to
-  ``/{phone_id}/media`` with ``messaging_product=whatsapp`` then
-  reference the returned ``id`` as ``audio.id`` on the message
-  POST. Mirrors whatsapp.rs:186-275.
-
 * Gateway outbound — ``POST {gateway}/message/send`` with
   ``{to, text}``, gracefully degrading non-text content
   (voice URL → "(Voice message: <url>)" text;
   image → caption-as-text; file/other → "(Unsupported …)").
-
-* Gateway voice (raw bytes) — ``POST {gateway}/message/send-voice``
-  with ``{to, audio: base64, mime_type}``.
 
 * 4096-char chunking via shared ``split_message``.
 
@@ -76,8 +71,14 @@ Improvements over the Rust adapter:
    bounded ``SeenSet`` (10000 / 5000) keeps redeliveries from
    double-emitting.
 
-3. **429 ``Retry-After`` honoured** on every outbound POST. Rust
-   warned-and-failed on the first non-2xx (whatsapp.rs:373-377).
+3. **429 ``Retry-After`` honoured on Cloud-API outbound POSTs**
+   (``_cloud_post_with_retry``). Rust warned-and-failed on the
+   first non-2xx (whatsapp.rs:373-377). The gateway path
+   (``_gateway_send_text`` / ``_gateway_send_voice``) does NOT
+   carry retry-after handling because the local Baileys gateway
+   does not return HTTP 429 in normal operation; if you proxy the
+   gateway behind a rate-limiting reverse-proxy, wrap the gateway
+   route with your own retry layer.
 
 4. **Explicit 30 s ``urlopen`` timeout** on every REST call.
 """
@@ -409,8 +410,23 @@ class WhatsAppAdapter(SidecarAdapter):
                   "DM policy: respond / allowed_only / ignore", "text",
                   placeholder=DM_RESPOND,
                   advanced=True),
+            # NOTE: WHATSAPP_GROUP_POLICY is currently inert in BOTH
+            # operating modes. Cloud API webhook payloads at
+            # `entry[].changes[].value.messages[]` don't surface a
+            # group/conversation distinction (we hardcode
+            # `is_group=False` at `_handle_post_webhook`), and gateway
+            # mode delegates inbound entirely to the Node Baileys
+            # gateway which never calls back into the sidecar's
+            # `should_handle_message` filter. The field is kept here so
+            # the schema stays forward-compatible with a future
+            # group-aware Cloud API webhook payload shape (Meta has
+            # been rolling out group-chat support gradually); operators
+            # who set it today get no effect, which is documented in
+            # the placeholder.
             Field("WHATSAPP_GROUP_POLICY",
-                  "Group policy: all / mention_only / commands_only / ignore",
+                  "Group policy (currently inert; reserved for future "
+                  "Cloud API group support): all / mention_only / "
+                  "commands_only / ignore",
                   "text",
                   placeholder=GROUP_ALL,
                   advanced=True),
@@ -445,6 +461,22 @@ class WhatsAppAdapter(SidecarAdapter):
                     "whatsapp WHATSAPP_APP_SECRET unset — X-Hub-Signature-256 "
                     "verification on inbound webhook is DISABLED. Production "
                     "deployments should always set this.",
+                )
+            if not self.verify_token:
+                # Without this, _handle_get_verify short-circuits on
+                # `self.verify_token` and Meta's subscription handshake
+                # silently returns 403 — operators see "subscription
+                # failed" in the Meta dashboard with no log line
+                # pointing back to the missing env var. WARN at startup
+                # so the failure is loud, matching the APP_SECRET
+                # pattern above.
+                log.warn(
+                    "whatsapp WHATSAPP_VERIFY_TOKEN unset — Meta's "
+                    "subscription handshake (GET /webhook with "
+                    "hub.mode=subscribe) will return 403 silently and "
+                    "Meta cannot subscribe to the webhook. Set this "
+                    "env var to the same string you enter in the "
+                    "Meta Developer console.",
                 )
 
         port_raw = os.environ.get("WHATSAPP_WEBHOOK_PORT", "").strip()
