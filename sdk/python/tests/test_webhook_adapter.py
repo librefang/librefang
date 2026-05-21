@@ -489,6 +489,12 @@ def test_handle_webhook_body_deliver_only_metadata():
 
 
 def test_handle_webhook_body_is_group_propagates():
+    """`is_group` MUST land at the top level of params (the sidecar
+    protocol's Message struct deserialises it from the top — see
+    crates/librefang-channels/src/sidecar.rs:99-100). If we stuff
+    it into metadata instead, the kernel's `msg.is_group` stays
+    `false` and group conversations are silently mis-routed as
+    DMs."""
     a = _adapter()
     body = json.dumps({
         "message": "hi", "sender_id": "u", "is_group": True,
@@ -496,7 +502,23 @@ def test_handle_webhook_body_is_group_propagates():
     sig = _sig(b"test-secret", body)
     emitted: list = []
     a._handle_webhook_body(body, sig, None, lambda ev: emitted.append(ev))
-    assert emitted[0]["params"]["metadata"]["is_group"] is True
+    assert emitted[0]["params"]["is_group"] is True
+    # And NOT in metadata — that was the bug shape before the fix.
+    assert "is_group" not in emitted[0]["params"].get("metadata", {})
+
+
+def test_handle_webhook_body_dm_does_not_set_is_group():
+    """The omit-default contract: when `is_group=False`, the field
+    is NOT present in params (mirrors protocol.message kwarg
+    handling, which only emits `is_group` when truthy)."""
+    a = _adapter()
+    body = json.dumps({
+        "message": "hi", "sender_id": "u",  # is_group implicit false
+    }).encode("utf-8")
+    sig = _sig(b"test-secret", body)
+    emitted: list = []
+    a._handle_webhook_body(body, sig, None, lambda ev: emitted.append(ev))
+    assert "is_group" not in emitted[0]["params"]
 
 
 def test_handle_webhook_body_invalid_signature_403():

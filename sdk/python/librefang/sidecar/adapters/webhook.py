@@ -562,15 +562,20 @@ class WebhookAdapter(SidecarAdapter):
             metadata["__deliver_only__"] = True
             if self.deliver_target:
                 metadata["__deliver_target__"] = self.deliver_target
-        if parsed["is_group"]:
-            metadata["is_group"] = True
 
+        # `is_group` is a TOP-LEVEL field on the sidecar protocol's
+        # Message struct (crates/librefang-channels/src/sidecar.rs:99-100),
+        # NOT a metadata key. Pass it as the kwarg so the bridge's
+        # ChannelMessage gets the right value — otherwise the
+        # kernel routing sees `is_group: false` (the serde default)
+        # and treats group messages as DMs.
         ev = protocol.message(
             user_id=parsed["sender_id"],
             user_name=parsed["sender_name"],
             content=content,
             message_id=msg_id,
             channel_id=parsed["sender_id"],
+            is_group=parsed["is_group"],
             thread_id=parsed["thread_id"],
             metadata=metadata,
         )
