@@ -902,32 +902,9 @@ multi-bot routing via `SLACK_ACCOUNT_ID`. Workspace-role RBAC via
 `channel_role_mapping.slack` is no longer live: see the regression
 note in the CHANGELOG.
 
-#### `[channels.whatsapp]`
+#### WhatsApp (sidecar)
 
-```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-webhook_port = 8443
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # optional admin phone numbers
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
-| `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
-| `webhook_port` | u16 | `8443` | Port to listen for incoming webhook callbacks. |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
-| `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+WhatsApp migrated to a Python sidecar (`librefang.sidecar.adapters.whatsapp`). The in-process `[channels.whatsapp]` block is no longer recognised. Both modes (Meta Cloud API + Web/QR Baileys gateway) are preserved. See [WhatsApp in the channels configuration guide](/configuration/channels#whatsapp-sidecar).
 
 #### Signal (sidecar)
 
@@ -974,25 +951,9 @@ Secret via `~/.librefang/secrets.env`: `MATRIX_ACCESS_TOKEN` (the bot's access t
 
 Email is provided by the Python sidecar adapter (`librefang.sidecar.adapters.email`). The in-process `[channels.email]` config block was removed in the sidecar migration. Declare email as a `[[sidecar_channels]]` entry instead — see [Email in the channels configuration guide](/configuration/channels#email-imap--smtp-sidecar).
 
-#### `[channels.teams]`
+#### Microsoft Teams (sidecar)
 
-```toml
-[channels.teams]
-app_id = ""
-app_password_env = "TEAMS_APP_PASSWORD"
-security_token_env = "TEAMS_SECURITY_TOKEN"
-webhook_port = 3978
-allowed_tenants = []
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | string | `""` | Azure Bot App ID. |
-| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
-| `security_token_env` | string | `"TEAMS_SECURITY_TOKEN"` | Env var holding the **outgoing webhook security token** (base64-encoded, copied from the Teams portal). Used for HMAC-SHA256 verification of every inbound `Authorization: HMAC <…>` header. If unset or non-base64, signature verification is skipped and a warning is logged once at startup — production should always set this. |
-| `webhook_port` | u16 | `3978` | Port for the Bot Framework incoming webhook. |
-| `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Teams is provided by the Python sidecar adapter (`librefang.sidecar.adapters.teams`). The in-process `[channels.teams]` config block was removed in the sidecar migration. Declare Teams as a `[[sidecar_channels]]` entry instead — see [Microsoft Teams in the channels configuration guide](/configuration/channels#microsoft-teams-sidecar).
 
 #### Mattermost (sidecar)
 
@@ -1012,21 +973,9 @@ MATTERMOST_SERVER_URL = "https://mattermost.example.com"
 
 `MATTERMOST_TOKEN` belongs in `~/.librefang/secrets.env`.
 
-#### `[channels.google_chat]`
+#### Google Chat
 
-```toml
-[channels.google_chat]
-service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
-space_ids = []
-webhook_port = 8444
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | Env var holding the service account JSON key. |
-| `space_ids` | list of strings | `[]` | Google Chat space IDs to listen in. |
-| `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Google Chat is provided by the Python sidecar adapter (`librefang.sidecar.adapters.google_chat`). The in-process `[channels.google_chat]` config block was removed in the sidecar migration. Declare Google Chat as a `[[sidecar_channels]]` entry instead — see [Google Chat in the channels configuration guide](/configuration/channels#google-chat).
 
 #### Twitch
 
@@ -1211,21 +1160,9 @@ DingTalk is provided by the Python sidecar adapter (`librefang.sidecar.adapters.
 
 The legacy in-process `webhook` mode (HMAC-SHA256 over `timestamp + secret + body`) is NOT ported — operators who relied on webhook mode must switch to stream subscription in the DingTalk admin console.
 
-#### `[channels.ntfy]`
+#### ntfy
 
-```toml
-[channels.ntfy]
-server_url = "https://ntfy.sh"
-topic = "my-agent-topic"
-token_env = "NTFY_TOKEN"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server_url` | string | `"https://ntfy.sh"` | ntfy server URL. Can be self-hosted. |
-| `topic` | string | `""` | Topic to subscribe/publish to. |
-| `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+ntfy is provided by the Python sidecar adapter (`librefang.sidecar.adapters.ntfy`). The in-process `[channels.ntfy]` config block was removed in the sidecar migration. Declare ntfy as a `[[sidecar_channels]]` entry instead — see [ntfy in the channels configuration guide](/configuration/channels#ntfy).
 
 #### Gotify
 
@@ -1244,21 +1181,9 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN` (publish) and `GOTIFY_CLIENT_TOKEN` (subscribe) belong in `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
-#### `[channels.webhook]`
+#### Webhook (sidecar)
 
-```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
-| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+Webhook migrated to a Python sidecar (`librefang.sidecar.adapters.webhook`). The in-process `[channels.webhook]` block is no longer recognised. Declare as `[[sidecar_channels]]` instead — see [Webhook in the channels configuration guide](/configuration/channels#webhook-sidecar).
 
 #### QQ Bot (sidecar)
 
@@ -1481,9 +1406,13 @@ slack = "U0ABCDEFG"
 
 ---
 
-### Channel Overrides
+### Channel Overrides (legacy — removed)
 
-Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
+The `[channels.<name>.overrides]` sub-table is **no longer recognised** — see the [migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed). The historical reference below documents the **pre-migration** shape only.
+
+### Channel Overrides (historical reference)
+
+Every channel adapter (pre-migration) supported an `[channels.<name>.overrides]` sub-table that customized agent behavior per-channel.
 
 ```toml
 [channels.discord.overrides]

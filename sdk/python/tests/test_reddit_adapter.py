@@ -753,10 +753,11 @@ def test_seen_comments_idempotent_mark():
 
 
 class _StubCmd:
-    def __init__(self, *, text=None, content=None, thread_id=None):
+    def __init__(self, *, text=None, content=None, thread_id=None, user=None):
         self.text = text
         self.content = content
         self.thread_id = thread_id
+        self.user = user if user is not None else {}
 
 
 def test_on_send_uses_thread_id_as_parent_fullname(monkeypatch):
@@ -789,3 +790,64 @@ def test_on_send_non_text_content_falls_back_to_placeholder(monkeypatch):
     )))
     form = _form(fake.calls[0]["body_raw"])
     assert "Unsupported content type" in form["text"]
+
+
+def test_on_send_recovers_parent_fullname_from_user_librefang_user(monkeypatch):
+    """Regression guard for the daemon-shape pre-fix bug: the bridge
+    only round-trips cmd.thread_id when [overrides] threading=true AND
+    the sidecar declares the `thread` capability — reddit declares
+    neither, so cmd.thread_id is always None in production. The pre-fix
+    on_send then RAISED RuntimeError("missing parent fullname"), which
+    the SDK's bare-except `on_command` swallowed silently. Bot looked
+    healthy, no replies ever landed.
+
+    librefang_user is the always-round-tripped carrier — this drives
+    the realistic daemon shape and asserts the POST contains the
+    correct thing_id."""
+    a = _adapter()
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (200, {"json": {"errors": [], "data": {}}}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hello",
+        # Daemon-default: thread_id is None
+        thread_id=None,
+        # The bridge round-trips librefang_user from inbound emit
+        user={
+            "platform_id": "alice",
+            "librefang_user": "t1_abc123",
+        },
+    )))
+    form = _form(fake.calls[0]["body_raw"])
+    assert form["thing_id"] == "t1_abc123", \
+        "on_send must recover parent fullname from " \
+        "cmd.user.librefang_user (not from cmd.thread_id, which " \
+        "the daemon NULLs by default for capability-less sidecars)"
+
+
+def test_on_send_rejects_non_reddit_fullname_in_librefang_user(monkeypatch):
+    """librefang_user is shared across channels (dingtalk puts a
+    sessionWebhook URL, telegram puts @username, etc.). Reddit's
+    `thing_id` must start with a deterministic prefix
+    (t1_/t3_/t4_/t5_); anything else must be rejected so we don't
+    POST garbage and trigger Reddit's 400."""
+    a = _adapter()
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    fake = _FakeUrlopen([
+        (200, {"json": {"errors": [], "data": {}}}),
+    ])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi",
+        # Daemon-default thread_id; valid-looking but non-reddit
+        # librefang_user.
+        thread_id="t1_fallback",
+        user={"platform_id": "alice", "librefang_user": "https://oapi.dingtalk.com/sb?s=42"},
+    )))
+    form = _form(fake.calls[0]["body_raw"])
+    # URL-shaped librefang_user rejected → falls back to thread_id.
+    assert form["thing_id"] == "t1_fallback"

@@ -236,20 +236,20 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 // Feature-gated adapter imports
 // email migrated to a sidecar (librefang.sidecar.adapters.email);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-google-chat")]
-use librefang_channels::google_chat::GoogleChatAdapter;
+// google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
 // see SIDECAR_CATALOG in routes/channels.rs.
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // see SIDECAR_CATALOG in routes/channels.rs.
 // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-teams")]
-use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-webhook")]
-use librefang_channels::webhook::WebhookAdapter;
-#[cfg(feature = "channel-whatsapp")]
-use librefang_channels::whatsapp::WhatsAppAdapter;
+// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // Wave 3
 // line migrated to a sidecar (librefang.sidecar.adapters.line); see
 // SIDECAR_CATALOG in routes/channels.rs.
@@ -1853,85 +1853,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn channel_overrides(
         &self,
-        channel_type: &str,
-        account_id: Option<&str>,
+        _channel_type: &str,
+        _account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        let cfg = self.kernel.config_ref();
-        let channels = &cfg.channels;
-
-        /// Look up channel overrides and default_agent from the matching
-        /// channel config entry. Prefers the entry whose `account_id` matches;
-        /// falls back to the first entry when no account_id is provided.
-        macro_rules! find_channel_info {
-            ($field:ident) => {{
-                let entry = if let Some(aid) = account_id {
-                    channels
-                        .$field
-                        .iter()
-                        .find(|c| c.account_id.as_deref() == Some(aid))
-                } else {
-                    channels.$field.first()
-                };
-                (
-                    entry.map(|c| c.overrides.clone()),
-                    entry.and_then(|c| c.default_agent.clone()),
-                )
-            }};
-        }
-
-        let (mut overrides, default_agent_name) = match channel_type {
-            "whatsapp" => find_channel_info!(whatsapp),
-            "teams" => find_channel_info!(teams),
-            "google_chat" => find_channel_info!(google_chat),
-            // Wave 5
-            "webhook" => find_channel_info!(webhook),
-            _ => (None, None),
-        };
-
-        // Merge the default agent's routing aliases into group_trigger_patterns
-        // so aliases trigger the bot in group chats without needing a formal
-        // @mention. Issue #2292.
-        if let (Some(ref mut ov), Some(agent_name)) = (&mut overrides, default_agent_name) {
-            if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
-                if let Some(routing) = entry.manifest.metadata.get("routing") {
-                    let aliases: Vec<String> = routing
-                        .get("aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let weak: Vec<String> = routing
-                        .get("weak_aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for alias in aliases.into_iter().chain(weak) {
-                        if !alias.is_empty() {
-                            let escaped_alias: String = alias
-                                .chars()
-                                .flat_map(|c| {
-                                    if ".+*?^$()[]{}|\\".contains(c) {
-                                        vec!['\\', c]
-                                    } else {
-                                        vec![c]
-                                    }
-                                })
-                                .collect();
-                            // Use \b word boundaries only for ASCII aliases;
-                            // CJK and other non-ASCII aliases use plain substring
-                            // matching since \b is ASCII-only in Rust's regex.
-                            let escaped = if escaped_alias.is_ascii() {
-                                format!("(?i)\\b{}\\b", escaped_alias)
-                            } else {
-                                format!("(?i){}", escaped_alias)
-                            };
-                            if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
-                                ov.group_trigger_patterns.push(escaped);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        overrides
+        // Per-channel `ChannelOverrides` only ever lived on the
+        // in-process `[channels.<name>]` configs, alongside an
+        // alias-merging side effect that pushed the default agent's
+        // routing aliases onto `group_trigger_patterns` (#2292).
+        // Sidecars have no equivalent per-instance override slot,
+        // and the alias-merging happens elsewhere now (via
+        // `agent_channel_overrides`, below, which reads the
+        // agent.toml). With every channel sidecar-migrated this
+        // method has nothing to return.
+        //
+        // The trait method stays — callers in the bridge still
+        // invoke it through the `KernelApi` interface, and the
+        // `None` short-circuits the per-channel override merge.
+        None
     }
 
     async fn agent_channel_overrides(
@@ -2451,40 +2389,15 @@ async fn redispatch_journal_entry(
 
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
-    config: &librefang_types::config::ChannelsConfig,
+    _config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
-    // Check which channels have config — only consider enabled features
-    #[allow(unused_mut)]
-    let mut has_any = false;
-
-    // Emit warnings for configured-but-disabled channels, track enabled ones
-    macro_rules! check_channel {
-        ($field:ident, $feature:literal, $name:expr) => {
-            #[cfg(feature = $feature)]
-            if config.$field.is_some() {
-                has_any = true;
-            }
-            #[cfg(not(feature = $feature))]
-            if config.$field.is_some() {
-                warn!(
-                    "{} channel configured but '{}' feature is not enabled — skipping",
-                    $name, $feature
-                );
-            }
-        };
-    }
-
-    check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
-    check_channel!(teams, "channel-teams", "Teams");
-    check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(webhook, "channel-webhook", "Webhook");
-
-    // Sidecar channels (always available, not feature-gated)
-    if !kernel.config_ref().sidecar_channels.is_empty() {
-        has_any = true;
-    }
-
-    if !has_any {
+    // Every channel adapter is now a sidecar; `_config` (the
+    // `[channels]` block from `KernelConfig`) is kept on the
+    // signature for callers that still pass it (hot-reload, etc.)
+    // but is no longer consulted — adapter construction lives in
+    // the sidecar loop below.
+    let sidecar_cfg = kernel.config_ref();
+    if sidecar_cfg.sidecar_channels.is_empty() {
         return (None, Vec::new(), axum::Router::new());
     }
 
@@ -2493,196 +2406,13 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // Collect all adapters to start: (adapter, default_agent_name, account_id)
-    #[allow(unused_mut, clippy::type_complexity)]
+    // (adapter, default_agent_name, account_id) — `account_id` is
+    // always None because `SidecarChannelConfig` carries no such
+    // field (sidecars surface their own per-instance id via env
+    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
+    // downstream router-population loop's signature.
+    #[allow(clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
-    #[cfg(feature = "channel-whatsapp")]
-    for wa_config in config.whatsapp.iter() {
-        let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env)
-            .ok()
-            .filter(|u| !u.is_empty());
-
-        if cloud_token.is_some() || gateway_url.is_some() {
-            let token = cloud_token.unwrap_or_default();
-            let verify_token =
-                read_token(&wa_config.verify_token_env, "WhatsApp (verify)").unwrap_or_default();
-            let adapter = Arc::new(
-                WhatsAppAdapter::new(
-                    wa_config.phone_number_id.clone(),
-                    token,
-                    verify_token,
-                    wa_config.webhook_port,
-                    wa_config.allowed_users.clone(),
-                )
-                .with_gateway(gateway_url)
-                .with_account_id(wa_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wa_config.default_agent.clone(),
-                wa_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // email migrated to a sidecar (librefang.sidecar.adapters.email);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // Teams
-    #[cfg(feature = "channel-teams")]
-    for tm_config in config.teams.iter() {
-        if let Some(password) = read_token(&tm_config.app_password_env, "Teams") {
-            let security_token =
-                read_token(&tm_config.security_token_env, "Teams (security_token)")
-                    .unwrap_or_default();
-            // Default-deny: unsigned webhooks let anyone forge Teams activities.
-            // Also reject when the token is present but cannot be base64-decoded
-            // or decodes to empty bytes — TeamsAdapter::new would otherwise
-            // silently fall back to security_token_key=None and skip
-            // signature verification at the webhook handler.
-            if tm_config.signature_required {
-                use base64::Engine;
-                let decoded = if security_token.is_empty() {
-                    Err("missing".to_string())
-                } else {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(security_token.as_bytes())
-                        .map_err(|e| format!("invalid base64: {e}"))
-                        .and_then(|b| {
-                            if b.is_empty() {
-                                Err("decodes to empty key".to_string())
-                            } else {
-                                Ok(b)
-                            }
-                        })
-                };
-                if let Err(reason) = decoded {
-                    tracing::error!(
-                        "Teams adapter for app_id={} refused: signature_required=true \
-                         but security_token_env '{}' is {reason}. Set the env var to a \
-                         valid base64-encoded outgoing-webhook token, or explicitly \
-                         set signature_required=false (NOT recommended).",
-                        tm_config.app_id,
-                        tm_config.security_token_env
-                    );
-                    continue;
-                }
-            }
-            let adapter = Arc::new(
-                TeamsAdapter::new(
-                    tm_config.app_id.clone(),
-                    password,
-                    security_token,
-                    tm_config.webhook_port,
-                    tm_config.allowed_tenants.clone(),
-                )
-                .with_account_id(tm_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tm_config.default_agent.clone(),
-                tm_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // mattermost migrated to a sidecar
-    // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
-    // routes/channels.rs.
-
-    // Google Chat
-    #[cfg(feature = "channel-google-chat")]
-    for gc_config in config.google_chat.iter() {
-        // Try service_account_key_path first, then fall back to env var
-        let key = gc_config
-            .service_account_key_path
-            .as_ref()
-            .filter(|p| !p.is_empty())
-            .and_then(|path| match std::fs::read_to_string(path) {
-                Ok(contents) => Some(contents),
-                Err(e) => {
-                    warn!("Google Chat: failed to read service account key from {path}: {e}");
-                    None
-                }
-            })
-            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
-        if let Some(key) = key {
-            let adapter = Arc::new(
-                GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
-                    .with_account_id(gc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                gc_config.default_agent.clone(),
-                gc_config.account_id.clone(),
-            ));
-        } else {
-            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
-        }
-    }
-
-    // zulip migrated to an out-of-process sidecar adapter
-    // (librefang.sidecar.adapters.zulip); no longer spawned here.
-
-    // ── Wave 3 ──────────────────────────────────────────────────
-    // line migrated to a sidecar (librefang.sidecar.adapters.line);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // ── Wave 4 ──────────────────────────────────────────────────
-    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // ── Wave 5 ──────────────────────────────────────────────────
-
-    // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
-    // see SIDECAR_CATALOG in routes/channels.rs.
-
-    // Webhook
-    #[cfg(feature = "channel-webhook")]
-    for wh_config in config.webhook.iter() {
-        if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
-            match WebhookAdapter::new(
-                secret,
-                wh_config.listen_port,
-                wh_config.callback_url.clone(),
-            ) {
-                Ok(wa) => {
-                    let adapter = Arc::new(
-                        wa.with_account_id(wh_config.account_id.clone())
-                            .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        wh_config.default_agent.clone(),
-                        wh_config.account_id.clone(),
-                    ));
-                }
-                Err(e) => {
-                    tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
-                }
-            }
-        }
-    }
 
     // ── Sidecar channel adapters ───────────────────────────────
     // Re-init path: this loop runs on every channel-bridge cycle, not just
@@ -2698,7 +2428,6 @@ pub async fn start_channel_bridge_with_config(
     // that handler-side follow-up will silently fail to spawn the sidecar
     // (the supervisor map stays empty); audit any new save endpoint that
     // touches `sidecar_channels` for this pattern.
-    let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
             name = %sidecar_config.name,
@@ -3639,11 +3368,10 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.whatsapp.is_none());
-        assert!(config.channels.teams.is_none());
-        assert!(config.channels.google_chat.is_none());
-        // Wave 5
-        assert!(config.channels.webhook.is_none());
+        // All previously in-process channels (google_chat, webhook,
+        // …) migrated to sidecars. With no `[[sidecar_channels]]`
+        // configured either, the bridge must skip.
+        assert!(config.sidecar_channels.is_empty());
     }
 
     #[test]
