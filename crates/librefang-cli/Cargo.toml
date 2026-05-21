@@ -30,7 +30,7 @@ default = ["telemetry"]
 # coordinated workflow + Cargo.toml change is out of scope for the
 # scaffolding cleanup PR that introduced this stub.
 mini = []
-telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 [[bin]]
 name = "librefang"
@@ -62,7 +62,6 @@ walkdir = { workspace = true }
 base64 = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
-async-trait = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 ratatui = { workspace = true }
@@ -74,7 +73,6 @@ open = "5.3.5"
 toml_edit = "0.25.8"
 rustls = "0.23"
 opentelemetry = { workspace = true, optional = true }
-opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
