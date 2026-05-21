@@ -64,8 +64,6 @@ keyring = "3"
 
 [features]
 default = ["librefang-api/default"]
-all-channels = ["librefang-api/all-channels"]
-mini = ["librefang-api/mini"]
 # Tauri uses custom-protocol in production builds
 custom-protocol = ["tauri/custom-protocol"]
 # Documents the mobile build path (no-op flag, mobile targets are cfg-gated)
@@ -75,12 +73,11 @@ mobile = []
 # Windows the tray is always on (handled in the per-target dependency
 # blocks above) and this feature is a no-op.
 linux-tray = ["tauri/tray-icon"]
-# Email migrated to a sidecar (librefang.sidecar.adapters.email); the
-# Android-specific `mobile-no-email` flavor that worked around
-# rustls-connector's missing `Verifier::new_with_extra_roots` impl is
-# no longer needed because the IMAP/SMTP code path runs out of
-# process. Feature collapses to `all-channels`.
-mobile-no-email = ["librefang-api/all-channels"]
+# `all-channels` / `mini` / `mobile-no-email` removed — every channel
+# adapter is now a sidecar (no Rust feature to gate). CI / packaging
+# flavors that referenced these names need to drop the `-f` flag;
+# `mobile-smoke.yml`'s `-f mobile-no-email` is removed in the same
+# change.
 
 [[bin]]
 name = "librefang-desktop"
