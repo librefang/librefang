@@ -252,12 +252,27 @@ def parse_wechat_msg(
     if account_id is not None:
         metadata["account_id"] = account_id
 
+    # `librefang_user` is the always-round-tripped carrier for the
+    # per-user iLink `context_token`. The previous routing relied on
+    # `self._user_context_tokens[user_id]` only — an in-memory dict
+    # that vanished on sidecar restart, leaving the bot's first reply
+    # after restart with an empty `context_token` (iLink may reject
+    # or post out-of-thread). librefang_user round-trips bytewise
+    # through the bridge via `ChannelUser.librefang_user`
+    # (`crates/librefang-channels/src/sidecar.rs:766` inbound,
+    # `:1204` outbound) so it survives serde + restart cleanly. The
+    # process-local cache is kept as a freshness signal — the
+    # context_token Lark/iLink last issued is more current than the
+    # one stamped on whichever message the daemon happens to round-
+    # trip back. See `on_send` for the precedence: cache first, then
+    # `librefang_user`, then empty.
     return protocol.message(
         user_id=from_user_id,
         user_name=display_name,
         content=content,
         message_id=msg_id or None,
         channel_id=from_user_id,
+        librefang_user=context_token or None,
         metadata=metadata,
     )
 
@@ -656,8 +671,24 @@ class WeChatAdapter(SidecarAdapter):
             log.warn("wechat on_send: missing user_id, dropping")
             return
 
+        # Precedence: process-local cache (freshest token Lark/iLink
+        # issued) → `cmd.user["librefang_user"]` (round-tripped from
+        # the inbound that triggered this reply; survives sidecar
+        # restart). Both are best-effort; an empty token still posts
+        # the message (iLink falls back to a fresh top-level frame).
         with self._context_lock:
             context_token = self._user_context_tokens.get(user_id, "")
+        if not context_token and cmd.user:
+            candidate = cmd.user.get("librefang_user")
+            # Guard: librefang_user is shared across channels (dingtalk
+            # puts a sessionWebhook URL, telegram puts @username, …).
+            # iLink context_token is an opaque base64-ish string —
+            # generic URL/whitespace/@ guard is enough.
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                context_token = candidate
 
         content = cmd.content
         text = cmd.text or ""
