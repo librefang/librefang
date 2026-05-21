@@ -1,9 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import {
-  listChannels,
-  getCommsTopology,
-  listCommsEvents,
-} from "../http/client";
+import { listChannels, getCommsTopology, listCommsEvents } from "../http/client";
 import { channelKeys, commsKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 

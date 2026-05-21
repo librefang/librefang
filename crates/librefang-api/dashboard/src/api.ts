@@ -116,22 +116,49 @@ export interface MediaMusicResult {
   sample_rate?: number;
 }
 
+export interface ChannelField {
+  key: string;
+  label?: string;
+  type?: string;
+  required?: boolean;
+  advanced?: boolean;
+  has_value?: boolean;
+  env_var?: string | null;
+  placeholder?: string | null;
+  value?: string;
+  options?: string[];
+  show_when?: string;
+  readonly?: boolean;
+}
+
 export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
+  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
+   *  `0` means no instances; `1` matches the legacy single-instance shape. */
+  instance_count?: number;
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
+  difficulty?: string;
+  setup_time?: string;
+  quick_setup?: string;
+  setup_type?: string;
+  setup_steps?: string[];
+  fields?: ChannelField[];
   /** TOML snippet shown for read-only sidecar discovery rows so operators
    *  can copy it into config.toml. Backend always emits this; the UI only
    *  renders it for `category === "sidecar"` to avoid noise on regular
-   *  rows that have their own configure flow. */
+   *  CHANNEL_REGISTRY rows that already have a setup form. */
   config_template?: string;
+  /** Webhook endpoint path on the shared server (e.g. "/channels/teams/webhook"). */
+  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
-   *  the `channel` column. */
+   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
+   *  meta-line on the Channels page card. */
   msgs_24h?: number;
 }
 

@@ -22,6 +22,7 @@ export const G_NAV_SHORTCUTS: Record<string, { to: string; labelKey: string }> =
   w: { to: "/workflows", labelKey: "workflows" },
   m: { to: "/models", labelKey: "models" },
   p: { to: "/providers", labelKey: "providers" },
+  n: { to: "/channels", labelKey: "channels" },
   g: { to: "/goals", labelKey: "goals" },
   l: { to: "/logs", labelKey: "logs" },
   r: { to: "/runtime", labelKey: "runtime" },

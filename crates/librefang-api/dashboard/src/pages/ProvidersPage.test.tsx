@@ -132,9 +132,9 @@ function renderPage(): void {
 }
 
 // Renders the current global drawer body once into a stable host so tests
-// can query the drawer's content alongside the page. `<PushDrawer />`
-// mounts twice (desktop + mobile) and breaks unique text queries, hence
-// the slot-projection escape hatch.
+// can query the drawer's content alongside the page. Mirrors the helper in
+// ChannelsPage.test.tsx; <PushDrawer /> mounts twice (desktop + mobile) and
+// breaks unique text queries.
 function DrawerSlot(): React.ReactNode {
   const content = useDrawerStore((s) => s.content);
   const isOpen = useDrawerStore((s) => s.isOpen);
@@ -252,10 +252,9 @@ describe("ProvidersPage", () => {
 
     renderPage();
 
-    // Configured providers are visible on the page; unconfigured ones
-    // live behind the picker (post-tab-removal: ProvidersPage uses an
-    // add-via-picker flow rather than a tabbed configured/unconfigured
-    // split).
+    // Configured providers are visible on the page; unconfigured ones live
+    // behind the picker (post-tab-removal: ProvidersPage now mirrors
+    // ChannelsPage's add-via-picker pattern).
     expect(screen.queryByText("Groq")).not.toBeInTheDocument();
 
     // Header has the Add button — click it to open the picker drawer.
