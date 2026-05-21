@@ -1850,7 +1850,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * GET /api/channels — List all 40 channel adapters with status and field metadata.
+         * Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
+         *     GET /api/channels — List all 40 channel adapters with status and field metadata.
          * @description Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
          *     shape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).
          *     The full channel registry is materialized in-memory, so this is a single
@@ -1860,23 +1861,6 @@ export interface paths {
         get: operations["list_channels"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/channels/reload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** POST /api/channels/reload — Manually trigger a channel hot-reload from disk config. */
-        post: operations["reload_channels"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1903,6 +1887,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/channels/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /api/channels/reload — Manually trigger a channel hot-reload from disk config. */
+        post: operations["reload_channels"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/channels/sidecar/{name}/configure": {
         parameters: {
             query?: never;
@@ -1920,6 +1921,42 @@ export interface paths {
          *     `SIDECAR_CATALOG` key (`telegram`, `ntfy`, …).
          */
         post: operations["configure_sidecar_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/channels/{name}/qr": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/channels/{name}/qr — Return the latest QR-login state
+         *     published by the sidecar.
+         * @description The sidecar drives the QR start/poll cycle itself and emits
+         *     `qr_ready` / `qr_status` events; this handler just reads the
+         *     cached `ChannelStatus.qr` and returns it to the dashboard.
+         *
+         *     Status codes:
+         *     - `200` — sidecar has published at least one QR event; payload is
+         *       the current `QrState` (which may be in any lifecycle phase).
+         *     - `204` — sidecar is running but has not published a QR session
+         *       yet (e.g. WeChat sidecar authenticated from a cached
+         *       `WECHAT_BOT_TOKEN`, no QR needed). The dashboard treats this as
+         *       "no scan required" and closes the dialog.
+         *     - `404` — no sidecar is currently registered under that name.
+         *       With the in-process registry retired, a "known channel name"
+         *       check would just duplicate "is there a running adapter?", so we
+         *       collapse the two cases — easier to read in a dashboard error
+         *       panel ("Sidecar not running") than two indistinguishable 404s.
+         */
+        get: operations["get_channel_qr"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -8362,6 +8399,26 @@ export interface operations {
             };
         };
     };
+    list_channel_registry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Channel metadata from registry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown[];
+                };
+            };
+        };
+    };
     reload_channels: {
         parameters: {
             query?: never;
@@ -8387,26 +8444,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JsonObject"];
-                };
-            };
-        };
-    };
-    list_channel_registry: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Channel metadata from registry */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown[];
                 };
             };
         };
@@ -8465,6 +8502,45 @@ export interface operations {
             };
             /** @description Schema not cached — SDK module may be missing */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonObject"];
+                };
+            };
+        };
+    };
+    get_channel_qr: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel adapter name (e.g. wechat, whatsapp) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description QR-login state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonObject"];
+                };
+            };
+            /** @description Sidecar running, no QR session yet */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sidecar not running */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
