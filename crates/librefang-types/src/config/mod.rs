@@ -11,8 +11,9 @@ mod types;
 mod validation;
 mod version;
 
-// Maintain backward compatibility: re-export all public types
-pub use serde_helpers::*;
+// Maintain backward compatibility: re-export all public types.
+// `serde_helpers` re-export removed alongside `OneOrMany<T>` (its
+// only public symbol) — restore if a future serde helper resurfaces.
 pub use types::*;
 pub use version::*;
 
@@ -302,27 +303,17 @@ admin_role = "admin"
         assert!(back.stable_prefix_mode);
     }
 
-    #[test]
-    fn test_validate_missing_env_vars() {
-        let mut config = KernelConfig::default();
-        config.channels.whatsapp = OneOrMany(vec![WhatsAppConfig {
-            access_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_WA_TOKEN".to_string(),
-            ..Default::default()
-        }]);
-        let warnings = config.validate();
-        assert!(
-            warnings.iter().any(|w| w.contains("WhatsApp")),
-            "expected a WhatsApp warning in: {warnings:?}"
-        );
-    }
+    // test_validate_missing_env_vars removed — its in-process witness
+    // (WhatsApp) migrated to a sidecar; the remaining in-process
+    // channel configs (`google_chat`, `webhook`) keep their env-var
+    // checks but no longer drive a missing-var WARN via the
+    // ChannelsConfig surface this test used to exercise.
 
-    #[test]
-    fn test_whatsapp_config_defaults() {
-        let wa = WhatsAppConfig::default();
-        assert_eq!(wa.access_token_env, "WHATSAPP_ACCESS_TOKEN");
-        assert_eq!(wa.webhook_port, 8443);
-        assert!(wa.allowed_users.is_empty());
-    }
+    // test_whatsapp_config_defaults / test_whatsapp_config_serde
+    // removed — whatsapp migrated to a sidecar
+    // (librefang.sidecar.adapters.whatsapp) and the in-process
+    // WhatsAppConfig was deleted alongside the
+    // `channels.whatsapp` field on ChannelsConfig.
 
     // test_signal_config_defaults removed — signal migrated to a
     // sidecar (librefang.sidecar.adapters.signal) and the in-process
@@ -332,119 +323,65 @@ admin_role = "admin"
     // sidecar (librefang.sidecar.adapters.matrix) and the in-process
     // MatrixConfig was deleted.
 
-    #[test]
-    fn test_email_config_defaults() {
-        let em = EmailConfig::default();
-        assert_eq!(em.imap_port, 993);
-        assert_eq!(em.smtp_port, 587);
-        assert_eq!(em.password_env, "EMAIL_PASSWORD");
-        assert_eq!(em.folders, vec!["INBOX".to_string()]);
-        // #4877: TLS knobs default safe.
-        assert_eq!(em.tls_root_ca_path, None);
-        assert!(!em.tls_accept_invalid_certs);
-    }
-
-    /// #4877: TLS knobs round-trip through TOML and only the set fields land
-    /// in the serialised output (skip_serializing_if on the optional path).
-    #[test]
-    fn test_email_config_tls_overrides_serde_roundtrip() {
-        let em = EmailConfig {
-            imap_host: "imap.internal.example.com".to_string(),
-            tls_root_ca_path: Some("/etc/librefang/internal-ca.pem".to_string()),
-            tls_accept_invalid_certs: true,
-            ..EmailConfig::default()
-        };
-        let toml_str = toml::to_string(&em).expect("serialize");
-        assert!(
-            toml_str.contains("tls_root_ca_path = \"/etc/librefang/internal-ca.pem\""),
-            "set path must appear: {toml_str}"
-        );
-        assert!(
-            toml_str.contains("tls_accept_invalid_certs = true"),
-            "set flag must appear: {toml_str}"
-        );
-
-        // When the path is None, nothing is emitted for that field.
-        let em_unset = EmailConfig::default();
-        let toml_unset = toml::to_string(&em_unset).expect("serialize default");
-        assert!(
-            !toml_unset.contains("tls_root_ca_path"),
-            "unset Option must not serialise: {toml_unset}"
-        );
-
-        let parsed: EmailConfig = toml::from_str(&toml_str).expect("deserialize");
-        assert_eq!(
-            parsed.tls_root_ca_path.as_deref(),
-            Some("/etc/librefang/internal-ca.pem")
-        );
-        assert!(parsed.tls_accept_invalid_certs);
-    }
-
-    #[test]
-    fn test_whatsapp_config_serde() {
-        let wa = WhatsAppConfig {
-            phone_number_id: "12345".to_string(),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&wa).unwrap();
-        let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.phone_number_id, "12345");
-    }
+    // test_email_config_defaults +
+    // test_email_config_tls_overrides_serde_roundtrip removed —
+    // email migrated to a sidecar (librefang.sidecar.adapters.email)
+    // and the in-process EmailConfig was deleted alongside the
+    // `[channels.email]` field on ChannelsConfig. TLS knobs
+    // (`EMAIL_TLS_ROOT_CA_PATH` / `EMAIL_TLS_ACCEPT_INVALID_CERTS`)
+    // now live on the sidecar's env contract; round-trip is exercised
+    // by `tests/test_email_adapter.py::test_tls_accept_invalid_certs_*`.
 
     // test_matrix_config_serde removed — matrix migrated to a sidecar.
 
     #[test]
     fn test_channels_config_with_new_channels() {
+        // Witness rotation history: Matrix #5368 → Email → Teams →
+        // WhatsApp → Webhook → GoogleChat — all sidecar-migrated.
+        // With no in-process channel left, this test now only
+        // exercises that `ChannelsConfig::default()` round-trips
+        // through `KernelConfig` without erroring. Re-add a
+        // per-channel assertion when a future in-process channel
+        // brings a witness back.
         let config = KernelConfig {
-            channels: ChannelsConfig {
-                whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
-                // matrix migrated to a sidecar (#5368) — use wechat as
-                // the in-process fixture with a usable Default impl.
-                wechat: OneOrMany(vec![WeChatConfig::default()]),
-                email: OneOrMany(vec![EmailConfig::default()]),
-                ..Default::default()
-            },
+            channels: ChannelsConfig::default(),
             ..Default::default()
         };
-        assert!(config.channels.whatsapp.is_some());
-        assert!(config.channels.wechat.is_some());
-        assert!(config.channels.email.is_some());
+        assert!(
+            config.channels.file_download_max_bytes > 0,
+            "default ChannelsConfig must populate file_download_max_bytes"
+        );
     }
 
-    #[test]
-    fn test_teams_config_defaults() {
-        let t = TeamsConfig::default();
-        assert_eq!(t.app_password_env, "TEAMS_APP_PASSWORD");
-        assert_eq!(t.webhook_port, 3978);
-        assert!(t.allowed_tenants.is_empty());
-        assert!(t.signature_required, "default-deny on Teams webhook");
-    }
+    // test_teams_config_defaults removed — teams migrated to a
+    // sidecar (librefang.sidecar.adapters.teams) and the in-process
+    // TeamsConfig was deleted.
 
     // test_mattermost_config_defaults removed — mattermost migrated to
     // a sidecar (librefang.sidecar.adapters.mattermost) and the
     // in-process MattermostConfig was deleted.
 
-    #[test]
-    fn test_google_chat_config_defaults() {
-        let gc = GoogleChatConfig::default();
-        assert_eq!(gc.service_account_env, "GOOGLE_CHAT_SERVICE_ACCOUNT");
-        assert_eq!(gc.webhook_port, 8444);
-    }
+    // test_google_chat_config_defaults removed — google_chat
+    // migrated to a sidecar (librefang.sidecar.adapters.google_chat)
+    // and the in-process GoogleChatConfig was deleted.
 
     #[test]
     fn test_all_new_channel_configs_serde() {
+        // Witness rotation history: GoogleChat → Webhook (both
+        // sidecar-migrated). With no in-process channel left, the
+        // serde round-trip now only exercises that the default
+        // `ChannelsConfig` survives a TOML emit + reparse — adapter-
+        // specific field-shape coverage moved with each migration.
         let config = KernelConfig {
-            channels: ChannelsConfig {
-                teams: OneOrMany(vec![TeamsConfig::default()]),
-                google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                ..Default::default()
-            },
+            channels: ChannelsConfig::default(),
             ..Default::default()
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let back: KernelConfig = toml::from_str(&toml_str).unwrap();
-        assert!(back.channels.teams.is_some());
-        assert!(back.channels.google_chat.is_some());
+        assert!(
+            back.channels.file_download_max_bytes > 0,
+            "default ChannelsConfig must round-trip with non-zero file_download_max_bytes"
+        );
     }
 
     #[test]
@@ -873,141 +810,17 @@ admin_role = "admin"
         assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
     }
 
-    #[test]
-    fn test_one_or_many_single_toml_table() {
-        // Single [channels.wechat] table should parse as OneOrMany with one element.
-        // Matrix migrated to a sidecar (#5368); these tests cover the
-        // OneOrMany helper itself, not the channel — swapped to wechat
-        // because it's one of the in-process fixtures that survived.
-        let toml_str = r#"
-            [channels.wechat]
-            bot_token_env = "WECHAT_TOKEN_SINGLE"
-            account_id = "bot1"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wechat.is_some());
-        assert_eq!(config.channels.wechat.len(), 1);
-        let wc = config.channels.wechat.first().unwrap();
-        assert_eq!(wc.bot_token_env, "WECHAT_TOKEN_SINGLE");
-        assert_eq!(wc.account_id.as_deref(), Some("bot1"));
-    }
+    // test_one_or_many_* (4 tests + the local `OoMTestRow` fixture)
+    // retired alongside the `OneOrMany<T>` type. With every channel
+    // sidecar-migrated `OneOrMany<T>` had zero production callers
+    // and was deleted from `serde_helpers.rs`. Restore from git
+    // history alongside the type if a future in-process channel
+    // needs the single-table-or-array-of-tables shape back.
 
-    #[test]
-    fn test_one_or_many_array_of_tables() {
-        // [[channels.wechat]] should parse as OneOrMany with multiple elements
-        // (matrix migrated to a sidecar — see _single_toml_table).
-        let toml_str = r#"
-            [[channels.wechat]]
-            bot_token_env = "WECHAT_TOKEN_1"
-            account_id = "bot1"
-            default_agent = "assistant"
-
-            [[channels.wechat]]
-            bot_token_env = "WECHAT_TOKEN_2"
-            account_id = "bot2"
-            default_agent = "coder"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wechat.is_some());
-        assert_eq!(config.channels.wechat.len(), 2);
-
-        let bots: Vec<_> = config.channels.wechat.iter().collect();
-        assert_eq!(bots[0].bot_token_env, "WECHAT_TOKEN_1");
-        assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
-        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].bot_token_env, "WECHAT_TOKEN_2");
-        assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
-        assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
-    }
-
-    #[test]
-    fn test_one_or_many_single_wechat_table() {
-        let toml_str = r#"
-            [channels.wechat]
-            bot_token_env = "WECHAT_TOKEN_MAIN"
-            account_id = "wechat-main"
-            default_agent = "assistant"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wechat.is_some());
-        assert_eq!(config.channels.wechat.len(), 1);
-
-        let wechat = config.channels.wechat.first().unwrap();
-        assert_eq!(wechat.bot_token_env, "WECHAT_TOKEN_MAIN");
-        assert_eq!(wechat.account_id.as_deref(), Some("wechat-main"));
-        assert_eq!(wechat.default_agent.as_deref(), Some("assistant"));
-    }
-
-    #[test]
-    fn test_one_or_many_array_of_wecom_tables() {
-        let toml_str = r#"
-            [[channels.wecom]]
-            bot_id = "bot-main"
-            secret_env = "WECOM_SECRET_MAIN"
-            account_id = "wecom-main"
-            default_agent = "assistant"
-
-            [[channels.wecom]]
-            bot_id = "bot-sales"
-            secret_env = "WECOM_SECRET_SALES"
-            account_id = "wecom-sales"
-            default_agent = "sales-assistant"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.wecom.is_some());
-        assert_eq!(config.channels.wecom.len(), 2);
-
-        let bots: Vec<_> = config.channels.wecom.iter().collect();
-        assert_eq!(bots[0].bot_id, "bot-main");
-        assert_eq!(bots[0].secret_env, "WECOM_SECRET_MAIN");
-        assert_eq!(bots[0].account_id.as_deref(), Some("wecom-main"));
-        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].bot_id, "bot-sales");
-        assert_eq!(bots[1].secret_env, "WECOM_SECRET_SALES");
-        assert_eq!(bots[1].account_id.as_deref(), Some("wecom-sales"));
-        assert_eq!(bots[1].default_agent.as_deref(), Some("sales-assistant"));
-    }
-
-    #[test]
-    fn test_one_or_many_empty_default() {
-        // Matrix migrated to a sidecar (#5368); use wechat as the
-        // surviving in-process fixture.
-        let config = KernelConfig::default();
-        assert!(config.channels.wechat.is_none());
-        assert!(config.channels.wechat.is_empty());
-        assert_eq!(config.channels.wechat.len(), 0);
-        assert!(config.channels.wechat.first().is_none());
-        assert!(config.channels.wechat.as_ref().is_none());
-    }
-
-    #[test]
-    fn test_one_or_many_serialize_roundtrip() {
-        // Single element serializes as a bare table, multi as array-of-tables.
-        // Matrix migrated to a sidecar (#5368) — uses wechat instead.
-        let single = OneOrMany(vec![WeChatConfig::default()]);
-        let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<WeChatConfig> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.len(), 1);
-
-        let multi = OneOrMany(vec![WeChatConfig::default(), WeChatConfig::default()]);
-        let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<WeChatConfig> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.len(), 2);
-
-        let empty: OneOrMany<WeChatConfig> = OneOrMany::default();
-        let json = serde_json::to_string(&empty).unwrap();
-        assert_eq!(json, "null");
-    }
-
-    #[test]
-    fn test_account_id_in_channel_configs() {
-        // Verify account_id field exists and defaults to None.
-        // (Matrix entry removed: migrated to a sidecar in #5368.)
-        assert!(WhatsAppConfig::default().account_id.is_none());
-        assert!(EmailConfig::default().account_id.is_none());
-        assert!(WeChatConfig::default().account_id.is_none());
-        assert!(WeComConfig::default().account_id.is_none());
-    }
+    // test_account_id_in_channel_configs removed — its witnesses
+    // (WhatsApp + WeChat + DingTalk) all migrated to sidecars. The
+    // remaining in-process channel configs (google_chat) don't
+    // expose `account_id` so there's nothing left to assert.
 
     #[test]
     fn test_redact_proxy_url_with_credentials() {
@@ -1569,34 +1382,19 @@ admin_role = "admin"
     }
 
     // ---------------------------------------------------------------
-    // #5130 — typos inside repeated tables ([[channels.whatsapp]],
-    // [[mcp_servers]], …) used to be silently dropped because the
-    // strict-mode walker only descended into single-table paths.
-    // `deny_unknown_fields` on the per-element struct catches them at
-    // serde-deserialize time, regardless of repeated-vs-single shape.
+    // #5130 — typos inside repeated tables ([[mcp_servers]], …) used
+    // to be silently dropped because the strict-mode walker only
+    // descended into single-table paths. `deny_unknown_fields` on the
+    // per-element struct catches them at serde-deserialize time,
+    // regardless of repeated-vs-single shape.
+    //
+    // strict_config_rejects_typo_in_repeated_channel_table_5130
+    // (originally on DiscordConfig / SlackConfig /
+    // MattermostConfig / WhatsAppConfig / WebhookConfig) removed —
+    // every per-channel struct that carried `deny_unknown_fields`
+    // has migrated to a sidecar. McpServerConfigEntry is the only
+    // remaining locked-down per-element struct.
     // ---------------------------------------------------------------
-
-    #[test]
-    fn strict_config_rejects_typo_in_repeated_channel_table_5130() {
-        let toml_src = r#"
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN"
-            verify_token_env = "WA_VERIFY"
-            phone_number_id = "123"
-            # Typo: should be `default_agent`. Before #5130, this
-            # silently deserialised into the struct's Default and the
-            # operator's intent was lost.
-            defaul_agent = "research"
-        "#;
-        let err = toml::from_str::<KernelConfig>(toml_src).expect_err(
-            "typo inside [[channels.whatsapp]] must be rejected by deny_unknown_fields",
-        );
-        let msg = err.to_string();
-        assert!(
-            msg.contains("defaul_agent") || msg.contains("unknown field"),
-            "error must mention the offending field, got: {msg}",
-        );
-    }
 
     #[test]
     fn strict_config_rejects_typo_in_repeated_mcp_servers_table_5130() {
@@ -1616,29 +1414,21 @@ admin_role = "admin"
     }
 
     #[test]
-    fn well_formed_repeated_channel_table_still_parses_5130() {
+    fn well_formed_repeated_mcp_servers_table_still_parses_5130() {
         // Drift sentinel: deny_unknown_fields must not regress the
         // happy path. If a future refactor renames a field on
-        // WhatsAppConfig / McpServerConfigEntry without updating this
-        // fixture, the test will fail loudly. (DiscordConfig,
-        // SlackConfig, and MattermostConfig were in this set
-        // originally; all three were migrated to sidecars in v2026.5.)
+        // McpServerConfigEntry without updating this fixture, the
+        // test will fail loudly. (DiscordConfig, SlackConfig,
+        // MattermostConfig, WhatsAppConfig, WebhookConfig were in
+        // this set originally; all migrated to sidecars by v2026.5.)
         let cfg: KernelConfig = toml::from_str(
             r#"
-            [[channels.whatsapp]]
-            access_token_env = "WA_TOKEN"
-            verify_token_env = "WA_VERIFY"
-            phone_number_id = "123"
-            webhook_port = 8443
-            gateway_url_env = "WA_GATEWAY"
-
             [[mcp_servers]]
             name = "filesystem"
             timeout_secs = 30
             "#,
         )
         .expect("well-formed repeated tables must still parse with deny_unknown_fields");
-        assert_eq!(cfg.channels.whatsapp.len(), 1);
         assert_eq!(cfg.mcp_servers.len(), 1);
     }
 }
