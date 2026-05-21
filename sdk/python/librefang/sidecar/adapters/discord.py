@@ -75,15 +75,9 @@ Secret via ``~/.librefang/secrets.env``: ``DISCORD_BOT_TOKEN``.
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import os
 import random
-import select
-import socket
-import ssl
-import struct
 import threading
 import time
 import urllib.error
@@ -93,6 +87,23 @@ from typing import Any, Callable, Optional
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    http_request as _http_request,
+    MAX_BACKOFF_SECS,
+    parse_retry_after as _parse_retry_after_impl,
+    SeenSet as _SeenSet,
+    split_csv as _split_csv,
+    split_message as _split_message,
+)
+from librefang.sidecar.ws import (
+    MAX_FRAME_PAYLOAD,
+    OP_CLOSE as _OP_CLOSE,
+    OP_CONT as _OP_CONT,
+    OP_PING as _OP_PING,
+    OP_PONG as _OP_PONG,
+    OP_TEXT as _OP_TEXT,
+    WebSocketClient as _WebSocketClient,
+)
 
 # Discord REST + Gateway constants. ``DISCORD_API_BASE`` is overridable
 # via the ``api_base`` instance attribute so unit tests can point at a
@@ -128,30 +139,6 @@ HANDSHAKE_TIMEOUT_SECS = 15.0
 # consecutive failure, capped at MAX_BACKOFF_SECS. Matches Rust
 # ``with_backoff`` defaults.
 INITIAL_BACKOFF_SECS = 1.0
-MAX_BACKOFF_SECS = 60.0
-
-# RFC 6455 — Sec-WebSocket-Accept derivation magic GUID and frame
-# opcodes. Same as gotify's hand-rolled reader (#5263).
-_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-_OP_CONT = 0x0
-_OP_TEXT = 0x1
-_OP_BIN = 0x2
-_OP_CLOSE = 0x8
-_OP_PING = 0x9
-_OP_PONG = 0xA
-
-# Cap on a single inbound WS frame's payload length. Discord frames
-# are short JSON (the heaviest realistic event is a MESSAGE_CREATE
-# with embeds + attachments, well under 100 KiB). 4 MiB guards
-# against a hostile server that announces a 64-bit length to make
-# us spin reading multi-exabyte payloads.
-MAX_FRAME_PAYLOAD = 1 << 22  # 4 MiB
-
-# Gateway close codes that are NOT recoverable by reconnecting — the
-# operator must fix the config first. Mapping per Discord docs.
-# Closing with one of these and immediately reconnecting just burns
-# the gateway budget and produces noisy logs; we surface a single
-# clear error and let the supervisor's circuit-breaker stop us.
 FATAL_CLOSE_CODES = {
     4004: "authentication failed — DISCORD_BOT_TOKEN is invalid",
     4010: "invalid shard",
@@ -357,271 +344,6 @@ def parse_message_create(
     )
 
 
-# ---------------------------------------------------------------------------
-# Stdlib WebSocket client. Adapted from gotify (#5263); same RFC 6455
-# logic with two Discord-specific additions:
-#   * the iterator yields raw text frames (Discord's gateway frames
-#     carry JSON one event per frame, so a frame-level iterator is
-#     enough — no continuation handling needed in practice but we
-#     support it for correctness);
-#   * ``send_text(s)`` is exposed so callers (the heartbeat sender
-#     and the IDENTIFY/RESUME emitters) can push frames back.
-# ---------------------------------------------------------------------------
-
-
-class _WebSocketClient:
-    """Minimal RFC 6455 client (text-only). Use as a context manager.
-
-    Server→client frames are never masked; client→server frames MUST
-    be masked with a fresh 4-byte key per frame.
-    """
-
-    def __init__(
-        self,
-        url: str,
-        *,
-        headers: Optional[dict] = None,
-        handshake_timeout: float = HANDSHAKE_TIMEOUT_SECS,
-    ) -> None:
-        self.url = url
-        self.headers = dict(headers or {})
-        self._sock: Optional[socket.socket] = None
-        self._leftover = b""
-        self._handshake_timeout = handshake_timeout
-        self._send_lock = threading.Lock()
-        self.closed = False
-
-    @staticmethod
-    def _parse_url(url: str) -> tuple[str, int, str, bool]:
-        u = urllib.parse.urlparse(url)
-        scheme = u.scheme.lower()
-        if scheme not in ("ws", "wss"):
-            raise ValueError(f"not a websocket url: {url!r}")
-        if not u.hostname:
-            raise ValueError(f"websocket url missing host: {url!r}")
-        is_tls = scheme == "wss"
-        port = u.port or (443 if is_tls else 80)
-        path = u.path or "/"
-        if u.query:
-            path += "?" + u.query
-        return u.hostname, port, path, is_tls
-
-    def __enter__(self) -> "_WebSocketClient":
-        host, port, path, is_tls = self._parse_url(self.url)
-        sock = socket.create_connection((host, port),
-                                        timeout=self._handshake_timeout)
-        if is_tls:
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        lines = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}:{port}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-        ]
-        for k, v in self.headers.items():
-            lines.append(f"{k}: {v}")
-        req = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
-        sock.sendall(req)
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                sock.close()
-                raise RuntimeError("connection closed during ws handshake")
-            buf += chunk
-            if len(buf) > 65536:
-                sock.close()
-                raise RuntimeError("ws handshake response too large")
-        head, _, leftover = buf.partition(b"\r\n\r\n")
-        head_lines = head.split(b"\r\n")
-        status = head_lines[0]
-        if not status.startswith(b"HTTP/1.1 101 "):
-            sock.close()
-            raise RuntimeError(
-                f"ws handshake failed: {status.decode('ascii', 'replace')}"
-            )
-        expected = base64.b64encode(
-            hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()
-        ).decode("ascii")
-        got = None
-        for line in head_lines[1:]:
-            name, _, val = line.partition(b":")
-            if name.strip().lower() == b"sec-websocket-accept":
-                got = val.strip().decode("ascii", "replace")
-                break
-        if got != expected:
-            sock.close()
-            raise RuntimeError("ws handshake Sec-WebSocket-Accept mismatch")
-        self._sock = sock
-        self._leftover = leftover
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        self.closed = True
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-    def settimeout(self, timeout: Optional[float]) -> None:
-        if self._sock is not None:
-            self._sock.settimeout(timeout)
-
-    def wait_readable(self, timeout: float) -> bool:
-        """Return True when bytes are ready (or already buffered),
-        False on a clean timeout. Used to gate the heartbeat tick
-        BEFORE we start consuming a frame, so a mid-frame stall
-        becomes a hard transport error instead of corrupting state.
-
-        TLS-on-Python is the awkward bit: ``ssl.SSLSocket.pending()``
-        exposes already-decrypted bytes that aren't visible to
-        ``select`` (TLS records can come back from the OS but stay
-        in the SSL layer's read buffer). We check leftover-from-
-        handshake first, then ``ssl.pending()``, then ``select``.
-        """
-        if self._leftover:
-            return True
-        sock = self._sock
-        if sock is None:
-            return False
-        # SSLSocket exposes already-decrypted bytes via `.pending()` —
-        # those don't show up in select() because the OS has already
-        # given them to the SSL layer.
-        pending = getattr(sock, "pending", None)
-        if callable(pending):
-            try:
-                if pending() > 0:
-                    return True
-            except Exception:  # noqa: BLE001 — closed socket etc.
-                pass
-        try:
-            r, _, _ = select.select([sock], [], [], max(0.0, timeout))
-        except (OSError, ValueError):
-            # ``select`` rejects closed/negative-fd sockets — treat as
-            # "no data, will fail on next recv".
-            return False
-        return bool(r)
-
-    def _recv_exact(self, n: int) -> bytes:
-        if n <= 0:
-            return b""
-        buf = bytearray()
-        while len(buf) < n:
-            if self._leftover:
-                take = min(n - len(buf), len(self._leftover))
-                buf.extend(self._leftover[:take])
-                self._leftover = self._leftover[take:]
-                continue
-            assert self._sock is not None
-            chunk = self._sock.recv(n - len(buf))
-            if not chunk:
-                raise EOFError("websocket closed mid-frame")
-            buf.extend(chunk)
-        return bytes(buf)
-
-    def _send_frame(self, opcode: int, payload: bytes) -> None:
-        assert self._sock is not None
-        header = bytearray([0x80 | (opcode & 0x0F)])
-        ln = len(payload)
-        if ln < 126:
-            header.append(0x80 | ln)
-        elif ln < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack(">H", ln))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack(">Q", ln))
-        mask = os.urandom(4)
-        header.extend(mask)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        with self._send_lock:
-            self._sock.sendall(bytes(header) + masked)
-
-    def send_text(self, s: str) -> None:
-        self._send_frame(_OP_TEXT, s.encode("utf-8"))
-
-    def send_close(self) -> None:
-        try:
-            self._send_frame(_OP_CLOSE, b"")
-        except OSError:
-            pass
-
-    def recv_frame(self) -> tuple[Optional[str], Optional[tuple[int, bytes]]]:
-        """Read one frame and return either ``(text, None)`` for a
-        completed text message, or ``(None, (close_code, reason))``
-        for a close frame the server sent. Pings are answered inline
-        and skipped. Returns ``(None, None)`` for non-text frames we
-        ignore (binary, pong)."""
-        h2 = self._recv_exact(2)
-        fin = (h2[0] & 0x80) != 0
-        opcode = h2[0] & 0x0F
-        masked = (h2[1] & 0x80) != 0
-        ln = h2[1] & 0x7F
-        if ln == 126:
-            ln = struct.unpack(">H", self._recv_exact(2))[0]
-        elif ln == 127:
-            ln = struct.unpack(">Q", self._recv_exact(8))[0]
-        if ln > MAX_FRAME_PAYLOAD:
-            raise RuntimeError(
-                f"websocket frame payload {ln} exceeds cap "
-                f"{MAX_FRAME_PAYLOAD}; failing the stream"
-            )
-        mask_key = self._recv_exact(4) if masked else None
-        payload = self._recv_exact(ln)
-        if mask_key is not None:
-            payload = bytes(
-                b ^ mask_key[i % 4] for i, b in enumerate(payload)
-            )
-        if opcode == _OP_PING:
-            self._send_frame(_OP_PONG, payload)
-            return None, None
-        if opcode == _OP_PONG:
-            return None, None
-        if opcode == _OP_CLOSE:
-            code = 1005  # "no status received" if payload < 2 bytes
-            reason = b""
-            if len(payload) >= 2:
-                code = struct.unpack(">H", payload[:2])[0]
-                reason = payload[2:]
-            return None, (code, reason)
-        if opcode == _OP_TEXT:
-            # Discord frames are always one event per frame (no
-            # multi-frame fragmentation), but support continuation
-            # for spec correctness.
-            buf = bytearray(payload)
-            while not fin:
-                h2 = self._recv_exact(2)
-                fin = (h2[0] & 0x80) != 0
-                opcode2 = h2[0] & 0x0F
-                masked2 = (h2[1] & 0x80) != 0
-                ln2 = h2[1] & 0x7F
-                if ln2 == 126:
-                    ln2 = struct.unpack(">H", self._recv_exact(2))[0]
-                elif ln2 == 127:
-                    ln2 = struct.unpack(">Q", self._recv_exact(8))[0]
-                if ln2 > MAX_FRAME_PAYLOAD:
-                    raise RuntimeError("ws continuation payload too large")
-                mk = self._recv_exact(4) if masked2 else None
-                payload2 = self._recv_exact(ln2)
-                if mk is not None:
-                    payload2 = bytes(
-                        b ^ mk[i % 4] for i, b in enumerate(payload2)
-                    )
-                if opcode2 != _OP_CONT:
-                    # Unexpected interleaved frame — bail.
-                    raise RuntimeError(
-                        f"ws unexpected interleaved opcode {opcode2}"
-                    )
-                buf.extend(payload2)
-            return buf.decode("utf-8", "replace"), None
-        # Binary / unknown — ignore.
-        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -748,39 +470,11 @@ class DiscordAdapter(SidecarAdapter):
         headers: Optional[dict] = None,
         timeout: float = SEND_TIMEOUT_SECS,
     ) -> tuple[int, Any, bytes, dict]:
-        """Return ``(status, parsed_json_or_None, raw_body, response_headers)``.
-
-        Response header keys are normalised to lowercase. HTTPError is
-        captured so callers can inspect 4xx/5xx without try/except.
-        """
-        req = urllib.request.Request(
-            url, data=body, headers=headers or {}, method=method,
+        """Thin wrapper around :func:`librefang.sidecar.common.http_request`."""
+        return _http_request(
+            url, method=method, body=body, headers=headers,
+            timeout=timeout,
         )
-        resp_headers: dict = {}
-        try:
-            with urllib.request.urlopen(  # noqa: S310 — configured URL
-                req, timeout=timeout,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                raw = resp.read()
-                if resp.headers is not None:
-                    resp_headers = {
-                        k.lower(): v for k, v in resp.headers.items()
-                    }
-        except urllib.error.HTTPError as e:
-            status = e.code
-            try:
-                raw = e.read()
-            except Exception:  # noqa: BLE001
-                raw = b""
-            if e.headers is not None:
-                resp_headers = {k.lower(): v for k, v in e.headers.items()}
-        if not raw:
-            return status, None, b"", resp_headers
-        try:
-            return status, json.loads(raw.decode("utf-8")), raw, resp_headers
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return status, None, raw, resp_headers
 
     # ---- REST: gateway URL / send / typing / role lookup -----------
 
@@ -1134,32 +828,15 @@ class DiscordAdapter(SidecarAdapter):
                 None, self._send_typing, cmd.channel_id,
             )
 
-
-def _split_csv(raw: str) -> list[str]:
-    """Split a comma-separated env-var into a clean list of strings.
-
-    Empty input → empty list. Each item is whitespace-stripped.
-    Matches the Rust deserialize_string_or_int_vec shape (we accept
-    both ``"123,456"`` and ``"123, 456"``)."""
-    if not raw:
-        return []
-    return [s.strip() for s in raw.split(",") if s.strip()]
-
-
 def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
-    """Discord's 429 response includes ``Retry-After`` (seconds, may be
-    a decimal). Fall back to ``default_secs`` when missing/garbled.
-    Capped at MAX_BACKOFF_SECS so a server bug can't pin the send
-    loop for hours."""
-    raw = resp_hdrs.get("retry-after")
-    if not raw:
-        return default_secs
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return default_secs
-    return min(max(v, 0.1), MAX_BACKOFF_SECS)
-
+    """Backwards-compat wrapper around
+    :func:`librefang.sidecar.common.parse_retry_after`."""
+    return _parse_retry_after_impl(
+        resp_hdrs,
+        default_secs=default_secs,
+        floor_secs=0.1,
+        max_secs=MAX_BACKOFF_SECS,
+    )
 
 class _FatalGatewayError(Exception):
     """Raised on a Discord gateway close code that no amount of
