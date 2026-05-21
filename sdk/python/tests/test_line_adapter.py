@@ -776,6 +776,205 @@ async def test_on_send_falls_back_to_user_platform_id(monkeypatch):
     assert json.loads(fake.calls[0]["body_raw"])["to"] == "Ufallback"
 
 
+# ---- LINE reply API (free / no-quota path) --------------------------
+
+
+def test_parse_line_event_stashes_reply_token_via_librefang_user():
+    """`librefang_user` is the only inbound field the daemon's
+    bridge round-trips bytewise back to `cmd.user["librefang_user"]`
+    on outbound — `metadata.reply_token` does not survive the trip.
+    The fix stashes ``linereply:<token>:<event_ts_ms>`` here so
+    `on_send` can reconstruct the token + freshness window."""
+    event = {
+        "type": "message",
+        "replyToken": "RTOK123",
+        "timestamp": 1_700_000_000_000,
+        "source": {"type": "user", "userId": "U1"},
+        "message": {"id": "M1", "type": "text", "text": "hi"},
+    }
+    parsed = la.parse_line_event(event)
+    assert parsed is not None
+    params = parsed["params"]
+    assert params["librefang_user"] == (
+        f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    )
+    # The legacy `metadata.reply_token` continues to ship for
+    # consumers that key on it (no breaking change in the metadata
+    # shape).
+    assert params["metadata"]["reply_token"] == "RTOK123"
+
+
+def test_parse_line_event_omits_librefang_user_without_token():
+    event = {
+        "type": "message",
+        # No replyToken — postback / webhook-verify shape.
+        "timestamp": 1_700_000_000_000,
+        "source": {"type": "user", "userId": "U1"},
+        "message": {"id": "M1", "type": "text", "text": "hi"},
+    }
+    parsed = la.parse_line_event(event)
+    assert parsed is not None
+    assert "librefang_user" not in parsed["params"]
+
+
+def test_parse_reply_carry_returns_token_inside_window():
+    """A token whose embedded timestamp is within the safe 55 s
+    window is recovered for the reply API."""
+    now_ms = 1_700_000_030_000  # 30 s after stash
+    carry = f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    assert la.LineAdapter._parse_reply_carry(carry, now_ms=now_ms) == "RTOK123"
+
+
+def test_parse_reply_carry_rejects_expired_token():
+    now_ms = 1_700_000_000_000 + int(la.LINE_REPLY_TOKEN_TTL_SECS * 1000) + 1
+    carry = f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+    # Older than the TTL → returns None so on_send degrades to push.
+    assert la.LineAdapter._parse_reply_carry(carry, now_ms=now_ms) is None
+
+
+def test_parse_reply_carry_rejects_cross_channel_garbage():
+    """`librefang_user` is shared across channels (dingtalk stores a
+    sessionWebhook URL there, telegram stores an @username, …) — a
+    misrouted value must not be fed to LINE's reply endpoint. The
+    `linereply:` prefix gate is the guard."""
+    # dingtalk sessionWebhook shape
+    assert la.LineAdapter._parse_reply_carry(
+        "https://oapi.dingtalk.com/robot/sendBySession?session=...",
+    ) is None
+    # telegram @handle shape
+    assert la.LineAdapter._parse_reply_carry("@alice") is None
+    # bare reply token with no prefix / no timestamp
+    assert la.LineAdapter._parse_reply_carry("RTOK123") is None
+    # mangled trailing segment
+    assert la.LineAdapter._parse_reply_carry(
+        f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:not-a-number",
+    ) is None
+    # non-string
+    assert la.LineAdapter._parse_reply_carry(None) is None
+    assert la.LineAdapter._parse_reply_carry(12345) is None
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_uses_reply_api_when_token_fresh(monkeypatch):
+    """When the inbound event was recent, the outbound `on_send`
+    POSTs to /v2/bot/message/reply (free; no quota burn) instead of
+    /v2/bot/message/push."""
+    fake = _FakeUrlopen([(200, {})])
+    sleeps: list[float] = []
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "sleep", sleeps.append)
+    # Pretend "now" is 10 s after the embedded timestamp.
+    now_ms = 1_700_000_010_000
+    monkeypatch.setattr(la.time, "time", lambda: now_ms / 1000.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/reply")
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body == {
+        "replyToken": "RTOK123",
+        "messages": [{"type": "text", "text": "howdy"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_falls_back_to_push_when_token_stale(monkeypatch):
+    """When the token has aged past the safe window, on_send skips
+    the reply API and falls through to the push path so the agent's
+    reply still lands."""
+    fake = _FakeUrlopen([(200, {})])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    # Pretend "now" is 5 minutes past the embedded timestamp — well
+    # over the 55 s window.
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_300.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 1
+    # Push path, not reply.
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/push")
+    body = json.loads(fake.calls[0]["body_raw"])
+    assert body["to"] == "U1"
+
+
+@pytest.mark.asyncio
+async def test_on_send_text_falls_back_to_push_on_reply_4xx(monkeypatch):
+    """If LINE rejects the reply call (token already burned, etc.)
+    the sidecar must still get the agent's response out via push so
+    the user sees a reply. We assert two POSTs are issued: the
+    rejected reply attempt then the push fallback."""
+    fake = _FakeUrlopen([
+        # reply attempt is rejected — LINE returns 400 with "Invalid
+        # reply token".
+        (400, {"message": "Invalid reply token"}),
+        # push succeeds.
+        (200, {}),
+    ])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    monkeypatch.setattr(la.time, "sleep", lambda _s: None)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="howdy",
+        content={"Text": "howdy"},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    assert len(fake.calls) == 2
+    assert fake.calls[0]["url"].endswith("/v2/bot/message/reply")
+    assert fake.calls[1]["url"].endswith("/v2/bot/message/push")
+    body = json.loads(fake.calls[1]["body_raw"])
+    assert body["to"] == "U1"
+
+
+@pytest.mark.asyncio
+async def test_on_send_image_does_not_attempt_reply(monkeypatch):
+    """Image-and-caption is two pushes — the reply token would be
+    one-shot-locked on the first call and the caption would error.
+    Image path stays on push regardless of librefang_user shape."""
+    fake = _FakeUrlopen([(200, {}), (200, {})])
+    monkeypatch.setattr(la.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(la.time, "time", lambda: 1_700_000_010.0)
+    a = _adapter()
+    await a.on_send(_send_cmd(
+        channel_id="U1",
+        text="",
+        content={"Image": {"url": "https://x/y.jpg",
+                            "caption": "see this",
+                            "mime_type": None}},
+        user={
+            "librefang_user": (
+                f"{la.LINE_REPLY_LIBREFANG_USER_PREFIX}RTOK123:1700000000000"
+            ),
+        },
+    ))
+    # Both calls go through push, not reply.
+    assert len(fake.calls) == 2
+    for c in fake.calls:
+        assert c["url"].endswith("/v2/bot/message/push")
+
+
 # ---- schema (--describe) --------------------------------------------
 
 
