@@ -539,14 +539,6 @@ class ChannelsResource {
     return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
   }
 
-  async wechatQrStart() {
-    return this._c._request("POST", "/api/channels/wechat/qr/start");
-  }
-
-  async wechatQrStatus(query) {
-    return this._c._request("GET", "/api/channels/wechat/qr/status", undefined, query);
-  }
-
   async whatsappQrStart() {
     return this._c._request("POST", "/api/channels/whatsapp/qr/start");
   }
