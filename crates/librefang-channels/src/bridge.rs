@@ -1612,6 +1612,62 @@ impl BridgeManager {
                                         // #4985 was about (admin inbox +
                                         // unrelated bound chat both
                                         // receiving the same approval).
+                                        // ── Fast path: route back to the
+                                        // originating chat when the kernel
+                                        // populated `sender_id` + `channel`
+                                        // on the request. This is the common
+                                        // case for tool calls triggered by a
+                                        // user chatting with the agent in
+                                        // Telegram / Slack / Feishu: the
+                                        // approval prompt goes straight back
+                                        // to that chat, no
+                                        // `notification_recipients` or
+                                        // `AgentBinding` config needed.
+                                        //
+                                        // Pre-fix this branch didn't exist;
+                                        // the kernel didn't even put
+                                        // `sender_id` / `channel` on the
+                                        // event payload, so approvals on
+                                        // freshly-set-up Telegram adapters
+                                        // silently dropped at the
+                                        // empty-recipients DEBUG line below.
+                                        if let (Some(src_sender), Some(src_channel)) =
+                                            (approval.sender_id.as_deref(), approval.channel.as_deref())
+                                        {
+                                            if src_channel == ct_str
+                                                && !src_sender.is_empty()
+                                            {
+                                                let direct_recipient = ChannelUser {
+                                                    platform_id: src_sender.to_string(),
+                                                    display_name: String::new(),
+                                                    librefang_user: None,
+                                                };
+                                                if let Err(e) = adapter
+                                                    .send_interactive(&direct_recipient, &approval_keyboard)
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        error = %e,
+                                                        "Failed to deliver approval notification (direct-route)"
+                                                    );
+                                                } else {
+                                                    info!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        "Delivered approval notification (direct-route to originating chat)"
+                                                    );
+                                                }
+                                                // Direct route handled this
+                                                // adapter; skip the legacy
+                                                // recipients fan-out below.
+                                                continue;
+                                            }
+                                        }
+
                                         let recipients: Vec<ChannelUser> = match bound_agent {
                                             Some(bound) if bound == requesting_agent => {
                                                 adapter.notification_recipients()
@@ -5879,6 +5935,51 @@ mod tests {
         // button click can't carry a 6-digit code, so users need the
         // slash form for those.
         assert!(msg.text.contains("TOTP"));
+    }
+
+    #[test]
+    fn approval_requested_event_carries_routing_fields() {
+        // Pin the new wire shape on `ApprovalRequestedEvent`. Pre-fix the
+        // event had only request_id / agent_id / tool_name / description /
+        // risk_level, which is what stranded Telegram approvals: the
+        // channel listener subscribed to the EventBus version (NOT the
+        // approval_manager's broadcast) and got no `sender_id` / `channel`
+        // to route by.
+        use librefang_types::event::ApprovalRequestedEvent;
+        let evt = ApprovalRequestedEvent {
+            request_id: "req-12345678".to_string(),
+            agent_id: "agent".to_string(),
+            tool_name: "file_write".to_string(),
+            description: "desc".to_string(),
+            risk_level: "high".to_string(),
+            sender_id: Some("telegram-chat-12345".to_string()),
+            channel: Some("telegram".to_string()),
+        };
+        assert_eq!(evt.sender_id.as_deref(), Some("telegram-chat-12345"));
+        assert_eq!(evt.channel.as_deref(), Some("telegram"));
+
+        // And the JSON shape: new fields are `#[serde(default,
+        // skip_serializing_if = Option::is_none)]` so an event without
+        // them (the dashboard-direct / cron / autonomous path) emits the
+        // pre-fix payload byte-identically. This pins the wire-compat.
+        let bare = ApprovalRequestedEvent {
+            request_id: "req".to_string(),
+            agent_id: "agent".to_string(),
+            tool_name: "tool".to_string(),
+            description: "desc".to_string(),
+            risk_level: "low".to_string(),
+            sender_id: None,
+            channel: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !json.contains("sender_id"),
+            "absent sender_id must be omitted, got: {json}"
+        );
+        assert!(
+            !json.contains(r#""channel""#),
+            "absent channel must be omitted, got: {json}"
+        );
     }
 
     #[test]
