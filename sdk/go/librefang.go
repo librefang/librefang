@@ -666,6 +666,10 @@ func (r *ChannelsResource) ConfigureSidecarChannel(name string, data map[string]
 	return r.client.request("POST", fmt.Sprintf("/api/channels/sidecar/%s/configure", name), data, nil)
 }
 
+func (r *ChannelsResource) GetChannelQr(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/channels/%s/qr", name), nil, nil)
+}
+
 // ── Extensions Resource
 
 type ExtensionsResource struct{ client *Client }

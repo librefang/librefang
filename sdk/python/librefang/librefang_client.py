@@ -452,6 +452,9 @@ class _ChannelsResource(_Resource):
     def configure_sidecar_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/sidecar/{name}/configure", data)
 
+    def get_channel_qr(self, name: str):
+        return self._c._request("GET", f"/api/channels/{name}/qr")
+
 
 # ── Extensions Resource ────────────────────────────────────────
 
