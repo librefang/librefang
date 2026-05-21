@@ -704,12 +704,65 @@ impl CredentialVault {
         // file currently holds — which races between parallel tests
         // (#TOTP flake) and surprises CI/headless deployments that set
         // the env var as the source of truth.
-        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
-            let key_b64 = Zeroizing::new(key_b64);
-            return decode_master_key(&key_b64);
+        // Audit: vault-key-env-overrides-keyring. Resolve BOTH
+        // sources up front so the choice — and any disagreement
+        // between them — is visible in the daemon log instead of
+        // env silently winning. Precedence stays env-first to
+        // preserve the documented behaviour and the test-stability
+        // rationale in the original comment above; what changes is
+        // that an operator who set the env var and ALSO has a
+        // different value in the keyring sees a single WARN line
+        // naming the divergence on the next unlock, instead of
+        // never finding out their keyring is being ignored.
+        let env_key = std::env::var(VAULT_KEY_ENV).ok().map(Zeroizing::new);
+        let keyring_key = load_keyring_key().ok();
+
+        match classify_master_key_sources(
+            env_key.as_ref().map(|s| s.as_str()),
+            keyring_key.as_ref().map(|s| s.as_str()),
+        ) {
+            MasterKeySource::EnvOverridesDifferentKeyring => {
+                // The classic divergence case. WARN once per
+                // resolution so operators investigating credential
+                // weirdness find this line by grepping for
+                // VAULT_KEY_ENV. Values stay redacted — log only
+                // the fact that they differ.
+                tracing::warn!(
+                    target: "vault::keyring",
+                    env = %VAULT_KEY_ENV,
+                    "both LIBREFANG_VAULT_KEY env var AND OS keyring are set, \
+                     and they DISAGREE; env wins (current behaviour). \
+                     If you intended the keyring value to take effect, unset \
+                     the env var on the daemon process."
+                );
+            }
+            MasterKeySource::EnvMatchesKeyring => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "env LIBREFANG_VAULT_KEY matches OS keyring value; using env source"
+                );
+            }
+            MasterKeySource::EnvOnly => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "vault master key sourced from LIBREFANG_VAULT_KEY env var \
+                     (no OS keyring entry present)"
+                );
+            }
+            MasterKeySource::KeyringOnly => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "vault master key sourced from OS keyring \
+                     (no LIBREFANG_VAULT_KEY env var set)"
+                );
+            }
+            MasterKeySource::Neither => {}
         }
 
-        if let Ok(key_b64) = load_keyring_key() {
+        if let Some(key_b64) = env_key {
+            return decode_master_key(&key_b64);
+        }
+        if let Some(key_b64) = keyring_key {
             return decode_master_key(&key_b64);
         }
 
@@ -1102,6 +1155,40 @@ fn store_keyring_key_to_file(key_b64: &str) -> Result<(), String> {
 /// use `Argon2id(SHA-512(domain || random_id || os_material)[..32], salt)`.
 ///
 /// We retain the v2 read path for one release cycle to allow auto-migration
+/// Classification of which master-key source was available at
+/// resolution time. Used by `resolve_master_key` to emit the right
+/// observability signal. Audit: vault-key-env-overrides-keyring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MasterKeySource {
+    /// Both env and keyring set, but the two values disagree —
+    /// env wins (preserves historical precedence), but the
+    /// divergence is WARN-logged so an operator who expected the
+    /// keyring value to take effect can find out.
+    EnvOverridesDifferentKeyring,
+    /// Both env and keyring set, same value — env source used
+    /// (no divergence to warn about).
+    EnvMatchesKeyring,
+    /// Only env present.
+    EnvOnly,
+    /// Only keyring present.
+    KeyringOnly,
+    /// Neither — `resolve_master_key` returns `VaultLocked`.
+    Neither,
+}
+
+pub(crate) fn classify_master_key_sources(
+    env: Option<&str>,
+    keyring: Option<&str>,
+) -> MasterKeySource {
+    match (env, keyring) {
+        (Some(e), Some(k)) if e != k => MasterKeySource::EnvOverridesDifferentKeyring,
+        (Some(_), Some(_)) => MasterKeySource::EnvMatchesKeyring,
+        (Some(_), None) => MasterKeySource::EnvOnly,
+        (None, Some(_)) => MasterKeySource::KeyringOnly,
+        (None, None) => MasterKeySource::Neither,
+    }
+}
+
 /// on first daemon restart post-upgrade.  Plan to remove the v2 branch after
 /// release N+2 (tracked in #4159 follow-up).
 ///
@@ -3260,5 +3347,52 @@ mod tests {
         // ENOENT (and the updated collector logs that path explicitly).
         let pick = resolve_command(&["definitely-not-a-real-command-1234567890"]);
         assert_eq!(pick, "definitely-not-a-real-command-1234567890");
+    }
+
+    /// Audit: vault-key-env-overrides-keyring. The classification
+    /// helper is the single source of truth for which observability
+    /// signal `resolve_master_key` emits. Pinning its truth table
+    /// here keeps the WARN-on-divergence contract testable without
+    /// having to spin up a tracing subscriber and capture log lines.
+    #[test]
+    fn classify_master_key_sources_flags_divergence() {
+        assert_eq!(
+            classify_master_key_sources(Some("env-key"), Some("keyring-key")),
+            MasterKeySource::EnvOverridesDifferentKeyring,
+            "differing env + keyring must surface as the WARN-eligible class"
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_agreement() {
+        assert_eq!(
+            classify_master_key_sources(Some("same"), Some("same")),
+            MasterKeySource::EnvMatchesKeyring,
+            "identical env + keyring must NOT WARN — no divergence to flag"
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_env_only() {
+        assert_eq!(
+            classify_master_key_sources(Some("env-key"), None),
+            MasterKeySource::EnvOnly
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_keyring_only() {
+        assert_eq!(
+            classify_master_key_sources(None, Some("keyring-key")),
+            MasterKeySource::KeyringOnly
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_neither() {
+        assert_eq!(
+            classify_master_key_sources(None, None),
+            MasterKeySource::Neither
+        );
     }
 }
