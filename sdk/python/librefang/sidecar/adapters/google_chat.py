@@ -598,24 +598,22 @@ class GoogleChatAdapter(SidecarAdapter):
     # ---- Inbound (webhook) -----------------------------------------
 
     async def produce(self, emit) -> None:
-        # Bridge inbound webhook events from the worker thread to the
-        # asyncio emit via `loop.call_soon_threadsafe`.
-        loop = asyncio.get_running_loop()
-
+        # The framework's `emit` writes to stdout under a
+        # `threading.Lock` (sidecar/runtime.py:344-350), so it's
+        # safe to call directly from a worker thread — no need for
+        # `loop.call_soon_threadsafe`. Matches teams.py / webhook.py.
         def thread_emit(event: dict) -> None:
-            try:
-                # Inject account_id when configured (mirrors
-                # google_chat.rs:443-448).
-                if self.account_id:
-                    params = event.get("params")
-                    if isinstance(params, dict):
-                        meta = params.setdefault("metadata", {})
-                        if isinstance(meta, dict):
-                            meta.setdefault("account_id", self.account_id)
-                loop.call_soon_threadsafe(emit, event)
-            except RuntimeError:
-                # Loop closed — drop the event.
-                pass
+            # Inject account_id when configured (mirrors
+            # google_chat.rs:443-448). `setdefault` so the inbound
+            # parser's own account_id (if any future event payload
+            # carries one) wins over the adapter's instance id.
+            if self.account_id:
+                params = event.get("params")
+                if isinstance(params, dict):
+                    meta = params.setdefault("metadata", {})
+                    if isinstance(meta, dict):
+                        meta.setdefault("account_id", self.account_id)
+            emit(event)
 
         # ThreadingTCPServer (not single-threaded HTTPServer) so two
         # concurrent webhook POSTs don't serialize behind each other.
@@ -820,15 +818,21 @@ def _parse_webhook_event(
     else:
         content = Content.text(text)
 
-    metadata = {
-        "sender_id": str(sender_id),
-        "message_id": str(message_name),
-        "channel_label": "google_chat",
-    }
+    # `sender_id` (the human's `users/<id>`) is a Google-Chat-specific
+    # detail that doesn't fit any top-level protocol field — keep it
+    # in `metadata` exactly like google_chat.rs:432-438 did. Do NOT
+    # stuff `message_id` here; the framework has a top-level
+    # `message_id=` kwarg that maps to `ChannelMessage.platform_message_id`
+    # so reactions / edits can target the real Google Chat message.
+    # And do NOT invent a `channel_label` metadata key — no kernel
+    # consumer reads it; the channel identity is already on the
+    # sidecar's `channel_type = "google_chat"` declaration.
+    metadata = {"sender_id": str(sender_id)}
 
     event = protocol.message(
         user_id=str(space_name),
         user_name=str(sender_name),
+        message_id=str(message_name) if message_name else None,
         content=content,
         is_group=is_group,
         thread_id=thread_name if isinstance(thread_name, str) else None,

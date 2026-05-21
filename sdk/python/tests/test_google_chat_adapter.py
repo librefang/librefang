@@ -207,7 +207,26 @@ def test_parse_webhook_event_plain_text():
     assert params["content"] == {"Text": "hello"}
     assert params.get("is_group") is True
     assert params["metadata"]["sender_id"] == "users/123"
-    assert params["metadata"]["channel_label"] == "google_chat"
+    # `message_id` must land at the top level of params (not under
+    # metadata) so `ChannelMessage.platform_message_id` is populated
+    # — reactions / edits target the real Google Chat message id.
+    assert params["message_id"] == "spaces/AAAA/messages/M1"
+    # No `channel_label` key — that was a made-up name with no
+    # kernel consumer; channel identity comes from the sidecar's
+    # `channel_type = "google_chat"` declaration instead.
+    assert "channel_label" not in params["metadata"]
+
+
+def test_parse_webhook_event_omits_empty_message_id():
+    """A `message.name` that's empty/missing must NOT surface as
+    `message_id=""` on the protocol message — the kernel would
+    then store an empty platform_message_id and the reaction
+    helper would target the wrong row."""
+    msg = _msg_event()
+    msg["message"]["name"] = ""
+    event = gc._parse_webhook_event(msg, [])
+    assert event is not None
+    assert "message_id" not in event["params"]
 
 
 def test_parse_webhook_event_slash_command():
