@@ -732,6 +732,14 @@ class WebhookAdapter(SidecarAdapter):
             return
         chunks = _split_message(text, MAX_MESSAGE_LEN)
         for i, chunk in enumerate(chunks):
+            # Skip remaining chunks if shutdown was signalled — a
+            # multi-chunk send shouldn't keep firing 30 s-timeout
+            # HTTP requests once the supervisor wants us gone. The
+            # 429 retry path inside `_post_chunk` honours
+            # `_shutdown.wait()` already; this is the outer guard
+            # for the path between chunks.
+            if self._shutdown.is_set():
+                return
             self._post_chunk(chunk, user_id, user_name)
             if i + 1 < len(chunks):
                 # 100 ms inter-chunk delay matches webhook.rs:483-485.
