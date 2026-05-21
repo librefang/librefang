@@ -542,6 +542,10 @@ class ChannelsResource {
   async configureSidecarChannel(name, data) {
     return this._c._request("POST", `/api/channels/sidecar/${name}/configure`, data, undefined);
   }
+
+  async getChannelQr(name) {
+    return this._c._request("GET", `/api/channels/${name}/qr`);
+  }
 }
 
 // ── Extensions Resource
