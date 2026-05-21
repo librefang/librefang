@@ -492,6 +492,97 @@ pub struct ChannelStatus {
     pub messages_sent: u64,
     /// Last error message (if any).
     pub last_error: Option<String>,
+    /// Latest QR-login session state, when the adapter exposes one.
+    /// Skipped entirely from JSON when the adapter has never published
+    /// a QR event — preserves the historical `ChannelStatus` shape for
+    /// every non-QR channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr: Option<QrState>,
+}
+
+/// One QR-login session as seen by the daemon. Populated from the
+/// `qr_ready` / `qr_status` events that a sidecar emits during its
+/// authentication flow (e.g. WeChat iLink scan, WhatsApp Web pairing),
+/// and surfaced to the dashboard via `GET /api/channels/{name}/qr` so
+/// the operator can scan the code without having to read sidecar logs.
+///
+/// Lifecycle:
+/// 1. Sidecar emits `qr_ready` → `status = Pending`, `qr_code` set,
+///    optional `qr_url` populated when the platform exposes a
+///    pre-rendered scannable URL (Bluesky/WhatsApp Web), otherwise
+///    `None` and the dashboard renders `qr_code` to a canvas itself.
+/// 2. Sidecar polls the platform; intermediate progress → `qr_status`
+///    with `Scanning` (user scanned, awaiting confirm).
+/// 3. Terminal: `Confirmed` (login succeeded — sidecar continues with
+///    the obtained token), `Expired` (no scan in time), or `Failed`
+///    (network / API error). Dashboard stops polling.
+///
+/// `updated_at` advances on every state transition so dashboard polls
+/// can use it as a cheap diff signal — a stale `qr` whose
+/// `updated_at` is older than the poll's last-seen value is treated
+/// as no progress, not as a fresh QR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QrState {
+    pub status: QrStatusKind,
+    /// Raw QR payload — the string the user's phone scanner reads.
+    /// For WeChat this is an opaque iLink token; for WhatsApp Web it
+    /// is the pairing payload; for any other QR-style auth it is
+    /// whatever the platform documents as the "scan me" string.
+    pub qr_code: String,
+    /// Optional pre-formed URL. When present the dashboard renders
+    /// THIS into the canvas (often a deep-link the platform's mobile
+    /// app recognises explicitly); when absent it falls back to
+    /// encoding `qr_code` directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_url: Option<String>,
+    /// Operator-facing message — populated for `Failed` / `Expired`
+    /// (the error reason), and on `Confirmed` when the sidecar wants
+    /// to point at follow-up action ("set WECHAT_BOT_TOKEN to skip QR
+    /// next time").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// When the QR will/did expire — populated by the sidecar from
+    /// the platform's response (e.g. WeChat 5-minute window). The
+    /// dashboard uses this to show a countdown and stop polling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Wall-clock of the latest state transition. Acts as the
+    /// monotonic-ish ETag for poll-based consumers.
+    pub updated_at: DateTime<Utc>,
+}
+
+// NOTE: an earlier draft of this PR carried a `bot_token: Option<String>`
+// here so the dashboard could auto-persist on `Confirmed`. That was
+// dropped on review: the only safe persist path today is
+// `POST /api/channels/sidecar/{name}/configure`, which is a full-form
+// upsert that drops every schema-managed env key not in the payload —
+// silently wiping `WECHAT_ALLOWED_USERS` / `WECHAT_ACCOUNT_ID` / etc.
+// when called with only `{WECHAT_BOT_TOKEN}`. Until a narrow
+// `/api/channels/sidecar/{name}/secrets` endpoint exists, the sidecar
+// continues to log the captured token at DEBUG (see
+// `wechat.py::_qr_login`) and `QrState.message` instructs the operator
+// to copy it into `~/.librefang/secrets.env` themselves.
+
+/// QR-login lifecycle states. `snake_case` on the wire so the
+/// dashboard and the Python sidecar can each emit/consume the
+/// strings their convention prefers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QrStatusKind {
+    /// Sidecar has fetched a QR and is waiting for the user to scan.
+    /// This is the state set by `qr_ready`.
+    #[default]
+    Pending,
+    /// User scanned the QR; platform reports the login is in
+    /// progress (e.g. WeChat's confirm-on-phone step).
+    Scanning,
+    /// Login succeeded. `message` may carry follow-up instructions.
+    Confirmed,
+    /// QR window closed without a scan.
+    Expired,
+    /// Sidecar gave up — network error, API rejection, etc.
+    /// `message` carries the cause for the operator.
+    Failed,
 }
 
 // Re-export policy/format types from librefang-types for convenience.
