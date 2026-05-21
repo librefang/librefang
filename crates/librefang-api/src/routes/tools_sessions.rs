@@ -269,6 +269,7 @@ pub async fn invoke_tool(
         Some(state.kernel.process_registry()),
         None, // sender_id
         None, // channel
+        None, // chat_id (REST bridge has no conversation context)
         None, // checkpoint_manager — snapshotting is wired into agent loops
         None, // interrupt — no session to cancel
         None, // session_id

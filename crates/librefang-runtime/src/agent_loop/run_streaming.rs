@@ -137,6 +137,18 @@ pub async fn run_agent_loop_streaming(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // Approval-flow group-chat support: stamped by kernel alongside
+    // sender_user_id + sender_channel. Threaded through to
+    // `ToolCallContext.sender_chat_id` → `execute_tool` → the
+    // deferred payload so the bridge's approval listener can route
+    // `[Approve] [Deny]` to the originating conversation rather than
+    // the DM-with-bot. `None` for pre-PR call sites; the deferred
+    // payload falls back to `sender_id` in that case.
+    let sender_chat_id: Option<String> = manifest
+        .metadata
+        .get("sender_chat_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     // #5227: see `run_agent_loop` for the rationale; same fallback to
     // `sender_channel` keeps non-kernel callers behaving as they did
     // before the chat-scope helper landed.
@@ -1143,6 +1155,7 @@ pub async fn run_agent_loop_streaming(
                         process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        sender_chat_id: sender_chat_id.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
                         context_budget: &context_budget,
                         context_engine,
