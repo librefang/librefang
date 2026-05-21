@@ -199,9 +199,12 @@ jobs:
         with:
           key: cli-aarch64-linux-android-${{ inputs.tag }}
       - name: Build CLI (Android aarch64)
-        # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
-        # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
-        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
+        # Every channel adapter is a Python sidecar now; no per-channel
+        # cargo features remain to gate. The previous `--features android`
+        # collapsed `librefang-api/all-channels` without channel-email
+        # (rustls-connector 0.23.0 → rustls-platform-verifier 0.7.0
+        # missing on Android), now obsolete.
+        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features telemetry
       - name: Package
         run: |
           cd target/aarch64-linux-android/release
