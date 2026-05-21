@@ -226,21 +226,24 @@ MATTERMOST_SERVER_URL = "https://mattermost.example.com"
 
 `MATTERMOST_TOKEN` 写入 `~/.librefang/secrets.env`。
 
-#### `[channels.google_chat]`
+#### Google Chat
+
+Google Chat 由 Python sidecar adapter (`librefang.sidecar.adapters.google_chat`) 提供。Sidecar 迁移已移除进程内 `[channels.google_chat]` 配置块。请改为 `[[sidecar_channels]]`：
 
 ```toml
-[channels.google_chat]
-service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
-space_ids = []
-# webhook_port = 8444  # 已弃用：Webhook 现共享 API 端口
+[[sidecar_channels]]
+name = "google_chat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.google_chat"]
+channel_type = "google_chat"
+[sidecar_channels.env]
+GOOGLE_CHAT_WEBHOOK_PORT = "8090"
+# GOOGLE_CHAT_SPACE_IDS = "spaces/AAAA,spaces/BBBB"   # 可选，空 = 所有 space
+# GOOGLE_CHAT_ACCOUNT_ID = "prod"                     # 可选，多机器人路由
+# GOOGLE_CHAT_API_BASE = "https://chat.googleapis.com/v1"  # 测试覆盖
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | 存放服务账号 JSON 密钥的环境变量。 |
-| `space_ids` | list of strings | `[]` | 监听的 Google Chat 聊天室 ID 列表。 |
-| `webhook_port` | u16 | `8444` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`（完整的 JSON blob 字符串 —— **不是** 路径）写入 `~/.librefang/secrets.env`。Google Cloud Console 上 Bot 配置的 messaging endpoint 改成 `https://<host>:<GOOGLE_CHAT_WEBHOOK_PORT>/webhook`。
 
 #### Twitch
 
@@ -438,21 +441,23 @@ DINGTALK_APP_KEY = "dingxxx..."
 
 legacy in-process `webhook` 模式（HMAC-SHA256 + 公网 IP）**未迁移**——依赖 webhook 模式的运维需要在钉钉后台改用 stream 订阅。
 
-#### `[channels.ntfy]`
+#### ntfy
+
+ntfy 由 Python sidecar adapter (`librefang.sidecar.adapters.ntfy`) 提供。Sidecar 迁移已移除进程内 `[channels.ntfy]` 配置块。请改为 `[[sidecar_channels]]`：
 
 ```toml
-[channels.ntfy]
-server_url = "https://ntfy.sh"
-topic = "my-agent-topic"
-token_env = "NTFY_TOKEN"
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_SERVER_URL = "https://ntfy.sh"
+NTFY_TOPIC = "my-agent-topic"
+# NTFY_ACCOUNT_ID = "prod"                   # 可选，多机器人路由
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `"https://ntfy.sh"` | ntfy 服务器 URL。支持自托管。 |
-| `topic` | string | `""` | 要订阅/发布的主题。 |
-| `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`NTFY_TOKEN`（认证 token，公开 topic 可选）写入 `~/.librefang/secrets.env`。
 
 #### Gotify
 
@@ -554,9 +559,26 @@ channel_type = "wechat"
 ---
 
 
-### 通道行为覆盖
+### 通道行为覆盖（旧版 —— 已移除）
 
-每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
+`[channels.<name>.overrides]` 子表**已不再被识别**。它原本挂在进程内 `ChannelsConfig` 上，而 sidecar 迁移已经把这个结构清空（`ChannelsConfig` 现在只剩 `file_download_*` / `file_upload_max_bytes` 这些全局文件传输字段）。下方内容保留作**历史参考与迁移映射**。
+
+**迁移对照表 —— sidecar 模型下的等价做法：**
+
+| 旧的 override | 现在对应的 sidecar 写法 |
+|---|---|
+| `model`、`system_prompt` | 在 agent（`agent.toml`）上设置而不是按通道 —— sidecar 把每个入站都路由到同一个 agent。 |
+| `dm_policy`、`group_policy` | 写到 `[sidecar_channels.env]` 块里的 `*_DM_POLICY` / `*_GROUP_POLICY` 环境变量（Telegram / Discord / Slack / WhatsApp / Teams 五个 sidecar 都识别这套）。 |
+| `rate_limit_per_minute`、`rate_limit_per_user` | Sidecar 自己按平台限流；要更严的话，在 sidecar 前面套反向代理。 |
+| `output_format` | `[[sidecar_channels]]` 没暴露这个 knob；需要特定输出格式的 agent 应在 agent 侧切换。 |
+| `disable_commands`、`allowed_commands`、`blocked_commands` | 在 agent 清单（`agent.toml`）的命令策略区块设置 —— 跨通道统一生效。 |
+| `threading`、`usage_footer`、`typing_mode` | 用 sidecar 默认行为（平台支持时启用 threading；不显示用量页脚；instant 打字态）。当前不可按通道配置。 |
+
+下方是**已删除**的 override 结构 —— 保留作参考；**不要**复制到当前的 `config.toml`。
+
+### 通道行为覆盖（历史参考）
+
+迁移前每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
 
 ```toml
 [channels.discord.overrides]
