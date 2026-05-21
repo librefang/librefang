@@ -434,7 +434,22 @@ class WeChatAdapter(SidecarAdapter):
                         raise RuntimeError(
                             "wechat QR confirmed but bot_token missing",
                         )
-                    log.info("wechat QR login successful")
+                    # The Rust adapter relied on the dashboard's
+                    # /channels/wechat/qr/start + /qr/status endpoints
+                    # to capture the token and write it to secrets.env.
+                    # Those routes are gone in the sidecar — surface
+                    # the token at DEBUG so an operator running the
+                    # sidecar at -v can copy it into
+                    # ~/.librefang/secrets.env as WECHAT_BOT_TOKEN to
+                    # skip QR login on subsequent restarts. INFO-level
+                    # message intentionally omits the token to keep
+                    # production logs free of secrets.
+                    log.info(
+                        "wechat QR login successful — set WECHAT_BOT_TOKEN "
+                        "in ~/.librefang/secrets.env to skip QR on next "
+                        "restart (token logged at DEBUG)",
+                    )
+                    log.debug("wechat captured bot_token", bot_token=token)
                     return token
                 if qr_status == "expired":
                     raise RuntimeError(
@@ -491,6 +506,21 @@ class WeChatAdapter(SidecarAdapter):
             status, resp, raw, hdrs = self._post_json(
                 "/ilink/bot/getupdates", body, token=token,
             )
+        if status in (401, 403):
+            # Token expired / revoked. Clear the cache so the next
+            # poll-loop iteration triggers a fresh QR login instead
+            # of looping forever against a dead token.
+            snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+            log.error(
+                "wechat token rejected by iLink; "
+                "clearing cache and re-running QR login on next iteration",
+                status=status, snippet=snippet,
+            )
+            with self._token_lock:
+                self.bot_token = None
+            raise RuntimeError(
+                f"wechat getupdates auth rejected (status={status})",
+            )
         if status != 200 or not isinstance(resp, dict):
             snippet = raw[:200].decode("utf-8", "replace") if raw else ""
             raise RuntimeError(
@@ -543,6 +573,19 @@ class WeChatAdapter(SidecarAdapter):
                     return
                 status, resp, raw, hdrs = self._post_json(
                     "/ilink/bot/sendmessage", body, token=token,
+                )
+            if status in (401, 403):
+                # Outbound saw the token expire. Clear the cache so
+                # the next poll-loop iteration re-runs QR; the send
+                # still fails (caller's responsibility to retry), but
+                # subsequent inbounds will resume working once the
+                # operator re-scans.
+                with self._token_lock:
+                    self.bot_token = None
+                snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+                raise RuntimeError(
+                    f"wechat sendmessage auth rejected "
+                    f"(status={status}): {snippet}",
                 )
             if status < 200 or status >= 300:
                 snippet = raw[:200].decode("utf-8", "replace") if raw else ""
@@ -623,8 +666,24 @@ class WeChatAdapter(SidecarAdapter):
         while not self._shutdown.is_set():
             token = self._get_token()
             if token is None:
-                log.error("wechat bot_token missing during poll loop")
-                return
+                # Token cleared by an auth-rejection path
+                # (`_poll_updates` 401/403 handler). Re-run QR login
+                # rather than spinning. If the persisted env-var
+                # token was already wrong on first start, the same
+                # flow makes the operator aware via the QR-code log.
+                log.info("wechat re-running QR login (token cleared)")
+                try:
+                    token = self._qr_login()
+                except Exception as e:  # noqa: BLE001
+                    if self._shutdown.is_set():
+                        return
+                    log.error("wechat QR re-login failed", error=str(e))
+                    if self._shutdown.wait(backoff):
+                        return
+                    backoff = min(backoff * 2.0, self.max_backoff_secs)
+                    continue
+                self._set_token(token)
+                continue
             try:
                 data = self._poll_updates(token)
             except Exception as e:  # noqa: BLE001

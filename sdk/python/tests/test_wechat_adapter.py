@@ -546,6 +546,50 @@ def test_qr_login_no_qrcode_in_response(monkeypatch):
         a._qr_login()
 
 
+def test_send_text_401_clears_token(monkeypatch):
+    """A 401/403 on sendmessage clears the cached token so the
+    next poll-loop iteration triggers QR re-login. The send itself
+    still raises — caller decides whether to retry."""
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (401, None, b"token expired", {}),
+    )
+    a = _adapter()
+    assert a._get_token() == "tok_test"
+    with pytest.raises(RuntimeError, match="auth rejected"):
+        a._send_text("alice@im.wechat", "ctx", "hi")
+    assert a._get_token() is None
+
+
+def test_poll_updates_401_clears_token(monkeypatch):
+    """401/403 from /getupdates means the persisted token is dead.
+    The adapter MUST clear the cached token so the next poll-loop
+    iteration re-runs the QR flow instead of looping forever on a
+    rejected request."""
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (401, None, b"token expired", {}),
+    )
+    a = _adapter()
+    assert a._get_token() == "tok_test"  # primed
+    with pytest.raises(RuntimeError, match="auth rejected"):
+        a._poll_updates("tok_test")
+    # Cache cleared so the next loop iteration drops into QR re-login.
+    assert a._get_token() is None
+
+
+def test_poll_updates_403_also_clears_token(monkeypatch):
+    """Same as 401 — both auth-rejection statuses must clear cache."""
+    monkeypatch.setattr(
+        wc, "_http_request",
+        lambda url, **kw: (403, None, b"forbidden", {}),
+    )
+    a = _adapter()
+    with pytest.raises(RuntimeError, match="auth rejected"):
+        a._poll_updates("tok_test")
+    assert a._get_token() is None
+
+
 def test_qr_login_status_non_200_continues(monkeypatch):
     """Transient non-200 on status poll keeps trying; eventual
     `confirmed` succeeds."""
