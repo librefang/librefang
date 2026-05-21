@@ -8223,10 +8223,15 @@ fn cmd_channel_setup(name: Option<&str>) {
     let payload = serde_json::json!({ "values": values });
     let body = daemon_json(client.post(&url).json(&payload).send());
     // `daemon_json` only logs 5xx; 4xx silently returns the error body.
-    // Surface those by checking for the SidecarSaveResult shape.
+    // Surface those by checking for the SidecarSaveResult shape. The
+    // `ApiErrorResponse` envelope (see librefang-api types.rs:114-164)
+    // serializes the human-readable message at both `error.message`
+    // (nested, #3639 preferred shape) and `message` (top-level flat
+    // alias kept for legacy callers); prefer the nested one, fall
+    // through to the flat alias for older deployments.
     if body.get("status").and_then(|v| v.as_str()) != Some("saved") {
         let err = body
-            .get("error")
+            .pointer("/error/message")
             .and_then(|v| v.as_str())
             .or_else(|| body.get("message").and_then(|v| v.as_str()))
             .unwrap_or("save failed (no error body)");
