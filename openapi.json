@@ -4161,59 +4161,6 @@
         }
       }
     },
-    "/api/channels/wechat/qr/start": {
-      "post": {
-        "tags": [
-          "channels"
-        ],
-        "summary": "POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.",
-        "operationId": "wechat_qr_start",
-        "responses": {
-          "200": {
-            "description": "WeChat QR login initiated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/channels/wechat/qr/status": {
-      "get": {
-        "tags": [
-          "channels"
-        ],
-        "summary": "GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.",
-        "operationId": "wechat_qr_status",
-        "parameters": [
-          {
-            "name": "qr_code",
-            "in": "query",
-            "description": "QR code value from /qr/start",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "WeChat QR scan status",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/channels/whatsapp/qr/start": {
       "post": {
         "tags": [
