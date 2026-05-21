@@ -73,6 +73,11 @@ from typing import Any, Callable, Optional
 
 from .. import logging as log
 from .. import protocol
+from ..common import (
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
+    parse_retry_after as _parse_retry_after,
+)
 from ..protocol import Content, Field, Schema
 from ..runtime import SidecarAdapter, run_stdio_main
 
@@ -499,6 +504,14 @@ class GoogleChatAdapter(SidecarAdapter):
         self._httpd: Optional[socketserver.ThreadingTCPServer] = None
         self._server_thread: Optional[threading.Thread] = None
 
+        # Bounded dedupe keyed on `message.name`
+        # (e.g. ``spaces/AAAA/messages/BBBB``). Google Chat uses
+        # at-least-once delivery for Pub/Sub-style webhook events — the
+        # same MESSAGE event can arrive multiple times if Google's
+        # delivery layer retries on a slow response. Without dedupe a
+        # transient operator pause produces duplicate agent triggers.
+        self._seen = _SeenSet()
+
     # ---- Token resolution ------------------------------------------
 
     def _get_access_token(self) -> str:
@@ -537,34 +550,56 @@ class GoogleChatAdapter(SidecarAdapter):
         token = self._get_access_token()
         url = f"{self._api_base}/{space_name}/messages"
         for chunk in _split_message(text, MAX_MESSAGE_LEN):
-            body = json.dumps({"text": chunk}).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=body,
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            try:
-                with urllib.request.urlopen(
-                    req, timeout=HTTP_TIMEOUT_SECS,
-                ) as resp:
-                    resp.read()
-            except urllib.error.HTTPError as e:
-                text_body = (e.read() or b"").decode("utf-8", errors="replace")
-                # 401 likely means the cached token went stale early —
-                # clear and let the next send retry from JWT auth.
-                if e.code == 401:
-                    self._token_cache.clear()
-                raise RuntimeError(
-                    f"Google Chat API error {e.code}: {text_body}"
-                ) from e
-            except urllib.error.URLError as e:
-                raise RuntimeError(
-                    f"Google Chat send failed: {e.reason}"
-                ) from e
+            self._send_chunk(url, token, chunk, retry_429=True)
+
+    def _send_chunk(self, url: str, token: str, chunk: str,
+                    *, retry_429: bool) -> None:
+        body = json.dumps({"text": chunk}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                req, timeout=HTTP_TIMEOUT_SECS,
+            ) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and retry_429:
+                # Google Chat publishes per-bot + per-space quotas; both
+                # surface as 429 with Retry-After. Without honouring it
+                # the next outbound burst extends the rate-limit window
+                # and the daemon's reply lane just keeps dropping.
+                resp_hdrs = {
+                    k.lower(): v for k, v in (e.headers or {}).items()
+                }
+                wait = _parse_retry_after(
+                    resp_hdrs, default_secs=RETRY_AFTER_DEFAULT_SECS,
+                )
+                log.warn(
+                    "google_chat 429; sleeping then retrying once",
+                    retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                self._send_chunk(url, token, chunk, retry_429=False)
+                return
+            text_body = (e.read() or b"").decode("utf-8", errors="replace")
+            # 401 likely means the cached token went stale early —
+            # clear and let the next send retry from JWT auth.
+            if e.code == 401:
+                self._token_cache.clear()
+            raise RuntimeError(
+                f"Google Chat API error {e.code}: {text_body}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Google Chat send failed: {e.reason}"
+            ) from e
 
     async def on_send(self, cmd) -> None:
         # `Send.channel_id` carries the space name (`spaces/AAAA`),
@@ -753,7 +788,19 @@ def _make_webhook_handler(
 
             event = _parse_webhook_event(payload, adapter._space_ids)
             if event is not None:
-                emit(event)
+                # At-least-once delivery: dedupe on `message.name` so a
+                # retried webhook doesn't trigger the agent twice. We
+                # mark AFTER `_parse_webhook_event` returns non-None so
+                # we don't burn a slot on filtered-out events.
+                params = event.get("params") or {}
+                msg_id = params.get("message_id")
+                if msg_id and not adapter._seen.mark(msg_id):
+                    log.debug(
+                        "google_chat dropping redelivered webhook event",
+                        message_id=msg_id,
+                    )
+                else:
+                    emit(event)
 
             # Always 200 — Google retries non-2xx aggressively. Even
             # rejected events (wrong space, non-MESSAGE type) ack OK
