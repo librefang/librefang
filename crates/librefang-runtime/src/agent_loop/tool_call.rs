@@ -402,6 +402,13 @@ pub(super) struct ToolExecutionContext<'a> {
     pub(super) process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub(super) sender_user_id: Option<&'a str>,
     pub(super) sender_channel: Option<&'a str>,
+    /// Platform conversation id (chat_id / channel_id / JID). Distinct
+    /// from `sender_user_id` in group chats; coincides in DMs.
+    /// Threaded through `execute_tool` → `DeferredToolExecution` so
+    /// the approval-resume routing can target the originating
+    /// conversation (group OR DM). `None` for non-channel call
+    /// sites; the deferred payload falls back to `sender_user_id`.
+    pub(super) sender_chat_id: Option<&'a str>,
     pub(super) checkpoint_manager: Option<&'a Arc<CheckpointManager>>,
     pub(super) context_budget: &'a ContextBudget,
     pub(super) context_engine: Option<&'a dyn ContextEngine>,
@@ -623,6 +630,7 @@ pub(super) async fn execute_single_tool_call_inner(
             ctx.process_registry,
             ctx.sender_user_id,
             ctx.sender_channel,
+            ctx.sender_chat_id,
             ctx.checkpoint_manager,
             ctx.interrupt.clone(),
             Some(ctx.session.id.to_string()).as_deref(),

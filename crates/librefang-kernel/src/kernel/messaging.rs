@@ -390,10 +390,7 @@ impl LibreFangKernel {
             if sc.default_agent.as_deref() != Some(agent_name.as_str()) {
                 return None;
             }
-            let channel = sc
-                .channel_type
-                .clone()
-                .unwrap_or_else(|| sc.name.clone());
+            let channel = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());
             Some(SenderContext {
                 channel,
                 account_id: None,
@@ -2400,6 +2397,21 @@ impl LibreFangKernel {
                     "sender_channel".to_string(),
                     serde_json::Value::String(ctx.channel.clone()),
                 );
+            }
+            // Approval-flow group-chat support: stamp the raw chat_id
+            // alongside sender_channel + sender_user_id so the
+            // runtime's tool dispatch can thread it into
+            // `DeferredToolExecution.chat_id` for the bridge's
+            // approval listener to route `[Approve] [Deny]` keyboards
+            // back to the originating conversation (group or DM)
+            // instead of always to the human's DM with the bot.
+            if let Some(ref cid) = ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
             }
             // #5227: stamp the chat-qualified scope derived via the same
             // formula as `SessionId::for_sender_scope`. Adapters whose
