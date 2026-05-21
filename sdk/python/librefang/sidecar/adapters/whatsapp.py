@@ -663,10 +663,14 @@ class WhatsAppAdapter(SidecarAdapter):
         mode = (params.get("hub.mode") or [""])[0]
         token = (params.get("hub.verify_token") or [""])[0]
         challenge = (params.get("hub.challenge") or [""])[0]
+        # Constant-time compare of the verify_token — the handshake
+        # runs infrequently so timing attacks are impractical, but
+        # `==` on strings short-circuits at the first mismatching
+        # byte. Always cheap to do this right.
         if (
             mode == "subscribe"
             and self.verify_token
-            and token == self.verify_token
+            and hmac.compare_digest(token, self.verify_token)
         ):
             return 200, challenge.encode("utf-8")
         return 403, b""
