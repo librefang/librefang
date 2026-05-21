@@ -6403,8 +6403,8 @@ pub struct ChannelsConfig {
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Generic webhook configuration(s).
-    pub webhook: OneOrMany<WebhookConfig>,
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
@@ -6462,7 +6462,6 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             google_chat: OneOrMany::default(),
-            webhook: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6597,49 +6596,9 @@ impl Default for GoogleChatConfig {
 // in-process `QqConfig` + `[channels.qq]` block were removed in this
 // migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
-/// Generic webhook channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WebhookConfig {
-    /// Env var name holding the HMAC signing secret.
-    pub secret_env: String,
-    /// Port to listen for incoming webhooks.
-    pub listen_port: u16,
-    /// URL to POST outgoing messages to.
-    pub callback_url: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// When true, incoming POST bodies are forwarded directly to the delivery
-    /// target channel without invoking the LLM or any agent. Requires
-    /// `deliver` to be set to a valid channel name (not "log").
-    #[serde(default)]
-    pub deliver_only: bool,
-    /// Target channel name for direct delivery (e.g. "telegram", "discord").
-    /// Required when `deliver_only` is true.
-    #[serde(default)]
-    pub deliver: Option<String>,
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            secret_env: "WEBHOOK_SECRET".to_string(),
-            listen_port: 8460,
-            callback_url: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-            deliver_only: false,
-            deliver: None,
-        }
-    }
-}
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook); the
+// in-process `WebhookConfig` + `[channels.webhook]` block were removed in
+// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Terminal / CLI access control configuration.
 ///

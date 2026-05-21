@@ -1163,15 +1163,6 @@
           "default": null,
           "description": "Webex bot configuration(s)."
         },
-        "webhook": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/OneOrMany_WebhookConfig"
-            }
-          ],
-          "default": null,
-          "description": "Generic webhook configuration(s)."
-        },
         "zulip": {
           "allOf": [
             {
@@ -4890,108 +4881,6 @@
         }
       ]
     },
-    "OneOrMany_WebhookConfig": {
-      "oneOf": [
-        {
-          "description": "Generic webhook channel adapter configuration.",
-          "properties": {
-            "account_id": {
-              "default": null,
-              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "callback_url": {
-              "default": null,
-              "description": "URL to POST outgoing messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "default_agent": {
-              "default": null,
-              "description": "Default agent name to route messages to.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "deliver": {
-              "default": null,
-              "description": "Target channel name for direct delivery (e.g. \"telegram\", \"discord\"). Required when `deliver_only` is true.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "deliver_only": {
-              "default": false,
-              "description": "When true, incoming POST bodies are forwarded directly to the delivery target channel without invoking the LLM or any agent. Requires `deliver` to be set to a valid channel name (not \"log\").",
-              "type": "boolean"
-            },
-            "listen_port": {
-              "default": 8460,
-              "description": "Port to listen for incoming webhooks.",
-              "format": "uint16",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "overrides": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ChannelOverrides"
-                }
-              ],
-              "default": {
-                "allowed_commands": [],
-                "auto_route": "off",
-                "auto_route_confidence_threshold": 6,
-                "auto_route_divergence_count": 2,
-                "auto_route_sticky_bonus": 4,
-                "auto_route_ttl_minutes": 30,
-                "blocked_commands": [],
-                "clear_done_reaction": false,
-                "disable_commands": false,
-                "dm_policy": "respond",
-                "group_policy": "mention_only",
-                "group_trigger_patterns": [],
-                "message_debounce_max_buffer": 64,
-                "message_debounce_max_ms": 30000,
-                "message_debounce_ms": 0,
-                "model": null,
-                "output_format": null,
-                "prefix_agent_name": "off",
-                "rate_limit_per_minute": 0,
-                "rate_limit_per_user": 0,
-                "reply_precheck": false,
-                "reply_precheck_model": null,
-                "system_prompt": null,
-                "thread_ownership_enabled": true,
-                "threading": false,
-                "typing_mode": null,
-                "usage_footer": null
-              },
-              "description": "Per-channel behavior overrides."
-            },
-            "secret_env": {
-              "default": "WEBHOOK_SECRET",
-              "description": "Env var name holding the HMAC signing secret.",
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
-        {
-          "items": {
-            "$ref": "#/definitions/WebhookConfig"
-          },
-          "type": "array"
-        }
-      ]
-    },
     "OneOrMany_ZulipConfig": {
       "oneOf": [
         {
@@ -7903,98 +7792,6 @@
       },
       "type": "object"
     },
-    "WebhookConfig": {
-      "description": "Generic webhook channel adapter configuration.",
-      "properties": {
-        "account_id": {
-          "default": null,
-          "description": "Unique identifier for this bot instance (used for multi-bot routing).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "callback_url": {
-          "default": null,
-          "description": "URL to POST outgoing messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "default_agent": {
-          "default": null,
-          "description": "Default agent name to route messages to.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "deliver": {
-          "default": null,
-          "description": "Target channel name for direct delivery (e.g. \"telegram\", \"discord\"). Required when `deliver_only` is true.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "deliver_only": {
-          "default": false,
-          "description": "When true, incoming POST bodies are forwarded directly to the delivery target channel without invoking the LLM or any agent. Requires `deliver` to be set to a valid channel name (not \"log\").",
-          "type": "boolean"
-        },
-        "listen_port": {
-          "default": 8460,
-          "description": "Port to listen for incoming webhooks.",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "overrides": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ChannelOverrides"
-            }
-          ],
-          "default": {
-            "allowed_commands": [],
-            "auto_route": "off",
-            "auto_route_confidence_threshold": 6,
-            "auto_route_divergence_count": 2,
-            "auto_route_sticky_bonus": 4,
-            "auto_route_ttl_minutes": 30,
-            "blocked_commands": [],
-            "clear_done_reaction": false,
-            "disable_commands": false,
-            "dm_policy": "respond",
-            "group_policy": "mention_only",
-            "group_trigger_patterns": [],
-            "message_debounce_max_buffer": 64,
-            "message_debounce_max_ms": 30000,
-            "message_debounce_ms": 0,
-            "model": null,
-            "output_format": null,
-            "prefix_agent_name": "off",
-            "rate_limit_per_minute": 0,
-            "rate_limit_per_user": 0,
-            "reply_precheck": false,
-            "reply_precheck_model": null,
-            "system_prompt": null,
-            "thread_ownership_enabled": true,
-            "threading": false,
-            "typing_mode": null,
-            "usage_footer": null
-          },
-          "description": "Per-channel behavior overrides."
-        },
-        "secret_env": {
-          "default": "WEBHOOK_SECRET",
-          "description": "Env var name holding the HMAC signing secret.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "WebhookTriggerConfig": {
       "description": "Webhook trigger authentication configuration.\n\nControls the `/hooks/wake` and `/hooks/agent` endpoints for external systems to trigger agent actions.",
       "properties": {
@@ -8353,7 +8150,6 @@
         "signal": null,
         "slack": null,
         "webex": null,
-        "webhook": null,
         "zulip": null
       },
       "description": "Channel bridge configuration (Discord, Slack, etc.)."

@@ -295,29 +295,10 @@ impl KernelConfig {
         // Wave 5 channels
         // dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
         // env-var presence is now validated inside the sidecar process.
-        for wh in self.channels.webhook.iter() {
-            if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
-                warnings.push(format!(
-                    "Webhook configured but {} is not set",
-                    wh.secret_env
-                ));
-            }
-            if wh.deliver_only {
-                match wh.deliver.as_deref() {
-                    None => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
-                         set deliver = \"<channel>\" (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some("log") => warnings.push(format!(
-                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
-                         delivery channel — use a real channel name (e.g. \"telegram\")",
-                        wh.listen_port
-                    )),
-                    Some(_) => {}
-                }
-            }
-        }
+        // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+        // env-var presence + deliver_only-needs-target are now validated
+        // inside the sidecar process at startup (fail-closed `SystemExit(2)`
+        // when WEBHOOK_DELIVER_ONLY=1 but WEBHOOK_DELIVER is empty).
 
         // Web search provider validation
         match self.web.search_provider {

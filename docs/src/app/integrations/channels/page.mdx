@@ -253,16 +253,21 @@ Voice / image / file outbound is supported in **Cloud API mode** (audio link, im
 
 ## Webhook `deliver_only` Mode
 
-The webhook channel can run as a pass-through: incoming payloads bypass the LLM entirely (no sanitizer, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
+The webhook sidecar can run as a pass-through: incoming payloads bypass the LLM entirely (no sanitizer, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # required when deliver_only is true
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # required when WEBHOOK_DELIVER_ONLY=1
 ```
 
-When `deliver_only = true` but `deliver` is unset, librefang emits a startup warn and the webhook stays inactive. The fan-out is signalled internally via `__deliver_only__` / `__deliver_target__` metadata so adapter trait signatures stay unchanged.
+`WEBHOOK_SECRET` goes in `~/.librefang/secrets.env`. The sidecar **fail-closes at startup** when `WEBHOOK_DELIVER_ONLY=1` but `WEBHOOK_DELIVER` is empty — the Rust validator at the same path only emitted a warn-and-continue, which meant inbound messages were silently dropped at runtime. The fan-out is signalled internally via `__deliver_only__` / `__deliver_target__` metadata on the emitted message; the kernel's `bridge.rs` routing reads those keys and short-circuits the LLM call.
 
 ## Channel File Downloads
 

@@ -806,7 +806,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         // (skipping CI) and the matrix-style cleanup of this file
         // was missed.
         ch!(google_chat);
-        ch!(webhook);
         serde_json::Value::Object(map)
     };
 

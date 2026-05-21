@@ -505,21 +505,27 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN` (used for outbound publish) and `GOTIFY_CLIENT_TOKEN` (used for inbound WebSocket subscribe) go into `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
-#### `[channels.webhook]`
+#### Webhook (sidecar)
+
+Webhook migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.webhook`, stdlib-only). The in-process `[channels.webhook]` block is no longer recognised. Same HMAC-SHA256 + timestamp + SSRF-guard semantics, plus inbound dedupe and 429-retry that the Rust adapter didn't have.
 
 ```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+# WEBHOOK_LISTEN_PATH = "/webhook"
+# WEBHOOK_CALLBACK_URL = "https://example.com/incoming"
+# WEBHOOK_DELIVER_ONLY = "1"
+# WEBHOOK_DELIVER = "telegram"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
-| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`WEBHOOK_SECRET` (the HMAC-SHA256 signing secret) belongs in `~/.librefang/secrets.env`. Sidecar binds its own listener on `WEBHOOK_LISTEN_PORT` (default 8461) at `WEBHOOK_LISTEN_PATH` (default `/webhook`). The same SSRF guard from the Rust adapter (private / loopback / link-local / multicast / cloud-metadata / 100.64-CGN / IPv4-mapped-IPv6 all rejected, plus reserved hostnames like `localhost.`, `kubernetes.default.svc.cluster.local`) runs at sidecar startup AND on every outbound POST (defence-in-depth — a config reload that swaps the URL to a private host doesn't leak the secret to localhost).
+
+When `WEBHOOK_DELIVER_ONLY=1` the sidecar tags inbound with `__deliver_only__` / `__deliver_target__` metadata; the kernel's bridge layer reads those to forward the message body straight to the named channel without invoking an LLM. `WEBHOOK_DELIVER` is required when `WEBHOOK_DELIVER_ONLY=1` — fail-closed at sidecar startup if missing (the Rust validator only warned at runtime).
 
 #### QQ Bot (sidecar)
 

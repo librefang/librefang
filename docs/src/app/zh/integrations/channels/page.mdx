@@ -253,16 +253,21 @@ Feishu 之前会静默删掉传入文本里的 `@_user_N` 占位符。Feishu ada
 
 ## Webhook `deliver_only` 模式
 
-webhook 通道可作为 pass-through 跑：传入 payload 完全绕过 LLM（无 sanitizer、无 rate limiter、无 agent 查找），直接转发到目标通道。适合只需要让消息落到 Telegram / Slack 等地方的推送通知和带外告警。
+Webhook sidecar 可作为 pass-through 跑：传入 payload 完全绕过 LLM（无 sanitizer、无 rate limiter、无 agent 查找），直接转发到目标通道。适合只需要让消息落到 Telegram / Slack 等地方的推送通知和带外告警。
 
 ```toml
-[channels.webhook]
-enabled = true
-deliver_only = true
-deliver = "telegram:123456789"     # deliver_only 为 true 时必填
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+WEBHOOK_DELIVER_ONLY = "1"
+WEBHOOK_DELIVER = "telegram:123456789"  # WEBHOOK_DELIVER_ONLY=1 时必填
 ```
 
-`deliver_only = true` 但 `deliver` 未设时，librefang 启动时打 warn，webhook 保持不激活。扇出在内部用 `__deliver_only__` / `__deliver_target__` metadata 信号化，adapter trait 签名保持不变。
+`WEBHOOK_SECRET` 写入 `~/.librefang/secrets.env`。`WEBHOOK_DELIVER_ONLY=1` 时若 `WEBHOOK_DELIVER` 为空，sidecar **启动时 fail-closed**——原 Rust validator 同位置只 warn-and-continue，结果运行时入站被静默丢弃。扇出在内部用 `__deliver_only__` / `__deliver_target__` metadata 信号化，kernel `bridge.rs` 路由读这两个字段后短路 LLM 调用。
 
 ## 通道文件下载
 

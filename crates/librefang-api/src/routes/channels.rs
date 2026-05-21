@@ -192,21 +192,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // ntfy and gotify migrated to out-of-process sidecar adapters
     // (`librefang.sidecar.adapters.ntfy`, `librefang.sidecar.adapters.gotify`
     // in the SDK package); no longer in-process channels.
-    ChannelMeta {
-        name: "webhook", display_name: "Webhook", icon: "WH",
-        description: "Generic HMAC-signed webhook adapter",
-        category: "notifications", difficulty: "Easy", setup_time: "~1 min",
-        quick_setup: "Optionally set an HMAC secret",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "secret_env", label: "HMAC Secret", field_type: FieldType::Secret, env_var: Some("WEBHOOK_SECRET"), required: false, placeholder: "my-secret", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "listen_port", label: "Listen Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8460", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://example.com/webhook", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Enter an HMAC secret (or leave blank)", "Click Save — that's it!"],
-        config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
-    },
+    // webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+    // see SIDECAR_CATALOG below.
     // wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
     // see SIDECAR_CATALOG below.
     // wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
@@ -219,7 +206,6 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
     match name {
         "google_chat" => config.google_chat.is_some(),
-        "webhook" => config.webhook.is_some(),
         _ => false,
     }
 }
@@ -305,7 +291,7 @@ fn inject_callback_url(
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
     match channel_name {
-        "google_chat" | "webhook" => Some("/webhook"),
+        "google_chat" => Some("/webhook"),
         _ => None,
     }
 }
@@ -598,6 +584,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WhatsApp adapter — Meta Cloud API + Web/QR (Baileys) gateway dual-mode (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.whatsapp"],
+    },
+    SidecarCatalogEntry {
+        name: "webhook",
+        display_name: "Webhook",
+        description: "Generic HMAC-signed HTTP webhook adapter (out-of-process sidecar, Python stdlib only)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.webhook"],
     },
 ];
 
@@ -1096,10 +1089,6 @@ fn channel_config_values(
             .google_chat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
-        "webhook" => config
-            .webhook
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -1113,7 +1102,6 @@ fn channel_config_values(
 fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
     match name {
         "google_chat" => config.google_chat.len(),
-        "webhook" => config.webhook.len(),
         _ => 0,
     }
 }
@@ -1138,7 +1126,6 @@ fn channel_instances_serialized(
     }
     match name {
         "google_chat" => ser(&config.google_chat),
-        "webhook" => ser(&config.webhook),
         _ => Vec::new(),
     }
 }

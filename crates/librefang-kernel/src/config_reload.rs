@@ -664,14 +664,14 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Webhook config.
-        // Witness rotated: dingtalk → whatsapp → webhook (the last
-        // remaining in-process channel after the WhatsApp sidecar
-        // migration). The assertion is on the ReloadChannels hot
-        // action firing, not on any adapter-specific behaviour.
-        b.channels.webhook =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::WebhookConfig {
-                secret_env: "WEBHOOK_SECRET".to_string(),
+        // Change the channels config by adding a GoogleChat config.
+        // Witness rotated: dingtalk → whatsapp → webhook → google_chat
+        // (the last remaining in-process channel). The assertion is
+        // on the ReloadChannels hot action firing, not on any
+        // adapter-specific behaviour.
+        b.channels.google_chat =
+            librefang_types::config::OneOrMany(vec![librefang_types::config::GoogleChatConfig {
+                service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
                 ..Default::default()
             }]);
         let plan = build_reload_plan(&a, &b);
