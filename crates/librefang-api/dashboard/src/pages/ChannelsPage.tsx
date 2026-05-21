@@ -88,9 +88,6 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
   // drawer where they actually help selection).
   const msgs = typeof c.msgs_24h === "number" ? c.msgs_24h : 0;
   const kind = c.category || c.name;
-  // #4837: when a channel type has multiple instances configured, surface
-  // the count as a left-side meta tag so cards make sense at a glance.
-  const instanceCount = typeof c.instance_count === "number" ? c.instance_count : (c.configured ? 1 : 0);
   return (
     <Card
       hover
@@ -109,13 +106,8 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
         {getChannelIcon(c.name)}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="font-mono text-[13px] truncate text-text-main flex items-center gap-1.5">
+        <div className="font-mono text-[13px] truncate text-text-main">
           {c.display_name || c.name}
-          {instanceCount > 1 && (
-            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand border border-brand/20">
-              {t("channels.instance_count_short", { defaultValue: `${instanceCount}×` })}
-            </span>
-          )}
         </div>
         <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
           {kind} · {msgs} {t("channels.msgs_24h", { defaultValue: "msgs/24h" })}
@@ -196,24 +188,6 @@ function DetailsModal({ channel, onClose, t }: {
                   {channel.configured ? t("common.online") : t("common.setup")}
                 </Badge>
               </div>
-              {channel.difficulty && (
-                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
-                  <span className="text-xs font-bold text-text-dim">{t("channels.difficulty")}</span>
-                  <span className="text-xs font-bold">{channel.difficulty}</span>
-                </div>
-              )}
-              {channel.setup_time && (
-                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
-                  <span className="text-xs font-bold text-text-dim">{t("channels.setup_time")}</span>
-                  <span className="text-xs font-bold">{channel.setup_time}</span>
-                </div>
-              )}
-              {channel.setup_type && (
-                <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
-                  <span className="text-xs font-bold text-text-dim">{t("channels.setup_type")}</span>
-                  <span className="text-xs font-bold">{channel.setup_type}</span>
-                </div>
-              )}
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("channels.has_token")}</span>
                 <span className={`text-xs font-bold ${channel.has_token ? "text-success" : "text-warning"}`}>
@@ -222,32 +196,6 @@ function DetailsModal({ channel, onClose, t }: {
               </div>
             </div>
           </div>
-
-          {/* Webhook Endpoint */}
-          {channel.webhook_endpoint && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">Webhook Endpoint</h3>
-              <div className="p-3 rounded-lg bg-brand/5 border border-brand/20">
-                <code className="text-xs font-mono text-brand break-all select-all">{channel.webhook_endpoint}</code>
-                <p className="text-[10px] text-text-dim mt-1">Configure this path on the external platform. Port is the API listen port (default 4545).</p>
-              </div>
-            </div>
-          )}
-
-          {/* Setup Steps */}
-          {channel.setup_steps && channel.setup_steps.length > 0 && (
-            <div className="space-y-3">
-              <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("channels.setup_steps")}</h3>
-              <div className="space-y-2">
-                {channel.setup_steps.map((step, idx) => (
-                  <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-main/20">
-                    <span className="w-5 h-5 rounded-full bg-brand/20 text-brand text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
-                    <p className="text-xs text-text-main">{step}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Fields */}
           {channel.fields && channel.fields.length > 0 && (
@@ -276,24 +224,17 @@ function DetailsModal({ channel, onClose, t }: {
             </div>
           )}
 
-          {/* Every channel now runs out-of-process as a sidecar, so the
-              modal carries a read-only "manage via config.toml" note plus
-              the copyable snippet for unconfigured discovery rows. The
-              actual save flow lives in `SidecarForm` (Plus → picker →
-              schema-driven drawer). */}
-          <div className="space-y-3">
-            <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
-              <p className="text-xs text-text-dim">
-                {channel.configured
-                  ? <>Runs as an out-of-process sidecar adapter. Manage it in config.toml (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels, or use the Configure flow from the channel list.</>
-                  : <>This adapter ships as an out-of-process sidecar. Paste the snippet below into <code className="font-mono">~/.librefang/config.toml</code>, set the required env vars, and reload — then it will appear here as configured.</>}
-              </p>
-            </div>
-            {!channel.configured && channel.config_template && (
-              <pre className="p-4 rounded-xl bg-main/30 border border-border-subtle text-[11px] font-mono text-text-main whitespace-pre overflow-x-auto select-all">
-                {channel.config_template}
-              </pre>
-            )}
+          {/* Every channel runs as an out-of-process sidecar. The modal
+              is read-only; the save flow lives in `SidecarForm` (Plus →
+              picker → schema-driven drawer, or the gear on a card). The
+              copyable `config_template` snippet (also emitted by the
+              backend on each row) is intentionally surfaced inside
+              `SidecarForm` rather than here, since this modal only
+              opens for already-configured channels. */}
+          <div className="p-4 rounded-xl bg-brand/5 border border-brand/20">
+            <p className="text-xs text-text-dim">
+              Runs as an out-of-process sidecar adapter. Manage it in <code className="font-mono">config.toml</code> (<code className="font-mono">[[sidecar_channels]]</code>) — Config → Sidecar Channels, or use the gear on the channel card to open the configure drawer.
+            </p>
           </div>
         </div>
 
@@ -329,12 +270,27 @@ function SidecarForm({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const visible = showAdvanced ? [...fields, ...advanced] : fields;
 
+  // Pre-populate from the schema:
+  //  - non-secret fields with a `value` get their value
+  //  - secret fields are never echoed back as plaintext, so they
+  //    start empty; we surface `has_value: true` via the placeholder
+  //    below ("•••• (set — leave blank to keep)") so the operator
+  //    knows the slot is already filled and won't be wiped if they
+  //    don't retype.
   const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(allFields.map((f) => [f.key, ""])),
+    Object.fromEntries(
+      allFields.map((f) => [
+        f.key,
+        f.type !== "secret" && typeof f.value === "string" ? f.value : "",
+      ]),
+    ),
   );
 
   const handleSubmit = () => {
-    // Drop empty optional values; server validates required.
+    // Drop empty optional values: server interprets a missing key
+    // as "leave the existing value alone" (partial update). For
+    // secret fields with `has_value: true`, an empty submission
+    // therefore preserves the stored secret rather than clearing it.
     const payload: Record<string, string> = {};
     for (const f of allFields) {
       const v = values[f.key]?.trim();
@@ -410,7 +366,13 @@ function SidecarForm({
               <Input
                 type={f.type === "secret" ? "password" : "text"}
                 value={values[f.key] ?? ""}
-                placeholder={f.placeholder ?? undefined}
+                placeholder={
+                  f.type === "secret" && f.has_value
+                    ? t("channels.secret_set_placeholder", {
+                        defaultValue: "•••• (set — leave blank to keep)",
+                      })
+                    : f.placeholder ?? undefined
+                }
                 onChange={(e) =>
                   setValues((v) => ({ ...v, [f.key]: e.target.value }))
                 }
@@ -428,6 +390,18 @@ function SidecarForm({
               ? t("common.hide_advanced", { defaultValue: "Hide advanced" })
               : t("common.show_advanced", { defaultValue: "Show advanced" })}
           </button>
+        )}
+        {channel.config_template && (
+          <details className="pt-2">
+            <summary className="text-xs text-text-dim cursor-pointer select-none">
+              {t("channels.config_template_summary", {
+                defaultValue: "Or paste this into config.toml by hand",
+              })}
+            </summary>
+            <pre className="mt-2 p-3 rounded-md bg-main/30 border border-border-subtle text-[11px] font-mono text-text-main whitespace-pre overflow-x-auto select-all">
+              {channel.config_template}
+            </pre>
+          </details>
         )}
       </div>
       <div className="p-4 border-t border-border-subtle flex justify-end gap-2">

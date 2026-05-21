@@ -288,7 +288,68 @@ describe("ChannelsPage", () => {
     expect(reload.mutate).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the details modal with the sidecar config template for an unconfigured discovery row", () => {
+  it("pre-populates non-secret field values from the sidecar schema", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "ntfy",
+          display_name: "ntfy",
+          configured: false,
+          fields: [
+            {
+              key: "NTFY_TOPIC",
+              label: "Topic",
+              type: "text",
+              value: "alerts",
+              has_value: true,
+            },
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("ntfy"));
+    drawer = screen.getByTestId("drawer-slot");
+    expect(within(drawer).getByDisplayValue("alerts")).toBeInTheDocument();
+  });
+
+  it("uses a 'currently set' placeholder for secret fields with has_value", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          fields: [
+            {
+              key: "TELEGRAM_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+              has_value: true,
+            },
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("Telegram"));
+    drawer = screen.getByTestId("drawer-slot");
+    // Secret field with has_value=true never echoes the value back —
+    // surfaced via placeholder so the operator knows the slot is
+    // filled. Empty submission preserves the stored secret.
+    expect(
+      within(drawer).getByPlaceholderText(/set — leave blank|channels\.secret_set_placeholder/i),
+    ).toBeInTheDocument();
+  });
+
+  it("offers the copyable config_template snippet inside the SidecarForm drawer", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
         makeChannel({ name: "slack" }),
@@ -297,17 +358,29 @@ describe("ChannelsPage", () => {
           display_name: "ntfy",
           configured: false,
           config_template: '[[sidecar_channels]]\nname = "ntfy"\n',
+          fields: [
+            {
+              key: "NTFY_TOPIC",
+              label: "Topic",
+              type: "text",
+            },
+          ],
         }),
       ]),
     );
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
-    // From the picker, clicking the row sends us to the SidecarForm drawer
-    // (the actual configure flow). The details-modal-with-snippet path is
-    // exercised from the configured-cards view, which has no card for an
-    // unconfigured row by design, so we open it here by clicking through
-    // the configured `Slack` card.
     let drawer = screen.getByTestId("drawer-slot");
-    expect(within(drawer).getByText("ntfy")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByText("ntfy"));
+    drawer = screen.getByTestId("drawer-slot");
+    // <details> renders the summary unconditionally; the snippet lives
+    // inside the collapsed body and is still in the DOM (queryable via
+    // getByText) regardless of the open/closed state.
+    expect(
+      within(drawer).getByText(/paste this into config\.toml|channels\.config_template_summary/i),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByText(/\[\[sidecar_channels\]\]/),
+    ).toBeInTheDocument();
   });
 });

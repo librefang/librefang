@@ -135,26 +135,19 @@ export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
-  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
-   *  `0` means no instances; `1` matches the legacy single-instance shape. */
-  instance_count?: number;
+  /** True iff every required secret env var on the sidecar manifest
+   *  is present and non-empty. The backend computes this per row. */
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
-  difficulty?: string;
-  setup_time?: string;
-  quick_setup?: string;
-  setup_type?: string;
-  setup_steps?: string[];
+  /** Schema-driven configure form for a sidecar adapter (returned by
+   *  `python -m <module> --describe` and cached daemon-side). */
   fields?: ChannelField[];
-  /** TOML snippet shown for read-only sidecar discovery rows so operators
-   *  can copy it into config.toml. Backend always emits this; the UI only
-   *  renders it for `category === "sidecar"` to avoid noise on regular
-   *  CHANNEL_REGISTRY rows that already have a setup form. */
+  /** Read-only TOML snippet the operator can copy into config.toml
+   *  if they prefer hand-editing over the configure drawer. Emitted
+   *  by the backend on every row. */
   config_template?: string;
-  /** Webhook endpoint path on the shared server (e.g. "/channels/teams/webhook"). */
-  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
    *  the `channel` column. Surfaced as the `kind · N msgs/24h`
