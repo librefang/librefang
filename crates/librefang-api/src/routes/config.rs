@@ -799,7 +799,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             };
         }
         ch!(whatsapp);
-        ch!(teams);
+        // teams migrated to a sidecar (#5433) — `ChannelsConfig` no
+        // longer carries a `teams` field, so the macro can't expand
+        // on it.
         ch!(google_chat);
         ch!(webhook);
         serde_json::Value::Object(map)
