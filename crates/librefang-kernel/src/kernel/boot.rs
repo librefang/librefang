@@ -2467,18 +2467,6 @@ system_prompt = "You are a helpful assistant."
     }
 }
 
-/// Parse `[proactive_memory] extraction_model` into `(provider, model)` (#4871).
-///
-/// Three accepted forms, in priority order:
-///
-/// 1. `provider:model` — colon convention used by `[llm.auxiliary]` chains.
-/// 2. `provider/model` — slash convention used by `aliases.toml` and the
-///    `default_model` shape.
-/// 3. Bare model name — falls through to the kernel's default driver.
-///
-/// The provider prefix is honoured **only when the LHS is a registered
-/// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
-/// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
 /// Pure validator for the `LIBREFANG_STATE_SECRET` shape — `None`
 /// means env unset; otherwise the raw env value is checked for base64
 /// decodability and a 32-byte payload.
@@ -2516,6 +2504,18 @@ fn validate_state_secret_env() -> Result<(), String> {
     validate_state_secret_value(std::env::var("LIBREFANG_STATE_SECRET").ok().as_deref())
 }
 
+/// Parse `[proactive_memory] extraction_model` into `(provider, model)` (#4871).
+///
+/// Three accepted forms, in priority order:
+///
+/// 1. `provider:model` — colon convention used by `[llm.auxiliary]` chains.
+/// 2. `provider/model` — slash convention used by `aliases.toml` and the
+///    `default_model` shape.
+/// 3. Bare model name — falls through to the kernel's default driver.
+///
+/// The provider prefix is honoured **only when the LHS is a registered
+/// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
+/// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
 /// but where `google` is not a separate registered provider — the model id
 /// belongs to the OpenRouter provider verbatim).
 ///
