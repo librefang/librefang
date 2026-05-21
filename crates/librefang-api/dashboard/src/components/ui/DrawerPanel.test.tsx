@@ -94,9 +94,9 @@ describe("DrawerPanel", () => {
 
   // Regression test for #4714: the picker → config flow.
   //
-  // ProvidersPage and ChannelsPage both use a pattern where clicking an
-  // item in an "Add" picker drawer closes the picker and opens a
-  // configuration drawer in the same React commit:
+  // ProvidersPage uses a pattern where clicking an item in an "Add"
+  // picker drawer closes the picker and opens a configuration drawer
+  // in the same React commit:
   //
   //     handlePick = (item) => {
   //       setPickerOpen(false);     // → picker DrawerPanel isOpen=true → false
@@ -137,14 +137,14 @@ describe("DrawerPanel", () => {
       return (
         <>
           {/* Conditionally-mounted config drawer with isOpen literal true,
-              same shape as ChannelsPage::ConfigDialog. */}
+              same shape as ProvidersPage's configure drawer. */}
           {configMounted && (
             <DrawerPanel isOpen onClose={ConfigOnClose} title="config">
               <p data-testid="config-body">config body</p>
             </DrawerPanel>
           )}
           {/* Always-mounted picker drawer with toggling isOpen, same shape
-              as ChannelsPage's Add picker. */}
+              as ProvidersPage's Add picker. */}
           <DrawerPanel isOpen={pickerOpen} onClose={PickerOnClose} title="picker">
             <p data-testid="picker-body">picker body</p>
           </DrawerPanel>

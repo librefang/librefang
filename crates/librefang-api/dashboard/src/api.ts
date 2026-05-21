@@ -116,74 +116,23 @@ export interface MediaMusicResult {
   sample_rate?: number;
 }
 
-export interface ChannelField {
-  key: string;
-  label?: string;
-  type?: string;
-  required?: boolean;
-  advanced?: boolean;
-  has_value?: boolean;
-  env_var?: string | null;
-  placeholder?: string | null;
-  value?: string;
-  options?: string[];
-  show_when?: string;
-  readonly?: boolean;
-}
-
 export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
-  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
-   *  `0` means no instances; `1` matches the legacy single-instance shape. */
-  instance_count?: number;
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
-  difficulty?: string;
-  setup_time?: string;
-  quick_setup?: string;
-  setup_type?: string;
-  setup_steps?: string[];
-  fields?: ChannelField[];
   /** TOML snippet shown for read-only sidecar discovery rows so operators
    *  can copy it into config.toml. Backend always emits this; the UI only
    *  renders it for `category === "sidecar"` to avoid noise on regular
-   *  CHANNEL_REGISTRY rows that already have a setup form. */
+   *  rows that have their own configure flow. */
   config_template?: string;
-  /** Webhook endpoint path on the shared server (e.g. "/channels/teams/webhook"). */
-  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
-   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
-   *  meta-line on the Channels page card. */
+   *  the `channel` column. */
   msgs_24h?: number;
-}
-
-/** One configured `[[channels.<name>]]` instance. (#4837) */
-export interface ChannelInstance {
-  /** Array index — stable within a session, may shift after a delete.
-   *  Always re-fetch the list after a mutation. */
-  index: number;
-  /** Field schema with per-instance `value` and `has_value` populated. */
-  fields: ChannelField[];
-  /** Raw per-instance config map keyed by field. */
-  config: Record<string, unknown>;
-  /** True iff every required secret env var (the env var the instance's
-   *  field points at) is present and non-empty. */
-  has_token: boolean;
-  /** Compare-and-swap token. Send back unchanged on PUT/DELETE so the
-   *  server can reject the write if a concurrent edit shifted indices
-   *  or modified this instance after the list was read (#4865). */
-  signature: string;
-}
-
-export interface ChannelInstancesResponse {
-  channel: string;
-  items: ChannelInstance[];
-  total: number;
 }
 
 export interface SkillItem {
@@ -1778,69 +1727,6 @@ export async function listChannels(): Promise<ChannelItem[]> {
   return data.items ?? [];
 }
 
-// `testChannel` / `configureChannel` / `listChannelInstances` /
-// `createChannelInstance` / `updateChannelInstance` /
-// `deleteChannelInstance`: the matching backend endpoints
-// (`POST /api/channels/{name}/test`, `/configure`, and the four
-// `/instances*` routes) are gone with the in-process channel
-// scaffolding. The stubs below `Promise.reject` at runtime with
-// a clear-error message so `ChannelsPage.tsx` (which still
-// imports them via `mutations/channels.ts`) type-checks until a
-// follow-up refactors the page to a sidecar-only UI. Channel
-// configuration now lives through `saveSidecarConfig` →
-// `POST /api/channels/sidecar/{name}/configure`, plus
-// `reloadChannels` → `POST /api/channels/reload` to apply.
-const _channelEndpointGone = (which: string) =>
-  Promise.reject(
-    new Error(
-      `${which} is unavailable: the in-process channel REST endpoint was ` +
-        `removed in v2026.5.21. Channels are sidecar-only — use ` +
-        `saveSidecarConfig + reloadChannels instead.`,
-    ),
-  );
-
-export async function testChannel(_channelName: string): Promise<ApiActionResponse> {
-  return _channelEndpointGone("POST /api/channels/{name}/test");
-}
-
-export async function configureChannel(
-  _channelName: string,
-  _config: Record<string, unknown>,
-): Promise<ApiActionResponse> {
-  return _channelEndpointGone("POST /api/channels/{name}/configure");
-}
-
-export async function listChannelInstances(
-  _channelName: string,
-): Promise<ChannelInstancesResponse> {
-  return _channelEndpointGone("GET /api/channels/{name}/instances");
-}
-
-export async function createChannelInstance(
-  _channelName: string,
-  _fields: Record<string, unknown>,
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  return _channelEndpointGone("POST /api/channels/{name}/instances");
-}
-
-export async function updateChannelInstance(
-  _channelName: string,
-  _index: number,
-  _fields: Record<string, unknown>,
-  _signature: string,
-  _clearSecrets?: string[],
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  return _channelEndpointGone("PUT /api/channels/{name}/instances/{index}");
-}
-
-export async function deleteChannelInstance(
-  _channelName: string,
-  _index: number,
-  _signature: string,
-): Promise<void> {
-  return _channelEndpointGone("DELETE /api/channels/{name}/instances/{index}");
-}
-
 export interface SidecarSaveResult {
   status: "saved";
   restart_required: boolean;
@@ -1871,44 +1757,6 @@ export async function saveSidecarConfig(
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
-}
-
-// Per-instance channel management endpoints (`#4837`'s
-// `[[channels.<name>]]` array) gone — the entire backend
-// `GET /instances` / `POST /instances` / `PUT /instances/{index}` /
-// `DELETE /instances/{index}` API has been deleted. The
-// `saveSidecarConfig` helper above is the only configuration
-// path left; multi-instance support comes from multiple
-// `[[sidecar_channels]]` entries.
-
-export interface QrStartResponse {
-  available: boolean;
-  qr_code?: string;
-  qr_url?: string;
-  message?: string;
-}
-
-export interface QrStatusResponse {
-  connected: boolean;
-  expired: boolean;
-  message?: string;
-  bot_token?: string;
-}
-
-export async function wechatQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/wechat/qr/start", {});
-}
-
-export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
-}
-
-export async function whatsappQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
-}
-
-export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
 }
 
 export async function listSkills(): Promise<SkillItem[]> {
