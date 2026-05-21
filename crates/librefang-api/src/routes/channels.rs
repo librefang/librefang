@@ -78,6 +78,13 @@ use crate::types::ApiErrorResponse;
 pub(crate) enum FieldType {
     Secret,
     Text,
+    /// `Number` had no in-process consumer left after
+    /// google_chat / webhook moved to sidecars. Kept in the
+    /// enum so a future channel can resurrect the
+    /// `field_type: FieldType::Number` shape without touching the
+    /// JSON-shape converter; `#[allow(dead_code)]` because no
+    /// `ChannelField` literal references it right now.
+    #[allow(dead_code)]
     Number,
     List,
     /// Dropdown-style enum picker. WeCom's `mode` field was the only
@@ -164,21 +171,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     // see SIDECAR_CATALOG below.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG below.
-    ChannelMeta {
-        name: "google_chat", display_name: "Google Chat", icon: "GC",
-        description: "Google Chat service account adapter",
-        category: "enterprise", difficulty: "Hard", setup_time: "~15 min",
-        quick_setup: "Enter path to your service account JSON key",
-        setup_type: "form",
-        fields: &[
-            ChannelField { key: "service_account_env", label: "Service Account JSON", field_type: FieldType::Secret, env_var: Some("GOOGLE_CHAT_SERVICE_ACCOUNT"), required: true, placeholder: "/path/to/key.json", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "space_ids", label: "Space IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "spaces/AAAA", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8444", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
-        ],
-        setup_steps: &["Create a Google Cloud project with Chat API", "Download service account JSON key", "Enter the path below"],
-        config_template: "[channels.google_chat]\nservice_account_env = \"GOOGLE_CHAT_SERVICE_ACCOUNT\"",
-    },
+    // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+    // see SIDECAR_CATALOG below.
     // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
     // see SIDECAR_CATALOG below.
     // feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
@@ -203,11 +197,14 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
-fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
-    match name {
-        "google_chat" => config.google_chat.is_some(),
-        _ => false,
-    }
+fn is_channel_configured(
+    _config: &librefang_types::config::ChannelsConfig,
+    _name: &str,
+) -> bool {
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars — `ChannelsConfig` no longer carries
+    // per-channel fields. Configuration lives in `[sidecar_channels]`.
+    false
 }
 
 /// Build a JSON field descriptor, checking env var presence but never exposing secrets.
@@ -290,10 +287,13 @@ fn inject_callback_url(
 /// Returns the path suffix (e.g. "/webhook") for the given channel name,
 /// or None if the channel does not use webhook routes.
 fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
-    match channel_name {
-        "google_chat" => Some("/webhook"),
-        _ => None,
-    }
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars; their webhook listeners live inside the
+    // sidecar processes, not on the shared API server. Restore a
+    // real `match channel_name { … }` here when a future in-process
+    // channel needs a shared-server webhook route again.
+    let _ = channel_name;
+    None
 }
 
 /// Build the full webhook endpoint URL for a channel on the shared server.
@@ -591,6 +591,13 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Generic HMAC-signed HTTP webhook adapter (out-of-process sidecar, Python stdlib only)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.webhook"],
+    },
+    SidecarCatalogEntry {
+        name: "google_chat",
+        display_name: "Google Chat",
+        description: "Google Chat adapter — service-account JWT auth + REST API send, HTTP webhook receive (out-of-process sidecar)",
+        command: "python3",
+        args: &["-m", "librefang.sidecar.adapters.google_chat"],
     },
 ];
 
@@ -1081,16 +1088,13 @@ pub async fn configure_sidecar_channel(
 
 /// Serialize a channel's config to a JSON Value for pre-populating dashboard forms.
 fn channel_config_values(
-    config: &librefang_types::config::ChannelsConfig,
-    name: &str,
+    _config: &librefang_types::config::ChannelsConfig,
+    _name: &str,
 ) -> Option<serde_json::Value> {
-    match name {
-        "google_chat" => config
-            .google_chat
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        _ => None,
-    }
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars; per-instance config lives in
+    // `[sidecar_channels]` and surfaces through that code path.
+    None
 }
 
 /// Returns the number of configured instances for a channel type.
@@ -1099,11 +1103,14 @@ fn channel_config_values(
 /// `OneOrMany.len()` so the dashboard can render
 /// "Telegram · 2 bots" subtitles and the list endpoint can populate
 /// `instance_count`.
-fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
-    match name {
-        "google_chat" => config.google_chat.len(),
-        _ => 0,
-    }
+fn channel_instance_count(
+    _config: &librefang_types::config::ChannelsConfig,
+    _name: &str,
+) -> usize {
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars; instance count surfaces through the
+    // sidecar-channels code path.
+    0
 }
 
 /// Serialize each configured instance of `name` to a JSON value.
@@ -1113,21 +1120,13 @@ fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name
 /// `channel_config_values` returns for the first instance), so it can be
 /// fed straight into `build_field_json` to render the per-instance form.
 fn channel_instances_serialized(
-    config: &librefang_types::config::ChannelsConfig,
-    name: &str,
+    _config: &librefang_types::config::ChannelsConfig,
+    _name: &str,
 ) -> Vec<serde_json::Value> {
-    fn ser<T: serde::Serialize>(
-        items: &librefang_types::config::OneOrMany<T>,
-    ) -> Vec<serde_json::Value> {
-        items
-            .iter()
-            .filter_map(|c| serde_json::to_value(c).ok())
-            .collect()
-    }
-    match name {
-        "google_chat" => ser(&config.google_chat),
-        _ => Vec::new(),
-    }
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars; instances surface through the
+    // sidecar-channels code path.
+    Vec::new()
 }
 
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
@@ -2547,11 +2546,23 @@ mod test_channel_status_tests {
     /// Drop guard that restores the previous value of an env var when it falls
     /// out of scope, so a test failure doesn't poison the process for sibling
     /// tests.
+    ///
+    /// `#[allow(dead_code)]`: the last in-process callers
+    /// (`missing_required_env_returns_412` /
+    /// `credentials_present_no_target_returns_200`, both wired to
+    /// `GOOGLE_CHAT_SERVICE_ACCOUNT`) were retired alongside the
+    /// google_chat sidecar migration — the witness pool of
+    /// in-process channels with a `required: true` secret env var
+    /// is empty. Helper kept so a future in-process channel that
+    /// brings the witness back doesn't have to re-derive the
+    /// unsafe-env-mutation pattern.
+    #[allow(dead_code)]
     struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
     }
 
+    #[allow(dead_code)]
     impl EnvGuard {
         fn unset(key: &'static str) -> Self {
             let prev = std::env::var(key).ok();
@@ -2599,44 +2610,17 @@ mod test_channel_status_tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
-    async fn missing_required_env_returns_412() {
-        let _lock = ENV_LOCK.lock().await;
-        // Google Chat requires GOOGLE_CHAT_SERVICE_ACCOUNT. With it
-        // unset we must surface a 412 — NOT a 200 with a "status:
-        // error" body, which silently passes dashboard
-        // `fetch().ok` checks (#3507). Witness rotated: Email →
-        // Teams → WhatsApp (all sidecar-migrated) → GoogleChat,
-        // the only remaining in-process channel with a
-        // `required: true` secret env var.
-        let _g = EnvGuard::unset("GOOGLE_CHAT_SERVICE_ACCOUNT");
-
-        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
-            .await
-            .into_response();
-        assert_eq!(
-            resp.status(),
-            StatusCode::PRECONDITION_FAILED,
-            "missing credentials must return 412, not 200"
-        );
-    }
-
-    #[tokio::test]
-    async fn credentials_present_no_target_returns_200() {
-        let _lock = ENV_LOCK.lock().await;
-        // Credentials set but no `channel_id` / `chat_id` body — handler
-        // short-circuits before any network call and returns the
-        // "credentials look good" 200 response.
-        let _g = EnvGuard::set(
-            "GOOGLE_CHAT_SERVICE_ACCOUNT",
-            "/nonexistent/sa.json",
-        );
-
-        let resp = test_channel(Path("google_chat".to_string()), axum::body::Bytes::new())
-            .await
-            .into_response();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
+    // missing_required_env_returns_412 / credentials_present_no_target_returns_200
+    // retired alongside the google_chat → sidecar migration. The
+    // witness pool of in-process channels with a `required: true`
+    // secret env var has rotated through Email → Teams → WhatsApp →
+    // GoogleChat as each migrated; the remaining in-process channels
+    // (webhook) all carry their secrets as `required: false`, so the
+    // 412 path is no longer exercisable through `test_channel`. The
+    // handler-level 412 / 200 contract is otherwise unchanged and
+    // documented at routes/channels.rs::test_channel. If a future
+    // in-process channel re-adds a required-secret field, restore
+    // these two tests as the witness.
 
     // (downstream_send_failure_returns_502 was retired during the
     // discord-sidecar migration. It used Discord's REST 401-on-bad-token
@@ -2659,17 +2643,19 @@ mod instance_helper_tests {
     use super::*;
 
     fn matrix_meta() -> &'static ChannelMeta {
-        // Matrix migrated to a sidecar in v2026.5; rotated through
-        // whatsapp (also sidecar-migrated) to google_chat — the
-        // remaining in-process channel with a `required: true`
-        // secret env var, so the resolve_secret_env_overrides +
-        // instance_signature unit tests keep a real ChannelMeta
-        // witness. Function name kept for git-blame continuity.
-        find_channel_meta("google_chat").expect("google_chat is in the registry")
+        // Witness rotation history (function name kept for git-blame
+        // continuity): matrix → whatsapp → google_chat → webhook.
+        // After the google_chat sidecar migration the only remaining
+        // in-process ChannelMeta is `webhook`, whose `secret_env`
+        // field is `required: false`. The `resolve_secret_env_overrides`
+        // unit tests below still exercise the suffix-allocator logic
+        // — they just key off `secret_env` / `WEBHOOK_SECRET` instead
+        // of `service_account_env` / `GOOGLE_CHAT_SERVICE_ACCOUNT`.
+        find_channel_meta("webhook").expect("webhook is in the registry")
     }
 
     fn inst_with_env(env_name: &str) -> serde_json::Value {
-        serde_json::json!({ "service_account_env": env_name })
+        serde_json::json!({ "secret_env": env_name })
     }
 
     /// First-instance create on an empty channel returns the bare default
@@ -2679,8 +2665,8 @@ mod instance_helper_tests {
         let meta = matrix_meta();
         let overrides = resolve_secret_env_overrides(meta, &[], 0);
         assert_eq!(
-            overrides.get("service_account_env").map(|s| s.as_str()),
-            Some("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            overrides.get("secret_env").map(|s| s.as_str()),
+            Some("WEBHOOK_SECRET"),
             "first instance must use the bare default env-var name: {overrides:?}"
         );
     }
@@ -2694,13 +2680,13 @@ mod instance_helper_tests {
     fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
-            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
+            inst_with_env("WEBHOOK_SECRET"),
+            inst_with_env("WEBHOOK_SECRET_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
         assert_eq!(
-            overrides.get("service_account_env").map(|s| s.as_str()),
-            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2"),
+            overrides.get("secret_env").map(|s| s.as_str()),
+            Some("WEBHOOK_SECRET_2"),
             "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
         );
     }
@@ -2713,13 +2699,13 @@ mod instance_helper_tests {
     fn resolve_overrides_preserves_existing_env_name_on_update() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
-            inst_with_env("MY_CUSTOM_GC_SA"),
+            inst_with_env("WEBHOOK_SECRET"),
+            inst_with_env("MY_CUSTOM_WEBHOOK_SECRET"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         assert_eq!(
-            overrides.get("service_account_env").map(|s| s.as_str()),
-            Some("MY_CUSTOM_GC_SA"),
+            overrides.get("secret_env").map(|s| s.as_str()),
+            Some("MY_CUSTOM_WEBHOOK_SECRET"),
             "update path must preserve the instance's existing env-var name: {overrides:?}"
         );
     }
@@ -2733,16 +2719,16 @@ mod instance_helper_tests {
     fn resolve_overrides_excludes_target_index_from_sibling_set() {
         let meta = matrix_meta();
         let existing = vec![
-            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT"),
+            inst_with_env("WEBHOOK_SECRET"),
             inst_with_env(""), // empty — falls through to suffix search
-            inst_with_env("GOOGLE_CHAT_SERVICE_ACCOUNT_3"),
+            inst_with_env("WEBHOOK_SECRET_3"),
         ];
         let overrides = resolve_secret_env_overrides(meta, &existing, 1);
         // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
         // KEY_3. Lowest unused: KEY_2.
         assert_eq!(
-            overrides.get("service_account_env").map(|s| s.as_str()),
-            Some("GOOGLE_CHAT_SERVICE_ACCOUNT_2")
+            overrides.get("secret_env").map(|s| s.as_str()),
+            Some("WEBHOOK_SECRET_2")
         );
     }
 

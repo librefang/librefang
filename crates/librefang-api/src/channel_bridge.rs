@@ -236,8 +236,8 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 // Feature-gated adapter imports
 // email migrated to a sidecar (librefang.sidecar.adapters.email);
 // see SIDECAR_CATALOG in routes/channels.rs.
-#[cfg(feature = "channel-google-chat")]
-use librefang_channels::google_chat::GoogleChatAdapter;
+// google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
 // see SIDECAR_CATALOG in routes/channels.rs.
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
@@ -1856,21 +1856,30 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel_type: &str,
         account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
+        // `_account_id` / `_channels` underscore-prefixed and
+        // `find_channel_info!` marked `#[allow(unused_macros)]` so
+        // `cargo check -D warnings` stays green while every former
+        // in-process channel (google_chat, webhook, …) runs as a
+        // sidecar. The macro shape + cfg lookup are preserved so a
+        // future in-process channel can re-enable the match arms
+        // below by appending its handler.
+        let _ = account_id;
         let cfg = self.kernel.config_ref();
-        let channels = &cfg.channels;
+        let _channels = &cfg.channels;
 
         /// Look up channel overrides and default_agent from the matching
         /// channel config entry. Prefers the entry whose `account_id` matches;
         /// falls back to the first entry when no account_id is provided.
+        #[allow(unused_macros)]
         macro_rules! find_channel_info {
             ($field:ident) => {{
                 let entry = if let Some(aid) = account_id {
-                    channels
+                    _channels
                         .$field
                         .iter()
                         .find(|c| c.account_id.as_deref() == Some(aid))
                 } else {
-                    channels.$field.first()
+                    _channels.$field.first()
                 };
                 (
                     entry.map(|c| c.overrides.clone()),
@@ -1879,10 +1888,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             }};
         }
 
-        let (mut overrides, default_agent_name) = match channel_type {
-            "google_chat" => find_channel_info!(google_chat),
-            _ => (None, None),
-        };
+        // All previously in-process channels (google_chat, webhook,
+        // …) migrated to sidecars; per-channel overrides surface
+        // through the sidecar bridge in
+        // `librefang_kernel::kernel::handles::channel_sender`. With
+        // no `match` arm producing `Some(_)` the type inferencer
+        // can't pick concrete types for the `None` legs, so the
+        // tuple is bound explicitly. Restore a real `match
+        // channel_type { … }` here when a future in-process channel
+        // brings the field back.
+        let _ = channel_type;
+        let (mut overrides, default_agent_name): (
+            Option<librefang_types::config::ChannelOverrides>,
+            Option<String>,
+        ) = (None, None);
 
         // Merge the default agent's routing aliases into group_trigger_patterns
         // so aliases trigger the bot in group chats without needing a formal
@@ -2449,28 +2468,14 @@ pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
     config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
-    // Check which channels have config — only consider enabled features
+    // All previously in-process channels (google_chat, webhook, …)
+    // migrated to sidecars; operators configure them through
+    // `[[sidecar_channels]]` and the `check_channel!` env-presence
+    // probes are obsolete. Re-add the macro + invocations when a
+    // future in-process channel brings the shape back.
+    let _ = config;
     #[allow(unused_mut)]
     let mut has_any = false;
-
-    // Emit warnings for configured-but-disabled channels, track enabled ones
-    macro_rules! check_channel {
-        ($field:ident, $feature:literal, $name:expr) => {
-            #[cfg(feature = $feature)]
-            if config.$field.is_some() {
-                has_any = true;
-            }
-            #[cfg(not(feature = $feature))]
-            if config.$field.is_some() {
-                warn!(
-                    "{} channel configured but '{}' feature is not enabled — skipping",
-                    $name, $feature
-                );
-            }
-        };
-    }
-
-    check_channel!(google_chat, "channel-google-chat", "Google Chat");
 
     // Sidecar channels (always available, not feature-gated)
     if !kernel.config_ref().sidecar_channels.is_empty() {
@@ -2509,36 +2514,8 @@ pub async fn start_channel_bridge_with_config(
     // (librefang.sidecar.adapters.mattermost); see SIDECAR_CATALOG in
     // routes/channels.rs.
 
-    // Google Chat
-    #[cfg(feature = "channel-google-chat")]
-    for gc_config in config.google_chat.iter() {
-        // Try service_account_key_path first, then fall back to env var
-        let key = gc_config
-            .service_account_key_path
-            .as_ref()
-            .filter(|p| !p.is_empty())
-            .and_then(|path| match std::fs::read_to_string(path) {
-                Ok(contents) => Some(contents),
-                Err(e) => {
-                    warn!("Google Chat: failed to read service account key from {path}: {e}");
-                    None
-                }
-            })
-            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
-        if let Some(key) = key {
-            let adapter = Arc::new(
-                GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
-                    .with_account_id(gc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                gc_config.default_agent.clone(),
-                gc_config.account_id.clone(),
-            ));
-        } else {
-            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
-        }
-    }
+    // google_chat migrated to a sidecar
+    // (librefang.sidecar.adapters.google_chat); no longer spawned here.
 
     // zulip migrated to an out-of-process sidecar adapter
     // (librefang.sidecar.adapters.zulip); no longer spawned here.
@@ -3525,7 +3502,10 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.google_chat.is_none());
+        // All previously in-process channels (google_chat, webhook,
+        // …) migrated to sidecars. With no `[[sidecar_channels]]`
+        // configured either, the bridge must skip.
+        assert!(config.sidecar_channels.is_empty());
     }
 
     #[test]

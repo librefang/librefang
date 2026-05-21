@@ -2,27 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Deserialize a `Vec<String>` that tolerates both string and integer elements.
-///
-/// When channel configs are saved from the web dashboard, numeric IDs (e.g. Discord
-/// guild snowflakes, Telegram user IDs) are stored as TOML integers. This helper
-/// transparently converts integers back to strings so deserialization never fails.
-pub(crate) fn deserialize_string_or_int_vec<'de, D>(
-    deserializer: D,
-) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    Ok(values
-        .into_iter()
-        .map(|v| match v {
-            serde_json::Value::String(s) => s,
-            serde_json::Value::Number(n) => n.to_string(),
-            other => other.to_string(),
-        })
-        .collect())
-}
+// `deserialize_string_or_int_vec` was a `serde(deserialize_with =
+// ...)` hook used by `GoogleChatConfig.space_ids`. With google_chat
+// migrated to a sidecar there's no remaining in-process consumer;
+// re-add when a future in-process channel needs the same shape.
 
 /// Config field that accepts either a single value or an array.
 /// Enables multi-bot configurations while staying backward-compatible.

@@ -19,9 +19,9 @@ default = []
 # individual `channel-*` features below — adding a new adapter requires
 # a matching entry here. CI / release / packaging pipelines opt in to
 # this; everyday `cargo build` paths don't.
-all-channels = [
-    "channel-google-chat",
-]
+# Every in-process channel has migrated to a sidecar; this kept as
+# `[]` so consumers that opt into `all-channels` continue to compile.
+all-channels = []
 
 # Individual channel features
 # email migrated to a sidecar (librefang.sidecar.adapters.email);
@@ -32,7 +32,8 @@ all-channels = [
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 # teams migrated to a sidecar (librefang.sidecar.adapters.teams);
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-channel-google-chat = ["dep:rsa"]
+# google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+# see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 # dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
 # see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 # wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
@@ -76,7 +77,8 @@ rustls-native-certs = { workspace = true }
 urlencoding = { workspace = true }
 
 # Channel-specific optional dependencies
-rsa = { workspace = true, optional = true }
+# `rsa` was a `channel-google-chat`-only dep for service-account JWT
+# signing; google_chat migrated to a sidecar, no remaining consumer.
 aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true }
 rustls = { workspace = true, features = ["ring"] }

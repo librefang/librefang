@@ -37,8 +37,8 @@ pub use message_truncator::{
 // (librefang.sidecar.adapters.email); no longer an in-process channel.
 // feishu migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.feishu); no longer an in-process channel.
-#[cfg(feature = "channel-google-chat")]
-pub mod google_chat;
+// google_chat migrated to an out-of-process sidecar adapter
+// (librefang.sidecar.adapters.google_chat); no longer an in-process channel.
 // line migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.line); no longer an in-process channel.
 // matrix migrated to an out-of-process sidecar adapter

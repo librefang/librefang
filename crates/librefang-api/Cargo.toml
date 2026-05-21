@@ -100,7 +100,8 @@ telemetry = [
 # see SIDECAR_CATALOG in src/routes/channels.rs.
 # teams migrated to a sidecar (librefang.sidecar.adapters.teams);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
-channel-google-chat = ["librefang-channels/channel-google-chat"]
+# google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+# see SIDECAR_CATALOG in src/routes/channels.rs.
 # dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
 # see SIDECAR_CATALOG in src/routes/channels.rs.
 # wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
@@ -115,26 +116,17 @@ channel-google-chat = ["librefang-channels/channel-google-chat"]
 # growing this set. Used by `librefang-api`'s `default` and forwarded by
 # `librefang-cli`'s `default`. Anything bigger should opt in via
 # `all-channels` (or pick individual channels).
-core-channels = [
-    "channel-google-chat",
-]
+# Every in-process channel has migrated to a sidecar; these aliases
+# are now empty. Kept as empty arrays so external Cargo.toml's that
+# request them continue to compile; remove in a follow-up once
+# `mobile-smoke.yml` / release CI stop referencing them.
+core-channels = []
 
-all-channels = [
-    "channel-google-chat",
-]
+all-channels = []
 
-# All channels except email — kept as an alias for `all-channels`
-# now that email lives in the sidecar (the Android-specific carve-out
-# is no longer needed). Removed entirely in a follow-up once
-# `mobile-smoke.yml` is rewired to use `all-channels` directly.
-all-channels-no-email = [
-    "channel-google-chat",
-]
+all-channels-no-email = []
 
-# Mini: a small core set of channels
-mini = [
-    "channel-google-chat",
-]
+mini = []
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }

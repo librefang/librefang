@@ -26,7 +26,10 @@ macro_rules! for_each_channel_field {
         // processes or compilations would silently change which agent wins
         // when multiple channel instances share a `default_agent`. See
         // CLAUDE.md "Deterministic prompt ordering".
-        $mac!(google_chat, "google_chat");
+        // All previously in-process channels (google_chat, webhook,
+        // …) migrated to sidecars; their default-agent resolution
+        // goes through the sidecar-channels path below. The macro
+        // expands to nothing here — no `$mac!()` calls remain.
     };
 }
 
@@ -387,7 +390,13 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         _chat_id: &str,
     ) -> Option<librefang_types::agent::AgentId> {
         let cfg = self.config.load_full();
-        let channels = &cfg.channels;
+        // `_channels` underscore-prefixed so `cargo check -D warnings`
+        // stays green while `for_each_channel_field!` expands to
+        // nothing (every in-process channel has migrated to a sidecar).
+        // The macro shape is preserved so a future in-process channel
+        // can re-enable the loop by appending one `$mac!(field, "name")`
+        // line in `for_each_channel_field!`.
+        let _channels = &cfg.channels;
 
         // Scan each channel type for the first instance whose `default_agent`
         // names this channel.  Inverted from `resolve_agent_home_channel`:
@@ -397,10 +406,11 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // used by `resolve_agent_home_channel` in messaging.rs so both
         // functions stay in sync automatically — adding a new channel adapter
         // requires editing only `for_each_channel_field!`.
+        #[allow(unused_macros)]
         macro_rules! check {
             ($field:ident, $channel_name:literal) => {{
                 if channel == $channel_name {
-                    for entry in channels.$field.iter() {
+                    for entry in _channels.$field.iter() {
                         if let Some(agent_name) = entry.default_agent.as_deref() {
                             if let Some(registry_entry) =
                                 self.agents.registry.find_by_name(agent_name)
@@ -443,34 +453,26 @@ mod tests {
     /// to compile if the counts diverge, and fail at runtime if the order drifts.
     #[test]
     fn for_each_channel_field_macro_uses_dictionary_order() {
-        let mut collected: Vec<&'static str> = Vec::new();
-
+        // After every in-process channel migrated to a sidecar, the
+        // macro expands to nothing — `gather` and `collected` are
+        // both unused. The test stays as a stub so a future
+        // in-process channel that re-populates `for_each_channel_field!`
+        // gets dictionary-order coverage by un-prefixing the
+        // bindings + reinstating the `EXPECTED` list.
+        #[allow(unused_macros)]
         macro_rules! gather {
             ($field:ident, $name:literal) => {
-                collected.push($name);
+                _collected.push($name);
             };
         }
-
+        let mut _collected: Vec<&'static str> = Vec::new();
         crate::for_each_channel_field!(gather);
-
-        // Hardcoded sorted reference — must match the macro body exactly.
-        const EXPECTED: &[&str] = &[
-            "google_chat",
-        ];
-
+        const EXPECTED: &[&str] = &[];
         assert_eq!(
-            collected, EXPECTED,
-            "for_each_channel_field! must expand in strict alphabetical order; \
-             re-sort the macro body in channel_sender.rs if this fails"
-        );
-
-        // Also verify it is already sorted (catches future drift even if
-        // EXPECTED is accidentally updated out of order).
-        let mut sorted = collected.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            collected, sorted,
-            "for_each_channel_field! expansion order is not alphabetically sorted"
+            _collected, EXPECTED,
+            "for_each_channel_field! is currently empty (every in-process \
+             channel migrated to a sidecar). If you added one, append both \
+             the macro entry and the EXPECTED string here in dictionary order."
         );
     }
 

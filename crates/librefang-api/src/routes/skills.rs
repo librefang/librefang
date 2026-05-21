@@ -6811,14 +6811,20 @@ service_account_env = \"SLACK_BOT_TOKEN\"
         );
         assert!(raw.contains("SECOND"), "new entry must be present: {raw}");
 
-        // Round-trip through the typed config to make sure the kernel will
-        // see both instances post-promotion.
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.google_chat.len(), 2);
+        // Round-trip the raw TOML to confirm both instances live in
+        // the `[[channels.google_chat]]` array-of-tables shape. The
+        // pre-rebase form deserialized through the typed
+        // `ChannelsConfig`, which now lacks a `google_chat` field
+        // (sidecar-migrated); fall back to `toml::Table` so the
+        // helper coverage isn't witness-dependent.
+        let parsed: toml::Table = toml::from_str(&raw).unwrap();
+        let arr = parsed
+            .get("channels")
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("google_chat"))
+            .and_then(|v| v.as_array())
+            .expect("[[channels.google_chat]] must be present as an array");
+        assert_eq!(arr.len(), 2);
     }
 
     #[test]
@@ -6924,12 +6930,17 @@ service_account_env = \"SLACK_BOT_TOKEN\"
             "removed instance must be gone: {raw}"
         );
 
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.google_chat.len(), 2);
+        // `ChannelsConfig` lost the `google_chat` field on its
+        // sidecar migration — fall back to `toml::Table` so the
+        // helper coverage isn't witness-dependent.
+        let parsed: toml::Table = toml::from_str(&raw).unwrap();
+        let arr = parsed
+            .get("channels")
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("google_chat"))
+            .and_then(|v| v.as_array())
+            .expect("[[channels.google_chat]] must be present as an array");
+        assert_eq!(arr.len(), 2);
     }
 
     #[test]
@@ -6939,15 +6950,19 @@ service_account_env = \"SLACK_BOT_TOKEN\"
         std::fs::write(&path, "[[channels.google_chat]]\nservice_account_env = \"ONLY\"\n").unwrap();
         remove_channel_instance(&path, "google_chat", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        // Either the channels.google_chat entry is gone entirely, or the channels
-        // table itself is empty — both forms parse back to zero instances.
-        #[derive(serde::Deserialize, Default)]
-        struct Doc {
-            #[serde(default)]
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
-        assert_eq!(parsed.channels.google_chat.len(), 0);
+        // Either the channels.google_chat entry is gone entirely, or
+        // the channels table itself is empty. Use a raw `toml::Table`
+        // to validate either shape — `ChannelsConfig` lost the
+        // `google_chat` typed field on its sidecar migration.
+        let parsed: toml::Table = toml::from_str(&raw).unwrap_or_default();
+        let count = parsed
+            .get("channels")
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("google_chat"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(count, 0);
     }
 
     #[test]

@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
+// `OneOrMany` import removed — every former in-process channel
+// (google_chat, webhook, …) migrated to a sidecar, so the type has
+// no remaining consumer in this module. Re-add when a future
+// in-process channel needs the array-of-tables shape.
 use super::DEFAULT_API_LISTEN;
 
 /// Hard ceiling on messages persisted per session, enforced by
@@ -4952,6 +4955,10 @@ fn default_prompt_caching() -> bool {
     true
 }
 
+// default_local_probe_interval_secs is defined upstream at line ~4832
+// (re-added in #4ab144c4); duplicated here by an earlier draft of
+// this PR — deleted on rebase so only the upstream copy survives.
+
 /// Prompt cache breakpoint strategy (#4970).
 ///
 /// Selects which stability anchors get an explicit `cache_control`
@@ -5665,20 +5672,18 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-// `default_channel_initial_backoff_secs` was removed in the
-// wecom-sidecar migration: WeCom was the only remaining caller, and
-// the sidecar uses its own constant (`INITIAL_BACKOFF_SECS` in
-// `librefang.sidecar.adapters.wecom`).
-
-/// Default maximum backoff in seconds for channels using exponential backoff (60s).
-// default_channel_max_backoff_secs / default_channel_initial_backoff_2s
-// removed — the channels that consumed them (WeChat, QQ, Feishu, etc.)
-// migrated to sidecars; their backoff cadence is now controlled by the
-// sidecar runtime, leaving these serde defaults orphaned.
-
-// default_signal_poll_interval_secs removed — Signal migrated to a
-// sidecar; the polling cadence is now controlled by
-// SIGNAL_POLL_INTERVAL_SECS in [sidecar_channels.env].
+// The shared channel-timeout helpers
+// (`default_channel_initial_backoff_secs`,
+// `default_channel_max_backoff_secs`,
+// `default_channel_initial_backoff_2s`,
+// `default_signal_poll_interval_secs`) are all gone. Their last
+// in-process consumers — Signal, Matrix, WeCom, Feishu, WeChat,
+// Teams, WhatsApp, Webhook, Google Chat — migrated to sidecars;
+// sidecars own their own backoff / poll constants
+// (`INITIAL_BACKOFF_SECS` in `librefang.sidecar.adapters.wecom`,
+// etc.). Re-add when a future in-process channel needs the same
+// shape — until then, `warnings = "deny"` workspace-wide would
+// turn main red on an orphaned helper.
 
 impl Default for KernelConfig {
     fn default() -> Self {
@@ -6392,8 +6397,8 @@ pub struct ChannelsConfig {
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Google Chat configuration(s).
-    pub google_chat: OneOrMany<GoogleChatConfig>,
+    // google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // Wave 3 — High-value channels
     // line migrated to a sidecar (librefang.sidecar.adapters.line);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
@@ -6465,7 +6470,9 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            google_chat: OneOrMany::default(),
+            // All previously in-process channels (google_chat,
+            // webhook, …) migrated to sidecars; `ChannelsConfig`
+            // no longer carries per-channel fields.
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6523,44 +6530,14 @@ impl ChannelsConfig {
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Google Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GoogleChatConfig {
-    /// Env var name holding the service account JSON key.
-    pub service_account_env: String,
-    /// Path to a Google service account JSON key file (alternative to env var).
-    /// When set, JWT authentication is used to obtain OAuth2 access tokens.
-    #[serde(default)]
-    pub service_account_key_path: Option<String>,
-    /// Space IDs to listen in.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub space_ids: Vec<String>,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GoogleChatConfig {
-    fn default() -> Self {
-        Self {
-            service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
-            service_account_key_path: None,
-            space_ids: vec![],
-            webhook_port: 8444,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// GoogleChatConfig removed — google_chat migrated to a sidecar
+// (librefang.sidecar.adapters.google_chat). Service-account JSON now
+// lives in `[sidecar_channels.env] GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`
+// (the full JSON blob, secret-routed via secrets.env); space IDs in
+// `GOOGLE_CHAT_SPACE_IDS` (CSV); webhook port in
+// `GOOGLE_CHAT_WEBHOOK_PORT`; multi-bot id in
+// `GOOGLE_CHAT_ACCOUNT_ID`. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // zulip migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.zulip); the in-process `ZulipConfig`

@@ -8057,41 +8057,19 @@ fn cmd_channel_setup(channel: Option<&str>) {
         }
     };
 
-    match channel.as_str() {
-        // discord was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.discord) in v2026.5; the in-process
-        // wizard arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure page.
-        // slack was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.slack) in v2026.5; the in-process
-        // wizard arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure page.
-        // whatsapp was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.whatsapp); the in-process wizard
-        // arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure
-        // page (which renders the sidecar's --describe schema).
-        // email was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.email); the in-process wizard
-        // arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure
-        // page (which renders the sidecar's --describe schema).
-        // signal was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.signal) in v2026.5; the in-process
-        // wizard arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure page.
-        // matrix was migrated to a sidecar adapter
-        // (librefang.sidecar.adapters.matrix); the in-process wizard
-        // arm was removed. Configure via [[sidecar_channels]] in
-        // config.toml or through the dashboard's channel configure page.
-        other => {
-            ui::error_with_fix(
-                &i18n::t_args("channel-unknown", &[("name", other)]),
-                &i18n::t("channel-unknown-fix"),
-            );
-            std::process::exit(1);
-        }
-    }
+    // Every in-process channel wizard arm (discord, slack, whatsapp,
+    // email, signal, matrix, google_chat, …) has been removed
+    // alongside that channel's sidecar migration. Configure all
+    // channels via `[[sidecar_channels]]` in config.toml or through
+    // the dashboard's channel configure page (which renders the
+    // sidecar's `--describe` schema). The `librefang init <channel>`
+    // command now always falls through to the unknown-channel hint.
+    let other = channel.as_str();
+    ui::error_with_fix(
+        &i18n::t_args("channel-unknown", &[("name", other)]),
+        &i18n::t("channel-unknown-fix"),
+    );
+    std::process::exit(1);
 }
 
 // maybe_write_channel_config / notify_daemon_restart removed — they

@@ -378,9 +378,16 @@ impl LibreFangKernel {
     /// (the pre-#2872 behavior).
     pub(crate) fn resolve_agent_home_channel(&self, agent_id: AgentId) -> Option<SenderContext> {
         let entry = self.agents.registry.get(agent_id)?;
-        let agent_name = entry.name.clone();
+        // `_agent_name` / `_channels` underscore-prefixed so
+        // `cargo check -D warnings` stays green while
+        // `for_each_channel_field!` expands to nothing — every
+        // in-process channel has migrated to a sidecar. The macro
+        // shape is preserved so a future in-process channel re-enables
+        // the loop by appending one `$mac!(field, "name")` line in
+        // `for_each_channel_field!`.
+        let _agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-        let channels = &cfg.channels;
+        let _channels = &cfg.channels;
 
         // Scan each channel type for the first instance whose default_agent
         // names this agent. The `first` semantics match `channel_overrides`
@@ -389,12 +396,13 @@ impl LibreFangKernel {
         // `for_each_channel_field!` expands the exhaustive field list shared
         // with `resolve_channel_owner` in channel_sender.rs — one edit point
         // for all 40+ channel types keeps the two functions in sync.
+        #[allow(unused_macros)]
         macro_rules! check {
             ($field:ident, $channel_name:literal) => {{
-                if let Some(entry) = channels
+                if let Some(entry) = _channels
                     .$field
                     .iter()
-                    .find(|c| c.default_agent.as_deref() == Some(agent_name.as_str()))
+                    .find(|c| c.default_agent.as_deref() == Some(_agent_name.as_str()))
                 {
                     return Some(SenderContext {
                         channel: $channel_name.to_string(),

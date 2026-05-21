@@ -335,19 +335,21 @@ admin_role = "admin"
 
     #[test]
     fn test_channels_config_with_new_channels() {
-        // Witness rotated again: Matrix #5368 → Email → Teams →
-        // WhatsApp → Webhook (all sidecar-migrated) → GoogleChat,
-        // the last remaining in-process channel. The assertion is
-        // on ChannelsConfig serde shape, not on any
-        // adapter-specific behaviour.
+        // Witness rotation history: Matrix #5368 → Email → Teams →
+        // WhatsApp → Webhook → GoogleChat — all sidecar-migrated.
+        // With no in-process channel left, this test now only
+        // exercises that `ChannelsConfig::default()` round-trips
+        // through `KernelConfig` without erroring. Re-add a
+        // per-channel assertion when a future in-process channel
+        // brings a witness back.
         let config = KernelConfig {
-            channels: ChannelsConfig {
-                google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                ..Default::default()
-            },
+            channels: ChannelsConfig::default(),
             ..Default::default()
         };
-        assert!(config.channels.google_chat.is_some());
+        assert!(
+            config.channels.file_download_max_bytes > 0,
+            "default ChannelsConfig must populate file_download_max_bytes"
+        );
     }
 
     // test_teams_config_defaults removed — teams migrated to a
@@ -358,25 +360,27 @@ admin_role = "admin"
     // a sidecar (librefang.sidecar.adapters.mattermost) and the
     // in-process MattermostConfig was deleted.
 
-    #[test]
-    fn test_google_chat_config_defaults() {
-        let gc = GoogleChatConfig::default();
-        assert_eq!(gc.service_account_env, "GOOGLE_CHAT_SERVICE_ACCOUNT");
-        assert_eq!(gc.webhook_port, 8444);
-    }
+    // test_google_chat_config_defaults removed — google_chat
+    // migrated to a sidecar (librefang.sidecar.adapters.google_chat)
+    // and the in-process GoogleChatConfig was deleted.
 
     #[test]
     fn test_all_new_channel_configs_serde() {
+        // Witness rotation history: GoogleChat → Webhook (both
+        // sidecar-migrated). With no in-process channel left, the
+        // serde round-trip now only exercises that the default
+        // `ChannelsConfig` survives a TOML emit + reparse — adapter-
+        // specific field-shape coverage moved with each migration.
         let config = KernelConfig {
-            channels: ChannelsConfig {
-                google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
-                ..Default::default()
-            },
+            channels: ChannelsConfig::default(),
             ..Default::default()
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let back: KernelConfig = toml::from_str(&toml_str).unwrap();
-        assert!(back.channels.google_chat.is_some());
+        assert!(
+            back.channels.file_download_max_bytes > 0,
+            "default ChannelsConfig must round-trip with non-zero file_download_max_bytes"
+        );
     }
 
     #[test]
@@ -806,44 +810,45 @@ admin_role = "admin"
     }
 
     // OneOrMany single-table + array-of-tables tests rotated from
-    // matrix (#5368) → dingtalk → whatsapp → webhook → google_chat
-    // — google_chat is now the ONLY remaining in-process channel
-    // with a OneOrMany list shape. The assertion is on OneOrMany's
-    // TOML parse behaviour, not on any adapter-specific field
-    // shape.
-    #[test]
-    fn test_one_or_many_single_toml_table() {
-        let toml_str = r#"
-            [channels.google_chat]
-            service_account_env = "MY_GC_SA"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.google_chat.is_some());
-        assert_eq!(config.channels.google_chat.len(), 1);
-        let gc = config.channels.google_chat.first().unwrap();
-        assert_eq!(gc.service_account_env, "MY_GC_SA");
+    // matrix (#5368) → dingtalk → whatsapp → webhook → google_chat,
+    // all sidecar-migrated. With no in-process channel left to use
+    // as a TOML witness, the tests re-point at a local test fixture
+    // struct (`OoMTestRow`) so OneOrMany's `Deserialize` /
+    // `Serialize` shape stays under coverage independent of any
+    // production caller's field set.
+    #[derive(
+        Debug, Clone, Default, serde::Serialize, serde::Deserialize,
+        schemars::JsonSchema,
+    )]
+    #[serde(default)]
+    struct OoMTestRow {
+        token_env: String,
+        default_agent: Option<String>,
     }
 
     #[test]
-    fn test_one_or_many_array_of_tables() {
-        let toml_str = r#"
-            [[channels.google_chat]]
-            service_account_env = "GC_SA_1"
-            default_agent = "assistant"
+    fn test_one_or_many_single_serde_value() {
+        // Single-element single-table shape.
+        let raw = serde_json::json!({ "token_env": "MY_TOKEN" });
+        let row: OneOrMany<OoMTestRow> = serde_json::from_value(raw).unwrap();
+        assert!(row.is_some());
+        assert_eq!(row.len(), 1);
+        assert_eq!(row.first().unwrap().token_env, "MY_TOKEN");
+    }
 
-            [[channels.google_chat]]
-            service_account_env = "GC_SA_2"
-            default_agent = "coder"
-        "#;
-        let config: KernelConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.channels.google_chat.is_some());
-        assert_eq!(config.channels.google_chat.len(), 2);
-
-        let bots: Vec<_> = config.channels.google_chat.iter().collect();
-        assert_eq!(bots[0].service_account_env, "GC_SA_1");
-        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
-        assert_eq!(bots[1].service_account_env, "GC_SA_2");
-        assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
+    #[test]
+    fn test_one_or_many_array_of_serde_values() {
+        let raw = serde_json::json!([
+            { "token_env": "TOK_1", "default_agent": "assistant" },
+            { "token_env": "TOK_2", "default_agent": "coder" },
+        ]);
+        let rows: OneOrMany<OoMTestRow> = serde_json::from_value(raw).unwrap();
+        assert_eq!(rows.len(), 2);
+        let rows_vec: Vec<_> = rows.iter().collect();
+        assert_eq!(rows_vec[0].token_env, "TOK_1");
+        assert_eq!(rows_vec[0].default_agent.as_deref(), Some("assistant"));
+        assert_eq!(rows_vec[1].token_env, "TOK_2");
+        assert_eq!(rows_vec[1].default_agent.as_deref(), Some("coder"));
     }
 
     // test_one_or_many_single_wechat_table removed — wechat migrated
@@ -856,28 +861,28 @@ admin_role = "admin"
 
     #[test]
     fn test_one_or_many_empty_default() {
-        let config = KernelConfig::default();
-        assert!(config.channels.google_chat.is_none());
-        assert!(config.channels.google_chat.is_empty());
-        assert_eq!(config.channels.google_chat.len(), 0);
-        assert!(config.channels.google_chat.first().is_none());
-        assert!(config.channels.google_chat.as_ref().is_none());
+        let empty: OneOrMany<OoMTestRow> = OneOrMany::default();
+        assert!(empty.is_none());
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.first().is_none());
+        assert!(empty.as_ref().is_none());
     }
 
     #[test]
     fn test_one_or_many_serialize_roundtrip() {
         // Single element serializes as a bare table, multi as array-of-tables
-        let single = OneOrMany(vec![GoogleChatConfig::default()]);
+        let single = OneOrMany(vec![OoMTestRow::default()]);
         let json = serde_json::to_string(&single).unwrap();
-        let back: OneOrMany<GoogleChatConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<OoMTestRow> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
 
-        let multi = OneOrMany(vec![GoogleChatConfig::default(), GoogleChatConfig::default()]);
+        let multi = OneOrMany(vec![OoMTestRow::default(), OoMTestRow::default()]);
         let json = serde_json::to_string(&multi).unwrap();
-        let back: OneOrMany<GoogleChatConfig> = serde_json::from_str(&json).unwrap();
+        let back: OneOrMany<OoMTestRow> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 2);
 
-        let empty: OneOrMany<GoogleChatConfig> = OneOrMany::default();
+        let empty: OneOrMany<OoMTestRow> = OneOrMany::default();
         let json = serde_json::to_string(&empty).unwrap();
         assert_eq!(json, "null");
     }
