@@ -612,6 +612,13 @@ class TeamsAdapter(SidecarAdapter):
                     cl = int(self.headers.get("Content-Length", "0") or 0)
                 except ValueError:
                     cl = 0
+                if cl < 0:
+                    # `Content-Length: -1` (or any negative integer)
+                    # would make `rfile.read(-1)` consume to EOF —
+                    # an unbounded read. Treat as malformed.
+                    self.send_response(400)
+                    self.end_headers()
+                    return
                 if cl > self._MAX_BODY_BYTES:
                     self.send_response(413)
                     self.end_headers()
