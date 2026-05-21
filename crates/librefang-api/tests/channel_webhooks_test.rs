@@ -121,7 +121,7 @@ async fn webhook_path_does_not_require_auth_when_api_key_is_set() {
     // Webhook path: no token, no signature, but must NOT be 401.
     let webhook_req = Request::builder()
         .method(Method::POST)
-        .uri("/channels/feishu/webhook")
+        .uri("/channels/teams/webhook")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"type":"event_callback"}"#))
         .unwrap();

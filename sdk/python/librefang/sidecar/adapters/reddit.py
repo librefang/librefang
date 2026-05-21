@@ -119,6 +119,11 @@ from typing import Any
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    split_message as _split_message,
+)
+from librefang.sidecar.common import SeenSet as _SeenSet, http_request as _http_request
 
 DEFAULT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 DEFAULT_API_BASE = "https://oauth.reddit.com"
@@ -134,7 +139,6 @@ MAX_MESSAGE_LEN = 10000
 DEFAULT_POLL_INTERVAL_SECS = 30
 MIN_POLL_INTERVAL_SECS = 5
 SEND_TIMEOUT_SECS = 15
-MAX_BACKOFF_SECS = 60.0
 # Refresh OAuth tokens 5 minutes before expiry.
 TOKEN_REFRESH_BUFFER_SECS = 300
 # Cap the dedupe set; oldest half is evicted on overflow.
@@ -180,26 +184,6 @@ def _normalise_subreddit(value: str) -> str:
     if s.startswith("r/"):
         s = s[2:]
     return s.strip("/")
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Matches the Rust ``split_message`` helper used across channels."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _parse_reddit_comment(comment: dict, own_username: str) -> dict | None:
     """Parse a Reddit comment JSON object into a ``message`` event.
@@ -253,11 +237,18 @@ def _parse_reddit_comment(comment: dict, own_username: str) -> dict | None:
         content=content,
         message_id=comment_id,
         is_group=True,  # Subreddit comments are public/group, like Rust.
-        # P1: surface fullname as thread_id so on_send uses it as the
-        # parent fullname for POST /api/comment. The Rust adapter's
-        # thread_id was the subreddit, which broke per-comment replies
-        # in production (user.platform_id was the author, not the
-        # fullname /api/comment requires).
+        # P1 (revised): the parent fullname MUST round-trip to on_send —
+        # POST /api/comment requires `thing_id` (a fullname like `t1_…`);
+        # without it Reddit returns 400. The original P1 used `thread_id`
+        # as the carrier, but the daemon's bridge only honours
+        # `cmd.thread_id` under `[channels.reddit.overrides] threading = true`
+        # AND the `thread` capability (reddit declares neither), so every
+        # production reply RAISED `RuntimeError("missing parent fullname")`
+        # and got swallowed by the SDK's bare-except `on_command` wrapper
+        # — operator saw nothing land. Fixed by `librefang_user` (always
+        # round-tripped). `thread_id` is kept for forward-compat with a
+        # future opt-in.
+        librefang_user=fullname or None,
         thread_id=fullname or None,
         metadata=metadata,
     )
@@ -387,8 +378,9 @@ class RedditAdapter(SidecarAdapter):
         # Dedupe set for already-seen comment IDs. Capped by
         # SEEN_COMMENTS_MAX with crude oldest-half eviction (matches
         # the Rust adapter's eviction policy).
-        self._seen_comments: list[str] = []
-        self._seen_comments_set: set[str] = set()
+        self._seen = _SeenSet(
+            max_size=SEEN_COMMENTS_MAX, evict=SEEN_COMMENTS_EVICT,
+        )
 
     # ---- HTTP helpers ------------------------------------------------
 
@@ -555,18 +547,8 @@ class RedditAdapter(SidecarAdapter):
     # ---- inbound: poll new comments per subreddit --------------------
 
     def _mark_seen(self, comment_id: str) -> None:
-        """Track a comment ID with crude oldest-half eviction on
-        overflow. Mirrors the Rust adapter's eviction (it sorted by
-        insertion order via HashMap iteration; we use an explicit
-        list so the eviction is deterministic)."""
-        if comment_id in self._seen_comments_set:
-            return
-        self._seen_comments.append(comment_id)
-        self._seen_comments_set.add(comment_id)
-        if len(self._seen_comments) > SEEN_COMMENTS_MAX:
-            to_drop = self._seen_comments[:SEEN_COMMENTS_EVICT]
-            self._seen_comments = self._seen_comments[SEEN_COMMENTS_EVICT:]
-            self._seen_comments_set.difference_update(to_drop)
+        """Return True iff freshly seen. Shim around :class:`librefang.sidecar.common.SeenSet`."""
+        return self._seen.mark(comment_id)
 
     def _poll_once(self, emit) -> None:
         """Poll every configured subreddit once. Errors per-subreddit
@@ -643,7 +625,7 @@ class RedditAdapter(SidecarAdapter):
                         child.get("data"), dict,
                     ) else ""
                 )
-                if not comment_id or comment_id in self._seen_comments_set:
+                if not comment_id or comment_id in self._seen.ids:
                     continue
                 ev = _parse_reddit_comment(child, self.own_username)
                 if ev is None:
@@ -772,16 +754,39 @@ class RedditAdapter(SidecarAdapter):
             text = "(Unsupported content type — Reddit only supports text replies)"
         else:
             text = cmd.text or ""
-        # cmd.thread_id carries the parent fullname (e.g. "t1_abc123")
-        # that inbound parsing surfaced. The Rust adapter used
-        # user.platform_id for this, but parse_reddit_comment writes
-        # the author username there — the only fullname round-trip we
-        # can rely on is thread_id (see module docstring P1 note).
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] carries the
+        # parent fullname (set in parse_reddit_comment). The daemon's
+        # bridge round-trips `ChannelUser.librefang_user` bytewise
+        # regardless of capabilities/overrides — verified at
+        # crates/librefang-channels/src/sidecar.rs:766 inbound,
+        # :1204 outbound.
+        #
+        # Fallback: cmd.thread_id for the forward-compat threading=true
+        # path (would also require a future `thread` capability).
+        #
+        # Strongest sanity guard of all sidecars in this fix family —
+        # Reddit fullnames have a deterministic `t{1,3,4,5}_` prefix
+        # (t1=comment, t3=submission, t4=message, t5=subreddit). Reject
+        # anything else so a cross-channel `librefang_user` (a
+        # dingtalk URL, a telegram @username, etc.) can never POST
+        # garbage as the parent fullname.
+        parent_fullname: "Optional[str]" = None
+        user = getattr(cmd, "user", None) or {}
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            if (isinstance(candidate, str)
+                    and candidate.startswith(("t1_", "t3_", "t4_", "t5_"))
+                    and " " not in candidate
+                    and "/" not in candidate):
+                parent_fullname = candidate
+        if parent_fullname is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            parent_fullname = thread_id
+
         await asyncio.get_event_loop().run_in_executor(
-            None, self._post_comment, thread_id or "", text,
+            None, self._post_comment, parent_fullname or "", text,
         )
 
 

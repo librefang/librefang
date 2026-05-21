@@ -716,116 +716,113 @@ librefang skill create
 
 ## 通道命令
 
+所有通道都以独立进程的 sidecar adapter 形式运行 —— 这些命令调用
+存活的 daemon endpoint（`GET /api/channels`、`GET /api/channels/registry`、
+`POST /api/channels/sidecar/{name}/configure`、`POST /api/channels/reload`），
+而不是直接操作进程内 adapter 状态。
+
 ### librefang channel list
 
-列出已配置的通道及其状态。
+通过 `GET /api/channels` 列出已配置 + 可发现的通道。
 
 ```
 librefang channel list
 ```
 
-**输出列：** CHANNEL、ENV VAR、STATUS。
+**列：** NAME、KIND、CONFIGURED、TOKEN（必需的 secret 环境变量是否已设值）、24H MSGS。
 
-检查 `config.toml` 中的通道配置部分和所需令牌的环境变量。状态为以下之一：`Ready`、`Missing env`、`Not configured`。
+需要 daemon 在跑 —— 不通就报错退出。要不连 daemon 看配置，直接读
+`~/.librefang/config.toml`。
 
-**检查的通道：** webchat、telegram、discord、slack、whatsapp、signal、matrix、email。
+---
+
+### librefang channel reload
+
+调 `POST /api/channels/reload`，让 daemon 从 `~/.librefang/config.toml`
+（包括 `include` 的所有文件）重读 `[[sidecar_channels]]`，不重启。
+适用于：手动改完配置后，或 `librefang channel rm` 之后。
+
+```
+librefang channel reload
+```
 
 ---
 
 ### librefang channel setup
 
-通道集成的交互式设置向导。
+按 sidecar 自描述 schema 走的交互式配置。
 
 ```
-librefang channel setup [<CHANNEL>]
+librefang channel setup [<NAME>]
 ```
 
 **参数：**
 
 | 参数 | 说明 |
 |---|---|
-| `<CHANNEL>` | 通道名称。如果省略，显示交互式选择器。 |
+| `<NAME>` | Sidecar adapter 名字（`telegram`、`ntfy` 等）。省略则在未配置项里弹 picker。 |
 
-**支持的通道：** `telegram`、`discord`、`slack`、`whatsapp`、`email`、`signal`、`matrix`。
+按 sidecar 的 `--describe` schema 逐字段询问：
 
-每个向导会：
-1. 显示获取凭证的分步说明。
-2. 提示输入令牌/凭证。
-3. 将令牌保存到 `~/.librefang/.env`，并设置仅所有者权限。
-4. 将通道配置块追加到 `config.toml`（会提示确认）。
-5. 如果守护进程正在运行，提醒重启。
+- **非 secret 字段有当前值**会预填；空提交保留当前值。
+- **secret 类型字段且 `has_value=true`** 永远不回显 —— 显示成
+  `(set — leave blank to keep)`。空提交保留已存 secret。
+- **必填字段**在提示里加 `*`。
+
+提交时 POST 到 `/api/channels/sidecar/{name}/configure`，daemon 把
+secret 类字段写到 `~/.librefang/secrets.env`、其他写到 `config.toml`
+的 `[[sidecar_channels]]` 里，然后热加载。
 
 **示例：**
 
 ```bash
-# 交互式选择器
+# 在未配置 adapter 里弹交互式选择器
 librefang channel setup
 
-# 直接设置
+# 直接对一个 adapter 走配置流
 librefang channel setup telegram
-librefang channel setup discord
-librefang channel setup slack
 ```
 
 ---
 
-### librefang channel test
+### librefang channel rm
 
-通过已配置的通道发送测试消息。
+从 `~/.librefang/config.toml` 里删掉匹配的 `[[sidecar_channels]]` 条目，
+然后热加载让对应 sidecar 子进程退出。
 
 ```
-librefang channel test <CHANNEL>
+librefang channel rm <NAME>
 ```
 
 **参数：**
 
 | 参数 | 说明 |
 |---|---|
-| `<CHANNEL>` | 要测试的通道名称。 |
+| `<NAME>` | 要删除的 sidecar 条目的 `name` 字段。 |
 
-需要守护进程正在运行。发送 `POST /api/channels/<channel>/test`。
+Sidecar 迁移后，`[[sidecar_channels]]` 块是否存在就是唯一的开关
+信号（#5463 之前的 `enable` / `disable` 没有恢复），所以 `rm` 是
+关闭 adapter 的唯一方式。
 
 **示例：**
 
 ```bash
-librefang channel test telegram
+librefang channel rm telegram
 ```
 
 ---
 
-### librefang channel enable
+### 没有恢复的子命令
 
-启用通道集成。
+`librefang channel test` / `enable` / `disable` **故意不**从
+#5463 之前的形态恢复：
 
-```
-librefang channel enable <CHANNEL>
-```
-
-**参数：**
-
-| 参数 | 说明 |
-|---|---|
-| `<CHANNEL>` | 要启用的通道名称。 |
-
-守护进程模式下：发送 `POST /api/channels/<channel>/enable`。无守护进程时：提示更改将在下次启动时生效。
-
----
-
-### librefang channel disable
-
-禁用通道，但不删除其配置。
-
-```
-librefang channel disable <CHANNEL>
-```
-
-**参数：**
-
-| 参数 | 说明 |
-|---|---|
-| `<CHANNEL>` | 要禁用的通道名称。 |
-
-守护进程模式下：发送 `POST /api/channels/<channel>/disable`。无守护进程时：提示编辑 `config.toml`。
+- **`test`** —— sidecar 用自己的 stdout 日志暴露健康状态；没有
+  in-band 的 `/test` endpoint。改 tail `librefang logs --filter
+  sidecar/<name>`。
+- **`enable` / `disable`** —— sidecar 是否启动取决于 `config.toml` 里
+  有没有它的 `[[sidecar_channels]]` 块。`rm` 是关；`setup`（或手动改
+  完 `reload`）是开。
 
 ---
 
