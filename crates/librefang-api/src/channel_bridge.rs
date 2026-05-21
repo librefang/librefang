@@ -596,6 +596,41 @@ pub struct KernelBridgeAdapter {
     started_at: Instant,
 }
 
+/// Compose the message returned to a channel user when `/approve <id>`
+/// or `/reject <id>` found no live pending request.
+///
+/// Distinguishes two cases by checking the recent audit log:
+/// - **Already-resolved**: a recent audit entry's `request_id` starts
+///   with `id_prefix`. The user is double-clicking the inline keyboard
+///   OR following up with a slash command after the button click —
+///   harmless, ack idempotently with the original decision.
+/// - **Truly unknown**: no audit entry matches either. Keep the
+///   original "No pending approval matching" message so a real
+///   typo / stale id still surfaces as a real not-found.
+///
+/// Hoisted out as a free function so it can be unit-tested against a
+/// constructed `ApprovalManager` without going through the full
+/// `KernelApi` mocks the rest of `resolve_approval_text` requires.
+fn resolve_no_pending_message(
+    approvals: &librefang_kernel::approval::ApprovalManager,
+    id_prefix: &str,
+) -> String {
+    // Audit log is sorted DESC by `decided_at`; cap the scan to a small
+    // recent window since duplicate-click races are sub-second. 64 is
+    // generous and bounds the SQL cost.
+    let recent = approvals.query_audit(64, 0, None, None);
+    if let Some(entry) = recent.iter().find(|e| e.request_id.starts_with(id_prefix)) {
+        let short = &entry.request_id[..8.min(entry.request_id.len())];
+        let actor = entry.decided_by.as_deref().unwrap_or("(unknown)");
+        format!(
+            "Approval [{short}] already resolved ({} by {actor}).",
+            entry.decision
+        )
+    } else {
+        format!("No pending approval matching '{id_prefix}'.")
+    }
+}
+
 #[async_trait]
 impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
@@ -1479,7 +1514,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .filter(|r| r.id.to_string().starts_with(id_prefix))
             .collect();
         match matched.len() {
-            0 => format!("No pending approval matching '{id_prefix}'."),
+            // No pending match. Two sub-cases worth distinguishing for
+            // Telegram / Slack UX: a user double-tapping the inline
+            // `[Approve]` button (or button + slash command) produces a
+            // SECOND `/approve <id>` shortly after the FIRST resolved
+            // the request. Pre-fix that returned "No pending approval
+            // matching" which reads as an error. Check the audit log —
+            // if a recent entry's request_id starts with this prefix,
+            // it's the already-resolved duplicate, ack it idempotently.
+            0 => resolve_no_pending_message(self.kernel.approvals(), id_prefix),
             1 => {
                 let req = matched[0];
                 let decision = if approve {
@@ -2224,7 +2267,6 @@ fn apply_channel_proxy<A>(
 // EmailCredentials + resolve_email_credentials removed alongside the
 // in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
 
-
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2762,6 +2804,47 @@ pub async fn reload_channels_from_disk(
 mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
+
+    // ── resolve_no_pending_message ───────────────────────────────
+    //
+    // Telegram / Slack: a user double-tapping the `[Approve]` inline
+    // keyboard (or button + slash command in quick succession)
+    // produces a SECOND `/approve <id>` shortly after the first one
+    // resolved the request. Pre-fix that branch returned "No pending
+    // approval matching '<id>'" which reads as an error. The fixed
+    // helper detects the audit-log hit and acks idempotently.
+
+    fn fresh_approval_manager() -> librefang_kernel::approval::ApprovalManager {
+        // In-memory `ApprovalManager` without a persistent audit DB —
+        // `query_audit` returns `Vec::new()` for that path, which is
+        // exactly the "no audit hit" branch we want to exercise. The
+        // happy-resolved-path is covered by `kernel::approval`'s own
+        // unit suite (`test_request_approval_approve` et al), which
+        // wires up the SQLite-backed audit log end-to-end.
+        let policy = librefang_types::approval::ApprovalPolicy::default();
+        librefang_kernel::approval::ApprovalManager::new(policy)
+    }
+
+    #[test]
+    fn resolve_no_pending_message_falls_back_to_not_found_without_audit_hit() {
+        let mgr = fresh_approval_manager();
+        let msg = resolve_no_pending_message(&mgr, "deadbeef");
+        assert!(
+            msg.contains("No pending approval matching 'deadbeef'"),
+            "no-audit-hit branch must surface the not-found message verbatim, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_no_pending_message_handles_empty_prefix_safely() {
+        // Defensive: an empty `id_prefix` would `starts_with("")`
+        // match every audit row. Without an audit DB it should still
+        // gracefully report not-found rather than panic / surface
+        // unrelated approvals.
+        let mgr = fresh_approval_manager();
+        let msg = resolve_no_pending_message(&mgr, "");
+        assert!(msg.contains("No pending approval matching"));
+    }
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
