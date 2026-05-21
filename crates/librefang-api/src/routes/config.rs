@@ -785,29 +785,28 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let config = state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
-    let channels = {
-        let c = &config.channels;
-        let mut map = serde_json::Map::new();
-        macro_rules! ch {
-            ($name:ident) => {
-                if !c.$name.is_empty() {
-                    map.insert(
-                        stringify!($name).to_string(),
-                        serde_json::json!({ "instances": c.$name.len() }),
-                    );
-                }
-            };
-        }
-        ch!(whatsapp);
-        ch!(email);
-        ch!(teams);
-        ch!(google_chat);
-        ch!(feishu);
-        ch!(dingtalk);
-        ch!(webhook);
-        ch!(wecom);
-        serde_json::Value::Object(map)
-    };
+    // All previously in-process channels (whatsapp, teams,
+    // google_chat, webhook, …) migrated to sidecars; their fields no
+    // longer exist on `ChannelsConfig` so there's nothing to
+    // enumerate here. The macro shape + lookup are preserved as a
+    // comment block so a future in-process channel can rebuild this
+    // block by uncommenting + appending one `ch!()` line per field.
+    //
+    //   let c = &config.channels;
+    //   let mut map = serde_json::Map::new();
+    //   macro_rules! ch {
+    //       ($name:ident) => {{
+    //           if !c.$name.is_empty() {
+    //               map.insert(
+    //                   stringify!($name).to_string(),
+    //                   serde_json::json!({ "instances": c.$name.len() }),
+    //               );
+    //           }
+    //       }};
+    //   }
+    //   ch!(<future_in_process_channel>);
+    //   serde_json::Value::Object(map)
+    let channels = serde_json::Value::Object(serde_json::Map::new());
 
     // -- mcp_servers: list names/commands, redact env secrets --
     let mcp_servers: Vec<serde_json::Value> = config
