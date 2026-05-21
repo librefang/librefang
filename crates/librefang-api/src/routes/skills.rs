@@ -6730,16 +6730,17 @@ service_account_env = \"SLACK_BOT_TOKEN\"
     }
 
     #[test]
-    fn write_service_account_env_value_with_newline_is_rejected() {
+    fn write_secret_env_value_with_newline_is_rejected() {
         // Implementation tightened to reject newlines in the value rather
         // than escape them — escape-into-single-line was the old behaviour
         // (see this test's previous name) but it left a real injection
         // surface for callers that didn't expect dotenv parsers to honour
         // backslash sequences.  Now we fail-closed: caller must sanitise
-        // before passing.
+        // before passing. (`write_service_account_env` was folded into the
+        // generic `write_secret_env` when google_chat/webhook moved out.)
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
-        let err = write_service_account_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
+        let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(
             err.to_string().contains("newline"),
