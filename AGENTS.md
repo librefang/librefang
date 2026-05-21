@@ -23,7 +23,7 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 | `librefang-kernel` | Agent registry, scheduling, orchestration, event bus, metering |
 | `librefang-runtime` | Agent loop, LLM drivers, tools, MCP client, context engine, A2A |
 | `librefang-api` | HTTP/WebSocket server, routes, middleware, dashboard |
-| `librefang-channels` | 40+ messaging bridges (Discord, Slack, Telegram, WeCom, …) |
+| `librefang-channels` | Channel-bridge infra: sidecar trampoline + shared bridge types (per-channel adapters live as Python sidecars under `sdk/python/librefang/sidecar/adapters/`) |
 | `librefang-memory` | History, vector search, knowledge storage |
 | `librefang-wire` | OFP — agent-to-agent P2P |
 | `librefang-skills` | Skill registry, loader, marketplace, WASM sandbox |
