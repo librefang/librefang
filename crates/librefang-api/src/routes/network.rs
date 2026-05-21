@@ -1519,6 +1519,7 @@ pub async fn mcp_http(
             None, // process_registry (network bridge doesn't run agent tools)
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel
+            None, // chat_id (MCP HTTP has no conversation context either)
             None, // checkpoint_manager (network bridge doesn't run agent tools)
             None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
             None, // session_id (MCP HTTP is not tied to a live session)
