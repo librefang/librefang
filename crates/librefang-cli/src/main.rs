@@ -13387,7 +13387,7 @@ mod tests {
         daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
         is_valid_env_var_name, normalize_daemon_addr, normalize_release_tag, parse_toml_integer,
         parse_version_core, pool_strategy_canon, resolve_device_auth_start, resolve_hand_instance,
-        AuthCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
+        AuthCommands, ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
         MemoryCommands, ReleaseComparison,
     };
     use clap::Parser;
