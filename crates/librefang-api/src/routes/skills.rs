@@ -6583,22 +6583,22 @@ kind = \"openai-compat\"
 base_url = \"https://integrate.api.nvidia.com/v1\"
 api_key_env = \"NIM_API_KEY\"
 
-[channels.whatsapp]
-access_token_env = \"OLD_WA_TOKEN\"
+[channels.google_chat]
+service_account_env = \"OLD_GOOGLE_CHAT_SERVICE_ACCOUNT\"
 ";
         std::fs::write(&config_path, original).unwrap();
 
         let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
         fields.insert(
-            "access_token_env".to_string(),
-            ("WHATSAPP_TOKEN".to_string(), FieldType::Text),
+            "service_account_env".to_string(),
+            ("GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(), FieldType::Text),
         );
         fields.insert(
             "guild_ids".to_string(),
             ("123, 456".to_string(), FieldType::List),
         );
 
-        upsert_channel_config(&config_path, "whatsapp", &fields).expect("upsert should succeed");
+        upsert_channel_config(&config_path, "google_chat", &fields).expect("upsert should succeed");
 
         let raw = std::fs::read_to_string(&config_path).unwrap();
 
@@ -6629,26 +6629,27 @@ access_token_env = \"OLD_WA_TOKEN\"
         // The new channel fields must be written with correct TOML types
         // (list of strings, not list of integers — see the FieldType::List
         // comment about Matrix allowed-rooms / Discord guild snowflakes.)
-        // Witness rotated: matrix → wechat (both sidecar-migrated)
-        // → whatsapp (still in-process). The channel choice is
-        // incidental to the upsert/list-of-strings behaviour being
-        // asserted.
+        // Witness rotated: matrix → wechat → whatsapp → webhook
+        // (all sidecar-migrated) → google_chat (the last
+        // remaining in-process channel). The channel choice is
+        // incidental to the upsert/list-of-strings behaviour
+        // being asserted.
         #[derive(serde::Deserialize)]
-        struct WhatsApp {
-            access_token_env: String,
+        struct GoogleChat {
+            service_account_env: String,
             guild_ids: Vec<String>,
         }
         #[derive(serde::Deserialize)]
         struct Channels {
-            whatsapp: WhatsApp,
+            google_chat: GoogleChat,
         }
         #[derive(serde::Deserialize)]
         struct Wrapper {
             channels: Channels,
         }
         let parsed: Wrapper = toml::from_str(&raw).expect("config must round-trip");
-        assert_eq!(parsed.channels.whatsapp.access_token_env, "WHATSAPP_TOKEN");
-        assert_eq!(parsed.channels.whatsapp.guild_ids, vec!["123", "456"]);
+        assert_eq!(parsed.channels.google_chat.service_account_env, "GOOGLE_CHAT_SERVICE_ACCOUNT");
+        assert_eq!(parsed.channels.google_chat.guild_ids, vec!["123", "456"]);
     }
 
     /// Companion to the upsert test: removing a channel must also leave
@@ -6663,12 +6664,12 @@ access_token_env = \"OLD_WA_TOKEN\"
 kind = \"openai-compat\"
 base_url = \"https://integrate.api.nvidia.com/v1\"
 
-[channels.whatsapp]
-access_token_env = \"SLACK_BOT_TOKEN\"
+[channels.google_chat]
+service_account_env = \"SLACK_BOT_TOKEN\"
 ";
         std::fs::write(&config_path, original).unwrap();
 
-        remove_channel_config(&config_path, "whatsapp").expect("remove should succeed");
+        remove_channel_config(&config_path, "google_chat").expect("remove should succeed");
 
         let raw = std::fs::read_to_string(&config_path).unwrap();
         assert!(
@@ -6680,7 +6681,7 @@ access_token_env = \"SLACK_BOT_TOKEN\"
             "top-level comment was dropped — got:\n{raw}"
         );
         assert!(
-            !raw.contains("[channels.whatsapp]"),
+            !raw.contains("[channels.google_chat]"),
             "channel section should have been removed — got:\n{raw}"
         );
     }
@@ -6729,7 +6730,7 @@ access_token_env = \"SLACK_BOT_TOKEN\"
     }
 
     #[test]
-    fn write_secret_env_value_with_newline_is_rejected() {
+    fn write_service_account_env_value_with_newline_is_rejected() {
         // Implementation tightened to reject newlines in the value rather
         // than escape them — escape-into-single-line was the old behaviour
         // (see this test's previous name) but it left a real injection
@@ -6738,7 +6739,7 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         // before passing.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
-        let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
+        let err = write_service_account_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(
             err.to_string().contains("newline"),
@@ -6765,42 +6766,42 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         let f = fields_for(&[
-            ("access_token_env", "WHATSAPP_TOKEN", FieldType::Text),
+            ("service_account_env", "GOOGLE_CHAT_SERVICE_ACCOUNT", FieldType::Text),
             ("default_agent", "support", FieldType::Text),
         ]);
-        let idx = append_channel_instance(&path, "whatsapp", &f).unwrap();
+        let idx = append_channel_instance(&path, "google_chat", &f).unwrap();
         assert_eq!(idx, 0, "first append must land at index 0");
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
-            raw.contains("[[channels.whatsapp]]"),
-            "first append should write [[channels.whatsapp]] (array of tables): {raw}"
+            raw.contains("[[channels.google_chat]]"),
+            "first append should write [[channels.google_chat]] (array of tables): {raw}"
         );
-        assert!(raw.contains("access_token_env = \"WHATSAPP_TOKEN\""));
+        assert!(raw.contains("service_account_env = \"GOOGLE_CHAT_SERVICE_ACCOUNT\""));
     }
 
     #[test]
     fn append_channel_instance_promotes_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        // Seed with a legacy `[channels.whatsapp]` single-table layout — the
+        // Seed with a legacy `[channels.google_chat]` single-table layout — the
         // shape produced by every previous version of the dashboard.
         std::fs::write(
             &path,
-            "[channels.whatsapp]\naccess_token_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
+            "[channels.google_chat]\nservice_account_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
         )
         .unwrap();
         let f = fields_for(&[
-            ("access_token_env", "SECOND", FieldType::Text),
+            ("service_account_env", "SECOND", FieldType::Text),
             ("default_agent", "beta", FieldType::Text),
         ]);
-        let idx = append_channel_instance(&path, "whatsapp", &f).unwrap();
+        let idx = append_channel_instance(&path, "google_chat", &f).unwrap();
         assert_eq!(idx, 1, "appending to single table should land at index 1");
 
         let raw = std::fs::read_to_string(&path).unwrap();
         // Must now be an array-of-tables — the single-table form cannot
         // coexist with a second instance.
         assert!(
-            raw.contains("[[channels.whatsapp]]"),
+            raw.contains("[[channels.google_chat]]"),
             "single Table must be promoted to ArrayOfTables: {raw}"
         );
         assert!(
@@ -6816,7 +6817,7 @@ access_token_env = \"SLACK_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.whatsapp.len(), 2);
+        assert_eq!(parsed.channels.google_chat.len(), 2);
     }
 
     #[test]
@@ -6825,11 +6826,11 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.whatsapp]]\naccess_token_env = \"A\"\n\n[[channels.whatsapp]]\naccess_token_env = \"B\"\n",
+            "[[channels.google_chat]]\nservice_account_env = \"A\"\n\n[[channels.google_chat]]\nservice_account_env = \"B\"\n",
         )
         .unwrap();
-        let f = fields_for(&[("access_token_env", "C", FieldType::Text)]);
-        let idx = append_channel_instance(&path, "whatsapp", &f).unwrap();
+        let f = fields_for(&[("service_account_env", "C", FieldType::Text)]);
+        let idx = append_channel_instance(&path, "google_chat", &f).unwrap();
         assert_eq!(idx, 2, "third instance must land at index 2");
         let raw = std::fs::read_to_string(&path).unwrap();
         for needle in ["\"A\"", "\"B\"", "\"C\""] {
@@ -6843,14 +6844,14 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.whatsapp]]\naccess_token_env = \"A\"\n\n[[channels.whatsapp]]\naccess_token_env = \"B\"\n",
+            "[[channels.google_chat]]\nservice_account_env = \"A\"\n\n[[channels.google_chat]]\nservice_account_env = \"B\"\n",
         )
         .unwrap();
         let f = fields_for(&[
-            ("access_token_env", "B_UPDATED", FieldType::Text),
+            ("service_account_env", "B_UPDATED", FieldType::Text),
             ("default_agent", "ops", FieldType::Text),
         ]);
-        update_channel_instance(&path, "whatsapp", 1, &f).unwrap();
+        update_channel_instance(&path, "google_chat", 1, &f).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"A\""), "instance 0 must be preserved: {raw}");
         assert!(
@@ -6867,9 +6868,9 @@ access_token_env = \"SLACK_BOT_TOKEN\"
     fn update_channel_instance_replaces_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.whatsapp]\naccess_token_env = \"OLD\"\n").unwrap();
-        let f = fields_for(&[("access_token_env", "NEW", FieldType::Text)]);
-        update_channel_instance(&path, "whatsapp", 0, &f).unwrap();
+        std::fs::write(&path, "[channels.google_chat]\nservice_account_env = \"OLD\"\n").unwrap();
+        let f = fields_for(&[("service_account_env", "NEW", FieldType::Text)]);
+        update_channel_instance(&path, "google_chat", 0, &f).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
             raw.contains("NEW"),
@@ -6882,9 +6883,9 @@ access_token_env = \"SLACK_BOT_TOKEN\"
     fn update_channel_instance_out_of_bounds_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.whatsapp]]\naccess_token_env = \"A\"\n").unwrap();
-        let f = fields_for(&[("access_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "whatsapp", 5, &f).unwrap_err();
+        std::fs::write(&path, "[[channels.google_chat]]\nservice_account_env = \"A\"\n").unwrap();
+        let f = fields_for(&[("service_account_env", "X", FieldType::Text)]);
+        let err = update_channel_instance(&path, "google_chat", 5, &f).unwrap_err();
         assert!(
             err.to_string().contains("out of bounds"),
             "out-of-range update should error: {err}"
@@ -6896,8 +6897,8 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "[other]\nx = 1\n").unwrap();
-        let f = fields_for(&[("access_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "whatsapp", 0, &f).unwrap_err();
+        let f = fields_for(&[("service_account_env", "X", FieldType::Text)]);
+        let err = update_channel_instance(&path, "google_chat", 0, &f).unwrap_err();
         assert!(
             err.to_string().contains("not configured"),
             "unconfigured channel update should error: {err}"
@@ -6910,10 +6911,10 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.whatsapp]]\naccess_token_env = \"A\"\n\n[[channels.whatsapp]]\naccess_token_env = \"B\"\n\n[[channels.whatsapp]]\naccess_token_env = \"C\"\n",
+            "[[channels.google_chat]]\nservice_account_env = \"A\"\n\n[[channels.google_chat]]\nservice_account_env = \"B\"\n\n[[channels.google_chat]]\nservice_account_env = \"C\"\n",
         )
         .unwrap();
-        remove_channel_instance(&path, "whatsapp", 1).unwrap();
+        remove_channel_instance(&path, "google_chat", 1).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"A\""));
         assert!(raw.contains("\"C\""));
@@ -6927,17 +6928,17 @@ access_token_env = \"SLACK_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.whatsapp.len(), 2);
+        assert_eq!(parsed.channels.google_chat.len(), 2);
     }
 
     #[test]
     fn remove_channel_instance_drops_section_when_array_empties() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.whatsapp]]\naccess_token_env = \"ONLY\"\n").unwrap();
-        remove_channel_instance(&path, "whatsapp", 0).unwrap();
+        std::fs::write(&path, "[[channels.google_chat]]\nservice_account_env = \"ONLY\"\n").unwrap();
+        remove_channel_instance(&path, "google_chat", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        // Either the channels.whatsapp entry is gone entirely, or the channels
+        // Either the channels.google_chat entry is gone entirely, or the channels
         // table itself is empty — both forms parse back to zero instances.
         #[derive(serde::Deserialize, Default)]
         struct Doc {
@@ -6945,18 +6946,18 @@ access_token_env = \"SLACK_BOT_TOKEN\"
             channels: librefang_types::config::ChannelsConfig,
         }
         let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
-        assert_eq!(parsed.channels.whatsapp.len(), 0);
+        assert_eq!(parsed.channels.google_chat.len(), 0);
     }
 
     #[test]
     fn remove_channel_instance_drops_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.whatsapp]\naccess_token_env = \"OLD\"\n").unwrap();
-        remove_channel_instance(&path, "whatsapp", 0).unwrap();
+        std::fs::write(&path, "[channels.google_chat]\nservice_account_env = \"OLD\"\n").unwrap();
+        remove_channel_instance(&path, "google_chat", 0).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !raw.contains("access_token_env"),
+            !raw.contains("service_account_env"),
             "legacy single-table delete at idx 0 must remove the section: {raw}"
         );
     }
@@ -6965,8 +6966,8 @@ access_token_env = \"SLACK_BOT_TOKEN\"
     fn remove_channel_instance_out_of_bounds_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.whatsapp]]\naccess_token_env = \"A\"\n").unwrap();
-        let err = remove_channel_instance(&path, "whatsapp", 7).unwrap_err();
+        std::fs::write(&path, "[[channels.google_chat]]\nservice_account_env = \"A\"\n").unwrap();
+        let err = remove_channel_instance(&path, "google_chat", 7).unwrap_err();
         assert!(
             err.to_string().contains("out of bounds"),
             "out-of-range remove should error: {err}"
@@ -6984,13 +6985,13 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.matrix]]\naccess_token_env = \"TG_A\"\n\n\
-             [[channels.matrix]]\naccess_token_env = \"TG_B\"\n",
+            "[[channels.matrix]]\nservice_account_env = \"TG_A\"\n\n\
+             [[channels.matrix]]\nservice_account_env = \"TG_B\"\n",
         )
         .unwrap();
         let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
         fields.insert(
-            "access_token_env".to_string(),
+            "service_account_env".to_string(),
             ("TG_REPLACEMENT".to_string(), FieldType::Text),
         );
         let err = upsert_channel_config(&path, "matrix", &fields).unwrap_err();
@@ -7018,8 +7019,8 @@ access_token_env = \"SLACK_BOT_TOKEN\"
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[[channels.matrix]]\naccess_token_env = \"TG_A\"\n\n\
-             [[channels.matrix]]\naccess_token_env = \"TG_B\"\n",
+            "[[channels.matrix]]\nservice_account_env = \"TG_A\"\n\n\
+             [[channels.matrix]]\nservice_account_env = \"TG_B\"\n",
         )
         .unwrap();
         let err = remove_channel_config(&path, "matrix").unwrap_err();
@@ -7040,10 +7041,10 @@ access_token_env = \"SLACK_BOT_TOKEN\"
     fn upsert_channel_config_still_replaces_legacy_single_table() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.matrix]\naccess_token_env = \"OLD\"\n").unwrap();
+        std::fs::write(&path, "[channels.matrix]\nservice_account_env = \"OLD\"\n").unwrap();
         let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
         fields.insert(
-            "access_token_env".to_string(),
+            "service_account_env".to_string(),
             ("NEW_TOKEN".to_string(), FieldType::Text),
         );
         upsert_channel_config(&path, "matrix", &fields).expect("legacy single-table replace");

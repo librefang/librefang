@@ -45,13 +45,8 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
     // (librefang.sidecar.adapters.{discord,slack,webex,line}); see the
     // channels page in the dashboard / SIDECAR_CATALOG in
     // routes/channels.rs.
-    ChannelDef {
-        name: "whatsapp",
-        display_name: "WhatsApp",
-        category: "Messaging",
-        env_vars: &["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN"],
-        description: "WhatsApp Cloud API adapter",
-    },
+    // whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
     // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
     // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);

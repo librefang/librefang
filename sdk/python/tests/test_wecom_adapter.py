@@ -467,6 +467,79 @@ async def test_on_send_falls_back_to_user_platform_id():
 
 
 @pytest.mark.asyncio
+async def test_on_send_recovers_req_id_from_user_librefang_user_when_cache_cold():
+    """Regression guard for sidecar-restart fragility: the in-memory
+    ``_pending_req_ids`` cache vanishes on restart, so the bot's
+    first reply after restart would fall back to ``aibot_send_msg``
+    (active-message quota, blocked for unlicensed bots and rate-
+    limited hard for licensed ones). The bridge round-trips
+    ``ChannelUser.librefang_user`` bytewise, so the parse-side stash
+    of ``req_id`` there is the restart-survivable fallback. This
+    test simulates post-restart: ``_pending_req_ids`` empty,
+    ``cmd.user.librefang_user`` carries the inbound req_id."""
+    a = _adapter()
+    # Post-restart: cache empty.
+    assert a._pending_req_ids == {}
+    await a.on_send(_FakeSend(
+        channel_id="alice",
+        text="hi",
+        user={
+            "platform_id": "alice",
+            "librefang_user": "req-id-from-inbound-42",
+        },
+    ))
+    f = json.loads(a._send_queue.get_nowait())
+    # Must use aibot_respond_msg (passive) keyed on the recovered
+    # req_id — NOT aibot_send_msg (active) which is what the
+    # pre-fix code would degrade to.
+    assert f["cmd"] == "aibot_respond_msg", \
+        "on_send must recover req_id from cmd.user.librefang_user when " \
+        "_pending_req_ids cache is empty (post-restart scenario)"
+    assert f["headers"]["req_id"] == "req-id-from-inbound-42"
+
+
+@pytest.mark.asyncio
+async def test_on_send_in_memory_cache_wins_over_librefang_user():
+    """The in-memory cache holds the FRESHEST req_id (the latest
+    inbound's id) — it should take precedence over librefang_user
+    (which is whichever inbound the daemon happens to round-trip
+    back to us, possibly stale). Cache-first, librefang_user as
+    fallback."""
+    a = _adapter()
+    a._pending_req_ids["alice"] = "req-cache-fresh"
+    await a.on_send(_FakeSend(
+        channel_id="alice",
+        text="hi",
+        user={
+            "platform_id": "alice",
+            "librefang_user": "req-stale-roundtrip",
+        },
+    ))
+    f = json.loads(a._send_queue.get_nowait())
+    assert f["headers"]["req_id"] == "req-cache-fresh"
+
+
+@pytest.mark.asyncio
+async def test_on_send_ignores_url_shaped_librefang_user():
+    """``librefang_user`` is shared across channels — must reject
+    cross-channel pollution (dingtalk URL, telegram @username, …)
+    before using as a wecom req_id."""
+    a = _adapter()
+    # Cache empty + URL-shaped librefang_user → must NOT use it,
+    # must fall through to aibot_send_msg.
+    await a.on_send(_FakeSend(
+        channel_id="alice",
+        text="hi",
+        user={
+            "platform_id": "alice",
+            "librefang_user": "https://oapi.dingtalk.com/sb?s=42",
+        },
+    ))
+    f = json.loads(a._send_queue.get_nowait())
+    assert f["cmd"] == "aibot_send_msg"
+
+
+@pytest.mark.asyncio
 async def test_on_send_unsupported_content_uses_placeholder():
     a = _adapter()
     await a.on_send(_FakeSend(

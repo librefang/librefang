@@ -115,32 +115,47 @@ SLACK_BOT_TOKEN = "xoxb-..."
 See [`[[sidecar_channels]]`](#sidecar_channels) below for all
 supervisor fields (restart, backoff, ready timeout, message buffer).
 
-#### `[channels.whatsapp]`
+#### WhatsApp (sidecar)
+
+WhatsApp migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.whatsapp`, stdlib-only). The in-process `[channels.whatsapp]` block is no longer recognised. The sidecar covers **both** modes — Meta Cloud API and the legacy Web/QR (Baileys) gateway.
+
+**Cloud API mode** (recommended — production):
 
 ```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-# webhook_port = 8443  # Deprecated: webhooks now share the API port
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # optional admin phone numbers
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_PHONE_NUMBER_ID = "123456789012345"
+WHATSAPP_WEBHOOK_PORT = "8460"
+# WHATSAPP_WEBHOOK_PATH = "/webhook"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "production"
+# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore
+# WHATSAPP_GROUP_POLICY = "all"           # all / mention_only / commands_only / ignore
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
-| `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
-| `webhook_port` | u16 | `8443` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
-| `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
-| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
-| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+`WHATSAPP_ACCESS_TOKEN` (Cloud API access token), `WHATSAPP_VERIFY_TOKEN` (for Meta's webhook subscription handshake), and `WHATSAPP_APP_SECRET` (HMAC-SHA256 key for inbound `X-Hub-Signature-256`) belong in `~/.librefang/secrets.env`. The sidecar runs its own webhook server on `WHATSAPP_WEBHOOK_PORT` (default 8460) — Meta's Webhook subscription URL becomes `https://<host>:<WHATSAPP_WEBHOOK_PORT><WHATSAPP_WEBHOOK_PATH>`.
+
+The in-process Rust adapter's `start()` (whatsapp.rs:454-483) was a TODO stub that logged "webhook ready" but never parsed inbound activities — the sidecar implements the real handler, so Cloud API inbound now works end-to-end without a separate forwarder.
+
+**Web/QR mode** (legacy — personal accounts, no Meta dev account needed):
+
+```toml
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_GATEWAY_URL = "http://localhost:3009"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "personal"
+```
+
+The Baileys gateway (`@librefang/whatsapp-gateway`, Node.js, runs at `WHATSAPP_GATEWAY_URL`) must be **started separately** — the kernel no longer embeds or auto-spawns it. Inbound messages flow directly from the gateway to LibreFang's REST API (`POST /api/agents/{id}/message`), bypassing the sidecar; outbound replies route through the sidecar to `{gateway_url}/message/send`.
 
 #### Signal (sidecar)
 
@@ -490,21 +505,27 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN` (used for outbound publish) and `GOTIFY_CLIENT_TOKEN` (used for inbound WebSocket subscribe) go into `~/.librefang/secrets.env` — the dashboard's Channels page writes them there automatically when you fill the Gotify form.
 
-#### `[channels.webhook]`
+#### Webhook (sidecar)
+
+Webhook migrated from the in-process Rust adapter to a Python sidecar (`librefang.sidecar.adapters.webhook`, stdlib-only). The in-process `[channels.webhook]` block is no longer recognised. Same HMAC-SHA256 + timestamp + SSRF-guard semantics, plus inbound dedupe and 429-retry that the Rust adapter didn't have.
 
 ```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+# WEBHOOK_LISTEN_PATH = "/webhook"
+# WEBHOOK_CALLBACK_URL = "https://example.com/incoming"
+# WEBHOOK_DELIVER_ONLY = "1"
+# WEBHOOK_DELIVER = "telegram"
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
-| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+`WEBHOOK_SECRET` (the HMAC-SHA256 signing secret) belongs in `~/.librefang/secrets.env`. Sidecar binds its own listener on `WEBHOOK_LISTEN_PORT` (default 8461) at `WEBHOOK_LISTEN_PATH` (default `/webhook`). The same SSRF guard from the Rust adapter (private / loopback / link-local / multicast / cloud-metadata / 100.64-CGN / IPv4-mapped-IPv6 all rejected, plus reserved hostnames like `localhost.`, `kubernetes.default.svc.cluster.local`) runs at sidecar startup AND on every outbound POST (defence-in-depth — a config reload that swaps the URL to a private host doesn't leak the secret to localhost).
+
+When `WEBHOOK_DELIVER_ONLY=1` the sidecar tags inbound with `__deliver_only__` / `__deliver_target__` metadata; the kernel's bridge layer reads those to forward the message body straight to the named channel without invoking an LLM. `WEBHOOK_DELIVER` is required when `WEBHOOK_DELIVER_ONLY=1` — fail-closed at sidecar startup if missing (the Rust validator only warned at runtime).
 
 #### QQ Bot (sidecar)
 

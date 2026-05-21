@@ -263,10 +263,27 @@ def test_parse_tenant_missing_with_allowlist_rejected():
 
 
 def test_parse_group_conversation():
+    """`is_group` MUST land at the top level of params (the sidecar
+    protocol's Message struct deserialises it from the top — see
+    crates/librefang-channels/src/sidecar.rs:99-100). The previous
+    version stuffed it into metadata so the kernel's
+    `msg.is_group` stayed `false` and group conversations were
+    silently mis-routed as DMs."""
     ev = tm.parse_teams_activity(
         _msg_activity(is_group=True), app_id="x", allowed_tenants=[],
     )
-    assert ev["params"]["metadata"]["is_group"] is True
+    assert ev["params"]["is_group"] is True
+    # And NOT in metadata — that was the bug shape before the fix.
+    assert "is_group" not in ev["params"].get("metadata", {})
+
+
+def test_parse_dm_does_not_set_is_group():
+    """The omit-default contract: when `is_group=False`, the field
+    is NOT present at all (protocol.message only emits when truthy)."""
+    ev = tm.parse_teams_activity(
+        _msg_activity(is_group=False), app_id="x", allowed_tenants=[],
+    )
+    assert "is_group" not in ev["params"]
 
 
 def test_parse_command_routing():
