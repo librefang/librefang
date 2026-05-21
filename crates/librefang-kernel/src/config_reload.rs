@@ -664,14 +664,14 @@ mod tests {
     fn test_channels_hot_reload() {
         let a = default_cfg();
         let mut b = default_cfg();
-        // Change the channels config by adding a Matrix config
-        // (Discord and Slack were migrated to sidecars; Matrix is the
-        // in-process fixture).
-        b.channels.matrix =
-            librefang_types::config::OneOrMany(vec![librefang_types::config::MatrixConfig {
-                access_token_env: "MATRIX_TOKEN".to_string(),
-                ..Default::default()
-            }]);
+        // Witness rotation history: dingtalk → whatsapp → webhook →
+        // google_chat → here (`file_download_max_bytes`), the only
+        // non-`OneOrMany` field still on `ChannelsConfig` after all
+        // in-process channels migrated to sidecars. The assertion
+        // is on the ReloadChannels hot action firing for ANY change
+        // to the `channels` block, not on any adapter-specific
+        // shape. (`sidecar_channels` is covered by the next test.)
+        b.channels.file_download_max_bytes = a.channels.file_download_max_bytes + 1;
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadChannels));

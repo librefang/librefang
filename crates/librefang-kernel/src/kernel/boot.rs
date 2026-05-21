@@ -1448,7 +1448,6 @@ impl LibreFangKernel {
                 Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
             ),
             booted_at: std::time::Instant::now(),
-            whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             tool_policy_override: std::sync::RwLock::new(None),
             context_engine,
             context_engine_config,
