@@ -102,12 +102,11 @@ MASTODON_INSTANCE_URL = "https://mastodon.social"
 
 ## 通道覆盖
 
-每个通道适配器都支持 `ChannelOverrides`，可在两个层级自定义按通道行为：
+`ChannelOverrides` 用来让 agent 按通道自定义行为。Sidecar 迁移后**通道级**这一层已经移除（`[channels.<name>.overrides]` 子表挂在已删的进程内 `ChannelsConfig` 上），只剩 `agent.toml` 里的 **agent 级** 覆盖。原来通道级表里的大多数 knob 现在改到对应 sidecar 的 `[sidecar_channels.env]` 环境变量里 —— 详见[频道配置指南里的迁移对照表](/zh/configuration/channels#通道行为覆盖旧版--已移除)。
 
-- **通道级** 在 `config.toml` —— 对使用该通道的所有 agent 生效。加 `[channels.<name>.overrides]` 段。
 - **Agent 级** 在 `agent.toml` —— 只对该 agent 在所有通道上生效。加顶层 `[channel_overrides]` 段。
 
-**解析顺序**：agent 级 → 通道级 → 内置默认。哪一层设了哪一层赢；没设的字段穿透到下一层（跟 `exec_policy` 一样的模式）。
+**解析顺序**（迁移后）：agent 级 → sidecar env → 内置默认。哪一层设了哪一层赢。
 
 ```toml
 # agent.toml —— 每个 agent 自己的覆盖（比如 "这个 agent 永远回 DM"）
@@ -118,7 +117,10 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml —— 该通道上对所有 agent 的默认
+# config.toml —— 通道级覆盖（历史 —— 已不再被识别）。
+# #5463 之前，使用该通道的每个 agent 都继承下面这套默认。保留只为
+# 迁移对照参考；新写法把等价值设在 agent 上（`agent.toml [channel_overrides]`）
+# 或写到 sidecar 的 `[sidecar_channels.env]` 环境变量（如 `*_DM_POLICY`）。
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -210,8 +212,11 @@ usage_footer = "compact"
 | `Bracket` | `[agent-name] 回复内容` |
 | `BoldBracket` | `**[agent-name]** 回复内容`（粗体渲染依赖通道的输出格式） |
 
+把 `prefix_agent_name` 设到 agent 清单（`agent.toml`）的 `[channel_overrides]` 里；迁移前的 `[channels.<name>.overrides]` 位置已不再被识别。
+
 ```toml
-[channels.discord.overrides]
+# agent.toml
+[channel_overrides]
 prefix_agent_name = "BoldBracket"
 ```
 
