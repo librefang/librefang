@@ -785,32 +785,28 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let config = state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
-    let channels = {
-        let c = &config.channels;
-        let mut map = serde_json::Map::new();
-        macro_rules! ch {
-            ($name:ident) => {
-                if !c.$name.is_empty() {
-                    map.insert(
-                        stringify!($name).to_string(),
-                        serde_json::json!({ "instances": c.$name.len() }),
-                    );
-                }
-            };
-        }
-        ch!(whatsapp);
-        ch!(signal);
-        ch!(matrix);
-        ch!(email);
-        ch!(teams);
-        ch!(google_chat);
-        ch!(feishu);
-        ch!(dingtalk);
-        ch!(qq);
-        ch!(webhook);
-        ch!(wecom);
-        serde_json::Value::Object(map)
-    };
+    // All previously in-process channels (whatsapp, teams,
+    // google_chat, webhook, …) migrated to sidecars; their fields no
+    // longer exist on `ChannelsConfig` so there's nothing to
+    // enumerate here. The macro shape + lookup are preserved as a
+    // comment block so a future in-process channel can rebuild this
+    // block by uncommenting + appending one `ch!()` line per field.
+    //
+    //   let c = &config.channels;
+    //   let mut map = serde_json::Map::new();
+    //   macro_rules! ch {
+    //       ($name:ident) => {{
+    //           if !c.$name.is_empty() {
+    //               map.insert(
+    //                   stringify!($name).to_string(),
+    //                   serde_json::json!({ "instances": c.$name.len() }),
+    //               );
+    //           }
+    //       }};
+    //   }
+    //   ch!(<future_in_process_channel>);
+    //   serde_json::Value::Object(map)
+    let channels = serde_json::Value::Object(serde_json::Map::new());
 
     // -- mcp_servers: list names/commands, redact env secrets --
     let mcp_servers: Vec<serde_json::Value> = config
@@ -3415,7 +3411,7 @@ url = "https://search.example.com"
         ));
         assert!(!super::is_writable_config_path("default_model.api_key_env"));
         assert!(!super::is_writable_config_path(
-            "channels.matrix.access_token_env"
+            "channels.whatsapp.access_token_env"
         ));
         assert!(!super::is_writable_config_path("default_model.client_id"));
         assert!(!super::is_writable_config_path(
@@ -3448,10 +3444,9 @@ url = "https://search.example.com"
         // toggles via the dashboard).
         assert!(!super::is_writable_config_path("channels.telegram"));
         assert!(!super::is_writable_config_path("channels.whatsapp"));
-        assert!(!super::is_writable_config_path("channels.matrix"));
         assert!(!super::is_writable_config_path("channels.email"));
         assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.matrix.enabled"));
+        assert!(super::is_writable_config_path("channels.whatsapp.enabled"));
 
         // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
         // peer redirect, threat model parallel to the round-4 removal

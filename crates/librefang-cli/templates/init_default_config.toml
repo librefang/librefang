@@ -165,43 +165,396 @@ debounce_ms = 500
 # budget_tokens = 10000
 # stream_thinking = false
 
-# ── Channels (uncomment to enable) ───────────────────────────
-# Telegram is provided by a Python sidecar adapter. Declare it as a
-# [[sidecar_channels]] block; the in-process channel was removed in #5241.
-# [[sidecar_channels]]
-# name = "telegram"
-# command = "python3"
-# args = ["-m", "librefang.sidecar.adapters.telegram"]
-# channel_type = "telegram"
-# [sidecar_channels.env]
-# TELEGRAM_BOT_TOKEN = "..."
-# # ALLOWED_USERS = "111,@alice"
+# ── Sidecar channel adapters (one block per channel) ─────────
+# All channel adapters now run as out-of-process Python sidecars
+# speaking newline-delimited JSON-RPC over stdio.
+#
+# PREREQUISITE — install the LibreFang Python SDK so the daemon
+# can spawn the sidecars and so the `python3 -m ...` discovery
+# at boot can read each adapter's SCHEMA:
+#   pip install librefang-sdk
+# Or, from a source checkout:
+#   pip install -e sdk/python/
+# Make sure you install into the SAME Python interpreter the
+# `command = "python3"` lines below will resolve to — daemons
+# launched under mise / pyenv / conda often pick a different
+# `python3` than the one your shell uses. Verify with
+#   python3 -c 'import librefang.sidecar; print(librefang.__file__)'
+# from the same shell that starts `librefang`.
+#
+# Each block below is independent — uncomment only the adapters
+# you need. Secrets belong in ~/.librefang/secrets.env, NOT here.
+# The full env-var inventory for an adapter lives in its SCHEMA:
+#   python3 -m librefang.sidecar.adapters.<name> --describe
+#
+# (for librefang maintainers only — operators can ignore this)
+# Regenerate this listing from each adapter's SCHEMA with
+#   cd sdk/python && python3 ../../scripts/gen_sidecar_samples.py
+# from a librefang source checkout. Operators do not need to
+# run this — the listing is already in your sample file.
 
-# Discord is now an out-of-process sidecar adapter — declare it as a
-# [[sidecar_channels]] block; the in-process channel was removed.
+# Bluesky — Bluesky / AT Protocol
+# Migrated from in-process to sidecar in #5277. Old `[channels.bluesky]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "bluesky"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.bluesky"]
+# channel_type = "bluesky"
+# [sidecar_channels.env]
+# BLUESKY_IDENTIFIER = "alice.bsky.social"
+# BLUESKY_APP_PASSWORD = "..."  # xxxx-xxxx-xxxx-xxxx
+# # BLUESKY_SERVICE_URL = "https://bsky.social"  # optional
+# # BLUESKY_ACCOUNT_ID = "prod"  # optional
+
+# DingTalk — DingTalk (钉钉) Robot stream-mode WebSocket adapter
+# Migrated from in-process to sidecar in #5417. Old `[channels.dingtalk]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "dingtalk"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.dingtalk"]
+# channel_type = "dingtalk"
+# [sidecar_channels.env]
+# DINGTALK_APP_KEY = "dingxxxxxxxxxxxx"
+# DINGTALK_APP_SECRET = "..."  # app secret from DingTalk Open Platform
+# # DINGTALK_ALLOWED_USERS = "staff-id-1,staff-id-2"  # optional
+# # DINGTALK_ACCOUNT_ID = "prod-bot"  # optional
+
+# Discord — Discord Gateway bot adapter
+# Migrated from in-process to sidecar in #5299. Old `[channels.discord]` blocks are no longer recognised.
 # [[sidecar_channels]]
 # name = "discord"
 # command = "python3"
 # args = ["-m", "librefang.sidecar.adapters.discord"]
 # channel_type = "discord"
 # [sidecar_channels.env]
-# DISCORD_BOT_TOKEN = "..."
+# DISCORD_BOT_TOKEN = "..."  # MTIz...
+# # DISCORD_ALLOWED_GUILDS = "123456789, 987654321"  # optional
+# # DISCORD_ALLOWED_USERS = "123456789, 987654321"  # optional
 
-# Slack is now an out-of-process sidecar adapter — declare it as a
-# [[sidecar_channels]] block; the in-process channel was removed.
+# Email (IMAP + SMTP) — Polls an IMAP mailbox for new messages and replies via SMTP
+# Migrated from in-process to sidecar in #5408. Old `[channels.email]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "email"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.email"]
+# channel_type = "email"
+# [sidecar_channels.env]
+# EMAIL_IMAP_HOST = "imap.example.com"
+# EMAIL_SMTP_HOST = "smtp.example.com"
+# EMAIL_USERNAME = "bot@example.com"
+# EMAIL_PASSWORD = "..."
+# # EMAIL_IMAP_PORT = "993"  # optional
+# # EMAIL_SMTP_PORT = "587"  # optional
+
+# Feishu / Lark — Unified Feishu (CN) / Lark (international) sidecar adapter
+# Migrated from in-process to sidecar in #5380. Old `[channels.feishu]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "feishu"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.feishu"]
+# channel_type = "feishu"
+# [sidecar_channels.env]
+# FEISHU_APP_ID = "cli_a..."
+# FEISHU_APP_SECRET = "..."
+# # FEISHU_REGION = "cn"  # optional
+# # FEISHU_RECEIVE_MODE = "websocket"  # optional
+
+# Google Chat — Google Chat adapter
+# Migrated from in-process to sidecar in #5459. Old `[channels.google_chat]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "google_chat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.google_chat"]
+# channel_type = "google_chat"
+# [sidecar_channels.env]
+# GOOGLE_CHAT_SERVICE_ACCOUNT_JSON = "..."  # {"client_email": "...", "private_key": "-----BEGIN PRIVATE KEY-----..."}
+# # GOOGLE_CHAT_WEBHOOK_PORT = "8090"  # optional
+# # GOOGLE_CHAT_BIND_HOST = "0.0.0.0"  # optional
+
+# Gotify — Gotify push notifications
+# Migrated from in-process to sidecar in #5263. Old `[channels.gotify]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "gotify"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.gotify"]
+# channel_type = "gotify"
+# [sidecar_channels.env]
+# GOTIFY_SERVER_URL = "https://gotify.example.com"
+# GOTIFY_APP_TOKEN = "..."  # A...
+# GOTIFY_CLIENT_TOKEN = "..."  # C...
+# # GOTIFY_ACCOUNT_ID = "prod"  # optional
+
+# LINE — LINE Messaging API adapter
+# Migrated from in-process to sidecar in #5312. Old `[channels.line]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "line"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.line"]
+# channel_type = "line"
+# [sidecar_channels.env]
+# LINE_CHANNEL_SECRET = "..."  # abc123...
+# LINE_CHANNEL_ACCESS_TOKEN = "..."  # xyz789...
+# # LINE_WEBHOOK_PORT = "9090"  # optional
+# # LINE_WEBHOOK_PATH = "/webhook"  # optional
+
+# Mastodon — Mastodon Streaming API
+# Migrated from in-process to sidecar in #5264. Old `[channels.mastodon]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "mastodon"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.mastodon"]
+# channel_type = "mastodon"
+# [sidecar_channels.env]
+# MASTODON_INSTANCE_URL = "https://mastodon.social"
+# MASTODON_ACCESS_TOKEN = "..."  # from Settings → Development → Your apps
+# # MASTODON_VISIBILITY = "unlisted"  # optional
+# # MASTODON_MAX_MESSAGE_LEN = "500"  # optional
+
+# Matrix — Matrix Client-Server API adapter
+# Migrated from in-process to sidecar in #5368. Old `[channels.matrix]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "matrix"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.matrix"]
+# channel_type = "matrix"
+# [sidecar_channels.env]
+# MATRIX_HOMESERVER_URL = "https://matrix.example.com"
+# MATRIX_USER_ID = "@bot:matrix.example.com"
+# MATRIX_ACCESS_TOKEN = "..."  # syt_...
+# # MATRIX_ALLOWED_ROOMS = "!abc:matrix.org,!def:matrix.org"  # optional
+# # MATRIX_ACCOUNT_ID = "prod-bot"  # optional
+
+# Mattermost — Mattermost WebSocket + REST adapter
+# Migrated from in-process to sidecar in #5315. Old `[channels.mattermost]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "mattermost"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.mattermost"]
+# channel_type = "mattermost"
+# [sidecar_channels.env]
+# MATTERMOST_SERVER_URL = "https://mattermost.example.com"
+# MATTERMOST_TOKEN = "..."  # abc123...
+# # MATTERMOST_ALLOWED_CHANNELS = "ch-id-1, ch-id-2"  # optional
+# # MATTERMOST_ACCOUNT_ID = "team-prod"  # optional
+
+# Nextcloud Talk — Nextcloud Talk OCS REST adapter
+# Migrated from in-process to sidecar in #5301. Old `[channels.nextcloud]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "nextcloud"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.nextcloud"]
+# channel_type = "nextcloud"
+# [sidecar_channels.env]
+# NEXTCLOUD_SERVER_URL = "https://cloud.example.com"
+# NEXTCLOUD_TOKEN = "..."  # abc123...
+# # NEXTCLOUD_ROOMS = "abc123,def456"  # optional
+# # NEXTCLOUD_ACCOUNT_ID = "prod"  # optional
+
+# ntfy — ntfy.sh pub/sub notifications
+# Migrated from in-process to sidecar in #5224. Old `[channels.ntfy]` blocks are no longer recognised.
+# NTFY_SERVER_URL defaults to the PUBLIC ntfy.sh server — set this to your own server for private notifications.
+# [[sidecar_channels]]
+# name = "ntfy"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.ntfy"]
+# channel_type = "ntfy"
+# [sidecar_channels.env]
+# NTFY_TOPIC = "my-topic"
+# # NTFY_SERVER_URL = "https://ntfy.sh"  # optional
+# # NTFY_TOKEN = "..."  # optional; tk_...
+
+# QQ Bot — QQ Bot API v2 WebSocket + REST adapter
+# Migrated from in-process to sidecar in #5325. Old `[channels.qq]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "qq"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.qq"]
+# channel_type = "qq"
+# [sidecar_channels.env]
+# QQ_APP_ID = "1234567890"
+# QQ_APP_SECRET = "..."  # abc123...
+# # QQ_ALLOWED_USERS = "openid-1,openid-2"  # optional
+# # QQ_ACCOUNT_ID = "prod-bot"  # optional
+
+# Reddit — Reddit OAuth2 API
+# Migrated from in-process to sidecar in #5281. Old `[channels.reddit]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "reddit"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.reddit"]
+# channel_type = "reddit"
+# [sidecar_channels.env]
+# REDDIT_CLIENT_ID = "from https://www.reddit.com/prefs/apps"
+# REDDIT_CLIENT_SECRET = "..."
+# REDDIT_USERNAME = "librefang-bot"
+# REDDIT_PASSWORD = "..."
+# REDDIT_SUBREDDITS = "rust,programming"
+# REDDIT_USER_AGENT = "myorg/1.0 (by /u/myactual-reddit-name)"
+# # REDDIT_ACCOUNT_ID = "prod"  # optional
+# # REDDIT_POLL_INTERVAL_SECS = "30"  # optional
+
+# Rocket.Chat — Rocket.Chat REST API
+# Migrated from in-process to sidecar in #5298. Old `[channels.rocketchat]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "rocketchat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.rocketchat"]
+# channel_type = "rocketchat"
+# [sidecar_channels.env]
+# ROCKETCHAT_SERVER_URL = "https://chat.example.com"
+# ROCKETCHAT_TOKEN = "..."  # abc123...
+# ROCKETCHAT_USER_ID = "abc123"
+# # ROCKETCHAT_CHANNELS = "GENERAL,room2"  # optional
+# # ROCKETCHAT_ACCOUNT_ID = "prod"  # optional
+
+# Signal — signal-cli REST API adapter
+# Migrated from in-process to sidecar in #5317. Old `[channels.signal]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "signal"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.signal"]
+# channel_type = "signal"
+# [sidecar_channels.env]
+# SIGNAL_API_URL = "https://signal-cli.example.com"
+# SIGNAL_NUMBER = "+15555550100"
+# # SIGNAL_API_KEY = "..."  # optional; api-key-...
+# # SIGNAL_ALLOWED_USERS = "+15555550199,+15555550200"  # optional
+
+# Slack — Slack Socket Mode bot adapter
+# Migrated from in-process to sidecar in #5302. Old `[channels.slack]` blocks are no longer recognised.
 # [[sidecar_channels]]
 # name = "slack"
 # command = "python3"
 # args = ["-m", "librefang.sidecar.adapters.slack"]
 # channel_type = "slack"
 # [sidecar_channels.env]
-# SLACK_APP_TOKEN = "xapp-..."
-# SLACK_BOT_TOKEN = "xoxb-..."
+# SLACK_APP_TOKEN = "..."  # xapp-1-...
+# SLACK_BOT_TOKEN = "..."  # xoxb-...
+# # SLACK_ALLOWED_CHANNELS = "C0123, C0456"  # optional
+# # SLACK_UNFURL_LINKS = "true"  # optional
 
-# [channels.wechat]                   # Personal WeChat via iLink protocol
-# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: skip QR login on restart
-# default_agent = "assistant"
-# allowed_users = []                  # format: "hash@im.wechat"
+# Microsoft Teams — Microsoft Teams adapter via Bot Framework v3
+# Migrated from in-process to sidecar in #5433. Old `[channels.teams]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "teams"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.teams"]
+# channel_type = "teams"
+# [sidecar_channels.env]
+# TEAMS_APP_ID = "00000000-0000-0000-0000-000000000000"
+# TEAMS_APP_PASSWORD = "..."
+# # TEAMS_SECURITY_TOKEN = "..."  # optional; (from Teams portal — disables HMAC verification when blank)
+# # TEAMS_WEBHOOK_PORT = "8459"  # optional
+
+# Telegram — Telegram Bot API adapter
+# Migrated from in-process to sidecar in #5241. Old `[channels.telegram]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "telegram"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.telegram"]
+# channel_type = "telegram"
+# [sidecar_channels.env]
+# TELEGRAM_BOT_TOKEN = "..."  # 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+# # ALLOWED_USERS = "123456789, 987654321"  # optional
+
+# Twitch — Twitch IRC gateway adapter
+# Migrated from in-process to sidecar in #5297. Old `[channels.twitch]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "twitch"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.twitch"]
+# channel_type = "twitch"
+# [sidecar_channels.env]
+# TWITCH_OAUTH_TOKEN = "..."  # oauth:abc123… (the prefix is auto-added)
+# TWITCH_NICK = "librefang-bot"
+# TWITCH_CHANNELS = "channel1,channel2"
+# # TWITCH_ACCOUNT_ID = "prod"  # optional
+# # TWITCH_RATE_LIMIT_MSGS = "20"  # optional
+
+# Webex — Cisco Webex bot adapter
+# Migrated from in-process to sidecar in #5309. Old `[channels.webex]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "webex"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.webex"]
+# channel_type = "webex"
+# [sidecar_channels.env]
+# WEBEX_BOT_TOKEN = "..."  # NjIzOTkz...
+# # WEBEX_ALLOWED_ROOMS = "Y2lzY29zcGFyazov..."  # optional
+# # WEBEX_ACCOUNT_ID = "org-prod"  # optional
+
+# Webhook — Generic HMAC-signed HTTP webhook adapter
+# Migrated from in-process to sidecar in #5455. Old `[channels.webhook]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "webhook"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.webhook"]
+# channel_type = "webhook"
+# [sidecar_channels.env]
+# WEBHOOK_SECRET = "..."
+# # WEBHOOK_LISTEN_PORT = "8461"  # optional
+# # WEBHOOK_LISTEN_PATH = "/webhook"  # optional
+
+# WeChat — WeChat personal-account adapter via Tencent's iLink (open-source ClawBot) gateway
+# Migrated from in-process to sidecar in #5421. Old `[channels.wechat]` blocks are no longer recognised.
+# Requires either WECHAT_BOT_TOKEN (pre-supplied) OR no token set (triggers QR-login on first start).
+# [[sidecar_channels]]
+# name = "wechat"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wechat"]
+# channel_type = "wechat"
+# [sidecar_channels.env]
+# # WECHAT_BOT_TOKEN = "..."  # optional; (optional, populated by QR login)
+# # WECHAT_ALLOWED_USERS = "hash1@im.wechat,hash2@im.wechat"  # optional
+# # WECHAT_INITIAL_BACKOFF_SECS = "2"  # optional
+# # WECHAT_MAX_BACKOFF_SECS = "60"  # optional
+
+# WeCom — WeCom (企业微信) intelligent-bot WebSocket adapter
+# Migrated from in-process to sidecar in #5392. Old `[channels.wecom]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "wecom"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.wecom"]
+# channel_type = "wecom"
+# [sidecar_channels.env]
+# WECOM_BOT_ID = "aibxxxxxxx"
+# WECOM_BOT_SECRET = "..."  # bot secret from WeCom admin console
+# # WECOM_ALLOWED_USERS = "alice,bob"  # optional
+# # WECOM_ACCOUNT_ID = "prod-bot"  # optional
+
+# WhatsApp — WhatsApp adapter: Meta Cloud API for production, Web/QR via Baileys gateway for personal accounts
+# Migrated from in-process to sidecar in #5445. Old `[channels.whatsapp]` blocks are no longer recognised.
+# Requires EITHER (Cloud API path) WHATSAPP_PHONE_NUMBER_ID + WHATSAPP_ACCESS_TOKEN + WHATSAPP_VERIFY_TOKEN OR (Baileys gateway path) WHATSAPP_GATEWAY_URL pointing at a running Baileys instance.
+# [[sidecar_channels]]
+# name = "whatsapp"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+# channel_type = "whatsapp"
+# [sidecar_channels.env]
+# # WHATSAPP_PHONE_NUMBER_ID = "123456789012345"  # optional
+# # WHATSAPP_ACCESS_TOKEN = "..."  # optional
+# # WHATSAPP_VERIFY_TOKEN = "..."  # optional
+# # WHATSAPP_APP_SECRET = "..."  # optional; (production should always set this)
+
+# Zulip — Zulip REST + event-queue long-poll adapter
+# Migrated from in-process to sidecar in #5310. Old `[channels.zulip]` blocks are no longer recognised.
+# [[sidecar_channels]]
+# name = "zulip"
+# command = "python3"
+# args = ["-m", "librefang.sidecar.adapters.zulip"]
+# channel_type = "zulip"
+# [sidecar_channels.env]
+# ZULIP_SERVER_URL = "https://myorg.zulipchat.com"
+# ZULIP_BOT_EMAIL = "bot-bot@myorg.zulipchat.com"
+# ZULIP_API_KEY = "..."  # abcd1234...
+# # ZULIP_STREAMS = "engineering, general"  # optional
+# # ZULIP_ACCOUNT_ID = "prod"  # optional
+
+
+
+
+
+
 
 # ── MCP Servers (external tool integration) ──────────────────
 # [[mcp_servers]]
