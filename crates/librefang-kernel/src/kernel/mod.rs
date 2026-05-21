@@ -723,8 +723,9 @@ pub struct LibreFangKernel {
     pub(crate) processes: subsystems::ProcessSubsystem,
     /// Boot timestamp for uptime calculation.
     pub(crate) booted_at: std::time::Instant,
-    /// WhatsApp Web gateway child process PID (for shutdown cleanup).
-    pub(crate) whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
+    // whatsapp_gateway_pid removed alongside the whatsapp sidecar
+    // migration — the Baileys gateway is no longer auto-spawned by
+    // the kernel.
     /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
     pub(crate) tool_policy_override:
         std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,

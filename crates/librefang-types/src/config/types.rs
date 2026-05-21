@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
 /// Hard ceiling on messages persisted per session, enforced by
@@ -4829,6 +4828,14 @@ fn default_auto_dream_timeout_secs() -> u64 {
     600
 }
 
+fn default_local_probe_interval_secs() -> u64 {
+    // 60 s. Cadence of the dashboard's local-model (Ollama) availability
+    // probe. Responsive enough to notice `brew services start/stop ollama`
+    // without hammering `/api/tags`. Zero or sub-probe-timeout values are
+    // clamped back to this default by the consumer.
+    60
+}
+
 impl Default for AutoDreamConfig {
     fn default() -> Self {
         Self {
@@ -4943,6 +4950,10 @@ pub struct PluginsConfig {
 fn default_prompt_caching() -> bool {
     true
 }
+
+// default_local_probe_interval_secs is defined upstream at line ~4832
+// (re-added in #4ab144c4); duplicated here by an earlier draft of
+// this PR — deleted on rebase so only the upstream copy survives.
 
 /// Prompt cache breakpoint strategy (#4970).
 ///
@@ -5657,27 +5668,18 @@ fn default_true() -> bool {
 
 // ── Shared channel timeout defaults ────────────────────────────────
 
-// `default_channel_initial_backoff_secs` (1s) was removed alongside
-// the Signal sidecar migration and the Matrix in-process → sidecar
-// migration (#5368): the in-process Matrix adapter was the last
-// remaining consumer, and the sidecar version controls its own
-// backoff via env vars. Remaining channel adapters that still need
-// `serde(default = ...)` for backoff fields use
-// `default_channel_initial_backoff_2s` below.
-
-/// Default maximum backoff in seconds for channels using exponential backoff (60s).
-fn default_channel_max_backoff_secs() -> u64 {
-    60
-}
-
-/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
-fn default_channel_initial_backoff_2s() -> u64 {
-    2
-}
-
-// default_signal_poll_interval_secs removed — Signal migrated to a
-// sidecar; the polling cadence is now controlled by
-// SIGNAL_POLL_INTERVAL_SECS in [sidecar_channels.env].
+// The shared channel-timeout helpers
+// (`default_channel_initial_backoff_secs`,
+// `default_channel_max_backoff_secs`,
+// `default_channel_initial_backoff_2s`,
+// `default_signal_poll_interval_secs`) are all gone. Their last
+// in-process consumers — Signal, Matrix, WeCom, Feishu, WeChat,
+// Teams, WhatsApp, Webhook, Google Chat — migrated to sidecars;
+// sidecars own their own backoff / poll constants
+// (`INITIAL_BACKOFF_SECS` in `librefang.sidecar.adapters.wecom`,
+// etc.). Re-add when a future in-process channel needs the same
+// shape — until then, `warnings = "deny"` workspace-wide would
+// turn main red on an orphaned helper.
 
 impl Default for KernelConfig {
     fn default() -> Self {
@@ -6374,45 +6376,14 @@ impl std::fmt::Debug for NetworkConfig {
 
 /// Channel bridge configuration.
 ///
-/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.slack]`)
-/// and multi-instance (`[[channels.slack]]`) TOML syntax for multi-bot routing.
+/// Every channel runs as a sidecar (`[[sidecar_channels]]` — see
+/// [`SidecarChannelConfig`]); the per-vendor in-process fields that
+/// used to live here (`telegram`, `slack`, `whatsapp`, …, each typed
+/// `OneOrMany<*Config>`) are gone. What remains are the shared
+/// file-transfer caps + download dir that every channel honours.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// WhatsApp Cloud API configuration(s).
-    pub whatsapp: OneOrMany<WhatsAppConfig>,
-    // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Email (IMAP/SMTP) configuration(s).
-    pub email: OneOrMany<EmailConfig>,
-    /// Microsoft Teams configuration(s).
-    pub teams: OneOrMany<TeamsConfig>,
-    // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Google Chat configuration(s).
-    pub google_chat: OneOrMany<GoogleChatConfig>,
-    // Wave 3 — High-value channels
-    // line migrated to a sidecar (librefang.sidecar.adapters.line);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Feishu/Lark Open Platform configuration(s).
-    pub feishu: OneOrMany<FeishuConfig>,
-    // Wave 4 — Enterprise & community channels
-    // webex migrated to a sidecar (librefang.sidecar.adapters.webex);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    // Wave 5 — Niche & differentiating channels
-    /// DingTalk robot configuration(s).
-    pub dingtalk: OneOrMany<DingTalkConfig>,
-    // qq migrated to a sidecar (librefang.sidecar.adapters.qq);
-    // see SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
-    /// Generic webhook configuration(s).
-    pub webhook: OneOrMany<WebhookConfig>,
-    /// WeChat personal account (iLink) configuration(s).
-    pub wechat: OneOrMany<WeChatConfig>,
-    /// WeCom/WeChat Work configuration(s).
-    pub wecom: OneOrMany<WeComConfig>,
-
     // --- Global file-download settings ---
     /// Maximum file size in bytes for channel file downloads (default: 50 MB).
     #[serde(default = "default_file_download_max_bytes")]
@@ -6464,15 +6435,6 @@ impl Default for ChannelsConfig {
     // channel attachment as oversized. See issue #4436.
     fn default() -> Self {
         Self {
-            whatsapp: OneOrMany::default(),
-            email: OneOrMany::default(),
-            teams: OneOrMany::default(),
-            google_chat: OneOrMany::default(),
-            feishu: OneOrMany::default(),
-            dingtalk: OneOrMany::default(),
-            webhook: OneOrMany::default(),
-            wechat: OneOrMany::default(),
-            wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
             file_upload_max_bytes: default_file_upload_max_bytes(),
@@ -6500,75 +6462,10 @@ impl ChannelsConfig {
     }
 }
 
-/// WhatsApp Cloud API channel adapter configuration.
-//
-// `deny_unknown_fields` catches typos inside `[[channels.whatsapp]]`
-// elements at deserialize time. The detect_unknown_nested_fields walker
-// can't see into repeated-table elements (#5130), so the only way to
-// surface a typo here is for serde itself to reject it. This is the
-// canonical statement of the rationale; the other channel configs in
-// this module refer back to `WhatsAppConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct WhatsAppConfig {
-    /// Env var name holding the access token (Cloud API mode).
-    pub access_token_env: String,
-    /// Env var name holding the webhook verify token (Cloud API mode).
-    pub verify_token_env: String,
-    /// WhatsApp Business phone number ID (Cloud API mode).
-    pub phone_number_id: String,
-    /// Port to listen for webhook callbacks (Cloud API mode).
-    pub webhook_port: u16,
-    /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
-    /// When set, outgoing messages are routed through the gateway instead of Cloud API.
-    pub gateway_url_env: String,
-    /// Allowed phone numbers (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
-    /// When set, messages from non-owner numbers are forwarded to the first
-    /// owner number with sender context, and the sender receives an auto-ack.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub owner_numbers: Vec<String>,
-    /// Conversation tracker TTL in hours (Web gateway mode).
-    /// Active stranger conversations expire after this period of inactivity.
-    #[serde(default = "default_conversation_ttl_hours")]
-    pub conversation_ttl_hours: u32,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-fn default_conversation_ttl_hours() -> u32 {
-    24
-}
-
-fn default_local_probe_interval_secs() -> u64 {
-    60
-}
-
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            access_token_env: "WHATSAPP_ACCESS_TOKEN".to_string(),
-            verify_token_env: "WHATSAPP_VERIFY_TOKEN".to_string(),
-            phone_number_id: String::new(),
-            webhook_port: 8443,
-            gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            owner_numbers: vec![],
-            conversation_ttl_hours: default_conversation_ttl_hours(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// the in-process `WhatsAppConfig` + `[channels.whatsapp]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // signal migrated to a sidecar (librefang.sidecar.adapters.signal);
 // the in-process `SignalConfig` + `[channels.signal]` block were
@@ -6580,185 +6477,29 @@ impl Default for WhatsAppConfig {
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Email (IMAP/SMTP) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct EmailConfig {
-    /// IMAP server host.
-    pub imap_host: String,
-    /// IMAP port (993 for TLS).
-    pub imap_port: u16,
-    /// SMTP server host.
-    pub smtp_host: String,
-    /// SMTP port (587 for STARTTLS).
-    pub smtp_port: u16,
-    /// Email address (used for both IMAP and SMTP).
-    pub username: String,
-    /// Env var name holding the password.
-    pub password_env: String,
-    /// IMAP-specific username (falls back to `username` if not set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imap_username: Option<String>,
-    /// Env var for IMAP-specific password (falls back to `password_env` if not set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imap_password_env: Option<String>,
-    /// SMTP-specific username (falls back to `username` if not set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub smtp_username: Option<String>,
-    /// Env var for SMTP-specific password (falls back to `password_env` if not set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub smtp_password_env: Option<String>,
-    /// Poll interval in seconds.
-    pub poll_interval_secs: u64,
-    /// IMAP folders to monitor.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub folders: Vec<String>,
-    /// Only process emails from these senders (empty = all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_senders: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// Path to a PEM file containing one or more CA certificates to trust
-    /// **in addition to** the system root store for the IMAP TLS connection
-    /// (#4877). Use this for self-hosted IMAP behind a private CA — strictly
-    /// preferred over [`Self::tls_accept_invalid_certs`] because hostname /
-    /// expiry / signature validation remain ON.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_root_ca_path: Option<String>,
-    /// When `true`, the IMAP TLS connection accepts ANY server certificate —
-    /// hostname, expiry, signature, and chain are all ignored. **This makes
-    /// the connection vulnerable to MITM and exposes the entire mailbox.**
-    /// Provided as a last-resort dev escape hatch (e.g., expired self-signed
-    /// cert that cannot be renewed). Defaults to `false`. A WARN is logged
-    /// on every IMAP connect attempt while this is enabled, so the risk
-    /// stays visible in operator logs rather than being noticed once at
-    /// startup and then forgotten (#4877).
-    #[serde(default)]
-    pub tls_accept_invalid_certs: bool,
-}
+// email migrated to a sidecar (librefang.sidecar.adapters.email);
+// the in-process `EmailConfig` + `[channels.email]` block were
+// removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
-impl Default for EmailConfig {
-    fn default() -> Self {
-        Self {
-            imap_host: String::new(),
-            imap_port: 993,
-            smtp_host: String::new(),
-            smtp_port: 587,
-            username: String::new(),
-            password_env: "EMAIL_PASSWORD".to_string(),
-            imap_username: None,
-            imap_password_env: None,
-            smtp_username: None,
-            smtp_password_env: None,
-            poll_interval_secs: 30,
-            folders: vec!["INBOX".to_string()],
-            allowed_senders: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-            tls_root_ca_path: None,
-            tls_accept_invalid_certs: false,
-        }
-    }
-}
-
-/// Microsoft Teams (Bot Framework v3) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct TeamsConfig {
-    /// Azure Bot App ID.
-    pub app_id: String,
-    /// Env var name holding the app password.
-    pub app_password_env: String,
-    /// Env var name holding the outgoing webhook security token (base64-encoded).
-    /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// Required by default; setting `signature_required = false` opts out (dev only).
-    #[serde(default)]
-    pub security_token_env: String,
-    /// Reject adapter startup unless a security token is configured (default `true`).
-    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
-    #[serde(default = "default_true")]
-    pub signature_required: bool,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Allowed tenant IDs (empty = allow all).
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub allowed_tenants: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for TeamsConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_password_env: "TEAMS_APP_PASSWORD".to_string(),
-            security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
-            signature_required: true,
-            webhook_port: 3978,
-            allowed_tenants: vec![],
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+// the in-process `TeamsConfig` + `[channels.teams]` block were removed
+// in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
 // the in-process `MattermostConfig` + `[channels.mattermost]` block were
 // removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-/// Google Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct GoogleChatConfig {
-    /// Env var name holding the service account JSON key.
-    pub service_account_env: String,
-    /// Path to a Google service account JSON key file (alternative to env var).
-    /// When set, JWT authentication is used to obtain OAuth2 access tokens.
-    #[serde(default)]
-    pub service_account_key_path: Option<String>,
-    /// Space IDs to listen in.
-    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
-    pub space_ids: Vec<String>,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for GoogleChatConfig {
-    fn default() -> Self {
-        Self {
-            service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
-            service_account_key_path: None,
-            space_ids: vec![],
-            webhook_port: 8444,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// GoogleChatConfig removed — google_chat migrated to a sidecar
+// (librefang.sidecar.adapters.google_chat). Service-account JSON now
+// lives in `[sidecar_channels.env] GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`
+// (the full JSON blob, secret-routed via secrets.env); space IDs in
+// `GOOGLE_CHAT_SPACE_IDS` (CSV); webhook port in
+// `GOOGLE_CHAT_WEBHOOK_PORT`; multi-bot id in
+// `GOOGLE_CHAT_ACCOUNT_ID`. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
 // zulip migrated to an out-of-process sidecar adapter
 // (librefang.sidecar.adapters.zulip); the in-process `ZulipConfig`
@@ -6767,285 +6508,40 @@ impl Default for GoogleChatConfig {
 // ── Wave 3 channel configs ─────────────────────────────────────────
 // line migrated to a sidecar (librefang.sidecar.adapters.line); see
 // SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
+// feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+// the in-process `FeishuConfig` + `[channels.feishu]` block were
+// removed in this migration.
 
-/// Feishu/Lark Open Platform channel adapter configuration.
-///
-/// Feishu (CN) and Lark (international) share the same API — set `region` to
-/// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
-/// controls whether the adapter uses a webhook HTTP server or a long-lived
-/// WebSocket connection (default) to receive events.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct FeishuConfig {
-    /// Feishu app ID.
-    pub app_id: String,
-    /// Env var name holding the app secret.
-    pub app_secret_env: String,
-    /// API region: `"cn"` for Feishu (default) or `"intl"` for Lark.
-    #[serde(default)]
-    pub region: String,
-    /// How to receive inbound events: `"websocket"` (default) or `"webhook"`.
-    #[serde(default = "default_receive_mode")]
-    pub receive_mode: String,
-    /// Port for the incoming webhook (only used when `receive_mode = "webhook"`).
-    pub webhook_port: u16,
-    /// Verification token for webhook event validation (webhook mode only).
-    #[serde(default)]
-    pub verification_token: Option<String>,
-    /// Encrypt key for webhook event decryption (webhook mode only).
-    #[serde(default)]
-    pub encrypt_key: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
+// WeCom (`WeComConfig` / `WeComMode`) migrated to a sidecar
+// (librefang.sidecar.adapters.wecom); see SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs. The legacy callback mode
+// (HTTP webhook + AES-CBC-256 inbound payload decryption) is NOT
+// ported — Python stdlib has no AES, and the sidecar SDK is
+// stdlib-only by policy. Operators on callback mode must switch
+// the bot to WebSocket mode in the WeCom admin console.
 
-fn default_receive_mode() -> String {
-    "websocket".to_string()
-}
-
-impl Default for FeishuConfig {
-    fn default() -> Self {
-        Self {
-            app_id: String::new(),
-            app_secret_env: "FEISHU_APP_SECRET".to_string(),
-            region: "cn".to_string(),
-            receive_mode: "websocket".to_string(),
-            webhook_port: 8453,
-            verification_token: None,
-            encrypt_key: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// Connection mode for the WeCom intelligent bot adapter.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WeComMode {
-    /// WebSocket long-connection (no public endpoint required).
-    #[default]
-    Websocket,
-    /// URL callback (requires a publicly reachable HTTP endpoint).
-    Callback,
-}
-
-/// WeCom intelligent bot adapter configuration.
-///
-/// Supports two connection modes:
-/// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
-/// - `callback`: starts an HTTP server to receive message callbacks
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WeComConfig {
-    /// Bot ID obtained from the WeCom admin console.
-    pub bot_id: String,
-    /// Env var name holding the bot secret.
-    pub secret_env: String,
-    /// Connection mode: "websocket" (default) or "callback".
-    pub mode: WeComMode,
-    /// Port for the callback HTTP server (only used in callback mode).
-    pub webhook_port: u16,
-    /// Env var name holding the callback verification token (callback mode only).
-    pub token_env: Option<String>,
-    /// Env var name holding the EncodingAESKey (callback mode only).
-    pub encoding_aes_key_env: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WeComConfig {
-    fn default() -> Self {
-        Self {
-            bot_id: String::new(),
-            secret_env: "WECOM_BOT_SECRET".to_string(),
-            mode: WeComMode::default(),
-            webhook_port: 8454,
-            token_env: None,
-            encoding_aes_key_env: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
-
-/// WeChat personal account (iLink protocol) adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WeChatConfig {
-    /// Env var name holding the bot token from a previous QR login session.
-    /// If the env var is set and non-empty, the adapter skips QR login.
-    pub bot_token_env: String,
-    /// Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.
-    #[serde(default)]
-    pub allowed_users: Vec<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Initial backoff in seconds on API failures (default: 2).
-    #[serde(default = "default_channel_initial_backoff_2s")]
-    pub initial_backoff_secs: u64,
-    /// Maximum backoff in seconds on API failures (default: 60).
-    #[serde(default = "default_channel_max_backoff_secs")]
-    pub max_backoff_secs: u64,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for WeChatConfig {
-    fn default() -> Self {
-        Self {
-            bot_token_env: "WECHAT_BOT_TOKEN".to_string(),
-            allowed_users: vec![],
-            account_id: None,
-            default_agent: None,
-            initial_backoff_secs: default_channel_initial_backoff_2s(),
-            max_backoff_secs: default_channel_max_backoff_secs(),
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
+// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat); the
+// in-process `WeChatConfig` + `[channels.wechat]` block were removed in
+// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 // ── Wave 4 channel configs ─────────────────────────────────────────
 // webex migrated to a sidecar (librefang.sidecar.adapters.webex); see
 // SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 // ── Wave 5 channel configs ─────────────────────────────────────────
+// dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk); the
+// in-process `DingTalkConfig` + `DingTalkReceiveMode` + `[channels.dingtalk]`
+// block were removed in this migration. See SIDECAR_CATALOG in
+// librefang-api/src/routes/channels.rs.
 
-/// How the DingTalk adapter receives inbound events.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum DingTalkReceiveMode {
-    /// HTTP webhook server (requires public IP / reverse proxy).
-    Webhook,
-    /// Long-lived WebSocket connection via DingTalk Stream protocol (default).
-    #[default]
-    Stream,
-}
-
-/// DingTalk Robot API channel adapter configuration.
-///
-/// Supports two receive modes:
-/// - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived
-///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
-/// - **Webhook** (legacy): HTTP server that receives callback POST requests.
-///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct DingTalkConfig {
-    /// How to receive inbound messages (stream or webhook).
-    pub receive_mode: DingTalkReceiveMode,
-    // -- Stream mode credentials --
-    /// Env var name holding the DingTalk app key (stream mode).
-    pub app_key_env: String,
-    /// Env var name holding the DingTalk app secret (stream mode).
-    pub app_secret_env: String,
-    // -- Webhook mode credentials (legacy) --
-    /// Env var name holding the webhook access token.
-    pub access_token_env: String,
-    /// Env var name holding the signing secret.
-    pub secret_env: String,
-    /// Port for the incoming webhook (webhook mode only).
-    pub webhook_port: u16,
-    /// Robot code for sending messages via the Open API (stream mode).
-    /// If empty, falls back to app_key.
-    #[serde(default)]
-    pub robot_code: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-}
-
-impl Default for DingTalkConfig {
-    fn default() -> Self {
-        Self {
-            receive_mode: DingTalkReceiveMode::default(),
-            app_key_env: "DINGTALK_APP_KEY".to_string(),
-            app_secret_env: "DINGTALK_APP_SECRET".to_string(),
-            access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
-            secret_env: "DINGTALK_SECRET".to_string(),
-            webhook_port: 8457,
-            robot_code: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-        }
-    }
-}
 
 // qq migrated to a sidecar (librefang.sidecar.adapters.qq); the
 // in-process `QqConfig` + `[channels.qq]` block were removed in this
 // migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
-/// Generic webhook channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct WebhookConfig {
-    /// Env var name holding the HMAC signing secret.
-    pub secret_env: String,
-    /// Port to listen for incoming webhooks.
-    pub listen_port: u16,
-    /// URL to POST outgoing messages to.
-    pub callback_url: Option<String>,
-    /// Unique identifier for this bot instance (used for multi-bot routing).
-    #[serde(default)]
-    pub account_id: Option<String>,
-    /// Default agent name to route messages to.
-    pub default_agent: Option<String>,
-    /// Per-channel behavior overrides.
-    #[serde(default)]
-    pub overrides: ChannelOverrides,
-    /// When true, incoming POST bodies are forwarded directly to the delivery
-    /// target channel without invoking the LLM or any agent. Requires
-    /// `deliver` to be set to a valid channel name (not "log").
-    #[serde(default)]
-    pub deliver_only: bool,
-    /// Target channel name for direct delivery (e.g. "telegram", "discord").
-    /// Required when `deliver_only` is true.
-    #[serde(default)]
-    pub deliver: Option<String>,
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            secret_env: "WEBHOOK_SECRET".to_string(),
-            listen_port: 8460,
-            callback_url: None,
-            account_id: None,
-            default_agent: None,
-            overrides: ChannelOverrides::default(),
-            deliver_only: false,
-            deliver: None,
-        }
-    }
-}
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook); the
+// in-process `WebhookConfig` + `[channels.webhook]` block were removed in
+// this migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
 
 /// Terminal / CLI access control configuration.
 ///

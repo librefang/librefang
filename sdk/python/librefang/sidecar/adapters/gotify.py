@@ -45,13 +45,19 @@ import os
 import socket
 import ssl
 import struct
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
-from librefang.sidecar.common import split_message as _split_message
+from librefang.sidecar.common import (
+    RETRY_AFTER_DEFAULT_SECS,
+    SeenSet as _SeenSet,
+    parse_retry_after as _parse_retry_after,
+    split_message as _split_message,
+)
 
 # Gotify caps individual messages at this length (matches the Rust adapter).
 MAX_MESSAGE_LEN = 65535
@@ -310,6 +316,11 @@ class GotifyAdapter(SidecarAdapter):
                 server_url=self.server_url,
             )
             raise SystemExit(2)
+        # Bounded dedupe keyed on the gotify message `id` (monotonic
+        # per-server int). The WS stream can replay buffered messages
+        # on reconnect — without dedupe an unstable network produces
+        # duplicate agent triggers.
+        self._seen = _SeenSet()
 
     # ---- inbound: WebSocket subscription -----------------------------
 
@@ -380,6 +391,9 @@ class GotifyAdapter(SidecarAdapter):
                 parsed = self._parse_frame(text)
                 if parsed is None:
                     continue
+                mid = parsed[0]
+                if not self._seen.mark(f"gotify-{mid}"):
+                    continue
                 emit(self._to_event(*parsed))
 
     async def produce(self, emit) -> None:
@@ -409,29 +423,50 @@ class GotifyAdapter(SidecarAdapter):
         n = len(chunks)
         for i, chunk in enumerate(chunks):
             title = "LibreFang" if n == 1 else f"LibreFang ({i + 1}/{n})"
-            body = json.dumps({
-                "title": title,
-                "message": chunk,
-                "priority": 5,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(  # noqa: S310 — configured URL
-                    req, timeout=SEND_TIMEOUT_SECS,
-                ) as resp:
-                    status = getattr(resp, "status", 200)
-                    if status >= 300:
-                        raise RuntimeError(f"gotify publish HTTP {status}")
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode("utf-8", "replace")
-                raise RuntimeError(
-                    f"gotify publish {e.code}: {err_body}"
-                ) from e
+            self._publish_chunk(url, title, chunk, retry_429=True)
+
+    def _publish_chunk(self, url: str, title: str, chunk: str,
+                       *, retry_429: bool) -> None:
+        body = json.dumps({
+            "title": title,
+            "message": chunk,
+            "priority": 5,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status >= 300:
+                    raise RuntimeError(f"gotify publish HTTP {status}")
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and retry_429:
+                # Server-side rate limit. Honour Retry-After then retry
+                # once. A second 429 raises so the caller surfaces the
+                # backpressure rather than silently dropping the chunk.
+                resp_hdrs = {
+                    k.lower(): v for k, v in (e.headers or {}).items()
+                }
+                wait = _parse_retry_after(
+                    resp_hdrs, default_secs=RETRY_AFTER_DEFAULT_SECS,
+                )
+                log.warn(
+                    "gotify 429 on publish; sleeping then retrying once",
+                    retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                self._publish_chunk(url, title, chunk, retry_429=False)
+                return
+            err_body = e.read().decode("utf-8", "replace")
+            raise RuntimeError(
+                f"gotify publish {e.code}: {err_body}"
+            ) from e
 
     async def on_send(self, cmd) -> None:
         # Plain-text only, like the Rust adapter; structured content the
