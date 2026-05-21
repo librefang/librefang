@@ -890,18 +890,34 @@ async fn spawn_once(
 
 /// Circuit-breaker: restarts exhausted. Logged exactly once (the
 /// supervisor breaks right after), so no log-rate gate is needed.
+///
+/// Preserves the most recent per-attempt `last_error` (spawn error,
+/// sidecar-emitted `error` event, or stdout read failure) by composing
+/// it into the final `last_error` and surfacing it on the structured
+/// log as `last_cause`. The earlier behaviour overwrote the specific
+/// cause with a generic "circuit-breaker tripped" message, leaving
+/// `GET /api/channels` / dashboard operators with no actionable signal
+/// when a sidecar had been retrying-and-failing for the same reason
+/// (missing required env var, bad token, etc.) all along.
 fn trip_circuit(ctx: &SpawnCtx, attempt: u32) {
-    {
+    let prior = {
         let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
         s.connected = false;
-        s.last_error = Some(format!(
-            "sidecar restart circuit-breaker tripped after {attempt} attempts"
-        ));
-    }
+        let prior = s.last_error.clone();
+        s.last_error = Some(match prior.as_deref() {
+            Some(cause) if !cause.is_empty() => format!(
+                "sidecar restart circuit-breaker tripped after {attempt} attempts; \
+                 last cause: {cause}"
+            ),
+            _ => format!("sidecar restart circuit-breaker tripped after {attempt} attempts"),
+        });
+        prior
+    };
     error!(
         adapter = %ctx.name,
         attempt,
         max_retries = ctx.sup.max_retries,
+        last_cause = prior.as_deref().unwrap_or("(none recorded)"),
         "Sidecar exceeded restart attempts; giving up (circuit-break)"
     );
 }
@@ -2396,6 +2412,68 @@ mod tests {
         }
         adapter.stop().await.unwrap();
         assert!(!adapter.status().connected);
+    }
+
+    /// Regression: `trip_circuit` must preserve the specific per-attempt
+    /// cause in `status.last_error` after the breaker trips. Operators
+    /// reading `GET /api/channels` / dashboard rely on `last_error` to
+    /// see *why* a sidecar died (e.g. "TELEGRAM_BOT_TOKEN is required",
+    /// missing binary, bad config); the prior implementation overwrote
+    /// it with a generic "circuit-breaker tripped after N attempts"
+    /// notice, hiding the actionable signal.
+    ///
+    /// Drives the spawn-failure branch via a non-existent command so
+    /// the supervisor never even reaches `ready`; the OS spawn error
+    /// is recorded as `last_error` on each attempt, and after
+    /// `restart_max_retries` the trip must compose both pieces.
+    #[tokio::test]
+    async fn circuit_break_preserves_last_specific_cause() {
+        let config: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "circuit-cause",
+                // An absolute path that cannot exist — `Command::spawn`
+                // fails synchronously with a stable OS error message
+                // wrapped by `spawn_once` as "Failed to spawn sidecar
+                // '<name>' (<cmd>): <os err>".
+                "command": "/nonexistent/librefang-sidecar-circuit-test",
+                "restart_max_retries": 1,
+                "restart_initial_backoff_ms": 1,
+                "restart_max_backoff_ms": 2,
+            }))
+            .expect("valid SidecarChannelConfig");
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let _stream = adapter.start().await.unwrap();
+
+        // Two failed spawns (attempt 0, attempt 1) then trip
+        // (1 >= max_retries). Backoff is 1-2ms so the test is bounded
+        // by spawn latency; 5s leaves ample headroom on slow CI.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let last_error = loop {
+            if let Some(e) = adapter.status().last_error {
+                if e.contains("circuit-breaker tripped") {
+                    break e;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "supervisor did not trip in time; last_error={:?}",
+                    adapter.status().last_error
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        adapter.stop().await.unwrap();
+
+        assert!(
+            last_error.contains("last cause:"),
+            "circuit-break message must carry the prior cause, got: {last_error}"
+        );
+        // The OS phrasing for "no such file" varies across platforms;
+        // the supervisor's own wrapper is stable, so assert on that.
+        assert!(
+            last_error.contains("Failed to spawn sidecar"),
+            "circuit-break message must surface the spawn-failed wrapper, got: {last_error}"
+        );
     }
 
     #[tokio::test]
