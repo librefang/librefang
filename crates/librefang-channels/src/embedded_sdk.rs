@@ -116,7 +116,16 @@ fn embedded_hash() -> &'static str {
             hasher.update(bytes);
         }
         let digest = hasher.finalize();
-        hex::encode(digest)[..12].to_string()
+        // Hex-encode the first 6 bytes (= 12 hex chars). Open-coded
+        // to avoid a `hex` crate dep — `librefang-channels` had hex
+        // pruned in #5473 alongside the in-process channel cleanup,
+        // and this single 6-byte encode is the only consumer.
+        let mut out = String::with_capacity(12);
+        for byte in &digest[..6] {
+            out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
+            out.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap());
+        }
+        out
     })
 }
 
@@ -257,13 +266,21 @@ fn command_is_python_interpreter(command: &str) -> bool {
         .strip_suffix(".exe")
         .or_else(|| basename.strip_suffix(".EXE"))
         .unwrap_or(basename);
-    if basename == "python" || basename == "python3" {
+    // Accept `python` / `python3` / `python3.13` / `python3.13.1` —
+    // the basename strips the literal `python` prefix and the
+    // remainder is either empty or a dot-separated sequence of
+    // pure-digit segments. Rejects `pypy`, `python-thing`,
+    // `python3.x`, `python3-rc1` (pre-releases handled separately
+    // by distros symlinking to `python3.N` so we don't need to
+    // chase the rc-suffix taxonomy).
+    let Some(rest) = basename.strip_prefix("python") else {
+        return false;
+    };
+    if rest.is_empty() {
         return true;
     }
-    if let Some(rest) = basename.strip_prefix("python3.") {
-        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
-    }
-    false
+    rest.split('.')
+        .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Returns `true` iff `<command> -c "import librefang.sidecar"` exits 0.
@@ -480,6 +497,12 @@ mod tests {
         assert!(command_is_python_interpreter("python3"));
         assert!(command_is_python_interpreter("python3.12"));
         assert!(command_is_python_interpreter("python3.13"));
+        // Patch-version interpreters (some asdf / pyenv shims expose
+        // them directly). Pre-fix the detector rejected these because
+        // the digit-only suffix check failed on the `.1` segment;
+        // the dot-split tolerates any number of digit segments.
+        assert!(command_is_python_interpreter("python3.13.1"));
+        assert!(command_is_python_interpreter("python3.11.9"));
         assert!(command_is_python_interpreter("/usr/local/bin/python3"));
         assert!(command_is_python_interpreter(
             "/opt/homebrew/bin/python3.12"
