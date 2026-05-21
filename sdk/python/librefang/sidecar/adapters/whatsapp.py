@@ -9,7 +9,7 @@ operation:
   empty): talks to Meta's official WhatsApp Business Cloud API
   (``graph.facebook.com``) for outbound messages, and runs its own
   HTTP webhook server for inbound. (The in-process Rust adapter's
-  ``start()`` was a stub that logged "webhook ready" but never
+  ``start()`` was a no-op that logged "webhook ready" but never
   actually parsed inbound activities — see whatsapp.rs:454-483.
   This sidecar implements the real webhook handler.)
 
@@ -56,9 +56,10 @@ tree):
 Improvements over the Rust adapter:
 
 1. **Real Cloud API webhook server**. Rust's ``start()`` at
-   whatsapp.rs:454-483 was a TODO stub — operators wanting Cloud
-   API inbound had to wire their own webhook → ``/api/agents/…``
-   forwarder. The sidecar implements the real handler:
+   whatsapp.rs:454-483 was an unimplemented TODO — operators
+   wanting Cloud API inbound had to wire their own webhook →
+   ``/api/agents/…`` forwarder. The sidecar implements the real
+   handler:
    ``GET {path}`` returns ``hub.challenge`` for Meta's subscription
    confirmation when ``hub.mode == "subscribe"`` and
    ``hub.verify_token`` matches ``WHATSAPP_VERIFY_TOKEN``;
@@ -151,8 +152,8 @@ def verify_xhub_signature(
     Empty / missing / wrong-prefix / non-hex all reject.
 
     The Rust adapter didn't actually run a webhook (whatsapp.rs:454-
-    483 was a TODO stub); this verification path is new in the
-    sidecar.
+    483 was an unimplemented TODO); this verification path is new in
+    the sidecar.
     """
     if not isinstance(header, str) or not header:
         return False
