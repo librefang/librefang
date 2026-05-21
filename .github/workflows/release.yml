@@ -628,9 +628,12 @@ jobs:
         with:
           key: cli-aarch64-linux-android-${{ env.RELEASE_TAG }}
       - name: Build CLI (Android aarch64)
-        # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
-        # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
-        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
+        # Every channel adapter is a Python sidecar now; no per-channel
+        # cargo features remain to gate. The previous `--features android`
+        # collapsed `librefang-api/all-channels` without channel-email
+        # (rustls-connector 0.23.0 → rustls-platform-verifier 0.7.0
+        # missing on Android), now obsolete.
+        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features telemetry
       - name: Package
         run: |
           cd target/aarch64-linux-android/release
@@ -1793,16 +1796,16 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        # `-f mobile-no-email -- --no-default-features`: tauri-cli takes
-        # `-f` directly but `--no-default-features` is a cargo flag that
-        # must follow `--`. rustls-connector 0.23.0 (pulled by channel-email)
-        # → rustls-platform-verifier 0.7.0 → Verifier::new_with_extra_roots
-        # is not implemented for Android.
+        # `-- --no-default-features` is a cargo flag passed through
+        # tauri-cli. Every channel adapter runs as a Python sidecar
+        # now; the `mobile-no-email` flavor that worked around the
+        # in-process channel-email's rustls-platform-verifier Android
+        # incompatibility is gone with the feature itself.
         run: |
           cargo tauri android build \
             --target aarch64 \
             --apk --aab \
-            -f mobile-no-email -- --no-default-features
+            -- --no-default-features
 
       - name: Locate artifacts
         id: art
@@ -2211,13 +2214,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
-        # `-f mobile-no-email -- --no-default-features`: see android build
-        # above for why `--no-default-features` goes after `--`. We keep iOS
-        # on the same channel flavor as Android so mobile binaries are
-        # consistent and don't pull channel-email deps that aren't useful
-        # on iOS either.
+        # `-- --no-default-features` is a cargo flag passed through
+        # tauri-cli. See the android job above for the broader context
+        # — `mobile-no-email` is gone now that every channel runs as a
+        # Python sidecar.
         run: |
-          cargo tauri ios build --target aarch64 -f mobile-no-email -- --no-default-features
+          cargo tauri ios build --target aarch64 -- --no-default-features
 
       - name: Locate .ipa
         id: art

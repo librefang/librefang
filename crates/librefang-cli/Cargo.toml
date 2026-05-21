@@ -14,10 +14,22 @@ readme = "README.md"
 # `channel-*` features in `librefang-channels` that no longer exist;
 # they're gone too.
 default = ["telemetry"]
-# `android` flavor removed alongside the `librefang-api/all-channels`
-# alias — every channel is a sidecar and the Android-specific
-# `rustls-connector` workaround that motivated this flag is gone with
-# the in-process IMAP/SMTP code path.
+# `android` / `all-channels` flavors removed alongside the
+# `librefang-api/all-channels` alias — every channel is a sidecar
+# and the Android-specific `rustls-connector` workaround that
+# motivated those flags is gone with the in-process IMAP/SMTP code
+# path. Release CI's `cli_*_android` job switched to plain
+# `--features telemetry`.
+#
+# `mini` kept as an empty alias so the existing `cli_linux_mini` /
+# `cli_mac_mini` / `cli_windows_mini` release jobs continue to
+# produce `librefang-${target}-mini.tar.gz` artifacts. After the
+# per-channel cargo features went away the `mini` artifact is
+# byte-identical to the default-features build, so a follow-up
+# should retire those jobs entirely + drop this alias; the
+# coordinated workflow + Cargo.toml change is out of scope for the
+# scaffolding cleanup PR that introduced this stub.
+mini = []
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 [[bin]]
