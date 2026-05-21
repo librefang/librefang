@@ -4195,6 +4195,7 @@ dependencies = [
  "dashmap",
  "futures",
  "image",
+ "include_dir",
  "librefang-types",
  "pdf-extract",
  "regex",

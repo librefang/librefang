@@ -611,8 +611,29 @@ async fn spawn_once(
     // loader — still reach the child without a daemon restart. The
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
-    let merged_env = build_spawn_env(&ctx.home_dir, &ctx.env);
-    for (k, v) in &merged_env {
+    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.env)
+        .into_iter()
+        .collect();
+    // Embedded-SDK fallback: when the spawn command is a Python
+    // interpreter that cannot already `import librefang.sidecar`, put
+    // the daemon-bundled copy on PYTHONPATH so a fresh user with just
+    // `python3` on PATH can enable a sidecar channel without first
+    // running `pip install librefang-sdk`. No-op for developers whose
+    // editable install already wins, and for non-Python commands
+    // (`uv`, `bash`, …). See `embedded_sdk.rs` for precedence and
+    // extraction details.
+    let existing_pythonpath = env_map
+        .get("PYTHONPATH")
+        .cloned()
+        .or_else(|| std::env::var("PYTHONPATH").ok());
+    if let Some(composed) = crate::embedded_sdk::pythonpath_with_embedded(
+        &ctx.command,
+        &ctx.home_dir,
+        existing_pythonpath.as_deref(),
+    ) {
+        env_map.insert("PYTHONPATH".to_string(), composed);
+    }
+    for (k, v) in &env_map {
         cmd.env(k, v);
     }
     cmd.stdin(std::process::Stdio::piped())
