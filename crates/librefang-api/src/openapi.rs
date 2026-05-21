@@ -203,8 +203,9 @@ use crate::types;
         routes::delete_channel_instance,
         routes::whatsapp_qr_start,
         routes::whatsapp_qr_status,
-        routes::wechat_qr_start,
-        routes::wechat_qr_status,
+        // wechat_qr_{start,status} removed alongside the WeChat
+        // in-process → sidecar migration (#5421); the equivalent
+        // endpoints now live on the WeChat sidecar HTTP surface.
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,
