@@ -872,6 +872,29 @@ impl MessageDebouncer {
     }
 }
 
+/// True when the `/approve` / `/reject` text-ack reply from
+/// `handle_command` is redundant because the user **clicked an
+/// inline-keyboard button** rather than typing the slash command.
+///
+/// Rationale: tapping `[Approve]` already conveys the action visibly
+/// in the chat. The kernel then either fires the agent-wake continuation
+/// (#5488, "I've written the file…") OR posts a separate channel-listener
+/// confirmation — both arrive within seconds. The extra `"Approved
+/// [abc12345] file_write — uuid"` line that the slash-command handler
+/// returned post-#5483 was a UX wart: noisy, machine-shaped, and
+/// arrived between the user's tap and the agent's natural-language
+/// follow-up.
+///
+/// Suppression is scoped tight: ONLY the approve/reject command pair,
+/// and ONLY when triggered by a `ButtonCallback`. Typed `/approve <id>`
+/// keeps its ack — text-only channels (IRC, SMS, any sidecar without
+/// the `interactive` capability) need that confirmation because they
+/// don't have an inline-keyboard tap to convey "your action landed".
+fn suppress_button_command_ack(content: &ChannelContent, command: &str) -> bool {
+    matches!(content, ChannelContent::ButtonCallback { .. })
+        && matches!(command, "approve" | "reject")
+}
+
 fn content_to_text(content: &ChannelContent) -> String {
     match content {
         ChannelContent::Text(t) => t.clone(),
@@ -1516,17 +1539,32 @@ impl BridgeManager {
                                         }
                                     };
 
-                                    let short_id = &approval.request_id[..8.min(approval.request_id.len())];
-                                    let msg = format!(
-                                        "Approval required for agent {}\n\
-                                         Tool: {}\n\
-                                         Risk: {}\n\
-                                         {}\n\n\
-                                         Reply /approve {short_id} or /reject {short_id}",
-                                        approval.agent_id,
-                                        approval.tool_name,
-                                        approval.risk_level,
-                                        approval.description,
+                                    // Two-button inline keyboard. The button
+                                    // `action` is the slash command itself —
+                                    // when a user taps, the Telegram /
+                                    // Slack / Feishu sidecar emits a
+                                    // `callback_query` (or platform analogue)
+                                    // that lands in this crate's bridge as a
+                                    // `ChannelContent::ButtonCallback` whose
+                                    // `action` starts with `/`. The existing
+                                    // inbound dispatcher at `content_to_text`
+                                    // routes that straight through the
+                                    // `/approve` / `/reject` command handler.
+                                    // No new protocol bits required — the
+                                    // round-trip already existed; pre-fix the
+                                    // listener just sent plain text and never
+                                    // gave users buttons to click. The
+                                    // capability check + text fallback is in
+                                    // `ChannelAdapter::send_interactive` so
+                                    // adapters that don't declare
+                                    // `interactive` (IRC, SMS, …) still get
+                                    // the actionable text body unchanged.
+                                    let approval_keyboard = build_approval_interactive(
+                                        &approval.agent_id,
+                                        &approval.request_id,
+                                        &approval.tool_name,
+                                        &approval.risk_level,
+                                        &approval.description,
                                     );
 
                                     for adapter in &adapters {
@@ -1597,6 +1635,86 @@ impl BridgeManager {
                                         // #4985 was about (admin inbox +
                                         // unrelated bound chat both
                                         // receiving the same approval).
+                                        // ── Fast path: route back to the
+                                        // originating chat when the kernel
+                                        // populated `sender_id` + `channel`
+                                        // on the request. This is the common
+                                        // case for tool calls triggered by a
+                                        // user chatting with the agent in
+                                        // Telegram / Slack / Feishu: the
+                                        // approval prompt goes straight back
+                                        // to that chat, no
+                                        // `notification_recipients` or
+                                        // `AgentBinding` config needed.
+                                        //
+                                        // Pre-fix this branch didn't exist;
+                                        // the kernel didn't even put
+                                        // `sender_id` / `channel` on the
+                                        // event payload, so approvals on
+                                        // freshly-set-up Telegram adapters
+                                        // silently dropped at the
+                                        // empty-recipients DEBUG line below.
+                                        if let (Some(src_sender), Some(src_channel)) =
+                                            (approval.sender_id.as_deref(), approval.channel.as_deref())
+                                        {
+                                            if src_channel == ct_str
+                                                && !src_sender.is_empty()
+                                            {
+                                                // Group-chat fix:
+                                                // prefer `chat_id` (group id)
+                                                // when present, fall back to
+                                                // `sender_id` for DMs and for
+                                                // pre-PR producers that
+                                                // didn't stamp chat_id. The
+                                                // `platform_id` on
+                                                // `ChannelUser` is the
+                                                // address the channel adapter
+                                                // sends to — Telegram
+                                                // sidecar's send-path treats
+                                                // it as `chat_id` against the
+                                                // Bot API, so passing the
+                                                // group's chat_id here puts
+                                                // the keyboard back in the
+                                                // group conversation instead
+                                                // of the human's DM with the
+                                                // bot.
+                                                let target_id = approval
+                                                    .chat_id
+                                                    .as_deref()
+                                                    .filter(|c| !c.is_empty())
+                                                    .unwrap_or(src_sender)
+                                                    .to_string();
+                                                let direct_recipient = ChannelUser {
+                                                    platform_id: target_id,
+                                                    display_name: String::new(),
+                                                    librefang_user: None,
+                                                };
+                                                if let Err(e) = adapter
+                                                    .send_interactive(&direct_recipient, &approval_keyboard)
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        error = %e,
+                                                        "Failed to deliver approval notification (direct-route)"
+                                                    );
+                                                } else {
+                                                    info!(
+                                                        adapter = adapter.name(),
+                                                        request_id = %approval.request_id,
+                                                        recipient = %direct_recipient.platform_id,
+                                                        "Delivered approval notification (direct-route to originating chat)"
+                                                    );
+                                                }
+                                                // Direct route handled this
+                                                // adapter; skip the legacy
+                                                // recipients fan-out below.
+                                                continue;
+                                            }
+                                        }
+
                                         let recipients: Vec<ChannelUser> = match bound_agent {
                                             Some(bound) if bound == requesting_agent => {
                                                 adapter.notification_recipients()
@@ -1700,8 +1818,21 @@ impl BridgeManager {
                                             continue;
                                         }
                                         for user in &recipients {
+                                            // `send_interactive` has a built-in
+                                            // text fallback for adapters that
+                                            // don't override it (or whose
+                                            // sidecar didn't declare
+                                            // `interactive` capability) —
+                                            // see `ChannelAdapter::send_interactive`
+                                            // in `types.rs`. So this single
+                                            // call covers both surfaces:
+                                            // Telegram / Slack get a real
+                                            // inline keyboard, IRC / SMS get
+                                            // the plain text body (which
+                                            // already carries the slash-command
+                                            // instructions for them to act on).
                                             if let Err(e) = adapter
-                                                .send(user, ChannelContent::Text(msg.clone()))
+                                                .send_interactive(user, &approval_keyboard)
                                                 .await
                                             {
                                                 warn!(
@@ -1716,7 +1847,7 @@ impl BridgeManager {
                                                     adapter = adapter.name(),
                                                     request_id = %approval.request_id,
                                                     recipient = %user.platform_id,
-                                                    "Delivered approval notification"
+                                                    "Delivered approval notification (inline buttons; adapters without `interactive` capability render the text body verbatim)"
                                                 );
                                             }
                                         }
@@ -1891,6 +2022,60 @@ impl BridgeManager {
 }
 
 /// Resolve channel type to its config string key.
+/// Build the inline-keyboard payload the approval listener fans out
+/// to every bound adapter. The `text` is platform-agnostic prose;
+/// `buttons` carries the two slash-command actions that the existing
+/// inbound `ButtonCallback` dispatcher (`bridge.rs::content_to_text`)
+/// already routes straight to the `/approve` / `/reject` handlers.
+///
+/// Adapters that declare the `interactive` capability render this as
+/// a real inline keyboard (Telegram, Slack Block Kit, Feishu cards);
+/// adapters that don't fall back via the default
+/// `ChannelAdapter::send_interactive` impl in `types.rs:647-661`,
+/// which prepends the button labels to the text body. The
+/// slash-command instructions live in the text body so the
+/// text-fallback path stays actionable.
+///
+/// Factored out for unit-testing — the listener loop itself spins up
+/// real tokio tasks against live adapters, which is too heavy a
+/// scaffold for asserting payload shape.
+pub(crate) fn build_approval_interactive(
+    agent_id: &str,
+    request_id: &str,
+    tool_name: &str,
+    risk_level: &str,
+    description: &str,
+) -> crate::types::InteractiveMessage {
+    let short_id = &request_id[..8.min(request_id.len())];
+    let text = format!(
+        "Approval required for agent {agent_id}\n\
+         Tool: {tool_name}\n\
+         Risk: {risk_level}\n\
+         {description}\n\n\
+         Tap a button below, or reply \
+         /approve {short_id} or /reject {short_id} \
+         (add a TOTP code if required: \
+         /approve {short_id} <6-digit>)"
+    );
+    crate::types::InteractiveMessage {
+        text,
+        buttons: vec![vec![
+            crate::types::InteractiveButton {
+                label: "Approve".to_string(),
+                action: format!("/approve {short_id}"),
+                style: Some("primary".to_string()),
+                url: None,
+            },
+            crate::types::InteractiveButton {
+                label: "Deny".to_string(),
+                action: format!("/reject {short_id}"),
+                style: Some("danger".to_string()),
+                url: None,
+            },
+        ]],
+    }
+}
+
 fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     match channel {
         crate::types::ChannelType::Telegram => "telegram",
@@ -3167,7 +3352,9 @@ async fn dispatch_message(
                 overrides.as_ref(),
             )
             .await;
-            send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            if !suppress_button_command_ack(&message.content, name) {
+                send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            }
             return;
         }
         debug!(
@@ -3785,7 +3972,9 @@ async fn dispatch_message(
                     overrides.as_ref(),
                 )
                 .await;
-                send_response(adapter, &message.sender, result, thread_id, output_format).await;
+                if !suppress_button_command_ack(&message.content, cmd) {
+                    send_response(adapter, &message.sender, result, thread_id, output_format).await;
+                }
                 return;
             }
             debug!(
@@ -5724,6 +5913,198 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
         f();
+    }
+
+    // ── Approval-notification inline keyboard (PR: telegram-approval-buttons) ──
+    //
+    // The bridge's approval listener wraps every fan-out in an
+    // `InteractiveMessage` built by `build_approval_interactive`.
+    // Adapters that declare `interactive` capability render that as
+    // inline buttons (Telegram, Slack, Feishu); ones that don't fall
+    // back via the default `ChannelAdapter::send_interactive` impl,
+    // which exposes the slash commands as text. These tests pin both
+    // the wire shape and the slash-command actions inside the buttons.
+
+    // ── suppress_button_command_ack ──────────────────────────────
+    //
+    // Pin the noise-suppression rule for `/approve` and `/reject`
+    // when triggered by an inline-keyboard click. Goal of these tests
+    // is to keep two failure modes from sneaking back in:
+    //   1. Suppression accidentally widening to other commands (a
+    //      future `/cancel` button must still get its ack — only
+    //      approve/reject are the duplicate-ack case).
+    //   2. Suppression accidentally widening to typed slash commands
+    //      (text-only channels with no button affordance need the
+    //      ack — silencing typed `/approve abc` would break IRC/SMS
+    //      UX where the tap doesn't exist).
+
+    fn button_callback(action: &str) -> ChannelContent {
+        ChannelContent::ButtonCallback {
+            action: action.to_string(),
+            message_text: None,
+        }
+    }
+
+    #[test]
+    fn suppress_button_command_ack_silences_button_approve_and_reject() {
+        let approve = button_callback("/approve abc12345");
+        let reject = button_callback("/reject abc12345");
+        assert!(suppress_button_command_ack(&approve, "approve"));
+        assert!(suppress_button_command_ack(&reject, "reject"));
+    }
+
+    #[test]
+    fn suppress_button_command_ack_keeps_ack_for_typed_slash_commands() {
+        // Typed `/approve abc12345` arrives as plain text on inbound.
+        // The slash-command handler still sees `command == "approve"`,
+        // but the originating content is NOT a ButtonCallback, so the
+        // ack must NOT be suppressed — text-only channels (IRC, SMS,
+        // any sidecar lacking the `interactive` capability) rely on
+        // it to confirm the resolution landed.
+        let typed = ChannelContent::Text("/approve abc12345".to_string());
+        assert!(!suppress_button_command_ack(&typed, "approve"));
+        assert!(!suppress_button_command_ack(&typed, "reject"));
+    }
+
+    #[test]
+    fn suppress_button_command_ack_does_not_widen_to_other_commands() {
+        // Future-proofing: if another command (e.g. `/cancel`,
+        // `/agents`) ever gets an inline-keyboard trigger, that
+        // command's ack must still send. The duplicate-ack issue
+        // is specific to approval resolution; other commands rely
+        // on their text response to communicate result.
+        let btn = button_callback("/cancel xyz");
+        assert!(!suppress_button_command_ack(&btn, "cancel"));
+        assert!(!suppress_button_command_ack(&btn, "agents"));
+        assert!(!suppress_button_command_ack(&btn, "ping"));
+        assert!(!suppress_button_command_ack(&btn, ""));
+    }
+
+    #[test]
+    fn build_approval_interactive_shapes_two_buttons_in_one_row() {
+        let msg = build_approval_interactive(
+            "agent-uuid-here",
+            "req-abcdef1234567890",
+            "file_write",
+            "high",
+            "Write to /etc/hosts",
+        );
+        assert_eq!(msg.buttons.len(), 1, "single row expected");
+        assert_eq!(
+            msg.buttons[0].len(),
+            2,
+            "row should carry exactly Approve + Deny"
+        );
+        assert_eq!(msg.buttons[0][0].label, "Approve");
+        assert_eq!(msg.buttons[0][1].label, "Deny");
+        // Style hints — adapters that honor them (Slack Block Kit) get
+        // a green primary / red danger rendering; ones that don't
+        // (Telegram, currently) ignore the field harmlessly.
+        assert_eq!(msg.buttons[0][0].style.as_deref(), Some("primary"));
+        assert_eq!(msg.buttons[0][1].style.as_deref(), Some("danger"));
+    }
+
+    #[test]
+    fn build_approval_interactive_actions_are_slash_commands_with_short_id() {
+        // `content_to_text` (this file) treats a `ButtonCallback` whose
+        // `action` starts with `/` as a slash command — that's the
+        // entire round-trip. The action MUST be `/approve <8-char>` /
+        // `/reject <8-char>` so the existing `/approve` handler at
+        // `bridge.rs::5673+` picks it up unchanged.
+        let msg = build_approval_interactive(
+            "agent",
+            "0123456789abcdef-truncated",
+            "tool",
+            "low",
+            "desc",
+        );
+        let approve = &msg.buttons[0][0].action;
+        let deny = &msg.buttons[0][1].action;
+        assert_eq!(approve, "/approve 01234567");
+        assert_eq!(deny, "/reject 01234567");
+        // Telegram's `callback_data` is capped at 64 bytes; both
+        // commands stay well under it (16-17 bytes each).
+        assert!(approve.len() <= 64);
+        assert!(deny.len() <= 64);
+    }
+
+    #[test]
+    fn build_approval_interactive_text_carries_fallback_slash_instructions() {
+        // Adapters without `interactive` capability render the
+        // `text` field verbatim via the trait default impl. The text
+        // MUST still tell the operator how to act (because their
+        // platform won't draw a tappable button).
+        let msg = build_approval_interactive("agent", "abcdefgh123456", "tool", "low", "desc");
+        assert!(msg.text.contains("/approve abcdefgh"));
+        assert!(msg.text.contains("/reject abcdefgh"));
+        // TOTP hint surfaced for the require-TOTP variant — a single
+        // button click can't carry a 6-digit code, so users need the
+        // slash form for those.
+        assert!(msg.text.contains("TOTP"));
+    }
+
+    #[test]
+    fn approval_requested_event_carries_routing_fields() {
+        // Pin the new wire shape on `ApprovalRequestedEvent`. Pre-fix the
+        // event had only request_id / agent_id / tool_name / description /
+        // risk_level, which is what stranded Telegram approvals: the
+        // channel listener subscribed to the EventBus version (NOT the
+        // approval_manager's broadcast) and got no `sender_id` / `channel`
+        // to route by.
+        use librefang_types::event::ApprovalRequestedEvent;
+        let evt = ApprovalRequestedEvent {
+            request_id: "req-12345678".to_string(),
+            agent_id: "agent".to_string(),
+            tool_name: "file_write".to_string(),
+            description: "desc".to_string(),
+            risk_level: "high".to_string(),
+            sender_id: Some("telegram-user-12345".to_string()),
+            channel: Some("telegram".to_string()),
+            chat_id: Some("telegram-group-67890".to_string()),
+        };
+        assert_eq!(evt.sender_id.as_deref(), Some("telegram-user-12345"));
+        assert_eq!(evt.channel.as_deref(), Some("telegram"));
+        // chat_id distinct from sender_id — pins the group-chat shape
+        // where the human's platform_id differs from the conversation id.
+        assert_eq!(evt.chat_id.as_deref(), Some("telegram-group-67890"));
+
+        // And the JSON shape: new fields are `#[serde(default,
+        // skip_serializing_if = Option::is_none)]` so an event without
+        // them (the dashboard-direct / cron / autonomous path) emits the
+        // pre-fix payload byte-identically. This pins the wire-compat.
+        let bare = ApprovalRequestedEvent {
+            request_id: "req".to_string(),
+            agent_id: "agent".to_string(),
+            tool_name: "tool".to_string(),
+            description: "desc".to_string(),
+            risk_level: "low".to_string(),
+            sender_id: None,
+            channel: None,
+            chat_id: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !json.contains("sender_id"),
+            "absent sender_id must be omitted, got: {json}"
+        );
+        assert!(
+            !json.contains(r#""channel""#),
+            "absent channel must be omitted, got: {json}"
+        );
+        assert!(
+            !json.contains("chat_id"),
+            "absent chat_id must be omitted, got: {json}"
+        );
+    }
+
+    #[test]
+    fn build_approval_interactive_tolerates_short_request_ids() {
+        // The existing listener slices `request_id[..8.min(len)]`.
+        // Make sure the helper inherits the same defensive truncation
+        // so a short / malformed request id doesn't panic.
+        let msg = build_approval_interactive("agent", "abc", "tool", "low", "desc");
+        assert_eq!(msg.buttons[0][0].action, "/approve abc");
+        assert_eq!(msg.buttons[0][1].action, "/reject abc");
     }
 
     #[test]
