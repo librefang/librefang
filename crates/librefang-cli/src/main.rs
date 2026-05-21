@@ -8104,6 +8104,26 @@ fn cmd_channel_setup(name: Option<&str>) {
             .find(|c| c.get("name").and_then(|v| v.as_str()) == Some(n))
             .cloned(),
         None => {
+            // Distinguish the two empty-picker cases so the operator
+            // knows which is which:
+            //  - `all.is_empty()`: daemon's `GET /api/channels` returned
+            //    nothing at all — both `sidecar_channel_rows` and
+            //    `sidecar_discovery_rows` are empty. That means there
+            //    are no `[[sidecar_channels]]` entries AND nothing in
+            //    the SIDECAR_CATALOG (the latter is normally only
+            //    empty if the SDK wasn't installed alongside the
+            //    daemon — fix is `pip install librefang-sdk`).
+            //  - all non-empty but `candidates.is_empty()`: the
+            //    operator has configured every adapter the catalog
+            //    knows about. Use `librefang channel list` to see /
+            //    `librefang channel rm <name>` to drop one.
+            if all.is_empty() {
+                println!("Daemon's channel registry is empty.");
+                println!("Install the sidecar SDK so adapters appear in the catalog:");
+                println!("  pip install librefang-sdk");
+                println!("Then re-run `librefang channel setup`.");
+                return;
+            }
             let candidates: Vec<&serde_json::Value> = all
                 .iter()
                 .filter(|c| {
@@ -8112,7 +8132,8 @@ fn cmd_channel_setup(name: Option<&str>) {
                 .collect();
             if candidates.is_empty() {
                 println!("Every available channel is already configured.");
-                println!("Use `librefang channel list` to see them.");
+                println!("Use `librefang channel list` to see them, or");
+                println!("`librefang channel rm <name>` to remove an entry first.");
                 return;
             }
             println!("Pick a channel to set up:");
