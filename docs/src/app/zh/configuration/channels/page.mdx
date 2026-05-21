@@ -79,32 +79,47 @@ SLACK_BOT_TOKEN = "xoxb-..."
 
 完整的 supervisor 字段（restart、backoff、ready timeout、message buffer 等）参见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
-#### `[channels.whatsapp]`
+#### WhatsApp（Sidecar）
+
+WhatsApp 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.whatsapp`，仅依赖标准库）。原 `[channels.whatsapp]` 块不再识别。sidecar 同时覆盖 **Cloud API** 和 **Web/QR（Baileys）网关** 两种模式。
+
+**Cloud API 模式**（推荐生产使用）：
 
 ```toml
-[channels.whatsapp]
-access_token_env = "WHATSAPP_ACCESS_TOKEN"
-verify_token_env = "WHATSAPP_VERIFY_TOKEN"
-phone_number_id = ""
-# webhook_port = 8443  # 已弃用：Webhook 现共享 API 端口
-allowed_users = []
-# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # 用于 QR/Web 模式
-# account_id = "my-whatsapp-bot"
-# owner_numbers = []   # 可选的管理员手机号
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_PHONE_NUMBER_ID = "123456789012345"
+WHATSAPP_WEBHOOK_PORT = "8460"
+# WHATSAPP_WEBHOOK_PATH = "/webhook"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "production"
+# WHATSAPP_DM_POLICY = "respond"          # respond / allowed_only / ignore
+# WHATSAPP_GROUP_POLICY = "all"           # all / mention_only / commands_only / ignore
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | 存放 WhatsApp Cloud API 访问令牌的环境变量。 |
-| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `phone_number_id` | string | `""` | WhatsApp Business 手机号 ID。 |
-| `webhook_port` | u16 | `8443` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | 存放 WhatsApp Web 网关 URL 的环境变量。设置后，发送消息将通过 QR/Web 网关而非 Cloud API 路由。 |
-| `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
-| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
-| `owner_numbers` | list of strings | `[]` | 对此 Bot 实例拥有管理权限的手机号列表。 |
-| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+`WHATSAPP_ACCESS_TOKEN`、`WHATSAPP_VERIFY_TOKEN`（用于 Meta Webhook 订阅握手）、`WHATSAPP_APP_SECRET`（入站 `X-Hub-Signature-256` 的 HMAC 密钥）写入 `~/.librefang/secrets.env`。sidecar 在 `WHATSAPP_WEBHOOK_PORT`（默认 8460）上自己跑 webhook server —— Meta 后台填的 Webhook 订阅 URL 变成 `https://<host>:<WHATSAPP_WEBHOOK_PORT><WHATSAPP_WEBHOOK_PATH>`。
+
+原 Rust 适配器的 `start()`（whatsapp.rs:454-483）只是一个 TODO 桩——只 log "webhook ready"，从未解析入站事件。sidecar 实现了真正的 handler，所以 Cloud API 入站现在不靠任何外部 forwarder 就能工作。
+
+**Web/QR 模式**（个人号场景，无需 Meta 开发者账号）：
+
+```toml
+[[sidecar_channels]]
+name = "whatsapp"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.whatsapp"]
+channel_type = "whatsapp"
+[sidecar_channels.env]
+WHATSAPP_GATEWAY_URL = "http://localhost:3009"
+# WHATSAPP_ALLOWED_USERS = "+15551111,+15552222"
+# WHATSAPP_ACCOUNT_ID = "personal"
+```
+
+Baileys 网关（`@librefang/whatsapp-gateway`，Node.js，监听 `WHATSAPP_GATEWAY_URL`）**需要单独启动** —— kernel 不再内嵌或自动 spawn 它。入站消息由网关直接 POST 到 LibreFang REST API（`POST /api/agents/{id}/message`），绕过 sidecar；出站回复经 sidecar 路由到 `{gateway_url}/message/send`。
 
 #### Signal（Sidecar）
 
@@ -211,21 +226,24 @@ MATTERMOST_SERVER_URL = "https://mattermost.example.com"
 
 `MATTERMOST_TOKEN` 写入 `~/.librefang/secrets.env`。
 
-#### `[channels.google_chat]`
+#### Google Chat
+
+Google Chat 由 Python sidecar adapter (`librefang.sidecar.adapters.google_chat`) 提供。Sidecar 迁移已移除进程内 `[channels.google_chat]` 配置块。请改为 `[[sidecar_channels]]`：
 
 ```toml
-[channels.google_chat]
-service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
-space_ids = []
-# webhook_port = 8444  # 已弃用：Webhook 现共享 API 端口
+[[sidecar_channels]]
+name = "google_chat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.google_chat"]
+channel_type = "google_chat"
+[sidecar_channels.env]
+GOOGLE_CHAT_WEBHOOK_PORT = "8090"
+# GOOGLE_CHAT_SPACE_IDS = "spaces/AAAA,spaces/BBBB"   # 可选，空 = 所有 space
+# GOOGLE_CHAT_ACCOUNT_ID = "prod"                     # 可选，多机器人路由
+# GOOGLE_CHAT_API_BASE = "https://chat.googleapis.com/v1"  # 测试覆盖
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | 存放服务账号 JSON 密钥的环境变量。 |
-| `space_ids` | list of strings | `[]` | 监听的 Google Chat 聊天室 ID 列表。 |
-| `webhook_port` | u16 | `8444` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`（完整的 JSON blob 字符串 —— **不是** 路径）写入 `~/.librefang/secrets.env`。Google Cloud Console 上 Bot 配置的 messaging endpoint 改成 `https://<host>:<GOOGLE_CHAT_WEBHOOK_PORT>/webhook`。
 
 #### Twitch
 
@@ -423,21 +441,23 @@ DINGTALK_APP_KEY = "dingxxx..."
 
 legacy in-process `webhook` 模式（HMAC-SHA256 + 公网 IP）**未迁移**——依赖 webhook 模式的运维需要在钉钉后台改用 stream 订阅。
 
-#### `[channels.ntfy]`
+#### ntfy
+
+ntfy 由 Python sidecar adapter (`librefang.sidecar.adapters.ntfy`) 提供。Sidecar 迁移已移除进程内 `[channels.ntfy]` 配置块。请改为 `[[sidecar_channels]]`：
 
 ```toml
-[channels.ntfy]
-server_url = "https://ntfy.sh"
-topic = "my-agent-topic"
-token_env = "NTFY_TOKEN"
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_SERVER_URL = "https://ntfy.sh"
+NTFY_TOPIC = "my-agent-topic"
+# NTFY_ACCOUNT_ID = "prod"                   # 可选，多机器人路由
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `server_url` | string | `"https://ntfy.sh"` | ntfy 服务器 URL。支持自托管。 |
-| `topic` | string | `""` | 要订阅/发布的主题。 |
-| `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`NTFY_TOKEN`（认证 token，公开 topic 可选）写入 `~/.librefang/secrets.env`。
 
 #### Gotify
 
@@ -456,21 +476,27 @@ GOTIFY_SERVER_URL = "https://gotify.example.com"
 
 `GOTIFY_APP_TOKEN`（出站发布）和 `GOTIFY_CLIENT_TOKEN`（入站 WebSocket 订阅）写入 `~/.librefang/secrets.env`——在仪表盘 Channels 页填写 Gotify 表单时会自动写入。
 
-#### `[channels.webhook]`
+#### Webhook（Sidecar）
+
+Webhook 已从进程内 Rust 适配器迁移到 Python sidecar（`librefang.sidecar.adapters.webhook`，仅依赖标准库）。原 `[channels.webhook]` 块不再识别。保留全套 HMAC-SHA256 + 时间戳 + SSRF 防护，外加入站去重和 429 重试（Rust 适配器没有的两项改进）。
 
 ```toml
-[channels.webhook]
-secret_env = "WEBHOOK_SECRET"
-listen_port = 8460
-# callback_url = "https://example.com/webhook"
+[[sidecar_channels]]
+name = "webhook"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.webhook"]
+channel_type = "webhook"
+[sidecar_channels.env]
+WEBHOOK_LISTEN_PORT = "8461"
+# WEBHOOK_LISTEN_PATH = "/webhook"
+# WEBHOOK_CALLBACK_URL = "https://example.com/incoming"
+# WEBHOOK_DELIVER_ONLY = "1"
+# WEBHOOK_DELIVER = "telegram"
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `secret_env` | string | `"WEBHOOK_SECRET"` | 存放用于验证入站 Webhook 的 HMAC 签名密钥的环境变量。 |
-| `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
-| `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+`WEBHOOK_SECRET`（HMAC-SHA256 签名密钥）写入 `~/.librefang/secrets.env`。sidecar 自己监听 `WEBHOOK_LISTEN_PORT`（默认 8461）的 `WEBHOOK_LISTEN_PATH`（默认 `/webhook`）。SSRF 防护（私有 / 回环 / 链路本地 / 多播 / 云元数据 / 100.64-CGN / IPv4-mapped-IPv6 全部拒绝，以及 `localhost.`、`kubernetes.default.svc.cluster.local` 等保留主机名）在 sidecar 启动时**和**每次出站 POST 时都跑——defence in depth：配置热重载把 URL 改成私网时不会泄露签名密钥到 localhost。
+
+`WEBHOOK_DELIVER_ONLY=1` 时 sidecar 在入站消息上加 `__deliver_only__` / `__deliver_target__` metadata；kernel 的 bridge 层读这两个字段，把消息直接转发给目标 channel，绕过 LLM。`WEBHOOK_DELIVER_ONLY=1` 时 `WEBHOOK_DELIVER` 是必填的 —— sidecar 启动时若缺失直接 fail-closed（原 Rust validator 只在运行时 warn）。
 
 #### QQ Bot（Sidecar）
 
@@ -533,9 +559,26 @@ channel_type = "wechat"
 ---
 
 
-### 通道行为覆盖
+### 通道行为覆盖（旧版 —— 已移除）
 
-每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
+`[channels.<name>.overrides]` 子表**已不再被识别**。它原本挂在进程内 `ChannelsConfig` 上，而 sidecar 迁移已经把这个结构清空（`ChannelsConfig` 现在只剩 `file_download_*` / `file_upload_max_bytes` 这些全局文件传输字段）。下方内容保留作**历史参考与迁移映射**。
+
+**迁移对照表 —— sidecar 模型下的等价做法：**
+
+| 旧的 override | 现在对应的 sidecar 写法 |
+|---|---|
+| `model`、`system_prompt` | 在 agent（`agent.toml`）上设置而不是按通道 —— sidecar 把每个入站都路由到同一个 agent。 |
+| `dm_policy`、`group_policy` | 写到 `[sidecar_channels.env]` 块里的 `*_DM_POLICY` / `*_GROUP_POLICY` 环境变量（Telegram / Discord / Slack / WhatsApp / Teams 五个 sidecar 都识别这套）。 |
+| `rate_limit_per_minute`、`rate_limit_per_user` | Sidecar 自己按平台限流；要更严的话，在 sidecar 前面套反向代理。 |
+| `output_format` | `[[sidecar_channels]]` 没暴露这个 knob；需要特定输出格式的 agent 应在 agent 侧切换。 |
+| `disable_commands`、`allowed_commands`、`blocked_commands` | 在 agent 清单（`agent.toml`）的命令策略区块设置 —— 跨通道统一生效。 |
+| `threading`、`usage_footer`、`typing_mode` | 用 sidecar 默认行为（平台支持时启用 threading；不显示用量页脚；instant 打字态）。当前不可按通道配置。 |
+
+下方是**已删除**的 override 结构 —— 保留作参考；**不要**复制到当前的 `config.toml`。
+
+### 通道行为覆盖（历史参考）
+
+迁移前每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
 
 ```toml
 [channels.discord.overrides]

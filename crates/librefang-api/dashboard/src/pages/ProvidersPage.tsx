@@ -1509,7 +1509,7 @@ export function ProvidersPage() {
       ) : configuredCount === 0 ? (
         // No providers configured yet — surface the picker as a primary
         // CTA instead of an empty list. Mirrors the ChannelsPage empty
-        // state introduced when its tabs were retired.
+        // state.
         <Card padding="lg" className="flex flex-col items-center text-center gap-4 py-10">
           <div className="w-12 h-12 rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand">
             <Server className="h-6 w-6" />
