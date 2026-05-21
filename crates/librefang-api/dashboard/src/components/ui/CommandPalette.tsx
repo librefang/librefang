@@ -54,7 +54,6 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     { id: "goals", labelKey: "nav.goals", categoryKey: "nav.automation", icon: Shield, action: () => navigate({ to: "/goals" }) },
     { id: "agents", labelKey: "nav.agents", categoryKey: "nav.resources", icon: Bot, action: () => navigate({ to: "/agents" }) },
     { id: "providers", labelKey: "nav.providers", categoryKey: "nav.resources", icon: Server, action: () => navigate({ to: "/providers" }) },
-    { id: "channels", labelKey: "nav.channels", categoryKey: "nav.resources", icon: Network, action: () => navigate({ to: "/channels" }) },
     { id: "skills", labelKey: "nav.skills", categoryKey: "nav.resources", icon: Shield, action: () => navigate({ to: "/skills" }) },
     { id: "hands", labelKey: "nav.hands", categoryKey: "nav.resources", icon: Hand, action: () => navigate({ to: "/hands" }) },
     { id: "plugins", labelKey: "nav.plugins", categoryKey: "nav.resources", icon: Puzzle, action: () => navigate({ to: "/plugins" }) },

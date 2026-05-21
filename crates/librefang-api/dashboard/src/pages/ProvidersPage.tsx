@@ -1210,9 +1210,9 @@ export function ProvidersPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<ProviderItem | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
-  // The picker drawer holds the catalog of unconfigured providers, mirroring
-  // ChannelsPage. Default view shows only configured providers so the page
-  // stays focused on what's actually wired up; the configure-flow surface
+  // The picker drawer holds the catalog of unconfigured providers.
+  // Default view shows only configured providers so the page stays
+  // focused on what's actually wired up; the configure-flow surface
   // for new providers lives behind the Add picker.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
@@ -1508,8 +1508,7 @@ export function ProvidersPage() {
         <EmptyState title={t("common.no_data")} icon={<Server className="h-6 w-6" />} />
       ) : configuredCount === 0 ? (
         // No providers configured yet — surface the picker as a primary
-        // CTA instead of an empty list. Mirrors the ChannelsPage empty
-        // state introduced when its tabs were retired.
+        // CTA instead of an empty list.
         <Card padding="lg" className="flex flex-col items-center text-center gap-4 py-10">
           <div className="w-12 h-12 rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand">
             <Server className="h-6 w-6" />

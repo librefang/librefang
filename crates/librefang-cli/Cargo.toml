@@ -7,26 +7,29 @@ description = "CLI tool for the LibreFang Agent OS"
 readme = "README.md"
 
 [features]
-# Default = telemetry + a small "core-channels" set (discord / slack /
-# webhook). Heavy / unmaintained adapters (matrix, email/imap,
-# google-chat, …) stay opt-in via `--features all-channels`.
-# Cuts cold `cargo build -p librefang-cli` time substantially and avoids
-# dragging `matrix-sdk-crypto`, `lettre`, `imap`, `rsa`, … into every
-# developer build. Release CI passes `--features all-channels` explicitly
-# so published binaries still ship the full set. See #3688.
-default = ["librefang-api/core-channels", "telemetry"]
-# Note: `all-channels` does NOT imply `telemetry` — release CI builds with
-# `--features all-channels` (without `--no-default-features`), so default's
-# `telemetry` is still active. If you build with `--no-default-features
-# --features all-channels`, add `telemetry` explicitly.
-all-channels = ["librefang-api/all-channels"]
-mini = ["librefang-api/mini"]
-# Email migrated to a sidecar (librefang.sidecar.adapters.email); the
-# Android `all-channels-no-email` workaround for rustls-connector's
-# `Verifier::new_with_extra_roots` Android incompatibility is no
-# longer needed because the IMAP/SMTP code path now runs out of
-# process. `android` collapses to `all-channels`.
-android = ["librefang-api/all-channels"]
+# Default = telemetry only. Channel adapters all run as out-of-process
+# sidecars (`librefang.sidecar.adapters.*` in the SDK package) so there
+# are no per-adapter cargo features left to gate. The historical
+# `core-channels` / `all-channels` / `mini` aliases pointed at
+# `channel-*` features in `librefang-channels` that no longer exist;
+# they're gone too.
+default = ["telemetry"]
+# `android` / `all-channels` flavors removed alongside the
+# `librefang-api/all-channels` alias — every channel is a sidecar
+# and the Android-specific `rustls-connector` workaround that
+# motivated those flags is gone with the in-process IMAP/SMTP code
+# path. Release CI's `cli_*_android` job switched to plain
+# `--features telemetry`.
+#
+# `mini` kept as an empty alias so the existing `cli_linux_mini` /
+# `cli_mac_mini` / `cli_windows_mini` release jobs continue to
+# produce `librefang-${target}-mini.tar.gz` artifacts. After the
+# per-channel cargo features went away the `mini` artifact is
+# byte-identical to the default-features build, so a follow-up
+# should retire those jobs entirely + drop this alias; the
+# coordinated workflow + Cargo.toml change is out of scope for the
+# scaffolding cleanup PR that introduced this stub.
+mini = []
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 [[bin]]

@@ -116,74 +116,23 @@ export interface MediaMusicResult {
   sample_rate?: number;
 }
 
-export interface ChannelField {
-  key: string;
-  label?: string;
-  type?: string;
-  required?: boolean;
-  advanced?: boolean;
-  has_value?: boolean;
-  env_var?: string | null;
-  placeholder?: string | null;
-  value?: string;
-  options?: string[];
-  show_when?: string;
-  readonly?: boolean;
-}
-
 export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
-  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
-   *  `0` means no instances; `1` matches the legacy single-instance shape. */
-  instance_count?: number;
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
-  difficulty?: string;
-  setup_time?: string;
-  quick_setup?: string;
-  setup_type?: string;
-  setup_steps?: string[];
-  fields?: ChannelField[];
   /** TOML snippet shown for read-only sidecar discovery rows so operators
    *  can copy it into config.toml. Backend always emits this; the UI only
    *  renders it for `category === "sidecar"` to avoid noise on regular
-   *  CHANNEL_REGISTRY rows that already have a setup form. */
+   *  rows that have their own configure flow. */
   config_template?: string;
-  /** Webhook endpoint path on the shared server (e.g. "/channels/teams/webhook"). */
-  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
-   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
-   *  meta-line on the Channels page card. */
+   *  the `channel` column. */
   msgs_24h?: number;
-}
-
-/** One configured `[[channels.<name>]]` instance. (#4837) */
-export interface ChannelInstance {
-  /** Array index — stable within a session, may shift after a delete.
-   *  Always re-fetch the list after a mutation. */
-  index: number;
-  /** Field schema with per-instance `value` and `has_value` populated. */
-  fields: ChannelField[];
-  /** Raw per-instance config map keyed by field. */
-  config: Record<string, unknown>;
-  /** True iff every required secret env var (the env var the instance's
-   *  field points at) is present and non-empty. */
-  has_token: boolean;
-  /** Compare-and-swap token. Send back unchanged on PUT/DELETE so the
-   *  server can reject the write if a concurrent edit shifted indices
-   *  or modified this instance after the list was read (#4865). */
-  signature: string;
-}
-
-export interface ChannelInstancesResponse {
-  channel: string;
-  items: ChannelInstance[];
-  total: number;
 }
 
 export interface SkillItem {
@@ -1778,14 +1727,6 @@ export async function listChannels(): Promise<ChannelItem[]> {
   return data.items ?? [];
 }
 
-export async function testChannel(channelName: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/test`, {});
-}
-
-export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
-}
-
 export interface SidecarSaveResult {
   status: "saved";
   restart_required: boolean;
@@ -1816,83 +1757,6 @@ export async function saveSidecarConfig(
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
-}
-
-// Per-instance channel management (#4837).
-//
-// The legacy `configureChannel` overwrites the single `[channels.<name>]`
-// section. The four functions below let the dashboard manage individual
-// `[[channels.<name>]]` array entries — supporting multiple Telegram bots,
-// Slack workspaces, etc. on the same channel type.
-
-export async function listChannelInstances(channelName: string): Promise<ChannelInstancesResponse> {
-  return get<ChannelInstancesResponse>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-  );
-}
-
-export async function createChannelInstance(
-  channelName: string,
-  fields: Record<string, unknown>,
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  return post<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-    { fields },
-  );
-}
-
-export async function updateChannelInstance(
-  channelName: string,
-  index: number,
-  fields: Record<string, unknown>,
-  signature: string,
-  clearSecrets?: string[],
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  const body: Record<string, unknown> = { fields, signature };
-  if (clearSecrets && clearSecrets.length > 0) body.clear_secrets = clearSecrets;
-  return put<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
-    body,
-  );
-}
-
-export async function deleteChannelInstance(
-  channelName: string,
-  index: number,
-  signature: string,
-): Promise<void> {
-  const qs = `?signature=${encodeURIComponent(signature)}`;
-  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}${qs}`);
-}
-
-export interface QrStartResponse {
-  available: boolean;
-  qr_code?: string;
-  qr_url?: string;
-  message?: string;
-}
-
-export interface QrStatusResponse {
-  connected: boolean;
-  expired: boolean;
-  message?: string;
-  bot_token?: string;
-}
-
-export async function wechatQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/wechat/qr/start", {});
-}
-
-export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
-}
-
-export async function whatsappQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
-}
-
-export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
 }
 
 export async function listSkills(): Promise<SkillItem[]> {

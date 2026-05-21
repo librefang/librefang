@@ -23,7 +23,6 @@ import {
   Users,
   User,
   Server,
-  Network,
   Hand,
   BarChart3,
   Database,
@@ -78,7 +77,6 @@ type DashboardRoute =
   | "/workflows"
   | "/scheduler"
   | "/mcp-servers"
-  | "/channels"
   | "/providers"
   | "/models"
   | "/memory"
@@ -978,7 +976,6 @@ export function App() {
         label: t("nav.runtime_section", { defaultValue: "Runtime" }),
         items: [
           { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
-          { to: "/channels", label: t("nav.channels"), icon: Network },
           { to: "/providers", label: t("nav.providers"), icon: Server },
           { to: "/models", label: t("nav.models"), icon: Cpu },
           { to: "/memory", label: t("nav.memory"), icon: Database },

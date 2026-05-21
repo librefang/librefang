@@ -4288,7 +4288,6 @@ dependencies = [
  "regex",
  "regex-lite",
  "reqwest",
- "rsa",
  "rustls",
  "rustls-native-certs",
  "serde",

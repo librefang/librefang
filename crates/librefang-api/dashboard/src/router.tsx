@@ -61,7 +61,6 @@ const AgentsPage = lazyWithReload(() => import("./pages/AgentsPage").then(m => (
 const AnalyticsPage = lazyWithReload(() => import("./pages/AnalyticsPage").then(m => ({ default: m.AnalyticsPage })));
 const CanvasPage = lazyWithReload(() => import("./pages/CanvasPage").then(m => ({ default: m.CanvasPage })));
 const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage").then(m => ({ default: m.ApprovalsPage })));
-const ChannelsPage = lazyWithReload(() => import("./pages/ChannelsPage").then(m => ({ default: m.ChannelsPage })));
 const ChatPage = lazyWithReload(() => import("./pages/ChatPage").then(m => ({ default: m.ChatPage })));
 const CommsPage = lazyWithReload(() => import("./pages/CommsPage").then(m => ({ default: m.CommsPage })));
 const GoalsPage = lazyWithReload(() => import("./pages/GoalsPage").then(m => ({ default: m.GoalsPage })));
@@ -155,12 +154,6 @@ const providersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/providers",
   component: () => <LazyRouteBoundary><ProvidersPage /></LazyRouteBoundary>
-});
-
-const channelsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/channels",
-  component: () => <LazyRouteBoundary><ChannelsPage /></LazyRouteBoundary>
 });
 
 const chatRoute = createRoute({
@@ -399,7 +392,6 @@ const routeTree = rootRoute.addChildren([
   agentsRoute,
   sessionsRoute,
   providersRoute,
-  channelsRoute,
   chatRoute,
   settingsRoute,
   skillsRoute,

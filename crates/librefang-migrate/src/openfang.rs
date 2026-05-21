@@ -607,7 +607,6 @@ mod tests {
              \n\
              [[mcp_servers]]\n\
              name = \"filesystem\"\n\
-             command = \"npx\"\n\
              nickname = \"this-field-does-not-exist\"\n",
         )
         .unwrap();
