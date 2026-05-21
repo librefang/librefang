@@ -110,6 +110,7 @@ fn make_request(agent: &str, tool: &str, session_id: Option<&str>) -> ApprovalRe
         timeout_secs: 300,
         sender_id: None,
         channel: None,
+        chat_id: None,
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: session_id.map(str::to_string),
