@@ -194,8 +194,9 @@ dirs = "6"
 # the OS keyring is genuinely unavailable.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
-# YAML parsing
-serde_yaml = "0.9"
+# YAML parsing — maintained drop-in fork of the archived serde_yaml (RUSTSEC-2024-0320).
+# Aliased to the `serde_yaml` name so existing `use serde_yaml::...` call sites stay unchanged.
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 
 # JSON5 parsing
 json5 = "1.3.1"
