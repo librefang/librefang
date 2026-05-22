@@ -6,7 +6,136 @@
 use librefang_types::config::DockerSandboxConfig;
 use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
+
+/// SECURITY: Allowlist of Linux capabilities considered safe to grant back
+/// after `--cap-drop ALL`. Derived from Docker's default capability set, with
+/// the most dangerous defaults trimmed:
+///
+/// - `NET_RAW` is retained (ping / traceroute need it) but documented as a
+///   minor SSRF amplifier; the network-namespace boundary is the real
+///   protection here.
+///
+/// Excluded by design (each is a sandbox-collapse vector):
+/// - `SYS_ADMIN` — near-root: mount, kexec, BPF, namespace manipulation.
+/// - `NET_ADMIN` — reconfigure interfaces, firewall rules, raw sockets to
+///   arbitrary protocols.
+/// - `SYS_PTRACE` — attach to other processes in the namespace; trivially
+///   defeats `no-new-privileges` for any other root-mapped UID.
+/// - `SYS_MODULE`, `SYS_BOOT`, `SYS_RAWIO`, `SYS_TIME`, `SYS_NICE`,
+///   `SYS_RESOURCE`, `SYS_PACCT`, `SYS_TTY_CONFIG`,
+///   `LEASE`, `LINUX_IMMUTABLE`, `MAC_ADMIN`, `MAC_OVERRIDE`,
+///   `IPC_LOCK`, `IPC_OWNER`, `BLOCK_SUSPEND`, `WAKE_ALARM`,
+///   `BPF`, `PERFMON`, `CHECKPOINT_RESTORE`, `AUDIT_CONTROL`,
+///   `AUDIT_READ`, `SYSLOG`.
+const SAFE_CAPS: &[&str] = &[
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "NET_BIND_SERVICE",
+    "NET_RAW",
+    "SYS_CHROOT",
+    "MKNOD",
+    "AUDIT_WRITE",
+    "SETFCAP",
+];
+
+/// SECURITY: Validate the Docker `--network` argument.
+///
+/// Rejects:
+/// - `host` — shares the host network namespace; container can reach
+///   `127.0.0.1`, cloud-metadata (`169.254.169.254`), and the daemon's
+///   listener on port 4545.
+/// - `container:<name>` — joins another container's network namespace,
+///   inheriting whatever that container can reach (including `host`
+///   transitively).
+/// - Anything outside `[A-Za-z0-9_-]+`, which Docker's own network-name
+///   grammar rejects anyway; we fail-fast with a typed error rather than
+///   defer to a `docker run` failure.
+fn validate_network(network: &str) -> Result<(), String> {
+    if network.is_empty() {
+        return Err("Docker network cannot be empty".into());
+    }
+    let lower = network.to_ascii_lowercase();
+    if lower == "host" {
+        return Err(
+            "Docker network='host' is forbidden: shares host network namespace, \
+             exposing loopback, cloud-metadata (169.254.169.254), and the daemon \
+             port to the sandbox"
+                .into(),
+        );
+    }
+    if lower.starts_with("container:") {
+        return Err(format!(
+            "Docker network='{network}' (container:* form) is forbidden: \
+             inherits the target container's namespace, transitively defeating isolation"
+        ));
+    }
+    // `bridge`, `none`, and user-defined network names: alphanumeric + `_-`.
+    if !network
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid Docker network name: {network} (allowed: [A-Za-z0-9_-]+)"
+        ));
+    }
+    Ok(())
+}
+
+/// SECURITY: Validate a single `--cap-add` value against the safe allowlist.
+///
+/// Capability names are matched case-insensitively against `SAFE_CAPS` after
+/// stripping an optional `CAP_` prefix (Docker accepts both `CHOWN` and
+/// `CAP_CHOWN`). Anything not in the allowlist — including syntactically
+/// valid but unsafe caps like `SYS_ADMIN` — fails closed with a typed error.
+fn validate_capability(cap: &str) -> Result<(), String> {
+    if cap.is_empty() {
+        return Err("Capability name cannot be empty".into());
+    }
+    // Character-set check is still useful to reject shell metacharacters
+    // before they reach `docker run`.
+    if !cap.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(format!(
+            "Invalid capability syntax: {cap} (allowed: alphanumeric + underscore)"
+        ));
+    }
+    let upper = cap.to_ascii_uppercase();
+    let stripped = upper.strip_prefix("CAP_").unwrap_or(&upper);
+    if SAFE_CAPS.contains(&stripped) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Capability '{cap}' is not in the safe allowlist. Dangerous capabilities \
+             (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, SYS_MODULE, SYS_BOOT, BPF, etc.) collapse \
+             the sandbox and are refused at config-load time."
+        ))
+    }
+}
+
+/// SECURITY: Full validation pass for `network` + `cap_add` at config load.
+///
+/// Fails fast with a typed error AND emits an `error!` log so the daemon
+/// startup surface records the rejection even if the caller swallows the
+/// `Result`.
+pub fn validate_sandbox_config(config: &DockerSandboxConfig) -> Result<(), String> {
+    if let Err(e) = validate_network(&config.network) {
+        error!(network = %config.network, error = %e, "Docker sandbox network rejected");
+        return Err(e);
+    }
+    for cap in &config.cap_add {
+        if let Err(e) = validate_capability(cap) {
+            error!(cap = %cap, error = %e, "Docker sandbox capability rejected");
+            return Err(e);
+        }
+    }
+    Ok(())
+}
 
 /// A running sandbox container.
 #[derive(Debug, Clone)]
@@ -97,6 +226,10 @@ pub async fn create_sandbox(
     workspace: &Path,
 ) -> Result<SandboxContainer, String> {
     validate_image_name(&config.image)?;
+    // SECURITY: Fail-fast on dangerous network / cap_add values before we
+    // shell out to `docker run`. See `validate_sandbox_config` for the
+    // boundary rationale.
+    validate_sandbox_config(config)?;
     let container_name = sanitize_container_name(&format!(
         "{}-{}",
         config.container_prefix,
@@ -115,14 +248,11 @@ pub async fn create_sandbox(
     cmd.arg("--cap-drop").arg("ALL");
     cmd.arg("--security-opt").arg("no-new-privileges");
 
-    // Add back specific capabilities if configured
+    // Add back specific capabilities if configured. `validate_sandbox_config`
+    // above has already rejected anything outside the SAFE_CAPS allowlist,
+    // so this loop is now a pure pass-through — no warn-and-skip.
     for cap in &config.cap_add {
-        // Validate: only allow known capability names (alphanumeric + underscore)
-        if cap.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            cmd.arg("--cap-add").arg(cap);
-        } else {
-            warn!("Skipping invalid capability: {cap}");
-        }
+        cmd.arg("--cap-add").arg(cap);
     }
 
     // Read-only root filesystem
@@ -673,6 +803,157 @@ mod tests {
         let c1 = DockerSandboxConfig::default();
         let c2 = DockerSandboxConfig::default();
         assert_eq!(config_hash(&c1), config_hash(&c2));
+    }
+
+    // ── Network / cap_add allowlist tests (audit: docker-network-cap-add) ──
+
+    #[test]
+    fn test_validate_network_rejects_host() {
+        let err = validate_network("host").unwrap_err();
+        assert!(
+            err.contains("host"),
+            "host rejection message should mention 'host': {err}"
+        );
+        // Case-insensitive: `HOST`, `Host` etc. must also fail.
+        assert!(validate_network("HOST").is_err());
+        assert!(validate_network("Host").is_err());
+    }
+
+    #[test]
+    fn test_validate_network_rejects_container_form() {
+        assert!(validate_network("container:foo").is_err());
+        assert!(validate_network("container:abc123").is_err());
+        assert!(validate_network("CONTAINER:foo").is_err());
+    }
+
+    #[test]
+    fn test_validate_network_accepts_safe_modes() {
+        assert!(validate_network("bridge").is_ok());
+        assert!(validate_network("none").is_ok());
+        assert!(validate_network("my-user-net").is_ok());
+        assert!(validate_network("librefang_agents").is_ok());
+    }
+
+    #[test]
+    fn test_validate_network_rejects_bad_chars_and_empty() {
+        assert!(validate_network("").is_err());
+        assert!(validate_network("net;rm -rf /").is_err());
+        assert!(validate_network("net$(id)").is_err());
+        assert!(validate_network("net with space").is_err());
+    }
+
+    #[test]
+    fn test_validate_capability_rejects_dangerous() {
+        // The classic sandbox-collapse trio plus a few extras.
+        for bad in [
+            "SYS_ADMIN",
+            "NET_ADMIN",
+            "SYS_PTRACE",
+            "SYS_MODULE",
+            "SYS_BOOT",
+            "BPF",
+            "PERFMON",
+        ] {
+            assert!(
+                validate_capability(bad).is_err(),
+                "dangerous cap {bad} must be rejected"
+            );
+            // CAP_-prefixed form must also be rejected.
+            let prefixed = format!("CAP_{bad}");
+            assert!(
+                validate_capability(&prefixed).is_err(),
+                "dangerous cap {prefixed} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_capability_accepts_safe() {
+        for good in [
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "NET_BIND_SERVICE",
+            "SETUID",
+            "SETGID",
+        ] {
+            assert!(
+                validate_capability(good).is_ok(),
+                "safe cap {good} must be accepted"
+            );
+            // CAP_-prefixed form must also be accepted.
+            let prefixed = format!("CAP_{good}");
+            assert!(
+                validate_capability(&prefixed).is_ok(),
+                "safe cap {prefixed} must be accepted"
+            );
+            // Case insensitivity.
+            assert!(validate_capability(&good.to_ascii_lowercase()).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_capability_rejects_bad_syntax_and_empty() {
+        assert!(validate_capability("").is_err());
+        assert!(validate_capability("SYS;ADMIN").is_err());
+        assert!(validate_capability("$(id)").is_err());
+    }
+
+    #[test]
+    fn test_validate_sandbox_config_happy_path() {
+        let mut config = DockerSandboxConfig::default();
+        // Defaults: network = "none", cap_add empty → must pass.
+        assert!(validate_sandbox_config(&config).is_ok());
+
+        // Bridge + safe caps → must pass.
+        config.network = "bridge".into();
+        config.cap_add = vec!["CHOWN".into(), "NET_BIND_SERVICE".into()];
+        assert!(validate_sandbox_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_sandbox_config_rejects_host_network() {
+        let config = DockerSandboxConfig {
+            network: "host".into(),
+            ..DockerSandboxConfig::default()
+        };
+        assert!(validate_sandbox_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_sandbox_config_rejects_dangerous_cap() {
+        let config = DockerSandboxConfig {
+            network: "none".into(),
+            cap_add: vec!["SYS_ADMIN".into()],
+            ..DockerSandboxConfig::default()
+        };
+        let err = validate_sandbox_config(&config).unwrap_err();
+        assert!(
+            err.contains("SYS_ADMIN") || err.contains("allowlist"),
+            "rejection message should reference the cap or allowlist: {err}"
+        );
+    }
+
+    #[test]
+    fn test_safe_caps_size_and_contents() {
+        // Pin the allowlist size so any future widening is a conscious
+        // diff that has to update this assertion.
+        assert_eq!(SAFE_CAPS.len(), 14, "SAFE_CAPS size changed — review");
+        // Spot-check a few entries that the audit specifically called out
+        // as the minimum safe set.
+        for expected in ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"] {
+            assert!(
+                SAFE_CAPS.contains(&expected),
+                "SAFE_CAPS must include {expected}"
+            );
+        }
+        // And confirm none of the dangerous ones slipped in.
+        for forbidden in ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "BPF"] {
+            assert!(
+                !SAFE_CAPS.contains(&forbidden),
+                "SAFE_CAPS must NOT include {forbidden}"
+            );
+        }
     }
 
     #[test]
