@@ -1537,15 +1537,21 @@ pub fn inject_attachments_into_session(
 /// Downloads each attachment URL, base64-encodes images, and returns
 /// content blocks ready to inject into a session. Non-image attachments
 /// and download failures are skipped with a warning.
+///
+/// SSRF defence: every URL is run through
+/// [`crate::webhook_store::validate_webhook_url_resolved`] before the
+/// fetch — this rejects loopback, RFC 1918, link-local, IPv6 ULA, the
+/// cloud-metadata literals, and any hostname whose DNS resolves to one
+/// of those families. For domain URLs we then pin reqwest to the
+/// validated `SocketAddr` via `.resolve(host, addr)` so a DNS-rebind
+/// flip between validation and the eventual HTTP connect cannot reroute
+/// the fetch onto an internal IP. Mirrors the webhook fire-time pattern
+/// at `webhooks.rs:738-744` (issue #3701).
 pub async fn resolve_url_attachments(
     attachments: &[librefang_types::comms::Attachment],
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = librefang_kernel::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("HTTP client build");
     let mut blocks = Vec::new();
 
     for att in attachments {
@@ -1561,6 +1567,43 @@ pub async fn resolve_url_attachments(
             tracing::debug!(url = %att.url, content_type, "Skipping non-image attachment");
             continue;
         }
+
+        // SSRF guard: validate the URL (cheap scheme + literal checks)
+        // and resolve its hostname against the SSRF blocklist BEFORE we
+        // make any outbound request. `None` means the URL was an IP
+        // literal (already covered by the cheap pre-check); `Some` means
+        // we got back a validated `SocketAddr` we must pin reqwest to.
+        let pinned_host = match crate::webhook_store::validate_webhook_url_resolved(&att.url).await
+        {
+            Ok(host) => host,
+            Err(e) => {
+                tracing::warn!(
+                    url = %att.url,
+                    error = %e,
+                    "Refusing attachment URL — failed SSRF validation"
+                );
+                continue;
+            }
+        };
+
+        // Build a per-attachment client and pin DNS to the IP we just
+        // validated. Without the pin, reqwest performs its own
+        // independent lookup before connecting — a low-TTL record can
+        // flip to a private IP between our validation and reqwest's
+        // resolver call (DNS rebind, #3701).
+        let mut builder = librefang_kernel::http_client::proxied_client_builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some((ref host, addr)) = pinned_host {
+            builder = builder.resolve(host, addr);
+        }
+        let client = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(url = %att.url, error = %e, "Failed to build HTTP client for attachment");
+                continue;
+            }
+        };
 
         match client.get(&att.url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -7692,9 +7735,8 @@ mod kernel_err_to_status_tests {
 
     #[test]
     fn agent_already_exists_maps_to_409() {
-        let err = KernelError::LibreFang(LibreFangError::AgentAlreadyExists(
-            "dup-name".to_string(),
-        ));
+        let err =
+            KernelError::LibreFang(LibreFangError::AgentAlreadyExists("dup-name".to_string()));
         assert_eq!(kernel_err_to_status(&err), StatusCode::CONFLICT);
     }
 
@@ -7703,11 +7745,90 @@ mod kernel_err_to_status_tests {
         // Sanity: the catch-all preserves the pre-fix behaviour so
         // a transient kernel error doesn't surprise-surface as a
         // client-error class.
-        let err =
-            KernelError::LibreFang(LibreFangError::Internal("disk full".to_string()));
+        let err = KernelError::LibreFang(LibreFangError::Internal("disk full".to_string()));
         assert_eq!(
             kernel_err_to_status(&err),
             StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
+}
+
+#[cfg(test)]
+mod url_attachment_ssrf_tests {
+    //! SSRF regression guards for `resolve_url_attachments`. The
+    //! function is called from `POST /api/a2a/send` (and reachable to
+    //! the `User` role per `middleware.rs` allowlist), so any URL we
+    //! fetch on the caller's behalf must pass the same blocklist the
+    //! webhook subscription store uses at fire-time. A returned empty
+    //! block list — paired with a `warn!` — is the contract: the
+    //! attacker gets no IMDS / RFC 1918 / link-local / IPv6-ULA round
+    //! trip, and no fetched bytes land in the agent session for the
+    //! LLM to transcribe back.
+    use super::resolve_url_attachments;
+    use librefang_types::comms::Attachment;
+
+    fn img(url: &str) -> Attachment {
+        Attachment {
+            url: url.to_string(),
+            filename: None,
+            content_type: Some("image/png".to_string()),
+            caption: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_loopback_literal() {
+        // The original exploit pathway — bare 127.0.0.1 reaches any
+        // localhost-bound service (admin UI, kernel API on 4545, etc).
+        let blocks = resolve_url_attachments(&[img("http://127.0.0.1:1/whatever.png")]).await;
+        assert!(blocks.is_empty(), "loopback literal must be refused");
+    }
+
+    #[tokio::test]
+    async fn rejects_imds_literal() {
+        // The headline AWS / GCP / Azure cloud-metadata exfil target.
+        let blocks = resolve_url_attachments(&[img(
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/role.png",
+        )])
+        .await;
+        assert!(blocks.is_empty(), "IMDS literal must be refused");
+    }
+
+    #[tokio::test]
+    async fn rejects_ipv6_ula_literal() {
+        // fc00::/7 covers fd00::/8 — common kubernetes / docker
+        // internal-network range. is_private_ip's V6 arm must catch it.
+        let blocks = resolve_url_attachments(&[img("http://[fd00::1]/whatever.png")]).await;
+        assert!(blocks.is_empty(), "IPv6 ULA literal must be refused");
+    }
+
+    #[tokio::test]
+    async fn rejects_localhost_hostname() {
+        // Hostname (not literal) — caught by the blocked-domain check
+        // in validate_webhook_url, no DNS query happens.
+        let blocks = resolve_url_attachments(&[img("http://localhost/whatever.png")]).await;
+        assert!(blocks.is_empty(), "localhost hostname must be refused");
+    }
+
+    #[tokio::test]
+    async fn rejects_rfc1918_literal() {
+        // 10.0.0.0/8 — common corporate-LAN target for SSRF pivots.
+        let blocks = resolve_url_attachments(&[img("http://10.0.0.1/whatever.png")]).await;
+        assert!(blocks.is_empty(), "RFC 1918 literal must be refused");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_scheme() {
+        // `file://`, `gopher://`, etc. would otherwise be a different
+        // exfil class entirely. validate_webhook_url only permits
+        // http / https — non-image content_type would also skip, but
+        // the SSRF guard is the canonical reject path.
+        let mut a = img("file:///etc/passwd");
+        a.content_type = Some("image/png".to_string());
+        let blocks = resolve_url_attachments(&[a]).await;
+        assert!(
+            blocks.is_empty(),
+            "non-http(s) scheme must be refused by SSRF guard"
         );
     }
 }
