@@ -257,7 +257,10 @@ mod tests {
     #[async_trait::async_trait]
     impl LlmDriver for ResponseFormatRecordingDriver {
         async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            self.observed.lock().unwrap().push(req.response_format.clone());
+            self.observed
+                .lock()
+                .unwrap()
+                .push(req.response_format.clone());
             Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
                     text: r#"{"queries": []}"#.to_string(),
