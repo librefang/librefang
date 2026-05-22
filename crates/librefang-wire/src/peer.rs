@@ -1355,9 +1355,14 @@ async fn connection_loop(
 ) -> Result<(), WireError> {
     loop {
         let msg = match if let Some(key) = session_key {
-            read_message_authenticated(reader, key).await
+            // Both helpers thread `peer_node_id` so the
+            // `wire::compat` warn emitted on Unknown-variant decode
+            // is labelled with the actual peer, not the
+            // pre-handshake placeholder (audit:
+            // wire-message-other-variant-silent).
+            read_message_authenticated_observed(reader, key, peer_node_id).await
         } else {
-            read_message(reader).await
+            read_message_observed(reader, peer_node_id).await
         } {
             Ok(m) => m,
             Err(WireError::ConnectionClosed) => return Ok(()),
@@ -1390,9 +1395,14 @@ async fn connection_loop(
             // may emit message types we don't understand. Drop the message
             // silently — the TCP link must stay alive so older peers stay
             // reachable. No response is produced for an unknown envelope.
+            // The `wire::compat` warn with the raw tag was already
+            // emitted by `read_message_observed` /
+            // `read_message_authenticated_observed` upstream; this
+            // arm just confirms the dispatch decision (audit:
+            // wire-message-other-variant-silent).
             WireMessageKind::Unknown => {
                 debug!(
-                    "OFP: ignoring unknown message type from {} (id={:?})",
+                    "OFP: no dispatch for unknown envelope from {} (id={:?})",
                     peer_node_id, msg.id
                 );
             }
@@ -1506,8 +1516,11 @@ fn handle_notification(peer_node_id: &str, notif: &WireNotification, registry: &
             registry.mark_disconnected(peer_node_id);
         }
         WireNotification::Unknown => {
+            // `wire::compat` warn with the raw event tag was emitted
+            // by the receive helper; this is just the dispatch
+            // confirmation. (audit: wire-message-other-variant-silent.)
             debug!(
-                "OFP: ignoring unknown notification from peer {}",
+                "OFP: no dispatch for unknown notification from peer {}",
                 peer_node_id
             );
         }
@@ -1563,6 +1576,21 @@ pub async fn write_message_authenticated(
 pub async fn read_message(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
 ) -> Result<WireMessage, WireError> {
+    read_message_observed(reader, "<pre-handshake>").await
+}
+
+/// Read a framed message and additionally emit a `warn!` on the
+/// `wire::compat` target when the decoded message landed in a
+/// `serde(other)` arm. The `peer_node_id` is attached as a
+/// structured field so operators can spot which peer is sending
+/// unrecognised tags (audit: wire-message-other-variant-silent).
+/// Pre-handshake reads (where the peer identity isn't yet known)
+/// pass `"<pre-handshake>"` via the existing [`read_message`]
+/// wrapper.
+pub async fn read_message_observed(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    peer_node_id: &str,
+) -> Result<WireMessage, WireError> {
     let mut header = [0u8; 4];
     match reader.read_exact(&mut header).await {
         Ok(_) => {}
@@ -1584,6 +1612,17 @@ pub async fn read_message(
     reader.read_exact(&mut body).await?;
 
     let msg = decode_message(&body)?;
+    if let Some(unk) = classify_unknown(&body, &msg) {
+        warn!(
+            target: "wire::compat",
+            peer = %peer_node_id,
+            msg_id = %msg.id,
+            level = %unk.level.name(),
+            raw_tag = %unk.raw_tag,
+            "ignoring unrecognised wire variant from peer (forward-compat fallback); \
+             a flood of these from the same peer indicates protocol skew or misbehaviour"
+        );
+    }
     Ok(msg)
 }
 
@@ -1594,6 +1633,18 @@ pub async fn read_message(
 pub async fn read_message_authenticated(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     session_key: &str,
+) -> Result<WireMessage, WireError> {
+    read_message_authenticated_observed(reader, session_key, "<pre-handshake>").await
+}
+
+/// Authenticated counterpart of [`read_message_observed`]: same
+/// post-decode `wire::compat` observability hook, just with HMAC
+/// verification first. Used by the post-handshake message loop where
+/// `peer_node_id` is available.
+pub async fn read_message_authenticated_observed(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    session_key: &str,
+    peer_node_id: &str,
 ) -> Result<WireMessage, WireError> {
     let mut header = [0u8; 4];
     match reader.read_exact(&mut header).await {
@@ -1637,7 +1688,18 @@ pub async fn read_message_authenticated(
         ));
     }
 
-    let msg = serde_json::from_slice(json_bytes)?;
+    let msg: WireMessage = serde_json::from_slice(json_bytes)?;
+    if let Some(unk) = classify_unknown(json_bytes, &msg) {
+        warn!(
+            target: "wire::compat",
+            peer = %peer_node_id,
+            msg_id = %msg.id,
+            level = %unk.level.name(),
+            raw_tag = %unk.raw_tag,
+            "ignoring unrecognised wire variant from authenticated peer (forward-compat fallback); \
+             a flood of these from the same peer indicates protocol skew or misbehaviour"
+        );
+    }
     Ok(msg)
 }
 

@@ -357,6 +357,22 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
     }
 }
 
+/// Cookie-clear attributes used by the logout path. Unlike
+/// [`session_cookie_attrs`], we ALWAYS emit `Secure` — RFC 6265bis §5.6
+/// and current browser behaviour require the Set-Cookie attributes on a
+/// clear (`Max-Age=0`) response to match those on the original cookie,
+/// otherwise the browser keeps the live `Secure` cookie. A logout
+/// request that happened to land over plain HTTP (proxy misconfig,
+/// `X-Forwarded-Proto` missing, local-HTTP dev mode where the user
+/// signed in via HTTPS) would otherwise invalidate server-side state
+/// but leave the cookie pinned client-side until next failed auth.
+/// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
+/// on `Max-Age=0` responses regardless of transport.
+/// (audit: logout-no-secure-cookie).
+fn session_cookie_clear_attrs() -> &'static str {
+    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
@@ -651,9 +667,11 @@ pub(crate) async fn dashboard_logout(
         }
     }
 
+    // Always emit `Secure` on the clear cookie, regardless of the
+    // logout-request transport — see `session_cookie_clear_attrs`.
     let expired_cookie = format!(
         "librefang_session=; {}; Max-Age=0",
-        session_cookie_attrs(&headers),
+        session_cookie_clear_attrs(),
     );
     (
         axum::http::StatusCode::OK,
@@ -1380,6 +1398,14 @@ pub async fn build_router(
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
+        // JSON depth guard — buffers `application/json` bodies once,
+        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
+        // adversarial `[[[[…]]]]` payloads at the layer boundary
+        // before any handler sees them. Sits below auth/rate-limit
+        // (so the cost of buffering is gated by auth) and above
+        // request-logging (so rejections show up in the request log
+        // with the right status). Audit: check-json-depth-unused.
+        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -1818,8 +1844,16 @@ pub async fn run_daemon(
                 st.skillhub_cache
                     .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
 
-                // Evict expired session tokens
-                let expired_sessions = {
+                // Evict expired session tokens and persist the
+                // trimmed state to disk. Audit:
+                // active-sessions-unbounded — the in-memory `retain`
+                // here resolves the "WS upgrade is the only sweep"
+                // half of the audit, but the trimmed state never made
+                // it back to `~/.librefang/sessions.json`, so every
+                // expired token came back to life on the next daemon
+                // boot via `load_sessions`. Persisting after the
+                // prune closes that survives-restart loop.
+                let (expired_sessions, sessions_snapshot) = {
                     let mut sessions = st.active_sessions.write().await;
                     let before = sessions.len();
                     sessions.retain(|_, token| {
@@ -1828,8 +1862,19 @@ pub async fn run_daemon(
                             crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                         )
                     });
-                    before - sessions.len()
+                    let removed = before - sessions.len();
+                    // Snapshot for disk write so we can drop the
+                    // write guard before the (potentially blocking)
+                    // file syscall. Only snapshot when there's
+                    // actually something to persist — the token map
+                    // is shallow but cloning on every tick when
+                    // nothing expired would be wasted work.
+                    let snap = (removed > 0).then(|| sessions.clone());
+                    (removed, snap)
                 };
+                if let Some(snap) = sessions_snapshot {
+                    save_sessions(st.kernel.home_dir(), &snap);
+                }
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
@@ -2204,6 +2249,82 @@ mod observability_tests {
         );
     }
 
+    /// Audit: active-sessions-unbounded. The 5-minute GC loop in
+    /// `run_server` evicts expired tokens from the in-memory
+    /// `active_sessions` map AND persists the trimmed snapshot to
+    /// disk. Without the persist step, the in-memory state was clean
+    /// (the load_sessions filter already drops expired tokens at
+    /// boot), but the file on disk grew unbounded — every successful
+    /// login left a token there forever. Persisting after the prune
+    /// stops the audit-flagged "RAM + disk usage grow as
+    /// `n_logins × token_size`" regression on the disk side.
+    ///
+    /// This test inspects the raw file contents (not the in-memory
+    /// view from `load_sessions`, which already filters expired
+    /// tokens at load time) to confirm the trimmed write reaches
+    /// disk.
+    #[test]
+    fn save_sessions_after_retain_drops_expired_tokens_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let live = crate::password_hash::SessionToken {
+            token: "live-token".to_string(),
+            created_at: now.saturating_sub(60),
+            user_name: None,
+            user_role: None,
+        };
+        let expired = crate::password_hash::SessionToken {
+            token: "expired-token".to_string(),
+            created_at: now
+                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            user_name: None,
+            user_role: None,
+        };
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("live-token".to_string(), live);
+        sessions.insert("expired-token".to_string(), expired);
+
+        // Initial persist — both tokens on disk. Read raw bytes
+        // because `load_sessions` filters expired tokens at load,
+        // hiding the on-disk state from the in-memory caller.
+        save_sessions(home, &sessions);
+        let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_before.contains("live-token") && raw_before.contains("expired-token"),
+            "baseline: both tokens must be on disk before the GC step: {raw_before}"
+        );
+
+        // Simulate the GC retain step — same shape as the
+        // background loop in `run_server`.
+        sessions.retain(|_, token| {
+            !crate::password_hash::is_token_expired(
+                token,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+            )
+        });
+        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        save_sessions(home, &sessions);
+
+        let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_after.contains("live-token"),
+            "live token must still be on disk after the GC sweep: {raw_after}"
+        );
+        assert!(
+            !raw_after.contains("expired-token"),
+            "expired token MUST NOT be on disk after the GC sweep — \
+             the audit-flagged disk-bloat lever was that expired tokens \
+             survived restart in the file: {raw_after}"
+        );
+    }
+
     // #3725: a sessions.json file already on disk at world-readable
     // permissions (i.e. left over from a daemon revision before the
     // 0600-on-write fix) must be tightened on the next load so an
@@ -2401,6 +2522,39 @@ fn is_daemon_responding(addr: &str) -> bool {
         std::net::TcpStream::connect(addr_only)
             .map(|_| true)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod session_cookie_attrs_tests {
+    use super::{session_cookie_attrs, session_cookie_clear_attrs};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn clear_attrs_always_contain_secure() {
+        // Audit: logout-no-secure-cookie. The browser refuses to
+        // overwrite a `Secure` cookie with a clear response that lacks
+        // `Secure`, so the logout-cookie clear MUST emit `Secure`
+        // regardless of the logout request's transport.
+        let attrs = session_cookie_clear_attrs();
+        assert!(
+            attrs.contains("Secure"),
+            "clear attrs must include `Secure` so browsers actually drop the cookie: {attrs}"
+        );
+        assert!(attrs.contains("HttpOnly"));
+        assert!(attrs.contains("SameSite=Lax"));
+        assert!(attrs.contains("Path=/dashboard"));
+    }
+
+    #[test]
+    fn login_attrs_remain_transport_dependent() {
+        // Sanity: the login-path attrs builder still keeps `Secure`
+        // off for plain HTTP (local-dev affordance) and on for HTTPS /
+        // X-Forwarded-Proto=https. Only the clear path is unconditional.
+        let mut h = HeaderMap::new();
+        assert!(!session_cookie_attrs(&h).contains("Secure"));
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(session_cookie_attrs(&h).contains("Secure"));
     }
 }
 
