@@ -422,9 +422,24 @@ impl LibreFangKernel {
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.workflows
-                        .triggers
-                        .register(agent_id, pattern, prompt, 0);
+                    // Same handling as `background_lifecycle.rs`'s
+                    // proactive-trigger registration — best effort
+                    // when the agent has already hit its trigger
+                    // budget; log + skip rather than failing the
+                    // spawn. (audit: trigger-engine-no-per-agent-cap)
+                    if let Err(e) =
+                        self.workflows
+                            .triggers
+                            .register(agent_id, pattern, prompt, 0)
+                    {
+                        warn!(
+                            agent = %name,
+                            id = %agent_id,
+                            error = %e,
+                            "Proactive trigger registration skipped — per-agent cap exceeded",
+                        );
+                        continue;
+                    }
                     registered = true;
                 }
             }

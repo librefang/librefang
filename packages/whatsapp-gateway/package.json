@@ -11,7 +11,7 @@
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6",
+    "@whiskeysockets/baileys": "6.7.21",
     "better-sqlite3": "^12.8.0",
     "link-preview-js": "^3.0.0",
     "pino": "^9",

@@ -2011,11 +2011,13 @@ pub async fn comms_send(
         return ApiErrorResponse::not_found("Target agent not found").into_json_tuple();
     }
 
-    // SECURITY: Limit message size
-    if req.message.len() > 64 * 1024 {
+    // SECURITY: Limit message size — both byte cap (memory) and
+    // char cap (LLM cost) so CJK users aren't unfairly clipped at
+    // a third of the ASCII budget. Audit: message-byte-vs-char-cap.
+    if let Err(e) = crate::validation::check_message_size(&req.message) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": e.message})),
         );
     }
 
