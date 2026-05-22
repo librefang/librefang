@@ -256,6 +256,38 @@ mod tests {
         assert_eq!(t.t("nonexistent-key"), "nonexistent-key");
     }
 
+    /// Regression guard for the audit item
+    /// `api-error-generic-missing-fluent-key` — 41+ route handlers
+    /// build their HTTP 500 body via
+    /// `t_args("api-error-generic", &[("error", &e.to_string())])`.
+    /// Before this fix the key was not defined in any locale, so
+    /// `t_args` hit the missing-key branch at
+    /// `i18n.rs:163-164`, returned the literal `"api-error-generic"`,
+    /// and the `$error` interpolation never ran — every 5xx
+    /// response surfaced the bare key with no diagnostic context.
+    /// This test pins both the key's existence (covered by
+    /// `all_languages_have_same_keys`) AND its interpolation
+    /// contract: when `$error` is supplied, the rendered body must
+    /// contain the underlying error string verbatim.
+    #[test]
+    fn api_error_generic_interpolates_underlying_error() {
+        for lang in SUPPORTED_LANGUAGES {
+            let t = ErrorTranslator::new(lang);
+            let result = t.t_args(
+                "api-error-generic",
+                &[("error", "session DB corrupted")],
+            );
+            assert_ne!(
+                result, "api-error-generic",
+                "lang '{lang}': api-error-generic must be defined; got literal key",
+            );
+            assert!(
+                result.contains("session DB corrupted"),
+                "lang '{lang}': api-error-generic must interpolate $error; got {result:?}",
+            );
+        }
+    }
+
     #[test]
     fn fallback_to_english_for_unsupported_language() {
         let t = ErrorTranslator::new("ko");
@@ -326,6 +358,17 @@ mod tests {
             "api-error-auth-missing",
             "api-error-not-found",
             "api-error-internal",
+            // `api-error-generic` is the stopgap catch-all used by 41+
+            // HTTP 500 handlers (`t_args("api-error-generic",
+            // &[("error", &e.to_string())])`). It MUST exist in every
+            // locale or the response degrades to the literal key
+            // `"api-error-generic"` with the underlying error silently
+            // dropped — see the dedicated regression test
+            // `api_error_generic_interpolates_underlying_error` below
+            // for the interpolation contract. The same-key requirement
+            // is asserted here so a new locale or a stale `errors.ftl`
+            // cannot regress this without a CI failure.
+            "api-error-generic",
         ];
         for lang in SUPPORTED_LANGUAGES {
             let t = ErrorTranslator::new(lang);

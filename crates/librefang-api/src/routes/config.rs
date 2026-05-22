@@ -229,11 +229,17 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
+    // Use the indexed `SELECT COUNT(*)` projection — `list_sessions()`
+    // here would return a `Vec<serde_json::Value>` with each session's
+    // full rmp-encoded message history decoded just to call `.len()`.
+    // The dashboard hammers this route on its 5 s status poll, so on
+    // a workspace with 100 sessions × 200 KB history apiece the daemon
+    // decoded ~20 MB (≈ 4 MB/s) of message bodies every poll for what
+    // is morphologically a `SELECT COUNT(*)`.
     let session_count = state
         .kernel
         .memory_substrate()
-        .list_sessions()
-        .map(|s| s.len())
+        .count_sessions()
         .unwrap_or(0);
 
     let memory_used_mb = current_process_rss_mb();
@@ -3000,11 +3006,14 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .iter()
         .filter(|e| !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
+    // Same fix as `/api/status` above — indexed COUNT instead of
+    // decoding every session blob just to call `.len()`. This is the
+    // dashboard snapshot path (`/api/dashboard/snapshot`), hit on
+    // every 5 s poll, so the cost compounded.
     let session_count = state
         .kernel
         .memory_substrate()
-        .list_sessions()
-        .map(|s| s.len())
+        .count_sessions()
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
     // Runtime stats shared with `/api/status` — the dashboard RuntimePage

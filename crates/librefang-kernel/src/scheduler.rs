@@ -181,6 +181,35 @@ impl AgentScheduler {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
             let now = Instant::now();
+            // Evict on push regardless of whether anyone will query
+            // the deque (audit: tool-calls-deque-unbounded).
+            //
+            // Pre-fix, eviction happened only inside
+            // `tool_calls_in_last_minute`, which `check_quota`
+            // calls ONLY when `max_tool_calls_per_minute > 0`. That
+            // field defaults to 0 (no per-minute limit) in
+            // `KernelConfig`, so most production deployments never
+            // ran the eviction path. The write path here kept
+            // pushing on every turn — for a tool-heavy agent that
+            // turns ~50 tool calls per minute, the deque accreted
+            // 50 × 60 × 60 = 180k Instants per hour with no upper
+            // bound until daemon restart.
+            //
+            // The cheap fix is to evict on push too: that keeps the
+            // deque bounded to "the last minute of timestamps"
+            // independently of whether the quota check ever runs.
+            // No behaviour change for agents with the limit
+            // configured (the prune-then-len read at quota time
+            // sees the same result); pure memory-leak plug for
+            // agents that don't.
+            let cutoff = instant_now_minus(ONE_MINUTE);
+            while tracker
+                .tool_call_timestamps
+                .front()
+                .is_some_and(|t| *t < cutoff)
+            {
+                tracker.tool_call_timestamps.pop_front();
+            }
             for _ in 0..count {
                 tracker.tool_call_timestamps.push_back(now);
             }
@@ -937,5 +966,77 @@ mod tests {
         let mut t = UsageTracker::default();
         assert_eq!(t.tool_calls_in_last_minute(), 0);
         assert_eq!(t.tokens_in_last_minute(), 0);
+    }
+
+    /// Regression for audit `tool-calls-deque-unbounded`.
+    /// `record_tool_calls` must evict stale timestamps on push,
+    /// regardless of whether any quota check ever runs. Pre-fix,
+    /// agents with `max_tool_calls_per_minute = 0` (the default
+    /// in `KernelConfig`) accreted timestamps without bound — the
+    /// quota-side eviction path is gated on the limit being >0 and
+    /// is never invoked for unlimited agents.
+    ///
+    /// Test seeds the deque with 200 stale timestamps that fall
+    /// outside the 60s window, then pushes one new call. Expected:
+    /// the new record evicts all 200 stale entries and leaves only
+    /// the new one — independent of any quota configuration.
+    #[test]
+    fn record_tool_calls_evicts_stale_timestamps_without_quota_configured() {
+        let scheduler = AgentScheduler::default();
+        let agent_id = AgentId::new();
+        scheduler.usage.insert(agent_id, UsageTracker::default());
+        // Seed: 200 timestamps from 2 hours ago.
+        {
+            let mut tracker = scheduler.usage.get_mut(&agent_id).unwrap();
+            let stale = instant_now_minus(ONE_MINUTE * 120);
+            for _ in 0..200 {
+                tracker.tool_call_timestamps.push_back(stale);
+            }
+            assert_eq!(tracker.tool_call_timestamps.len(), 200);
+        }
+        // No quota configured — the audit's failure mode is exactly
+        // this: `check_quota` never runs the eviction path for an
+        // agent without `max_tool_calls_per_minute`. The write path
+        // must evict on its own.
+        assert!(scheduler.quotas.get(&agent_id).is_none());
+
+        scheduler.record_tool_calls(agent_id, 1);
+
+        let tracker = scheduler.usage.get(&agent_id).unwrap();
+        assert_eq!(
+            tracker.tool_call_timestamps.len(),
+            1,
+            "stale timestamps must be evicted on push; got len={}",
+            tracker.tool_call_timestamps.len(),
+        );
+    }
+
+    /// Pin the "tool-heavy agent over a long horizon" case as a
+    /// realistic upper bound. 10k recorded calls under no quota →
+    /// deque len ≤ small constant (== count of pushes within the
+    /// last minute, which here is "all of them" since the test
+    /// runs in << 1 minute).
+    #[test]
+    fn record_tool_calls_long_horizon_stays_bounded_without_quota() {
+        let scheduler = AgentScheduler::default();
+        let agent_id = AgentId::new();
+        scheduler.usage.insert(agent_id, UsageTracker::default());
+        for _ in 0..10_000 {
+            scheduler.record_tool_calls(agent_id, 1);
+        }
+        // Sanity: all 10k were recorded in <1s, so all stay in the
+        // window. The point: nothing OUTSIDE the window survives,
+        // which the previous test pinned. Together they show the
+        // deque is bounded by activity-in-window, not lifetime.
+        let len = scheduler
+            .usage
+            .get(&agent_id)
+            .unwrap()
+            .tool_call_timestamps
+            .len();
+        assert!(
+            len == 10_000,
+            "all 10k same-second pushes survive; got {len}",
+        );
     }
 }
