@@ -258,6 +258,14 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "workflow_stale_timeout_minutes",
         "workflow_default_total_timeout_secs",
         "local_probe_interval_secs",
+        // System-wide operator knobs (timezone, …) and rate-limit
+        // notify policy: server-side / deployment-time configuration,
+        // edited in `config.toml` (or via the agent manifest for the
+        // per-agent rate-limit-notify override) rather than through a
+        // dashboard section. Re-evaluate if either grows into something
+        // operators want a UI for.
+        "system",
+        "rate_limit_notify",
     ];
 
     let root = schema_root();
