@@ -1970,8 +1970,31 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    let derived =
-                        SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref());
+                    // Audit: cron-channel-name-not-reserved. Defense-in-depth
+                    // at the kernel boundary: even if a construction-site
+                    // sanitizer was skipped, an external SenderContext whose
+                    // `channel` matches a reserved kernel system channel
+                    // (`cron`, `autonomous`, `webui` — case-insensitive)
+                    // must NOT share a SessionId with the internal cron /
+                    // autonomous / webui paths. `is_internal_cron` is the
+                    // `#[serde(skip)]` trust flag the cron dispatcher sets;
+                    // when it is false and the channel collides, rename to
+                    // `ext-<name>` so derivation lands on a disjoint
+                    // session. Internal cron continues to derive the legacy
+                    // `for_channel(agent, "cron")` SessionId so existing
+                    // persistent cron-session history is preserved.
+                    let scope_channel = if ctx.is_internal_cron
+                        || !librefang_channels::types::is_reserved_system_channel(&ctx.channel)
+                    {
+                        ctx.channel.clone()
+                    } else {
+                        librefang_channels::types::sanitize_channel_name(&ctx.channel)
+                    };
+                    let derived = SessionId::for_sender_scope(
+                        agent_id,
+                        &scope_channel,
+                        ctx.chat_id.as_deref(),
+                    );
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.
                     // Operators previously had no way to tell from logs

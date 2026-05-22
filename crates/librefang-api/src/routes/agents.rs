@@ -2022,11 +2022,18 @@ pub async fn send_message(
 
 fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     let sender_id = req.sender_id.as_ref()?;
+    // Audit: cron-channel-name-not-reserved. An HTTP caller supplying
+    // `channel_type = "cron"` (or case variant) used to derive the
+    // SAME SessionId as the kernel's internal cron-fire path and
+    // interleave history. Sanitize at the construction site so the
+    // value reaching `send_message_full` cannot collide with a
+    // reserved system channel name.
+    let raw_channel = req
+        .channel_type
+        .clone()
+        .unwrap_or_else(|| "api".to_string());
     Some(SenderContext {
-        channel: req
-            .channel_type
-            .clone()
-            .unwrap_or_else(|| "api".to_string()),
+        channel: librefang_channels::types::sanitize_channel_name(&raw_channel),
         user_id: sender_id.clone(),
         display_name: req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
         is_group: req.is_group,

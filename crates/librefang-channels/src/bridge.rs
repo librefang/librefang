@@ -2094,33 +2094,12 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     }
 }
 
-/// Sanitize a raw channel name before it reaches `SessionId`
-/// derivation. If `name` would collide with a kernel-internal system
-/// channel (`cron`, `autonomous`, `webui` — see
-/// [`crate::types::RESERVED_SYSTEM_CHANNEL_NAMES`]), prefix it with
-/// `ext-` so it derives a disjoint `SessionId` via `for_channel`
-/// instead of writing into the kernel's cron/autonomous/webui
-/// session history. Matching is case-insensitive — `for_channel`
-/// lowercases internally before hashing.
-///
-/// Audit: cron-channel-name-not-reserved. Operator-supplied
-/// `ChannelType::Custom("cron")` (and case variants) used to derive
-/// the SAME session id as the cron-fire path, so two write streams
-/// could interleave into one history. This helper is the choke
-/// point at `SenderContext` construction.
-fn sanitize_channel_name(name: &str) -> String {
-    if crate::types::is_reserved_system_channel(name) {
-        tracing::warn!(
-            requested = %name,
-            "channel name collides with reserved kernel system channel; \
-             renaming to `ext-<name>` to keep session history disjoint \
-             (audit: cron-channel-name-not-reserved)"
-        );
-        format!("ext-{}", name.trim().to_ascii_lowercase())
-    } else {
-        name.to_string()
-    }
-}
+/// Re-export of [`crate::types::sanitize_channel_name`] so the
+/// bridge call sites keep working unchanged; the canonical
+/// implementation lives in `types.rs` so non-bridge external
+/// `SenderContext` construction sites (HTTP request body,
+/// approval-replay path) can call it without a `bridge` dep.
+use crate::types::sanitize_channel_name;
 
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
@@ -8950,8 +8929,7 @@ mod tests {
         use librefang_types::agent::{AgentId, SessionId};
         let agent = AgentId::new();
         let kernel_internal = SessionId::for_channel(agent, "cron");
-        let sanitized_external =
-            SessionId::for_channel(agent, &sanitize_channel_name("cron"));
+        let sanitized_external = SessionId::for_channel(agent, &sanitize_channel_name("cron"));
         assert_ne!(
             kernel_internal, sanitized_external,
             "operator-typed `Custom(\"cron\")` must NOT collide with the \

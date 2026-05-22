@@ -24,6 +24,40 @@ pub fn is_reserved_system_channel(name: &str) -> bool {
     RESERVED_SYSTEM_CHANNEL_NAMES.iter().any(|r| *r == lower)
 }
 
+/// Sanitize a raw channel name before it reaches `SessionId`
+/// derivation. If `name` would collide with a kernel-internal system
+/// channel (`cron`, `autonomous`, `webui` — see
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`]), prefix it with `ext-` so it
+/// derives a disjoint `SessionId` via
+/// `SessionId::for_channel(agent, name)` instead of writing into the
+/// kernel's cron/autonomous/webui session history. Matching is
+/// case-insensitive — `for_channel` lowercases internally before
+/// hashing.
+///
+/// Audit: cron-channel-name-not-reserved. External callers that
+/// construct a `SenderContext` (HTTP request body, channel bridge
+/// adapter `ChannelType::Custom("cron")`, stored deferred-tool
+/// metadata) used to be able to drive `channel = "cron"` (or case
+/// variants) into `SessionId::for_channel` and collide with the
+/// internal cron-fire path — two independent write streams
+/// interleaving into one history. Every external `SenderContext`
+/// construction site must funnel through this helper.
+pub fn sanitize_channel_name(name: &str) -> String {
+    if is_reserved_system_channel(name) {
+        let renamed = format!("ext-{}", name.trim().to_ascii_lowercase());
+        tracing::warn!(
+            requested = %name,
+            renamed_to = %renamed,
+            "channel name collides with reserved kernel system channel; \
+             renaming to keep session history disjoint \
+             (audit: cron-channel-name-not-reserved)"
+        );
+        renamed
+    } else {
+        name.to_string()
+    }
+}
+
 /// Truncate `s` to at most `max_bytes`, respecting UTF-8 char boundaries.
 pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
