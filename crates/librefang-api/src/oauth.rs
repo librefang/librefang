@@ -403,18 +403,27 @@ impl TokenStore {
             .map(|(sub, entry)| (sub.clone(), entry.clone()))
     }
 
-    /// Find any stored entry with a refresh token, evicting expired entries.
-    async fn find_any_with_refresh(&self) -> Option<(String, StoredTokens)> {
+    /// Find any stored entry that has a refresh token, evicting expired
+    /// entries first.
+    ///
+    /// Returns the refresh token as a non-optional `String` so callers cannot
+    /// reach for `.unwrap()` on `entry.refresh_token` (audit:
+    /// `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on
+    /// refresh_token"). The `Some(..)` arm is itself the proof that a refresh
+    /// token is present — the invariant lives in the type, not in a comment.
+    async fn find_any_with_refresh(&self) -> Option<(String, String, StoredTokens)> {
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
         // Evict expired entries.
         write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
 
-        write
-            .iter()
-            .find(|(_sub, entry)| entry.refresh_token.is_some())
-            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+        write.iter().find_map(|(sub, entry)| {
+            entry
+                .refresh_token
+                .clone()
+                .map(|rt| (sub.clone(), rt, entry.clone()))
+        })
     }
 }
 
@@ -1353,13 +1362,14 @@ pub async fn auth_refresh(
     } else {
         // Neither refresh token nor provider — try to find any stored refresh token.
         match TOKEN_STORE.find_any_with_refresh().await {
-            Some((sub, entry)) => {
+            Some((sub, refresh_token, entry)) => {
                 let provider = providers
                     .iter()
                     .find(|p| p.id == entry.provider_id)
                     .cloned();
-                // refresh_token is guaranteed Some by find_any_with_refresh
-                (entry.refresh_token.unwrap(), Some(sub), provider)
+                // `find_any_with_refresh` hands back the refresh token directly,
+                // so there is no Option to unwrap here.
+                (refresh_token, Some(sub), provider)
             }
             None => {
                 return (

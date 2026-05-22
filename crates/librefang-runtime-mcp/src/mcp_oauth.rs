@@ -635,6 +635,16 @@ pub enum McpOAuthError {
     Io(#[from] std::io::Error),
     #[error("vault crypto/format error: {0}")]
     Crypto(String),
+    /// A cached token expired and the automatic refresh attempt failed for a
+    /// reason that is **not** "the refresh token is revoked" — a 5xx / timeout
+    /// / network error (transient), or another non-`invalid_grant` failure
+    /// (permanent). Distinct from `Ok(None)` so the connection layer does
+    /// NOT discard a still-valid refresh token and force a re-auth on a
+    /// transient outage (audit: `oauth-refresh-error-body-token-leak`).
+    /// The message carries only a status code / sanitized reason — never the
+    /// token-endpoint response body.
+    #[error("token refresh failed: {0}")]
+    RefreshFailed(String),
 }
 
 /// Trait for OAuth token storage and management.
