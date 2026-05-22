@@ -4370,6 +4370,12 @@ pub async fn patch_agent(
                 );
             }
         };
+        // Localize the scrubbed internal-error message before dropping the
+        // translator (`ErrorTranslator` is `!Send`, so it must not survive
+        // across the `update_manifest` call site). The detailed cause still
+        // reaches tracing::error! below; only the generic, localized text
+        // is surfaced to the client.
+        let internal_error_msg = t.t("api-error-internal");
         drop(t);
         return match state.kernel.update_manifest(agent_id, manifest) {
             Ok(()) => (
@@ -4384,8 +4390,8 @@ pub async fn patch_agent(
             // rusqlite-errors-leak). The full chain (column names,
             // constraint identifiers, lock state) still reaches
             // tracing::error! for ops; the response body is the
-            // generic "Internal server error" so the client sees
-            // no schema details. Surrounding match arm shape is
+            // generic, localized "Internal server error" so the client
+            // sees no schema details. Surrounding match arm shape is
             // `(StatusCode, Json<Value>)` so we hand-construct the
             // scrubbed pair here rather than detour through
             // `ApiErrorResponse::into_response()`.
@@ -4393,7 +4399,7 @@ pub async fn patch_agent(
                 tracing::error!(error = %e, "agent manifest update failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Internal server error"})),
+                    Json(serde_json::json!({"error": internal_error_msg})),
                 )
             }
         };
