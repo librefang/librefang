@@ -11,6 +11,7 @@
 use crate::llm_driver::{CompletionRequest, LlmDriver};
 use crate::web_search::WebToolsContext;
 use librefang_types::agent::AgentManifest;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{Message, Role};
 use tracing::{debug, warn};
 
@@ -95,7 +96,19 @@ async fn generate_search_queries(
         prompt_caching: false,
         cache_ttl: None,
         prompt_cache_strategy: None,
-        response_format: None,
+        // Request structured JSON output — `SEARCH_QUERY_GEN_PROMPT`
+        // explicitly tells the LLM "Respond ONLY with a JSON object:
+        // {"queries": [...]}", so the same `response_format` flag
+        // history_fold needs (#5287) applies here. Without it,
+        // DeepSeek / OpenAI / Mistral / Gemini are free to emit
+        // free-form prose that `parse_search_queries` will reject,
+        // causing `generate_search_queries` to return None and the
+        // augment path to fall back to the raw user message (the
+        // existing failure mode is silent, just degraded relevance).
+        // The prompt already contains the word "JSON" (DeepSeek's
+        // requirement for json_object mode). Providers that don't
+        // honour the flag ignore it without error.
+        response_format: Some(ResponseFormat::Json),
         timeout_secs: Some(15),
         extra_body: None,
         agent_id: None,
@@ -174,7 +187,20 @@ pub(super) async fn web_search_augment(
     {
         Some(q) if q.is_empty() => return None, // LLM says no search needed
         Some(q) => q,
-        None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+        None => {
+            // Query-generation LLM failed — non-JSON response, network
+            // error, or the response_format=Json pin we ship in this
+            // module is ignored by the provider. Falling back to a single
+            // verbatim-user-message search keeps the feature working but
+            // is observably worse than a well-formed multi-query expansion;
+            // surface it so operators can spot a degraded provider.
+            tracing::debug!(
+                user_message_chars = user_message.chars().count(),
+                "web_search_augment: LLM query generation returned no parseable queries; \
+                 falling back to verbatim user message as the single search query",
+            );
+            vec![user_message.to_string()]
+        }
     };
 
     // Search with each query and collect results
@@ -197,5 +223,98 @@ pub(super) async fn web_search_augment(
     } else {
         debug!("Web search augmentation: injecting search results");
         Some(all_results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm_driver::{CompletionResponse, LlmError};
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use std::sync::{Arc, Mutex};
+
+    /// Driver that records the `response_format` flag on every
+    /// request, then returns a benign `{"queries": []}` so
+    /// `generate_search_queries` resolves cleanly. Same shape as
+    /// `history_fold::tests::ResponseFormatRecordingDriver`.
+    struct ResponseFormatRecordingDriver {
+        observed: Arc<Mutex<Vec<Option<ResponseFormat>>>>,
+    }
+
+    impl ResponseFormatRecordingDriver {
+        fn new() -> (Self, Arc<Mutex<Vec<Option<ResponseFormat>>>>) {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            (
+                ResponseFormatRecordingDriver {
+                    observed: Arc::clone(&observed),
+                },
+                observed,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for ResponseFormatRecordingDriver {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.observed.lock().unwrap().push(req.response_format.clone());
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: r#"{"queries": []}"#.to_string(),
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    /// Regression guard for #5287 (web_augment branch) —
+    /// `generate_search_queries` must pin
+    /// `response_format = Some(ResponseFormat::Json)` on the aux
+    /// request. `SEARCH_QUERY_GEN_PROMPT` says "Respond ONLY with a
+    /// JSON object: {"queries": [...]}", so strict-output providers
+    /// (DeepSeek / OpenAI / Mistral / Gemini) need the flag set or
+    /// they're free to emit prose. The downstream `text.find('{')?`
+    /// then returns None and the entire augmentation path silently
+    /// degrades to falling back to the raw user message — same
+    /// silent-degradation class as history_fold's bulk_summary.
+    #[tokio::test]
+    async fn search_query_request_pins_response_format_json() {
+        let (rec, observed) = ResponseFormatRecordingDriver::new();
+        let driver: Box<dyn LlmDriver> = Box::new(rec);
+        let manifest = AgentManifest {
+            model: ModelConfig {
+                provider: "deepseek".to_string(),
+                model: "deepseek-chat".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let _ = generate_search_queries(
+            driver.as_ref(),
+            &manifest,
+            &[],
+            "what's the weather in tokyo?",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        let observed = observed.lock().unwrap().clone();
+        assert_eq!(
+            observed.len(),
+            1,
+            "expected exactly one aux request for query generation"
+        );
+        assert_eq!(
+            observed[0],
+            Some(ResponseFormat::Json),
+            "generate_search_queries must pin response_format = Json — \
+             the SEARCH_QUERY_GEN_PROMPT explicitly asks for a JSON \
+             object and strict-output providers need the flag set"
+        );
     }
 }

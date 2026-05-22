@@ -418,6 +418,60 @@ async fn skills_install_unknown_hand_returns_404() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_install_path_traversal_name_rejected_400() {
+    // Guards the `validate_skill_identifier` hardening (audit:
+    // skill-install-path-traversal): a `name` containing path
+    // separators / `..` must be rejected with 400 BEFORE it can reach
+    // `Path::join` and probe / write outside `~/.librefang/skills/`.
+    // The rejection must fire ahead of the NotFound branch so an
+    // attacker gets no filesystem-existence oracle.
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/install",
+        Some(serde_json::json!({"name": "../../etc/passwd"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("name"),
+        "error must scope the rejection to the bad `name` field: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_install_path_traversal_hand_rejected_400() {
+    // Same hardening, applied to the `hand` field. A traversal `hand`
+    // is joined onto `workspaces/hands/` pre-fix; it must be rejected
+    // with 400 before the `hand_dir.exists()` probe (which would
+    // otherwise yield a 404/oracle).
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/install",
+        Some(serde_json::json!({"name": "anything", "hand": "../../x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("hand"),
+        "error must scope the rejection to the bad `hand` field: {body:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/uninstall — error path only.
 // ---------------------------------------------------------------------------
