@@ -649,7 +649,147 @@ async fn test_build_router_rejects_deeply_nested_json_body() {
     );
 }
 
+/// Build a POST /api/migrate request with a loopback ConnectInfo so the
+/// unauth fail-closed branch (empty api_key) treats the oneshot as a
+/// localhost caller. Mirrors the injection in
+/// `test_run_migrate_uses_daemon_home_when_target_dir_is_empty`.
+fn migrate_request(source_dir: &str, target_dir: &str, dry_run: bool) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir,
+                "target_dir": target_dir,
+                "dry_run": dry_run,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    request
+}
+
+// ── audit: migrate-arbitrary-paths — path containment (PR #5355) ──────
+// These exercise `resolve_and_check_migrate_path` /
+// `migrate_allowed_roots` end-to-end through the real router. The
+// allowed roots are the daemon home (the test's tempdir) plus the four
+// `~/.openclaw|.openfang|.langchain|.autogpt` config dirs (only if they
+// exist). `/etc` and a `..`-traversal collapsing to `/etc` both resolve
+// outside those roots and must be refused with HTTP 400.
+
 #[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_outside_allowed_roots() {
+    let harness = start_full_router("").await;
+
+    let request = migrate_request("/etc", "", false);
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_dir=/etc is outside the allowed migration roots and must be refused"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err = json["message"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("source_dir") && err.contains("allowed migration roots"),
+        "error should name source_dir and the containment failure, got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_traversal() {
+    let harness = start_full_router("").await;
+
+    // Start inside the allowed home root but climb out with `..`. After
+    // canonicalisation this collapses to /etc, well outside any root.
+    let traversal = format!(
+        "{}/../../../../../../../../etc",
+        harness.state.kernel.home_dir().display()
+    );
+    let request = migrate_request(&traversal, "", false);
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a `..` traversal escaping the home root must be refused"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err = json["message"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("source_dir") && err.contains("allowed migration roots"),
+        "error should name source_dir and the containment failure, got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_accepts_in_root_source_dir() {
+    let harness = start_full_router("").await;
+
+    // Absolute path under the daemon home (an allowed root). Populate a
+    // minimal OpenClaw config so the migration actually runs to
+    // completion rather than failing for unrelated reasons. target_dir
+    // is left empty → resolves to the (allowed) home dir, and exercises
+    // the GAP-2 post-creation re-check on the happy non-dry-run path.
+    let source_dir = harness
+        .state
+        .kernel
+        .home_dir()
+        .join("legit-openclaw-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{
+          agents: {
+            list: [
+              { id: "main", name: "Main Agent" }
+            ],
+            defaults: {
+              model: "anthropic/some-model"
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let request = migrate_request(&source_dir.display().to_string(), "", false);
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    let status = response.status();
+    assert_ne!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a legitimate in-root source_dir must pass containment (not 400)"
+    );
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a legitimate in-root migration should complete"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "completed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+
 async fn test_config_reload_hot_reloads_proxy_changes() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
