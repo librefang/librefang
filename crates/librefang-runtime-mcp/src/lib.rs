@@ -1962,6 +1962,100 @@ fn inject_annotation_class(
     }
 }
 
+/// Basic argument guard for MCP tool calls.
+///
+/// The MCP runtime is the trust boundary between the LLM's tool-call
+/// output and the remote MCP server. Without any check, a malformed
+/// LLM tool-call (missing required field, wrong shape) reaches the
+/// server, which typically returns an implementation-specific error
+/// that the LLM cannot act on cleanly — and some servers crash outright
+/// on bad input.
+///
+/// This is intentionally a cheap guard, NOT a full JSON Schema
+/// validator: the workspace does not depend on `jsonschema` and adding
+/// it for this audit row is more weight than the finding earns. We
+/// reject the two gross failure modes the audit cites:
+///
+///   1. `arguments` is not a JSON object when the schema declares
+///      `type: "object"` (the only shape MCP currently uses).
+///   2. The schema's `required` array names fields absent from
+///      `arguments`.
+///
+/// Type-correctness of individual fields, pattern matching, enum
+/// constraints, `additionalProperties`, nested object validation, etc.
+/// remain delegated to the MCP server — same as before. Operators who
+/// need stricter validation can wrap their tools server-side. The
+/// trade-off is documented in the PR body for the originating audit
+/// row (`docs/issues/mcp-args-no-schema-check.md`).
+fn validate_args_against_schema(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    input_schema: &serde_json::Value,
+) -> Result<(), String> {
+    // Schema must be an object for any meaningful check; if the tool
+    // registered something weird (non-object schema) we skip — same
+    // forgiving stance the rest of the codebase takes toward malformed
+    // upstream metadata.
+    let Some(schema_obj) = input_schema.as_object() else {
+        return Ok(());
+    };
+
+    // If the schema declares `type: "object"` (the conventional MCP
+    // shape), arguments MUST be an object. The `arguments == null` and
+    // `arguments == {}` cases are both treated as empty-object by
+    // `call_tool` further down, so we accept them here too — only
+    // arrays / scalars are rejected.
+    let declares_object = schema_obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "object")
+        .unwrap_or(true); // absent `type` → assume object (MCP convention)
+
+    if declares_object && !arguments.is_null() && !arguments.is_object() {
+        return Err(format!(
+            "MCP tool '{}' argument validation failed: expected JSON object, got {}",
+            tool_name,
+            json_type_name(arguments)
+        ));
+    }
+
+    // Check `required` fields. Only meaningful when arguments is an
+    // object — if it's null we treat it as `{}` for the missing-fields
+    // check (any required field is missing).
+    let empty_obj = serde_json::Map::new();
+    let args_obj = arguments.as_object().unwrap_or(&empty_obj);
+
+    if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
+        let missing: Vec<&str> = required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|field| !args_obj.contains_key(*field))
+            .collect();
+
+        if !missing.is_empty() {
+            return Err(format!(
+                "MCP tool '{}' argument validation failed: missing required field(s): {}",
+                tool_name,
+                missing.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Human-readable JSON value kind for error messages.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 impl McpConnection {
     /// Call a tool on the MCP server.
     pub async fn call_tool(
@@ -1977,6 +2071,14 @@ impl McpConnection {
             .cloned()
             .or_else(|| strip_mcp_prefix(&self.config.name, name).map(|s| s.to_string()))
             .unwrap_or_else(|| name.to_string());
+
+        // Schema guard: reject obviously malformed arguments at the runtime
+        // boundary rather than forwarding them to the MCP server (which
+        // typically returns implementation-specific errors or crashes on
+        // bad input). See `validate_args_against_schema` doc for scope.
+        if let Some(tool_def) = self.tools.iter().find(|t| t.name == name) {
+            validate_args_against_schema(name, arguments, &tool_def.input_schema)?;
+        }
 
         // SECURITY: best-effort taint filter before shipping arguments
         // to an out-of-process MCP server. An LLM that has been pushed
@@ -2725,6 +2827,129 @@ mod tests {
             "email": "john@example.com",
         });
         assert!(scan_mcp_arguments_for_taint(&args).is_some());
+    }
+
+    // ── MCP argument schema guard ────────────────────────────────────────
+
+    #[test]
+    fn test_validate_args_rejects_missing_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["name", "count"],
+            "properties": {
+                "name": { "type": "string" },
+                "count": { "type": "integer" },
+            },
+        });
+        let args = serde_json::json!({ "name": "alice" });
+        let err = validate_args_against_schema("mcp_x_thing", &args, &schema)
+            .expect_err("missing `count` must be rejected");
+        assert!(
+            err.contains("count"),
+            "error must name the missing field: {err}"
+        );
+        assert!(
+            err.contains("mcp_x_thing"),
+            "error must include tool name: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_args_accepts_when_all_required_present() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } },
+        });
+        let args = serde_json::json!({ "name": "alice", "extra": 1 });
+        assert!(validate_args_against_schema("mcp_x_thing", &args, &schema).is_ok());
+    }
+
+    #[test]
+    fn test_validate_args_rejects_non_object_arguments_for_object_schema() {
+        let schema = serde_json::json!({ "type": "object" });
+        // LLM hallucinated a bare string instead of an object — exactly
+        // the "garbage from the model" case the audit row cites.
+        let args = serde_json::json!("not an object");
+        let err = validate_args_against_schema("mcp_x_thing", &args, &schema)
+            .expect_err("non-object args must be rejected");
+        assert!(err.contains("expected JSON object"), "{err}");
+        assert!(err.contains("string"), "error must name actual type: {err}");
+    }
+
+    #[test]
+    fn test_validate_args_accepts_null_as_empty_object_when_no_required() {
+        // `call_tool` treats null arguments as empty-object for transport.
+        // The guard should agree, NOT reject — otherwise zero-parameter
+        // tools break.
+        let schema = serde_json::json!({ "type": "object" });
+        assert!(
+            validate_args_against_schema("mcp_x_thing", &serde_json::Value::Null, &schema).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_args_skips_when_schema_not_object() {
+        // Some upstreams hand us a non-object schema (e.g. `true` for
+        // "any value accepted"). Don't crash, don't reject — just pass.
+        let schema = serde_json::json!(true);
+        let args = serde_json::json!({ "anything": 1 });
+        assert!(validate_args_against_schema("mcp_x_thing", &args, &schema).is_ok());
+    }
+
+    #[test]
+    fn test_call_tool_rejects_missing_required_field_before_transport() {
+        // End-to-end via `call_tool`: the validation must fire BEFORE
+        // any transport dispatch. We use an HttpCompat connection whose
+        // `base_url` points at a closed loopback port — if validation
+        // skipped, the test would hang or surface a connection error
+        // instead of the structured validation message.
+        let mut conn = McpConnection {
+            config: McpServerConfig {
+                name: "guard".to_string(),
+                transport: McpTransport::HttpCompat {
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    headers: vec![],
+                    tools: vec![],
+                },
+                timeout_secs: 30,
+                env: vec![],
+                headers: vec![],
+                oauth_provider: None,
+                oauth_config: None,
+                taint_scanning: false,
+                taint_policy: None,
+                taint_rule_sets: empty_taint_rule_sets_handle(),
+                roots: vec![],
+            },
+            tools: vec![ToolDefinition {
+                name: "mcp_guard_create".to_string(),
+                description: "create something".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["name"],
+                }),
+            }],
+            original_names: {
+                let mut m = HashMap::new();
+                m.insert("mcp_guard_create".to_string(), "create".to_string());
+                m
+            },
+            inner: McpInner::HttpCompat {
+                client: librefang_http::proxied_client(),
+            },
+            auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(conn.call_tool("mcp_guard_create", &serde_json::json!({})))
+            .expect_err("missing required field must be rejected pre-transport");
+        assert!(err.contains("missing required field"), "{err}");
+        assert!(err.contains("name"), "{err}");
     }
 
     #[test]

@@ -138,6 +138,21 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     ) {
         return true;
     }
+    // `POST /api/hands/{hand_id}/install-deps` shells out to a package
+    // manager whose argv is read straight from the HAND.toml an Admin can
+    // write via `/api/registry/content/hand`. Even with the program
+    // allowlist + flag denylist added in `routes::skills::install_hand_deps`,
+    // the endpoint still spawns a process under the daemon UID, which is the
+    // exact privilege Owner controls — restrict to Owner so an Admin role
+    // (which is "config write" by design) cannot turn into "process spawn".
+    // The matching `check-deps` sibling is a read-only readiness probe and
+    // intentionally stays at Admin.
+    if *method == axum::http::Method::POST
+        && path.starts_with("/api/hands/")
+        && path.ends_with("/install-deps")
+    {
+        return true;
+    }
     // RBAC user-management surface (M6) — every mutating call under
     // `/api/users*` (create / replace / delete / bulk import) maps to
     // `Action::ManageUsers` in the kernel, which requires `Owner`. We
@@ -1636,6 +1651,43 @@ mod tests {
                 "{role:?} must be allowed to GET /api/approvals/totp/status"
             );
         }
+    }
+
+    // Install-deps spawns a package-manager process under the daemon UID
+    // from argv that Admin can author in HAND.toml. Even with the
+    // skill::install_hand_deps allowlist + flag denylist, this is the
+    // wrong privilege boundary for an Admin role — restrict to Owner.
+    // The matching `check-deps` sibling is read-only and stays at Admin.
+    #[test]
+    fn test_install_hand_deps_is_owner_only() {
+        let post = axum::http::Method::POST;
+        let install = "/api/hands/some-hand/install-deps";
+        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+            assert!(
+                !user_role_allows_request(role, &post, install),
+                "{role:?} must NOT be allowed to POST {install}"
+            );
+        }
+        assert!(
+            user_role_allows_request(UserRole::Owner, &post, install),
+            "Owner must be allowed to POST {install}"
+        );
+
+        // Sibling readiness probe stays Admin-accessible.
+        let check = "/api/hands/some-hand/check-deps";
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, check),
+            "Admin must still be allowed to POST {check} (read-only sibling)"
+        );
+
+        // Suffix-only matches must not over-restrict — e.g. a stray
+        // `/install-deps` outside `/api/hands/` (none today, but guard
+        // against future additions tripping the gate).
+        let other = "/api/plugins/foo/install-deps";
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, other),
+            "Admin must still be allowed to POST plugin install-deps ({other})"
+        );
     }
 
     #[test]

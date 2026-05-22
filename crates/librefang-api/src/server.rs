@@ -332,11 +332,35 @@ pub(crate) fn check_bind_auth_safety(
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
 /// issued with the `Secure` attribute.
 ///
-/// Handles the multi-proxy case where the header is comma-separated — RFC 7239
-/// semantics put the client-facing proto first (`https, http` = HTTPS reached
-/// the outermost proxy, HTTP was the back-channel), so we split and check the
-/// first value only.
-fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
+/// SECURITY (audit: `x-forwarded-proto-trusted-proxies`): the
+/// `X-Forwarded-Proto` header is only honored when the immediate TCP peer
+/// is in the operator-configured `trusted_proxies` allowlist. This mirrors
+/// the existing trust gate in `client_ip.rs` for `X-Forwarded-For` /
+/// `CF-Connecting-IP` etc.
+///
+/// - Untrusted peer (open internet, including the spoofing case where a
+///   plain-HTTP daemon receives a forged `X-Forwarded-Proto: https`):
+///   the header is ignored and we return `false`. Cookies will not be
+///   issued with `Secure`, which matches the actual transport.
+/// - Trusted peer (TLS-terminating proxy that the operator allow-listed):
+///   the header is honored. Multi-proxy comma-separated values follow
+///   RFC 7239 semantics — the client-facing proto is leftmost
+///   (`https, http` = HTTPS reached the outermost proxy, HTTP was the
+///   back-channel), so we split and check the first value only.
+///
+/// Fail-closed: when `trusted_proxies` is empty (default), no peer is
+/// trusted, so the header is always ignored. Operators of plain-HTTP
+/// dev binds don't lose `Secure` (it was already absent); operators
+/// behind TLS proxies must allow-list their proxy or use option 1 of
+/// the audit recommendation (always `Secure` when auth is enabled).
+fn request_is_https(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    trusted_proxies: &crate::client_ip::TrustedProxies,
+) -> bool {
+    if trusted_proxies.is_empty() || !trusted_proxies.contains(peer) {
+        return false;
+    }
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -347,10 +371,15 @@ fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
 
 /// Build the base attribute list for the `librefang_session` cookie. `Secure`
 /// is added only when the request came in over HTTPS so local-HTTP dev keeps
-/// working; any public deployment should be proxied behind TLS (at which point
+/// working; any public deployment should be proxied behind TLS *and* have
+/// the proxy address allow-listed via `trusted_proxies` (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
-fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
-    if request_is_https(headers) {
+fn session_cookie_attrs(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    trusted_proxies: &crate::client_ip::TrustedProxies,
+) -> &'static str {
+    if request_is_https(peer, headers, trusted_proxies) {
         "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
     } else {
         "Path=/dashboard; HttpOnly; SameSite=Lax"
@@ -388,6 +417,7 @@ fn session_cookie_clear_attrs() -> &'static str {
 )]
 pub(crate) async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -577,7 +607,7 @@ pub(crate) async fn dashboard_login(
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
-                session_cookie_attrs(&headers),
+                session_cookie_attrs(peer_addr.ip(), &headers, &state.trusted_proxies),
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS
             );
             (
@@ -951,6 +981,11 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("data").join("sessions.json")
 }
 
+/// Prefix that marks a `sessions.json` map key as already hashed (the new
+/// post-#5494 on-disk format). Matches the `$sha256$` tag emitted by
+/// `password_hash::hash_device_token`.
+const SESSIONS_HASH_PREFIX: &str = "$sha256$";
+
 /// Load persisted sessions from disk, dropping any that have already expired.
 ///
 /// SECURITY (#3725): An older daemon revision wrote `sessions.json` at the
@@ -960,6 +995,23 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 /// permissive mode until something rewrites it. Tighten on load so a daemon
 /// upgraded onto a multi-user host stops leaking bearer tokens immediately
 /// instead of waiting for the next session mutation.
+///
+/// SECURITY (#5494): the on-disk map key is hashed by `save_sessions` so
+/// `sessions.json` lifted out of a backup snapshot (Time Machine, restic,
+/// BorgBackup pipelines often do NOT honor source 0600 perms) does not
+/// yield a usable set of bearer tokens. Entries whose key carries the
+/// `$sha256$` prefix are dropped on load — there is no cleartext to re-key
+/// the in-memory auth map with, so they cannot authenticate any presented
+/// token. The daemon trades cross-restart session continuity for
+/// backup-snapshot replay resistance; operators get one re-login per
+/// restart, an attacker with a month-old `sessions.json` gets nothing.
+///
+/// Entries whose key does NOT carry the `$sha256$` prefix are treated as
+/// legacy cleartext from a pre-#5494 daemon. They authenticate normally
+/// for one session lifetime and are rewritten in the new hashed form by
+/// the very next `save_sessions` call (every login, every logout, the
+/// periodic GC sweep), so the migration window is at most one mutation
+/// deep.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
@@ -995,6 +1047,14 @@ fn load_sessions(
         serde_json::from_str(&content).unwrap_or_default();
     sessions
         .into_iter()
+        .filter(|(key, _)| {
+            // New-format hashed entries (post-#5494) cannot be reversed
+            // into the cleartext key the auth middleware looks up against
+            // — keeping them would just bloat the map with rows that
+            // match no presented token. Drop them; operator must
+            // re-authenticate after restart.
+            !key.starts_with(SESSIONS_HASH_PREFIX)
+        })
         .filter(|(_, st)| {
             !crate::password_hash::is_token_expired(
                 st,
@@ -1004,16 +1064,53 @@ fn load_sessions(
         .collect()
 }
 
+/// Build the on-disk view of the in-memory session map: each key is
+/// replaced with `hash_device_token(key)` and the duplicate copy of the
+/// token carried inside `SessionToken.token` is cleared. The resulting
+/// map serialises into a `sessions.json` that contains no usable bearer
+/// token in either map position — only opaque hashes and session
+/// metadata (created_at / user_name / user_role) the daemon needs for
+/// GC.
+///
+/// SECURITY (#5494): exposed at module scope so the
+/// `sessions_for_disk_redacts_token_field` regression test in this
+/// crate can assert the redaction directly without booting a daemon.
+fn sessions_for_disk(
+    sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
+) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
+    sessions
+        .iter()
+        .map(|(token, st)| {
+            let mut redacted = st.clone();
+            // Wipe the inner copy of the token so a backup snapshot
+            // doesn't hand the attacker the same secret via the value
+            // payload that the key already hid.
+            redacted.token.clear();
+            (crate::password_hash::hash_device_token(token), redacted)
+        })
+        .collect()
+}
+
 /// Persist active sessions to disk so they survive daemon restarts.
 ///
 /// SECURITY: The file is written with owner-only permissions (0600) so that
 /// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
+///
+/// SECURITY (#5494): each map key is hashed via `hash_device_token` (and
+/// the duplicate `SessionToken.token` field is cleared) before
+/// serialization, so `sessions.json` cannot be replayed even if leaked
+/// through a backup pipeline that did not honor the source 0600 perms
+/// (Time Machine, restic, BorgBackup snapshots). The in-memory
+/// `active_sessions` map keeps the cleartext token as the key, so live
+/// auth lookups in `middleware.rs` (`sessions.get(token_str)`) are
+/// unchanged.
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
 ) {
     let path = sessions_path(home_dir);
-    match serde_json::to_string(sessions) {
+    let on_disk = sessions_for_disk(sessions);
+    match serde_json::to_string(&on_disk) {
         Ok(content) => {
             // Atomic save with mode(0o600) at create-time to close the
             // TOCTOU window left by #3939: std::fs::write opened the
@@ -2414,8 +2511,7 @@ mod observability_tests {
         };
         let expired = crate::password_hash::SessionToken {
             token: "expired-token".to_string(),
-            created_at: now
-                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            created_at: now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
             user_name: None,
             user_role: None,
         };
@@ -2424,14 +2520,26 @@ mod observability_tests {
         sessions.insert("live-token".to_string(), live);
         sessions.insert("expired-token".to_string(), expired);
 
-        // Initial persist — both tokens on disk. Read raw bytes
-        // because `load_sessions` filters expired tokens at load,
-        // hiding the on-disk state from the in-memory caller.
+        // Per #5494, the on-disk form is keyed by the SHA-256 hash of
+        // the cleartext token (and the inner token field is wiped), so
+        // the assertion shape changed from "raw file contains the
+        // cleartext literal" to "raw file contains the token's hash
+        // AND never the cleartext".
+        let live_hash = crate::password_hash::hash_device_token("live-token");
+        let expired_hash = crate::password_hash::hash_device_token("expired-token");
+
+        // Initial persist — both tokens on disk (in hashed form). Read
+        // raw bytes because `load_sessions` filters expired tokens at
+        // load, hiding the on-disk state from the in-memory caller.
         save_sessions(home, &sessions);
         let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
         assert!(
-            raw_before.contains("live-token") && raw_before.contains("expired-token"),
-            "baseline: both tokens must be on disk before the GC step: {raw_before}"
+            raw_before.contains(&live_hash) && raw_before.contains(&expired_hash),
+            "baseline: both token HASHES must be on disk before the GC step: {raw_before}"
+        );
+        assert!(
+            !raw_before.contains("live-token") && !raw_before.contains("expired-token"),
+            "baseline: NEITHER cleartext bearer must appear on disk (#5494): {raw_before}"
         );
 
         // Simulate the GC retain step — same shape as the
@@ -2442,19 +2550,27 @@ mod observability_tests {
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "retain dropped the expired entry in memory"
+        );
         save_sessions(home, &sessions);
 
         let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
         assert!(
-            raw_after.contains("live-token"),
-            "live token must still be on disk after the GC sweep: {raw_after}"
+            raw_after.contains(&live_hash),
+            "live token's hash must still be on disk after the GC sweep: {raw_after}"
         );
         assert!(
-            !raw_after.contains("expired-token"),
+            !raw_after.contains(&expired_hash),
             "expired token MUST NOT be on disk after the GC sweep — \
              the audit-flagged disk-bloat lever was that expired tokens \
              survived restart in the file: {raw_after}"
+        );
+        assert!(
+            !raw_after.contains("live-token"),
+            "live cleartext bearer must NEVER leak to disk (#5494): {raw_after}"
         );
     }
 
@@ -2512,6 +2628,122 @@ mod observability_tests {
         assert!(
             leftover.is_empty(),
             "temp file must be renamed away, not left behind"
+        );
+    }
+
+    // ---- #5494: sessions.json must never contain a usable bearer token ----
+
+    fn make_session_5494(token: &str) -> crate::password_hash::SessionToken {
+        crate::password_hash::SessionToken {
+            token: token.to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            user_name: Some("admin".to_string()),
+            user_role: Some("owner".to_string()),
+        }
+    }
+
+    /// `sessions_for_disk` must replace the map key with a `$sha256$`
+    /// hash AND wipe the inner duplicate of the token, so the on-disk
+    /// `SessionToken.token` field carries no cleartext either. Without
+    /// the second wipe the hash on the key would be theatre — the
+    /// value payload still holds the same secret in a recoverable form.
+    #[test]
+    fn sessions_for_disk_redacts_token_field() {
+        let cleartext = "f0e1d2c3b4a596878695a4b3c2d1e0f0e1d2c3b4a596878695a4b3c2d1e0f0e1";
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(cleartext.to_string(), make_session_5494(cleartext));
+
+        let on_disk = sessions_for_disk(&sessions);
+
+        assert_eq!(on_disk.len(), 1, "must preserve all rows");
+        for (key, value) in &on_disk {
+            assert!(
+                key.starts_with(SESSIONS_HASH_PREFIX),
+                "on-disk key must be hashed, got {key}"
+            );
+            assert_ne!(
+                key, cleartext,
+                "on-disk key must NOT equal the cleartext bearer"
+            );
+            assert!(
+                value.token.is_empty(),
+                "inner SessionToken.token must be wiped so the file holds no replayable bearer"
+            );
+        }
+    }
+
+    /// End-to-end audit threat model: a daemon writes a session to
+    /// `sessions.json`, the file is later restored from a backup
+    /// snapshot (Time Machine, restic, BorgBackup), and the original
+    /// cleartext token must NOT authenticate against the re-loaded
+    /// map. Asserts both that the raw file holds no cleartext AND that
+    /// `load_sessions` does not produce a row keyed by it.
+    #[test]
+    fn save_then_load_does_not_resurrect_cleartext_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        // 64-hex, matching the real generate_session_token CSPRNG output shape.
+        let cleartext = "deadbeef".repeat(8);
+        let mut live = std::collections::HashMap::new();
+        live.insert(cleartext.clone(), make_session_5494(&cleartext));
+        save_sessions(home, &live);
+
+        let raw = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            !raw.contains(&cleartext),
+            "sessions.json must not contain the cleartext bearer: {raw}"
+        );
+
+        // `load_sessions` simulates both the boot path and what a
+        // forensic reader would derive from a backup. The middleware's
+        // auth lookup is `sessions.get(presented_token_cleartext)`, so
+        // absence of the cleartext key here means a presented
+        // `Bearer <cleartext>` returns None ⇒ 401.
+        let reloaded = load_sessions(home);
+        assert!(
+            !reloaded.contains_key(&cleartext),
+            "disk-recovered map must not authenticate the original cleartext token"
+        );
+    }
+
+    /// Legacy `sessions.json` (written by a pre-#5494 daemon, cleartext
+    /// keys) must continue to authenticate so that upgrading the
+    /// daemon does not log every active user out instantly. On the
+    /// next mutation the file is migrated to the hashed form.
+    #[test]
+    fn load_sessions_accepts_legacy_cleartext_keys_for_one_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let cleartext = "a".repeat(64);
+        let legacy: std::collections::HashMap<String, crate::password_hash::SessionToken> =
+            std::iter::once((cleartext.clone(), make_session_5494(&cleartext))).collect();
+        // Simulate the pre-#5494 on-disk layout by writing the
+        // in-memory form directly (no hashing).
+        std::fs::write(sessions_path(home), serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let reloaded = load_sessions(home);
+        assert!(
+            reloaded.contains_key(&cleartext),
+            "legacy cleartext sessions.json entries must continue to auth across one upgrade cycle"
+        );
+
+        // Next save_sessions migrates the file in place.
+        save_sessions(home, &reloaded);
+        let migrated_raw = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            !migrated_raw.contains(&cleartext),
+            "save_sessions after legacy load must rewrite the file in the hashed form"
+        );
+        assert!(
+            migrated_raw.contains(SESSIONS_HASH_PREFIX),
+            "migrated file must carry the $sha256$ marker for the rewritten entry: {migrated_raw}"
         );
     }
 }
@@ -2719,8 +2951,18 @@ fn is_daemon_responding(addr: &str) -> bool {
 
 #[cfg(test)]
 mod session_cookie_attrs_tests {
-    use super::{session_cookie_attrs, session_cookie_clear_attrs};
+    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
+    use crate::client_ip::TrustedProxies;
     use axum::http::HeaderMap;
+    use std::net::IpAddr;
+
+    fn tp(entries: &[&str]) -> TrustedProxies {
+        TrustedProxies::compile(&entries.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn clear_attrs_always_contain_secure() {
@@ -2738,15 +2980,90 @@ mod session_cookie_attrs_tests {
         assert!(attrs.contains("Path=/dashboard"));
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Audit: `x-forwarded-proto-trusted-proxies`
+    //
+    // `X-Forwarded-Proto` is now interpreted only when the immediate
+    // TCP peer is in `trusted_proxies`. These tests pin the gate.
+    // ─────────────────────────────────────────────────────────────
+
     #[test]
-    fn login_attrs_remain_transport_dependent() {
-        // Sanity: the login-path attrs builder still keeps `Secure`
-        // off for plain HTTP (local-dev affordance) and on for HTTPS /
-        // X-Forwarded-Proto=https. Only the clear path is unconditional.
+    fn xfp_ignored_when_peer_is_untrusted() {
+        // Forged `X-Forwarded-Proto: https` from the open internet
+        // against a plain-HTTP daemon. Operator has not allow-listed
+        // the source. The header MUST be ignored — `Secure` would
+        // pin the cookie to HTTPS even though the actual transport
+        // is plain HTTP, and the attacker controls the input.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("203.0.113.7");
         let mut h = HeaderMap::new();
-        assert!(!session_cookie_attrs(&h).contains("Secure"));
         h.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(session_cookie_attrs(&h).contains("Secure"));
+        assert!(
+            !request_is_https(peer, &h, &trusted),
+            "forged X-Forwarded-Proto from an untrusted peer must be ignored"
+        );
+        assert!(
+            !session_cookie_attrs(peer, &h, &trusted).contains("Secure"),
+            "untrusted peer + forged xfp must not produce `Secure` cookie"
+        );
+    }
+
+    #[test]
+    fn xfp_honored_when_peer_is_trusted() {
+        // Operator-allow-listed reverse proxy on 172.19.0.0/16
+        // (e.g. docker bridge for nginx) forwarding a real HTTPS
+        // request. We honor its claim and emit `Secure`.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(request_is_https(peer, &h, &trusted));
+        assert!(session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
+    }
+
+    #[test]
+    fn trusted_peer_without_xfp_is_plain_http() {
+        // The naive-nginx case the audit calls out. Proxy is
+        // allow-listed but the operator forgot to forward
+        // `X-Forwarded-Proto`. We have no positive evidence of
+        // TLS, so we MUST treat the request as plain HTTP. The
+        // resulting missing-`Secure` cookie is intentional — the
+        // operator notices at deploy time and fixes the proxy
+        // config, rather than discovering the gap after a leak.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let h = HeaderMap::new(); // no x-forwarded-proto
+        assert!(!request_is_https(peer, &h, &trusted));
+        assert!(!session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
+    }
+
+    #[test]
+    fn empty_trusted_proxies_ignores_xfp_unconditionally() {
+        // Fail-closed default: no `trusted_proxies` configured means
+        // we never honor `X-Forwarded-Proto`, regardless of peer.
+        // (Operators of an HTTPS-direct bind don't reach this code
+        // path with a header at all; operators behind a TLS proxy
+        // must allow-list it.)
+        let trusted = tp(&[]);
+        let peer = ip("172.19.0.5"); // would be trusted under non-empty list
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!request_is_https(peer, &h, &trusted));
+    }
+
+    #[test]
+    fn xfp_multi_value_uses_leftmost_when_peer_trusted() {
+        // RFC 7239 multi-proxy chain: leftmost is client-facing.
+        // Behavior preserved across the trust-gate refactor.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        assert!(request_is_https(peer, &h, &trusted));
+
+        let mut h2 = HeaderMap::new();
+        h2.insert("x-forwarded-proto", "http, https".parse().unwrap());
+        assert!(!request_is_https(peer, &h2, &trusted));
     }
 }
 

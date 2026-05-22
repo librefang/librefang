@@ -1020,7 +1020,7 @@ async fn handle_code_exchange(
     // Check allowed domains.
     if !provider.allowed_domains.is_empty() {
         if let Some(ref email) = claims.email {
-            let domain = email.rsplit('@').next().unwrap_or("");
+            let domain = email_domain(email);
             if !provider.allowed_domains.iter().any(|d| d == domain) {
                 return (
                     StatusCode::FORBIDDEN,
@@ -1061,9 +1061,13 @@ async fn handle_code_exchange(
             .into_response();
     }
 
+    // SECURITY: log only the email domain at INFO — full email is PII and
+    // production INFO logs typically ship to aggregators with longer retention
+    // than DEBUG. The domain alone preserves the diagnostic value (which IdP
+    // tenant signed in) without leaking the user identifier.
     info!(
         sub = %claims.sub,
-        email = ?claims.email,
+        domain = %claims.email.as_deref().map(email_domain).unwrap_or(""),
         provider = %provider.id,
         "External auth login successful"
     );
@@ -1491,9 +1495,11 @@ pub async fn oidc_auth_middleware(
                 // tokens without an email claim MUST be rejected.
                 if !provider.allowed_domains.is_empty() {
                     if let Some(ref email) = claims.email {
-                        let domain = email.rsplit('@').next().unwrap_or("");
+                        let domain = email_domain(email);
                         if !provider.allowed_domains.iter().any(|d| d == domain) {
-                            debug!(email = %email, "Email domain not in allowed list");
+                            // SECURITY: log only the domain — the full email is PII even at
+                            // DEBUG. `domain` is already extracted just above for the check.
+                            debug!(domain = %domain, "Email domain not in allowed list");
                             return (
                                 StatusCode::FORBIDDEN,
                                 Json(serde_json::json!({"error": "Email domain not authorized"})),
@@ -1956,10 +1962,43 @@ pub async fn validate_external_token(
     Err("Token could not be validated against any configured provider".to_string())
 }
 
+/// Return the domain portion (everything after the last `@`) of an email.
+///
+/// SECURITY: this is the only form of an email address allowed into logs —
+/// the local part is the user identifier (PII), the domain is a non-PII
+/// diagnostic anchor (which IdP tenant signed in). Used both for
+/// `allowed_domains` authorization checks and for redacted log fields.
+///
+/// Malformed inputs never panic: no `@` returns the whole string (a token
+/// that isn't an address has no local part to leak), an empty or
+/// trailing-`@` value returns `""`.
+fn email_domain(email: &str) -> &str {
+    email.rsplit('@').next().unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn email_domain_redacts_local_part_and_handles_malformed_input() {
+        // Normal address: only the domain survives, never the local part (PII).
+        assert_eq!(email_domain("user@example.com"), "example.com");
+        // Multiple `@`: take everything after the last one; no panic.
+        assert_eq!(email_domain("a@b@corp.example.com"), "corp.example.com");
+        // No `@` at all: returns the whole string (not an address, no local
+        // part to leak) — must not panic.
+        assert_eq!(email_domain("noatsign"), "noatsign");
+        // Trailing `@`: empty domain, never leaks the local part.
+        assert_eq!(email_domain("user@"), "");
+        // Leading `@`: domain only.
+        assert_eq!(email_domain("@example.com"), "example.com");
+        // Empty input: empty domain.
+        assert_eq!(email_domain(""), "");
+        // The local part is never present in the output for a valid address.
+        assert!(!email_domain("secret-user@example.com").contains("secret-user"));
+    }
 
     #[test]
     fn test_oidc_audience_single() {

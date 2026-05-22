@@ -1189,10 +1189,10 @@ impl LibreFangKernel {
                     // enhancement, not a contract the agent's
                     // operation depends on.
                     // (audit: trigger-engine-no-per-agent-cap)
-                    if let Err(e) =
-                        self.workflows
-                            .triggers
-                            .register(agent_id, pattern, prompt, 0)
+                    if let Err(e) = self
+                        .workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0)
                     {
                         warn!(
                             agent = %name,
@@ -1238,6 +1238,13 @@ impl LibreFangKernel {
                         thread_id: None,
                         account_id: None,
                         is_internal_cron: false,
+                        // Trusted internal system path: keep the reserved
+                        // `"autonomous"` channel so the kernel resolver derives
+                        // the legacy `for_channel(agent, "autonomous")` session
+                        // instead of rewriting it to `ext-autonomous` (audit:
+                        // cron-channel-name-not-reserved). NOT `is_internal_cron`
+                        // — autonomous ticks must not strip `[SILENT]` markers.
+                        is_internal_system: true,
                         ..Default::default()
                     };
                     match k.send_message_with_sender_context(aid, &msg, &sender).await {

@@ -209,6 +209,37 @@ impl LibreFangKernel {
         }
     }
 
+    /// Delete a single session by id and reclaim any process-local side-state
+    /// keyed on it.
+    ///
+    /// Session-keyed side-state currently means the per-session
+    /// `file_read_tracker` bucket. Before this method existed the API DELETE
+    /// route called `memory_substrate().delete_session(...)` directly, which
+    /// left a tracker entry per ever-existed session in the daemon — the
+    /// only reclamation path was the context compressor, and deleted sessions
+    /// never reach the compressor. Long-lived daemons leaked one entry per
+    /// deleted session monotonically.
+    ///
+    /// Unlike [`Self::reset_session`] / [`Self::reboot_session`], this method
+    /// does **not** recreate an empty session at the same sid, does not fire
+    /// `SessionEnd` / `SessionReset` external hooks, and does not touch the
+    /// agent registry pointer — it is a plain hard delete intended for the
+    /// dashboard "delete session" affordance and any equivalent CLI path.
+    /// Callers that need the recreate-and-fire-hooks semantic want
+    /// `reset_session(_, ResetScope::Session(sid))` instead.
+    pub fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+        self.memory
+            .substrate
+            .delete_session(session_id)
+            .map_err(KernelError::LibreFang)?;
+        // Reclaim the per-session `file_read_tracker` bucket so the
+        // process-wide registry doesn't accumulate one entry per ever-deleted
+        // session. Context-compression GC remains the fallback for live
+        // sessions that never reach this path.
+        librefang_runtime::file_read_tracker::forget_session(&session_id);
+        Ok(())
+    }
+
     /// Implementation of [`ResetScope::Agent`] — wipe every session for this
     /// agent. `save_summary` distinguishes reset (true) vs. reboot (false).
     ///

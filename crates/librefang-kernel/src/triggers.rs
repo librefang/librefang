@@ -1477,12 +1477,14 @@ mod tests {
     fn test_register_trigger() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let id = engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event occurred: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let id = engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event occurred: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
         assert!(engine.get(id).is_some());
     }
 
@@ -1490,12 +1492,14 @@ mod tests {
     fn test_evaluate_lifecycle() {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
-        engine.register(
-            watcher,
-            TriggerPattern::Lifecycle,
-            "Lifecycle: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::Lifecycle,
+                "Lifecycle: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1516,14 +1520,16 @@ mod tests {
     fn test_evaluate_agent_spawned_pattern() {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
-        engine.register(
-            watcher,
-            TriggerPattern::AgentSpawned {
-                name_pattern: "coder".to_string(),
-            },
-            "Coder spawned: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::AgentSpawned {
+                    name_pattern: "coder".to_string(),
+                },
+                "Coder spawned: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // This should match
         let event = Event::new(
@@ -1552,12 +1558,14 @@ mod tests {
     fn test_max_fires() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            2, // max 2 fires
-        ).unwrap();
+        let tid = engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                2, // max 2 fires
+            )
+            .unwrap();
         // Disable cooldown so we can fire rapidly in the test.
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
 
@@ -1580,7 +1588,9 @@ mod tests {
     fn test_remove_trigger() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let id = engine.register(agent_id, TriggerPattern::All, "msg".to_string(), 0).unwrap();
+        let id = engine
+            .register(agent_id, TriggerPattern::All, "msg".to_string(), 0)
+            .unwrap();
         assert!(engine.remove(id));
         assert!(engine.get(id).is_none());
     }
@@ -1589,8 +1599,12 @@ mod tests {
     fn test_remove_agent_triggers() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(agent_id, TriggerPattern::All, "a".to_string(), 0).unwrap();
-        engine.register(agent_id, TriggerPattern::System, "b".to_string(), 0).unwrap();
+        engine
+            .register(agent_id, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
+        engine
+            .register(agent_id, TriggerPattern::System, "b".to_string(), 0)
+            .unwrap();
         assert_eq!(engine.list_agent_triggers(agent_id).len(), 2);
 
         engine.remove_agent_triggers(agent_id);
@@ -1601,14 +1615,16 @@ mod tests {
     fn test_content_match() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(
-            agent_id,
-            TriggerPattern::ContentMatch {
-                substring: "quota".to_string(),
-            },
-            "Alert: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                agent_id,
+                TriggerPattern::ContentMatch {
+                    substring: "quota".to_string(),
+                },
+                "Alert: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1629,8 +1645,12 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
-        engine.register(old_agent, TriggerPattern::System, "b".to_string(), 0).unwrap();
+        engine
+            .register(old_agent, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
+        engine
+            .register(old_agent, TriggerPattern::System, "b".to_string(), 0)
+            .unwrap();
 
         let count = engine.reassign_agent_triggers(old_agent, new_agent);
         assert_eq!(count, 2);
@@ -1654,7 +1674,9 @@ mod tests {
     fn test_reassign_agent_triggers_no_match_returns_zero() {
         let engine = TriggerEngine::new();
         let agent_a = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        engine
+            .register(agent_a, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
 
         let count = engine.reassign_agent_triggers(AgentId::new(), AgentId::new());
         assert_eq!(count, 0);
@@ -1668,8 +1690,12 @@ mod tests {
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0).unwrap();
-        engine.register(agent_b, TriggerPattern::System, "b".to_string(), 0).unwrap();
+        engine
+            .register(agent_a, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
+        engine
+            .register(agent_b, TriggerPattern::System, "b".to_string(), 0)
+            .unwrap();
 
         let count = engine.reassign_agent_triggers(agent_a, agent_c);
         assert_eq!(count, 1);
@@ -1685,15 +1711,19 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        engine.register(
-            old_agent,
-            TriggerPattern::ContentMatch {
-                substring: "deploy".to_string(),
-            },
-            "Deploy alert: {{event}}".to_string(),
-            5,
-        ).unwrap();
-        engine.register(old_agent, TriggerPattern::Lifecycle, "lc".to_string(), 0).unwrap();
+        engine
+            .register(
+                old_agent,
+                TriggerPattern::ContentMatch {
+                    substring: "deploy".to_string(),
+                },
+                "Deploy alert: {{event}}".to_string(),
+                5,
+            )
+            .unwrap();
+        engine
+            .register(old_agent, TriggerPattern::Lifecycle, "lc".to_string(), 0)
+            .unwrap();
 
         // Take triggers — engine should be empty for old agent
         let taken = engine.take_agent_triggers(old_agent);
@@ -1730,7 +1760,9 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        let tid = engine
+            .register(old_agent, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
         engine.set_enabled(tid, false);
 
         let taken = engine.take_agent_triggers(old_agent);
@@ -1752,12 +1784,14 @@ mod tests {
     fn test_evaluate_no_target_wakes_owner() {
         let engine = TriggerEngine::new();
         let owner = AgentId::new();
-        engine.register(
-            owner,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                owner,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1779,16 +1813,18 @@ mod tests {
         let engine = TriggerEngine::new();
         let owner = AgentId::new();
         let target = AgentId::new();
-        engine.register_with_target(
-            owner,
-            TriggerPattern::All,
-            "Cross-wake: {{event}}".to_string(),
-            0,
-            Some(target),
-            None,
-            None,
-            None,
-        ).unwrap();
+        engine
+            .register_with_target(
+                owner,
+                TriggerPattern::All,
+                "Cross-wake: {{event}}".to_string(),
+                0,
+                Some(target),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1811,14 +1847,16 @@ mod tests {
         let engine = TriggerEngine::new();
         let owner = AgentId::new();
         let target = AgentId::new();
-        let tid = engine.register_cross_agent_trigger(
-            owner,
-            target,
-            TriggerPattern::AgentSpawned {
-                name_pattern: "worker".to_string(),
-            },
-            "Worker spawned: {{event}}".to_string(),
-        ).unwrap();
+        let tid = engine
+            .register_cross_agent_trigger(
+                owner,
+                target,
+                TriggerPattern::AgentSpawned {
+                    name_pattern: "worker".to_string(),
+                },
+                "Worker spawned: {{event}}".to_string(),
+            )
+            .unwrap();
 
         let trigger = engine.get(tid).unwrap();
         assert_eq!(trigger.agent_id, owner);
@@ -1846,16 +1884,18 @@ mod tests {
         let target = AgentId::new();
         let new_owner = AgentId::new();
 
-        engine.register_with_target(
-            old_owner,
-            TriggerPattern::System,
-            "sys: {{event}}".to_string(),
-            0,
-            Some(target),
-            None,
-            None,
-            None,
-        ).unwrap();
+        engine
+            .register_with_target(
+                old_owner,
+                TriggerPattern::System,
+                "sys: {{event}}".to_string(),
+                0,
+                Some(target),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let taken = engine.take_agent_triggers(old_owner);
         assert_eq!(taken.len(), 1);
@@ -1878,12 +1918,14 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         // Register trigger with default cooldown (5s)
-        engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1907,12 +1949,14 @@ mod tests {
     fn test_cooldown_unwedges_on_future_last_fired_at() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let tid = engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // Simulate a future-dated `last_fired_at` — far enough ahead that
         // the bug's `unwrap_or(Duration::ZERO)` path would suppress every
@@ -1951,12 +1995,14 @@ mod tests {
     fn test_zero_cooldown_allows_rapid_refire() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let tid = engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
         // Explicitly disable cooldown
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
 
@@ -1981,12 +2027,14 @@ mod tests {
 
         // Register 5 triggers — all match All pattern
         for agent_id in &agents {
-            let tid = engine.register(
-                *agent_id,
-                TriggerPattern::All,
-                "Event: {{event}}".to_string(),
-                0,
-            ).unwrap();
+            let tid = engine
+                .register(
+                    *agent_id,
+                    TriggerPattern::All,
+                    "Event: {{event}}".to_string(),
+                    0,
+                )
+                .unwrap();
             // Disable cooldown so all are eligible
             engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
         }
@@ -2008,12 +2056,14 @@ mod tests {
     fn test_cooldown_clears_on_remove() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let tid = engine
+            .register(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2037,7 +2087,9 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        let tid = engine
+            .register(old_agent, TriggerPattern::All, "a".to_string(), 0)
+            .unwrap();
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(30);
 
         let taken = engine.take_agent_triggers(old_agent);
@@ -2108,14 +2160,16 @@ mod tests {
     fn test_content_match_on_custom_json_event() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(
-            agent_id,
-            TriggerPattern::ContentMatch {
-                substring: "deploy".to_string(),
-            },
-            "Deploy alert: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                agent_id,
+                TriggerPattern::ContentMatch {
+                    substring: "deploy".to_string(),
+                },
+                "Deploy alert: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let payload =
             serde_json::to_vec(&serde_json::json!({"type": "deploy", "data": {"env": "prod"}}))
@@ -2139,12 +2193,14 @@ mod tests {
     fn test_memory_update_trigger_fires() {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
-        engine.register(
-            watcher,
-            TriggerPattern::MemoryUpdate,
-            "Memory changed: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::MemoryUpdate,
+                "Memory changed: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2164,14 +2220,16 @@ mod tests {
     fn test_memory_key_pattern_trigger_fires() {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
-        engine.register(
-            watcher,
-            TriggerPattern::MemoryKeyPattern {
-                key_pattern: "user.".to_string(),
-            },
-            "User memory changed: {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                watcher,
+                TriggerPattern::MemoryKeyPattern {
+                    key_pattern: "user.".to_string(),
+                },
+                "User memory changed: {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // Should match
         let event = Event::new(
@@ -2210,14 +2268,16 @@ mod tests {
         let worker = AgentId::new();
         let delegator = AgentId::new();
 
-        engine.register(
-            worker,
-            TriggerPattern::TaskPosted {
-                assignee_match: Some("self".to_string()),
-            },
-            "claim and work on {{event}}".to_string(),
-            0,
-        ).unwrap();
+        engine
+            .register(
+                worker,
+                TriggerPattern::TaskPosted {
+                    assignee_match: Some("self".to_string()),
+                },
+                "claim and work on {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // A task assigned to the delegator must NOT match.
         let event_other = Event::new(
@@ -2306,16 +2366,18 @@ mod tests {
 
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register_with_target(
-            agent_id,
-            TriggerPattern::All,
-            "event: {{event}}".to_string(),
-            0,
-            None,
-            Some(0), // zero cooldown so the trigger fires immediately on every evaluation
-            Some(SessionMode::New),
-            None,
-        ).unwrap();
+        let tid = engine
+            .register_with_target(
+                agent_id,
+                TriggerPattern::All,
+                "event: {{event}}".to_string(),
+                0,
+                None,
+                Some(0), // zero cooldown so the trigger fires immediately on every evaluation
+                Some(SessionMode::New),
+                None,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2376,16 +2438,18 @@ mod tests {
 
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register_with_target(
-            agent_id,
-            TriggerPattern::All,
-            "event: {{event}}".to_string(),
-            0,
-            None,
-            Some(0),
-            Some(SessionMode::Persistent),
-            None,
-        ).unwrap();
+        engine
+            .register_with_target(
+                agent_id,
+                TriggerPattern::All,
+                "event: {{event}}".to_string(),
+                0,
+                None,
+                Some(0),
+                Some(SessionMode::Persistent),
+                None,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2411,16 +2475,18 @@ mod tests {
     fn session_mode_none_trigger_yields_none_override() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register_with_target(
-            agent_id,
-            TriggerPattern::All,
-            "event: {{event}}".to_string(),
-            0,
-            None,
-            Some(0),
-            None, // no per-trigger session mode
-            None,
-        ).unwrap();
+        engine
+            .register_with_target(
+                agent_id,
+                TriggerPattern::All,
+                "event: {{event}}".to_string(),
+                0,
+                None,
+                Some(0),
+                None, // no per-trigger session mode
+                None,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2487,16 +2553,18 @@ mod tests {
 
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let tid = engine.register_with_target(
-            agent_id,
-            TriggerPattern::All,
-            "event: {{event}}".to_string(),
-            0,
-            None,
-            Some(0),
-            Some(SessionMode::New),
-            None,
-        ).unwrap();
+        let tid = engine
+            .register_with_target(
+                agent_id,
+                TriggerPattern::All,
+                "event: {{event}}".to_string(),
+                0,
+                None,
+                Some(0),
+                Some(SessionMode::New),
+                None,
+            )
+            .unwrap();
 
         // Sanity: override is present before the patch.
         assert_eq!(
@@ -2541,16 +2609,18 @@ mod tests {
         };
         let agent_id = AgentId::new();
         // Register with a 60-second cooldown so it won't expire during the test.
-        let tid = engine1.register_with_target(
-            agent_id,
-            TriggerPattern::All,
-            "Event: {{event}}".to_string(),
-            0,
-            None,
-            Some(60),
-            None,
-            None,
-        ).unwrap();
+        let tid = engine1
+            .register_with_target(
+                agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+                None,
+                Some(60),
+                None,
+                None,
+            )
+            .unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2698,12 +2768,14 @@ mod tests {
         let agent = AgentId::new();
 
         // Register a runtime-only trigger.
-        let runtime_id = engine.register(
-            agent,
-            TriggerPattern::Lifecycle,
-            "runtime {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let runtime_id = engine
+            .register(
+                agent,
+                TriggerPattern::Lifecycle,
+                "runtime {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // Empty manifest, Keep policy → orphan survives.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Keep, |_| None);
@@ -2720,12 +2792,14 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent = AgentId::new();
 
-        let runtime_id = engine.register(
-            agent,
-            TriggerPattern::Lifecycle,
-            "runtime {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let runtime_id = engine
+            .register(
+                agent,
+                TriggerPattern::Lifecycle,
+                "runtime {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // Empty manifest, Warn policy → orphan kept, no delete.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Warn, |_| None);
@@ -2739,12 +2813,14 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent = AgentId::new();
 
-        let runtime_id = engine.register(
-            agent,
-            TriggerPattern::Lifecycle,
-            "runtime {{event}}".to_string(),
-            0,
-        ).unwrap();
+        let runtime_id = engine
+            .register(
+                agent,
+                TriggerPattern::Lifecycle,
+                "runtime {{event}}".to_string(),
+                0,
+            )
+            .unwrap();
 
         // Empty manifest, Delete policy → orphan removed.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Delete, |_| None);
@@ -3002,12 +3078,8 @@ mod tests {
         };
         let manifest = vec![make_trigger(0), make_trigger(1), make_trigger(2)];
 
-        let report = engine.reconcile_manifest_triggers(
-            agent,
-            &manifest,
-            OrphanPolicy::Keep,
-            |_| None,
-        );
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
 
         assert_eq!(
             report.created, 0,

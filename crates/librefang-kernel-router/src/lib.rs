@@ -1877,7 +1877,10 @@ system_prompt = "override"
         // not a behavioural one. Re-fetching pays a compile cost
         // but the match result is identical.
         let mut cache = RegexCache::new();
-        let matches_before = cache.get_or_compile("hello").unwrap().is_match("hello world");
+        let matches_before = cache
+            .get_or_compile("hello")
+            .unwrap()
+            .is_match("hello world");
         assert!(matches_before);
         // Flood the cache so "hello" gets evicted.
         for i in 0..(MAX_REGEX_CACHE_ENTRIES + 1) {
@@ -1885,8 +1888,14 @@ system_prompt = "override"
         }
         assert!(!cache.entries.contains_key("hello"));
         // Re-fetch — must compile fresh and still match.
-        let matches_after = cache.get_or_compile("hello").unwrap().is_match("hello world");
-        assert!(matches_after, "match outcome must survive an eviction round-trip");
+        let matches_after = cache
+            .get_or_compile("hello")
+            .unwrap()
+            .is_match("hello world");
+        assert!(
+            matches_after,
+            "match outcome must survive an eviction round-trip"
+        );
     }
 
     #[test]

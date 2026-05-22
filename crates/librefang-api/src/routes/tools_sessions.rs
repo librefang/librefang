@@ -473,7 +473,13 @@ pub async fn delete_session(
         }
     };
 
-    match state.kernel.memory_substrate().delete_session(session_id) {
+    // Route through the kernel orchestrator (rather than calling
+    // `memory_substrate().delete_session(...)` directly) so the per-session
+    // `file_read_tracker` bucket is reclaimed at the same time. Calling the
+    // substrate directly leaked one tracker entry per ever-deleted session
+    // for the daemon's lifetime — context-compression GC never runs on a
+    // dead session.
+    match state.kernel.delete_session(session_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))

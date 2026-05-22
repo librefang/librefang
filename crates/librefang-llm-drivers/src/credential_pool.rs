@@ -307,27 +307,28 @@ impl CredentialPool {
         match self.strategy {
             PoolStrategy::FillFirst => Self::acquire_fill_first(&inner.credentials),
             PoolStrategy::RoundRobin => {
-                let start = inner.round_robin_idx;
-                let result = Self::acquire_round_robin(&inner.credentials, start);
-                if result.is_some() {
-                    // Advance the index past the entry we just selected so
-                    // subsequent calls pick the next one.
-                    let available: Vec<usize> = (0..inner.credentials.len())
-                        .filter(|&i| inner.credentials[i].is_available())
-                        .collect();
-                    if available.len() > 1 {
-                        let pos_in_available = available
-                            .iter()
-                            .position(|&i| {
-                                result.as_deref() == Some(inner.credentials[i].api_key.as_str())
-                            })
-                            .unwrap_or(0);
-                        // Store the index of the *next* available slot (wrapping).
-                        let next_pos = (pos_in_available + 1) % available.len();
-                        inner.round_robin_idx = available[next_pos];
-                    }
+                let n = inner.credentials.len();
+                if n == 0 {
+                    return None;
                 }
-                result
+                // Defense-in-depth: normalize the cursor before use so any
+                // prior shrink (hot-reload) cannot point us at an
+                // out-of-bounds slot. Equivalent to the audit's
+                // `self.index %= active.len().max(1)` post-mutation hook,
+                // applied on every read so it survives any future code path
+                // that mutates `credentials` without explicit cleanup.
+                let start = inner.round_robin_idx % n;
+                // Single cycle-aware computation produces both the selected
+                // key and the next cursor — the outer cursor advance and the
+                // visible-key view come from one snapshot, eliminating the
+                // previous double-recompute race.
+                match Self::acquire_round_robin(&inner.credentials, start) {
+                    Some((key, next_idx)) => {
+                        inner.round_robin_idx = next_idx;
+                        Some(key)
+                    }
+                    None => None,
+                }
             }
             PoolStrategy::Random => Self::acquire_random(&inner.credentials),
             PoolStrategy::LeastUsed => Self::acquire_least_used(&inner.credentials),
@@ -437,23 +438,41 @@ impl CredentialPool {
 
     /// RoundRobin: starting from `start_idx`, pick the next available entry
     /// (wrapping around).
-    fn acquire_round_robin(creds: &[PooledCredential], start_idx: usize) -> Option<String> {
+    ///
+    /// Returns `(selected_api_key, next_cursor)` so the caller stores the
+    /// cursor position for the slot **after** the one we just picked, and
+    /// both values are derived from a single iteration over the credential
+    /// list. The previous implementation collected `available` into a `Vec`,
+    /// chose with `find(|&&i| i >= start_idx % n)`, then recomputed
+    /// `available` a second time in the caller to advance the cursor — two
+    /// snapshots that could disagree if the credential state changed
+    /// between them. The combined return prevents that race and the
+    /// `>=`-based scan that biased rotation toward low-index slots.
+    ///
+    /// Iteration is cycle-aware (`(0..n).cycle().skip(start).take(n)`) so
+    /// the function never compares absolute indices and never panics on a
+    /// shrunk credential list — the caller normalizes `start` modulo `n`
+    /// in `acquire`, and `take(n)` bounds the search to at most one full
+    /// rotation.
+    fn acquire_round_robin(
+        creds: &[PooledCredential],
+        start_idx: usize,
+    ) -> Option<(String, usize)> {
         let n = creds.len();
         if n == 0 {
             return None;
         }
-        // Collect indices of available credentials in sorted order.
-        let available: Vec<usize> = (0..n).filter(|&i| creds[i].is_available()).collect();
-        if available.is_empty() {
-            return None;
-        }
-        // Find the first available index >= start_idx (wrap around if needed).
-        let idx = available
-            .iter()
-            .find(|&&i| i >= start_idx % n)
-            .copied()
-            .unwrap_or(available[0]);
-        Some(creds[idx].api_key.clone())
+        // Cycle-aware single scan. `start_idx` is expected to already be in
+        // `[0, n)` (the caller normalizes), but `% n` here is defensive in
+        // case this helper is invoked directly from a future call site.
+        let start = start_idx % n;
+        let picked = (0..n)
+            .cycle()
+            .skip(start)
+            .take(n)
+            .find(|&i| creds[i].is_available())?;
+        let next_idx = (picked + 1) % n;
+        Some((creds[picked].api_key.clone(), next_idx))
     }
 
     /// Random: pick a random available entry using a simple LCG so we avoid
@@ -479,6 +498,27 @@ impl CredentialPool {
             .filter(|c| c.is_available())
             .min_by_key(|c| c.request_count)
             .map(|c| c.api_key.clone())
+    }
+
+    /// Test-only: simulate a hot-reload that replaces the credential list
+    /// (e.g. operator edited `config.toml`, the daemon rebuilt the pool with
+    /// fewer keys). Production hot-reload constructs a brand-new
+    /// `CredentialPool`, but in unit tests we want to exercise the path
+    /// where the existing pool's `round_robin_idx` was previously advanced
+    /// past the new `credentials.len()` and prove that `acquire` normalizes
+    /// rather than panicking or wrapping silently to the wrong key.
+    #[cfg(test)]
+    fn replace_credentials_for_test(&self, new_keys: Vec<(String, u32)>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut creds: Vec<PooledCredential> = new_keys
+            .into_iter()
+            .map(|(k, p)| PooledCredential::new(k, String::new(), p))
+            .collect();
+        creds.sort_unstable_by_key(|c| std::cmp::Reverse(c.priority));
+        inner.credentials = creds;
+        // Deliberately do NOT reset round_robin_idx — the regression we are
+        // guarding against is exactly the case where the cursor is stale
+        // relative to the new (smaller) credential list.
     }
 }
 
@@ -574,6 +614,135 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(pool.acquire().as_deref(), Some("key-b"));
         }
+    }
+
+    // ── RoundRobin index-desync regressions (rollup item 1 + item 3) ─────────
+
+    /// Three-key pool with the middle key exhausted: the cursor previously
+    /// landed on slot 2 (`key-c`) on first acquire because the absolute-index
+    /// `>=` scan biased toward higher slots, and a subsequent shrink of the
+    /// active set could leave the cursor pointing past `available.len()`. The
+    /// cycle-aware refactor must alternate between only the two surviving
+    /// keys (`key-a` and `key-c`) in fixed order with no panic, no skip.
+    #[test]
+    fn round_robin_alternates_between_surviving_keys_when_middle_exhausted() {
+        // All three credentials carry equal priority so the sort is stable
+        // on the declared order — slot 0 = key-a, slot 1 = key-b, slot 2 = key-c.
+        let pool = make_pool(
+            &[("key-a", 1), ("key-b", 1), ("key-c", 1)],
+            PoolStrategy::RoundRobin,
+        );
+        pool.mark_exhausted("key-b");
+        let picks: Vec<String> = (0..4).filter_map(|_| pool.acquire()).collect();
+        assert_eq!(picks.len(), 4, "no acquire returned None");
+        for k in &picks {
+            assert_ne!(k, "key-b", "exhausted key must never be returned");
+            assert!(
+                k == "key-a" || k == "key-c",
+                "unexpected key {k} — pool returned a non-pool entry"
+            );
+        }
+        // Must alternate in deterministic order — the previous biased rotation
+        // would repeat the same key on successive acquires when the cursor
+        // got stuck past the exhausted slot.
+        assert_eq!(picks[0], picks[2], "alternation broken at slot 2");
+        assert_eq!(picks[1], picks[3], "alternation broken at slot 3");
+        assert_ne!(
+            picks[0], picks[1],
+            "two consecutive acquires returned same key"
+        );
+    }
+
+    /// Five-key pool with two non-adjacent exhausted slots: rotation must
+    /// visit only the three survivors in order, cycling without panic.
+    #[test]
+    fn round_robin_skips_multiple_exhausted_keys() {
+        // Equal priority so the declared order is preserved.
+        let pool = make_pool(
+            &[
+                ("key-1", 1),
+                ("key-2", 1),
+                ("key-3", 1),
+                ("key-4", 1),
+                ("key-5", 1),
+            ],
+            PoolStrategy::RoundRobin,
+        );
+        pool.mark_exhausted("key-3");
+        pool.mark_exhausted("key-5");
+        // Two full cycles — six acquires across three survivors.
+        let picks: Vec<String> = (0..6).filter_map(|_| pool.acquire()).collect();
+        assert_eq!(picks.len(), 6);
+        let survivors: HashSet<&str> = picks.iter().map(String::as_str).collect();
+        assert_eq!(
+            survivors,
+            HashSet::from(["key-1", "key-2", "key-4"]),
+            "rotation visited an unexpected set of keys"
+        );
+        // Each survivor visited exactly twice across two cycles.
+        for s in ["key-1", "key-2", "key-4"] {
+            let count = picks.iter().filter(|k| k.as_str() == s).count();
+            assert_eq!(count, 2, "survivor {s} visited {count} times, expected 2");
+        }
+    }
+
+    /// Single-key pool with the only key exhausted: must return `None`, not
+    /// panic on `% 0` or out-of-bounds indexing.
+    #[test]
+    fn round_robin_single_key_all_exhausted_returns_none() {
+        let pool = make_pool(&[("only-key", 1)], PoolStrategy::RoundRobin);
+        pool.mark_exhausted("only-key");
+        assert!(pool.acquire().is_none());
+        // Call repeatedly — must stay None, must not panic.
+        for _ in 0..5 {
+            assert!(pool.acquire().is_none());
+        }
+    }
+
+    /// Hot-reload shrink: the cursor was advanced to a high slot when the
+    /// pool held five credentials; reload replaces the list with two
+    /// credentials and the stale cursor (e.g. 4) now points past the new
+    /// `credentials.len()`. The next `acquire` must normalize the cursor
+    /// and return one of the two surviving keys — never panic, never wrap
+    /// silently to a key that no longer exists.
+    #[test]
+    fn round_robin_recovers_when_hot_reload_shrinks_pool() {
+        let pool = make_pool(
+            &[
+                ("key-1", 1),
+                ("key-2", 1),
+                ("key-3", 1),
+                ("key-4", 1),
+                ("key-5", 1),
+            ],
+            PoolStrategy::RoundRobin,
+        );
+        // Advance the internal cursor by exhausting five rotations — the
+        // cursor now sits somewhere in `[0, 5)` but specifically past slot
+        // 1 after the fifth acquire.
+        for _ in 0..5 {
+            let _ = pool.acquire();
+        }
+        // Simulate hot-reload to a two-key pool.
+        pool.replace_credentials_for_test(vec![
+            ("survivor-a".to_string(), 1),
+            ("survivor-b".to_string(), 1),
+        ]);
+        // First post-reload acquire must succeed and return one of the
+        // survivors. Do this twice — the second proves rotation is still
+        // sane after the normalize.
+        let pick1 = pool.acquire().expect("post-reload acquire must succeed");
+        assert!(
+            pick1 == "survivor-a" || pick1 == "survivor-b",
+            "unexpected key after reload: {pick1}"
+        );
+        let pick2 = pool
+            .acquire()
+            .expect("second post-reload acquire must succeed");
+        assert!(
+            pick2 == "survivor-a" || pick2 == "survivor-b",
+            "unexpected key after reload: {pick2}"
+        );
     }
 
     // ── LeastUsed ─────────────────────────────────────────────────────────────
