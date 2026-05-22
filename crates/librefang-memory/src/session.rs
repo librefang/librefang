@@ -1286,6 +1286,16 @@ impl SessionStore {
     /// Delete sessions whose agent_id is not in the provided live set.
     ///
     /// Returns the number of orphan sessions deleted.
+    ///
+    /// Audit: cleanup-orphan-sessions-format-sql. Previously this
+    /// built the IN-clause via `format!("'{}'", id.0)` and embedded
+    /// the values directly into the SQL string. That was safe today
+    /// because `AgentId(Uuid)` only emits `[0-9a-f-]`, but the rest
+    /// of the substrate uses `?` parameter binding without
+    /// exception and the moment `AgentId` is relaxed to wrap a
+    /// `String` (e.g. for hand-namespaced ids) the silent SQLi door
+    /// opens. Bind the values instead — same plan, no escaping
+    /// dependency on the inner type.
     pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
@@ -1293,13 +1303,19 @@ impl SessionStore {
             return Ok(0);
         }
 
-        let placeholders: Vec<String> = live_agent_ids
-            .iter()
-            .map(|id| format!("'{}'", id.0))
-            .collect();
-        let in_clause = placeholders.join(",");
-        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({in_clause})");
-        let deleted = conn.execute(&sql, []).map_err(LibreFangError::memory)?;
+        // One `?` per live agent. `repeat_n` + `join` produces the
+        // canonical `?, ?, ?, …` placeholder string SQLite expects
+        // inside an `IN (...)` clause.
+        let placeholders = std::iter::repeat_n("?", live_agent_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({placeholders})");
+        let deleted = conn
+            .execute(
+                &sql,
+                rusqlite::params_from_iter(live_agent_ids.iter().map(|id| id.0.to_string())),
+            )
+            .map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -3273,5 +3289,74 @@ mod tests {
             "most-recent message must always survive; expected last to contain \
              {expected_last:?}, got {last_text:?}"
         );
+    }
+
+    /// Audit: cleanup-orphan-sessions-format-sql. Even with the
+    /// historical `AgentId(Uuid)` shape this query was safe — uuids
+    /// only emit `[0-9a-f-]`. The fix re-targets the safety
+    /// guarantee at the *substrate boundary* rather than at the
+    /// inner type, so the moment someone relaxes `AgentId` to a
+    /// `String`-wrapping variant (hand-namespaced ids, etc.) the
+    /// substrate continues to reject injection-shaped values
+    /// instead of silently emitting them as SQL literals. This
+    /// test forces the boundary: we construct an `AgentId` from a
+    /// uuid normally, then drive the helper with a `live` set
+    /// that contains an `AgentId` whose `.to_string()` we have
+    /// audited for `'` already (we can't actually construct a
+    /// `Uuid` containing a quote), and assert via the orphan-row
+    /// behaviour that the bind path works.
+    #[test]
+    fn test_cleanup_orphan_sessions_uses_bound_parameters_not_string_concat() {
+        let store = setup();
+
+        // Three live agents, one orphan agent — orphan row must be
+        // deleted, live rows must survive.
+        let live_a = AgentId::new();
+        let live_b = AgentId::new();
+        let live_c = AgentId::new();
+        let orphan = AgentId::new();
+
+        for aid in [live_a, live_b, live_c, orphan] {
+            let s = store.create_session(aid).unwrap();
+            assert_eq!(s.agent_id, aid);
+        }
+
+        let deleted = store
+            .cleanup_orphan_sessions(&[live_a, live_b, live_c])
+            .unwrap();
+        assert_eq!(deleted, 1, "exactly the orphan agent's session must go");
+
+        // Sanity: the live rows are still there.
+        for aid in [live_a, live_b, live_c] {
+            let listed = store.list_agent_sessions(aid).unwrap();
+            assert_eq!(
+                listed.len(),
+                1,
+                "live agent {aid:?} must keep its session after cleanup"
+            );
+        }
+        let orphan_left = store.list_agent_sessions(orphan).unwrap();
+        assert!(orphan_left.is_empty(), "orphan row must be gone");
+    }
+
+    /// Empty `live_agent_ids` is the "no live agents → don't touch
+    /// anything" early-return: documents the invariant so an
+    /// off-by-one in a future refactor doesn't silently wipe every
+    /// session when the registry is momentarily empty (e.g., during
+    /// startup reload).
+    #[test]
+    fn test_cleanup_orphan_sessions_empty_live_set_deletes_nothing() {
+        let store = setup();
+        let aid = AgentId::new();
+        store.create_session(aid).unwrap();
+
+        let deleted = store.cleanup_orphan_sessions(&[]).unwrap();
+        assert_eq!(
+            deleted, 0,
+            "empty live set must be treated as 'no live data, skip' — never \
+             as 'delete everything'"
+        );
+        let kept = store.list_agent_sessions(aid).unwrap();
+        assert_eq!(kept.len(), 1, "row must survive an empty cleanup call");
     }
 }

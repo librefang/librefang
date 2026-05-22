@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 40;
+const SCHEMA_VERSION: u32 = 41;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -118,6 +118,22 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // `sessions.messages_generation` so the repair-skip optimisation
     // survives a reload instead of paying a full repair pass every boot.
     run_step!(40, migrate_v40);
+    // v41 (audit: sessions-missing-index): the hot path
+    // `count_agent_sessions_touched_since` (`SELECT COUNT(*) FROM
+    // sessions WHERE agent_id = ?1 AND updated_at > ?2`) and the
+    // per-agent cascade `DELETE FROM sessions WHERE agent_id = ?1`
+    // had no usable index — the closest was `idx_sessions_peer ON
+    // sessions(agent_id, peer_id)` from v16, which works only as a
+    // prefix scan and is named in a way that discourages future
+    // hinting. On any deployment with > a few thousand sessions
+    // both queries degraded to a full-table scan. Add a composite
+    // index that the planner picks unambiguously for both
+    // `WHERE agent_id = ?` and the `agent_id + updated_at`
+    // combined predicate. Also add a composite
+    // `audit_entries(agent_id, timestamp)` mirror so the same
+    // recency-by-agent shape is fast against the audit trail (v8
+    // only created two separate single-column indexes).
+    run_step!(41, migrate_v41);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1484,6 +1500,42 @@ fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `column_exists` keeps every `ADD COLUMN` idempotent: fresh installs
 /// (whose v1 CREATE TABLE never carried these) and any DB already carrying
 /// the column from the legacy per-save ALTER both no-op cleanly.
+/// v41 (audit: sessions-missing-index): composite indexes on
+/// `sessions(agent_id, updated_at)` and `audit_entries(agent_id,
+/// timestamp)` to keep the per-agent recency hot paths off the
+/// full-table-scan plan. Both `CREATE INDEX IF NOT EXISTS` so a
+/// fresh boot is idempotent.
+fn migrate_v41(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- Composite index used by:
+        --   - count_agent_sessions_touched_since
+        --     (`WHERE agent_id = ?1 AND updated_at > ?2` — concurrent-
+        --      trigger admission check, runs on every fire)
+        --   - per-agent cascade DELETE on agent removal
+        --   - any future ORDER BY updated_at DESC LIMIT N scoped to
+        --     one agent (session timeline rendering)
+        -- v16 created `idx_sessions_peer ON sessions(agent_id, peer_id)`
+        -- which CAN serve `agent_id`-only scans as a prefix but is named
+        -- in a way that discourages future hinting; this index is the
+        -- explicit, intention-revealing one.
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated
+            ON sessions(agent_id, updated_at);
+
+        -- Companion composite for the audit trail: v8 created
+        -- single-column indexes on agent_id and timestamp, so
+        -- per-agent recency queries pick one or the other and pay
+        -- a sort. The composite lets the planner stream rows in
+        -- (agent_id, timestamp) order without a sort step.
+        CREATE INDEX IF NOT EXISTS idx_audit_agent_timestamp
+            ON audit_entries(agent_id, timestamp);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (41, datetime('now'), 'sessions(agent_id, updated_at) + audit_entries(agent_id, timestamp) composite indexes (audit: sessions-missing-index)');
+        ",
+    )
+}
+
 fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !column_exists(conn, "agents", "session_id") {
         conn.execute(
@@ -2486,5 +2538,89 @@ mod tests {
             )
             .unwrap();
         assert!(cleared.is_none(), "clearing model_override to NULL failed");
+    }
+
+    /// Audit: sessions-missing-index. After v41 both
+    /// `idx_sessions_agent_updated` (composite on sessions) and
+    /// `idx_audit_agent_timestamp` (composite on audit_entries) must
+    /// exist, and the planner must pick the new sessions index for
+    /// the `agent_id + updated_at` hot path that
+    /// `count_agent_sessions_touched_since` runs.
+    #[test]
+    fn migrate_v41_creates_composite_indexes_used_by_hot_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sessions_idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='index' AND name='idx_sessions_agent_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(
+            sessions_idx.as_deref(),
+            Some("idx_sessions_agent_updated"),
+            "v41 must create idx_sessions_agent_updated on sessions(agent_id, updated_at)"
+        );
+
+        let audit_idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='index' AND name='idx_audit_agent_timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(
+            audit_idx.as_deref(),
+            Some("idx_audit_agent_timestamp"),
+            "v41 must create idx_audit_agent_timestamp on audit_entries(agent_id, timestamp)"
+        );
+
+        // Verify the planner actually picks the new index for the
+        // canonical hot-path query. `EXPLAIN QUERY PLAN` returns
+        // a row whose `detail` column (index 3) names the chosen
+        // strategy. The audit doc's regression is "degrades to
+        // full-table scan" — we assert against that by requiring
+        // the new index name appears in the plan.
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
+            )
+            .unwrap()
+            .query_map(["a", "2000-01-01"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let plan_text = plan.join("\n");
+        assert!(
+            plan_text.contains("idx_sessions_agent_updated"),
+            "count_agent_sessions_touched_since must use the new composite index, \
+             planner picked: {plan_text}"
+        );
+    }
+
+    #[test]
+    fn migrate_v41_is_idempotent() {
+        // Re-running migrations must not fail or change anything. The
+        // ladder runner exits at user_version = SCHEMA_VERSION and the
+        // index DDL itself uses IF NOT EXISTS as a second safety net.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_sessions_agent_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "v41 sessions index must exist exactly once after repeated boots");
     }
 }
