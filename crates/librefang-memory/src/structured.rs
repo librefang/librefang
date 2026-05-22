@@ -1124,12 +1124,7 @@ mod tests {
         // Sanity: we know at least these are agent-keyed. If the
         // schema regresses below this floor the test is wrong, not
         // production.
-        for must_have in [
-            "audit_entries",
-            "kv_store",
-            "memories",
-            "pending_approvals",
-        ] {
+        for must_have in ["audit_entries", "kv_store", "memories", "pending_approvals"] {
             assert!(
                 agent_keyed.iter().any(|t| t == must_have),
                 "schema sanity: expected {must_have} in agent-keyed set; got {agent_keyed:?}",
@@ -1140,12 +1135,14 @@ mod tests {
         // NOT purged by the agent cascade. Keep this list tiny and
         // documented — any discovered agent-keyed table that is neither
         // cascaded nor listed here trips the purge assertion below.
-        //   - `group_roster`: its `agent_id` is *nullable*; rows model
-        //     group-chat membership keyed by chat, not agent ownership,
-        //     so removing an agent must not delete a chat's roster. Out
-        //     of scope for the agent cascade.
-        let not_cascaded: std::collections::HashSet<&str> =
-            ["group_roster"].into_iter().collect();
+        //
+        // Note: `group_roster` (v28) is intentionally absent here. It has
+        // NO `agent_id` / `source_agent` column at all (it is keyed by
+        // `channel_type` + `chat_id` + `user_id`; rows model group-chat
+        // membership, not agent ownership), so the discovery loop above
+        // never adds it to `agent_keyed` and there is nothing to exempt.
+        // Removing an agent must not delete a chat's roster.
+        let not_cascaded: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         // The agent-scoping column for a given table.
         let id_col = |table: &str| -> &'static str {
