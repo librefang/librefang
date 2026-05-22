@@ -622,4 +622,288 @@ mod tests {
         let (fired, _) = feed_deltas(&deltas);
         assert!(fired, "two structural markers should trigger the guard");
     }
+
+    // -----------------------------------------------------------------------
+    // Drift pin: cascade-leak markers vs real `build_system_prompt` output.
+    //
+    // This is the narrower re-port of the `keywords_match_real_prompt_headers`
+    // test from closed PR #4760, retargeted for the post-#5053 layout and the
+    // post-#5073 `granted_tool_hints` `PromptContext` shape. The closing
+    // comment on #4760 singled this test out as "the most valuable single
+    // piece" of that branch.
+    //
+    // Why it exists: `is_cascade_leak` (#4907) hard-codes string literals in
+    // `THEMATIC_HEADERS`, `SCAFFOLD_ONLY_HEADERS`, `STRUCTURAL_TURN_FRAMES`,
+    // `ENVELOPE_LINE_PREFIXES`, and `ENVELOPE_STANDALONE_MARKERS`. The
+    // detector trips when 2+ of these markers appear in an agent reply.
+    //
+    // Two failure modes the pin guards against:
+    //
+    // 1. **Positive drift** — the prompt builder renames a section the
+    //    detector watches for (e.g. `## Sender` → `## From`). The detector
+    //    keeps looking for the old string, so the cascade-leak it was tuned
+    //    to catch (#5141: model regurgitates `## Sender\n…\n## Today\n…`)
+    //    silently stops firing. CI stays green because no test ever ran the
+    //    builder and grepped its output for the marker strings.
+    //
+    // 2. **Negative drift** — the prompt builder starts emitting a string
+    //    the detector treats as a leak indicator (e.g. a new
+    //    `## Live Context\nUser asked: …` template, or an envelope marker
+    //    bleeding into a builder section). Real replies would then trip on
+    //    their own scaffolding. The pin catches this by also asserting
+    //    the `STRUCTURAL_TURN_FRAMES` / `ENVELOPE_*` markers do **not**
+    //    appear in any fully-populated `build_system_prompt` output.
+    // -----------------------------------------------------------------------
+
+    /// Build a maximally-populated `PromptContext` so every conditional
+    /// section in `build_system_prompt` fires. The exact values don't
+    /// matter — only the resulting `## <header>` shapes and any
+    /// gateway-marker bleed do.
+    ///
+    /// Kept inside this test module so adding a new `PromptContext` field
+    /// downstream produces a compile error here too, forcing the drift-pin
+    /// fixture to stay current.
+    fn fully_populated_prompt_context() -> crate::prompt_builder::PromptContext {
+        use std::collections::BTreeMap;
+        let mut granted_tool_hints = BTreeMap::new();
+        granted_tool_hints.insert("file_read".to_string(), "read file contents".to_string());
+        granted_tool_hints.insert(
+            "notify_owner".to_string(),
+            "send a private message to the owner".to_string(),
+        );
+
+        crate::prompt_builder::PromptContext {
+            agent_name: "ambrogio".to_string(),
+            agent_description: "butler".to_string(),
+            base_system_prompt: "You are Ambrogio.".to_string(),
+            granted_tools: vec![
+                "file_read".to_string(),
+                // Triggers Section 9.6 (`## Output Channels`).
+                "notify_owner".to_string(),
+            ],
+            granted_tool_hints,
+            recalled_memories: vec![("k".to_string(), "v".to_string())],
+            skill_summary: "skill-a\nskill-b".to_string(),
+            skill_count: 2,
+            skill_prompt_context: String::new(),
+            skill_config_section: String::new(),
+            mcp_summary: "mempalace: 19 tools".to_string(),
+            workspace_path: Some("/tmp/ws".to_string()),
+            soul_md: Some("Be helpful.".to_string()),
+            user_md: Some("Signore.".to_string()),
+            memory_md: Some("notes".to_string()),
+            canonical_context: Some("ctx".to_string()),
+            // Deliberately `None` so the first-run protocol section fires
+            // (it only injects when no `user_name` memory exists and the
+            // `user_name` context field is unset).
+            user_name: None,
+            channel_type: Some("telegram".to_string()),
+            sender_display_name: Some("Signore".to_string()),
+            sender_user_id: Some("123".to_string()),
+            is_group: true,
+            was_mentioned: true,
+            is_subagent: false,
+            is_autonomous: true,
+            agents_md: Some("agents".to_string()),
+            bootstrap_md: Some("bootstrap".to_string()),
+            workspace_context: Some("ws ctx".to_string()),
+            identity_md: Some("identity".to_string()),
+            heartbeat_md: Some("heartbeat".to_string()),
+            tools_md: Some("tools".to_string()),
+            peer_agents: vec![("peer".to_string(), "Idle".to_string(), "haiku".to_string())],
+            current_date: Some("Friday, 2026-05-16".to_string()),
+            active_goals: vec![("goal".to_string(), "in_progress".to_string(), 50)],
+            context_md: Some("ctx-md".to_string()),
+            dynamic_sections: Vec::new(),
+        }
+    }
+
+    /// **Negative pin** — markers the detector relies on being absent
+    /// from `build_system_prompt`. If any of these strings leak into the
+    /// rendered prompt, `is_cascade_leak` would false-positive on the
+    /// agent's own scaffolding the moment the model paraphrased it back.
+    #[test]
+    fn structural_and_envelope_markers_absent_from_prompt_builder() {
+        let prompt = crate::prompt_builder::build_system_prompt(&fully_populated_prompt_context());
+
+        for marker in STRUCTURAL_TURN_FRAMES {
+            assert!(
+                !prompt.contains(marker),
+                "STRUCTURAL_TURN_FRAMES entry {marker:?} is now emitted by \
+                 build_system_prompt. `is_cascade_leak` would false-positive \
+                 on the agent's own context the moment the model paraphrased \
+                 the section back. Either rename the builder section, drop \
+                 the marker from STRUCTURAL_TURN_FRAMES, or split the marker \
+                 list into prompt-safe / runtime-only halves.\n\nRendered \
+                 prompt:\n{prompt}",
+            );
+        }
+
+        for marker in ENVELOPE_LINE_PREFIXES {
+            assert!(
+                !prompt.contains(marker),
+                "ENVELOPE_LINE_PREFIXES entry {marker:?} is now emitted by \
+                 build_system_prompt. Envelope prefixes are gateway-injected \
+                 inbound markers — they must never appear in the system \
+                 prompt or the cascade-leak guard will trip on its own \
+                 scaffolding.\n\nRendered prompt:\n{prompt}",
+            );
+        }
+
+        for marker in ENVELOPE_STANDALONE_MARKERS {
+            assert!(
+                !prompt.contains(marker),
+                "ENVELOPE_STANDALONE_MARKERS entry {marker:?} is now emitted \
+                 by build_system_prompt. Standalone envelope markers \
+                 ([Stranger] / [Forwarded] / [User]) are gateway-injected — \
+                 they must never appear in the system prompt or the \
+                 cascade-leak guard will trip on its own scaffolding.\n\n\
+                 Rendered prompt:\n{prompt}",
+            );
+        }
+    }
+
+    /// **Positive pin** — snapshot the present-day mapping between every
+    /// cascade-leak marker header and whether `build_system_prompt`
+    /// actually emits that exact header today. Any future divergence
+    /// from this snapshot — whether a section is renamed, removed, or
+    /// (re)introduced under one of these names — fails the test.
+    ///
+    /// The snapshot is the load-bearing piece. Markers tagged `present`
+    /// must match a `## <header>` line in the rendered prompt; markers
+    /// tagged `absent` must NOT match any such line. Drift in either
+    /// direction is meaningful:
+    ///
+    /// - `present → absent`: a section the detector is tuned against has
+    ///   been renamed or removed in `prompt_builder.rs`. The detector
+    ///   keeps looking for the dead string and silently weakens the
+    ///   real cascade-leak pattern (#5141) it was meant to catch.
+    /// - `absent → present`: a builder section just adopted one of these
+    ///   names. Real replies that paraphrase that section now look like
+    ///   regurgitation to the detector and trip on legitimate output.
+    ///
+    /// Fix path on failure: update the snapshot deliberately, and in
+    /// the same commit either (a) rename the marker constant to the
+    /// builder's new section name, (b) restore the section in the
+    /// builder under the marker's name, or (c) drop the marker from
+    /// `THEMATIC_HEADERS` / `SCAFFOLD_ONLY_HEADERS`.
+    ///
+    /// Snapshot taken against `upstream/main` at the post-#5053 layout
+    /// and post-#5073 `granted_tool_hints` `PromptContext` shape. The
+    /// `false` entries here document a pre-existing divergence: the
+    /// detector's thematic and scaffold-only header lists were
+    /// calibrated against the pre-refactor prompt builder and no longer
+    /// match any section name in today's `build_system_prompt`. This is
+    /// the drift the closed-PR-#4760 reviewer asked the re-port to
+    /// surface — reconciling the marker constants (or restoring the
+    /// sections) is out of scope for this test PR.
+    #[test]
+    fn thematic_and_scaffold_headers_match_prompt_builder_output() {
+        // Snapshot: (marker, whether it is currently emitted as a
+        // `## <header>` line by `build_system_prompt`). MUST be kept in
+        // lock-step with `THEMATIC_HEADERS` + `SCAFFOLD_ONLY_HEADERS`.
+        const EXPECTED_EMISSION: &[(&str, bool)] = &[
+            // THEMATIC_HEADERS — all currently absent: the prompt builder
+            // does not emit `## Sender`, `## Today`, `## Calendar`,
+            // `## Tasks`, or `## Response Style` under those exact names
+            // in the post-#5053 layout. Sender identity is now folded
+            // into `## Channel`; daily summary headers don't exist;
+            // response-style guidance lives in `## Channel` and
+            // `## Operational Guidelines`. See PR thread for the
+            // reconciliation discussion.
+            ("## Sender", false),
+            ("## Today", false),
+            ("## Calendar", false),
+            ("## Tasks", false),
+            ("## Response Style", false),
+            // SCAFFOLD_ONLY_HEADERS subset — same story, re-asserted
+            // explicitly so deleting an entry from `SCAFFOLD_ONLY_HEADERS`
+            // without updating this snapshot is also a compile/test
+            // mismatch flagged here.
+            ("## Sender", false),
+            ("## Response Style", false),
+        ];
+
+        // Cross-check: every marker in `THEMATIC_HEADERS` and
+        // `SCAFFOLD_ONLY_HEADERS` must appear in the snapshot. Adding a
+        // new marker constant without updating the snapshot fails here.
+        for marker in THEMATIC_HEADERS.iter().chain(SCAFFOLD_ONLY_HEADERS.iter()) {
+            assert!(
+                EXPECTED_EMISSION.iter().any(|(m, _)| m == marker),
+                "Cascade-leak marker {marker:?} is in THEMATIC_HEADERS / \
+                 SCAFFOLD_ONLY_HEADERS but missing from the drift-pin \
+                 snapshot. Add an entry to EXPECTED_EMISSION above with \
+                 the appropriate `true`/`false` reflecting whether \
+                 build_system_prompt currently emits that header.",
+            );
+        }
+
+        // Reverse cross-check: every snapshot entry must still be a
+        // current marker. Dropping a marker from THEMATIC_HEADERS /
+        // SCAFFOLD_ONLY_HEADERS without pruning the snapshot fails here.
+        for (marker, _) in EXPECTED_EMISSION {
+            assert!(
+                THEMATIC_HEADERS.contains(marker) || SCAFFOLD_ONLY_HEADERS.contains(marker),
+                "Drift-pin snapshot entry {marker:?} is no longer in \
+                 THEMATIC_HEADERS or SCAFFOLD_ONLY_HEADERS. Remove it \
+                 from EXPECTED_EMISSION above (the marker was dropped \
+                 — the snapshot must shrink with it).",
+            );
+        }
+
+        let prompt = crate::prompt_builder::build_system_prompt(&fully_populated_prompt_context());
+
+        // Headers seen in the rendered prompt, with the leading `## `
+        // stripped, so we can compare against marker strings using a
+        // case-insensitive header-equality check (matching the
+        // `is_cascade_leak` `.contains()` semantics conservatively: a
+        // marker `.contains()`-matches the prompt iff some `## <header>`
+        // line is exactly that header).
+        let emitted_headers: Vec<&str> = prompt
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("## "))
+            .collect();
+
+        for (marker, expected_present) in EXPECTED_EMISSION {
+            let needle = marker.trim_start_matches("## ");
+            let actually_present = emitted_headers
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(needle));
+
+            if *expected_present && !actually_present {
+                panic!(
+                    "Cascade-leak marker {marker:?} was tagged `present` in \
+                     the drift-pin snapshot but no longer matches any \
+                     `## <header>` emitted by build_system_prompt. The \
+                     detector in `is_cascade_leak` is now calibrated \
+                     against a ghost — a section that used to exist (or \
+                     was renamed) in prompt_builder.rs without a \
+                     corresponding update here. Either restore the \
+                     section under the old name, rename the marker to \
+                     match the new section name, drop the marker from \
+                     THEMATIC_HEADERS / SCAFFOLD_ONLY_HEADERS, or update \
+                     the snapshot to `false` deliberately.\n\n\
+                     Headers emitted today:\n  ## {}",
+                    emitted_headers.join("\n  ## "),
+                );
+            }
+
+            if !*expected_present && actually_present {
+                panic!(
+                    "Cascade-leak marker {marker:?} was tagged `absent` in \
+                     the drift-pin snapshot but build_system_prompt now \
+                     emits a `## <header>` line that matches it. A \
+                     legitimate reply that paraphrases the new section \
+                     will trip `is_cascade_leak` on its own scaffolding. \
+                     Either rename the new builder section, drop the \
+                     marker from THEMATIC_HEADERS / SCAFFOLD_ONLY_HEADERS, \
+                     or update the snapshot to `true` deliberately (and \
+                     audit `is_cascade_leak` for false-positive risk on \
+                     the now-legitimate header).\n\n\
+                     Headers emitted today:\n  ## {}",
+                    emitted_headers.join("\n  ## "),
+                );
+            }
+        }
+    }
 }

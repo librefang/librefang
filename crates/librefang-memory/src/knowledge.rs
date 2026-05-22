@@ -10,6 +10,7 @@ use librefang_types::memory::{
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
+use tracing::error;
 use uuid::Uuid;
 
 /// Knowledge graph store backed by SQLite.
@@ -203,7 +204,7 @@ impl KnowledgeStore {
                     &r.s_props,
                     &r.s_created,
                     &r.s_updated,
-                ),
+                )?,
                 relation: parse_relation(
                     &r.r_source,
                     &r.r_type,
@@ -211,7 +212,7 @@ impl KnowledgeStore {
                     &r.r_props,
                     r.r_confidence,
                     &r.r_created,
-                ),
+                )?,
                 target: parse_entity(
                     &r.t_id,
                     &r.t_type,
@@ -219,7 +220,7 @@ impl KnowledgeStore {
                     &r.t_props,
                     &r.t_created,
                     &r.t_updated,
-                ),
+                )?,
             });
         }
         Ok(matches)
@@ -264,25 +265,40 @@ fn parse_entity(
     props: &str,
     created: &str,
     updated: &str,
-) -> Entity {
+) -> LibreFangResult<Entity> {
     let entity_type: EntityType =
         serde_json::from_str(etype).unwrap_or(EntityType::Custom("unknown".to_string()));
-    let properties: HashMap<String, serde_json::Value> =
-        serde_json::from_str(props).unwrap_or_default();
+    // Refuse to silently substitute `HashMap::default()` for a corrupt
+    // `properties` blob — that disguises corruption as "this entity has
+    // no properties", which the operator cannot tell apart from a row
+    // that legitimately has none (audit: json-text-silent-parse-fallback).
+    let properties: HashMap<String, serde_json::Value> = match serde_json::from_str(props) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                row_id = %id,
+                table = "entities",
+                column = "properties",
+                error = %e,
+                "corrupt JSON in TEXT column"
+            );
+            return Err(LibreFangError::serialization(e));
+        }
+    };
     let created_at = chrono::DateTime::parse_from_rfc3339(created)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
     let updated_at = chrono::DateTime::parse_from_rfc3339(updated)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    Entity {
+    Ok(Entity {
         id: id.to_string(),
         entity_type,
         name: name.to_string(),
         properties,
         created_at,
         updated_at,
-    }
+    })
 }
 
 fn parse_relation(
@@ -292,21 +308,36 @@ fn parse_relation(
     props: &str,
     confidence: f64,
     created: &str,
-) -> Relation {
+) -> LibreFangResult<Relation> {
     let relation: RelationType = serde_json::from_str(rtype).unwrap_or(RelationType::RelatedTo);
-    let properties: HashMap<String, serde_json::Value> =
-        serde_json::from_str(props).unwrap_or_default();
+    // Same rationale as `parse_entity`: a corrupt `properties` blob must
+    // surface as an error, not as a silent empty map (audit:
+    // json-text-silent-parse-fallback).
+    let properties: HashMap<String, serde_json::Value> = match serde_json::from_str(props) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                source = %source,
+                target = %target,
+                table = "relations",
+                column = "properties",
+                error = %e,
+                "corrupt JSON in TEXT column"
+            );
+            return Err(LibreFangError::serialization(e));
+        }
+    };
     let created_at = chrono::DateTime::parse_from_rfc3339(created)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    Relation {
+    Ok(Relation {
         source: source.to_string(),
         relation,
         target: target.to_string(),
         properties,
         confidence: confidence as f32,
         created_at,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -457,5 +488,147 @@ mod tests {
         );
         assert_eq!(matches[0].source.name, "Alice");
         assert_eq!(matches[0].target.name, "Acme Corp");
+    }
+
+    /// Regression for the audit item `json-text-silent-parse-fallback`.
+    ///
+    /// Pre-fix, `parse_entity` / `parse_relation` silently substituted
+    /// `HashMap::default()` when the `properties` TEXT column failed to
+    /// parse — so a corrupt row was indistinguishable from one that
+    /// legitimately had no properties. After the fix, a corrupt
+    /// `properties` blob causes `query_graph` to fail loudly with a
+    /// `Serialization` error instead of returning a fabricated empty map.
+    #[test]
+    fn query_graph_surfaces_corrupt_entity_properties_instead_of_defaulting() {
+        let store = setup();
+        let alice_id = store
+            .add_entity(
+                Entity {
+                    id: "alice".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+        let company_id = store
+            .add_entity(
+                Entity {
+                    id: "acme".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+        store
+            .add_relation(
+                Relation {
+                    source: alice_id.clone(),
+                    relation: RelationType::WorksAt,
+                    target: company_id,
+                    properties: HashMap::new(),
+                    confidence: 0.9,
+                    created_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+
+        // Corrupt Alice's `properties` blob directly — simulates a manual
+        // SQL edit, upstream serde drift, or partial-write recovery.
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE entities SET properties = ?1 WHERE id = ?2",
+                rusqlite::params!["this is not json", &alice_id],
+            )
+            .unwrap();
+        }
+
+        let res = store.query_graph(GraphPattern {
+            source: Some(alice_id),
+            relation: Some(RelationType::WorksAt),
+            target: None,
+            max_depth: 1,
+        });
+        assert!(
+            matches!(res, Err(LibreFangError::Serialization { .. })),
+            "corrupt entity properties must surface as Serialization, not be silently defaulted; \
+             got: {res:?}"
+        );
+    }
+
+    /// Same audit item, but the corruption is on the relation row's
+    /// `properties` column instead of the entity's.
+    #[test]
+    fn query_graph_surfaces_corrupt_relation_properties_instead_of_defaulting() {
+        let store = setup();
+        let alice_id = store
+            .add_entity(
+                Entity {
+                    id: "alice".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+        let company_id = store
+            .add_entity(
+                Entity {
+                    id: "acme".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+        let rel_id = store
+            .add_relation(
+                Relation {
+                    source: alice_id.clone(),
+                    relation: RelationType::WorksAt,
+                    target: company_id,
+                    properties: HashMap::new(),
+                    confidence: 0.9,
+                    created_at: Utc::now(),
+                },
+                "test-agent",
+            )
+            .unwrap();
+
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE relations SET properties = ?1 WHERE id = ?2",
+                rusqlite::params!["{not-valid-json", &rel_id],
+            )
+            .unwrap();
+        }
+
+        let res = store.query_graph(GraphPattern {
+            source: Some(alice_id),
+            relation: Some(RelationType::WorksAt),
+            target: None,
+            max_depth: 1,
+        });
+        assert!(
+            matches!(res, Err(LibreFangError::Serialization { .. })),
+            "corrupt relation properties must surface as Serialization, not be silently defaulted; \
+             got: {res:?}"
+        );
     }
 }

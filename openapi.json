@@ -3606,7 +3606,7 @@
           "system"
         ],
         "summary": "POST /api/backup — Create a backup archive of kernel state.",
-        "description": "Returns the backup metadata including the filename. The archive is stored\nin `<home_dir>/backups/` with a timestamped filename.",
+        "description": "Returns the backup metadata including the filename. The archive is stored\nin `<home_dir>/backups/` with a timestamped filename.\n\nThe actual zip-build work (`walkdir` + `std::fs::read`/`write` over the\nwhole `~/.librefang/` tree) is dispatched onto\n`tokio::task::spawn_blocking` — running it directly on the axum/tokio\nworker would stall every other request scheduled on that worker for\nthe duration of the walk (seconds, on a multi-GB home).",
         "operationId": "create_backup",
         "responses": {
           "200": {

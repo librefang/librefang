@@ -385,7 +385,8 @@ async fn comms_send_rejects_unknown_from_agent() {
 async fn comms_send_rejects_oversize_message() {
     // Construct two real agents so the size check runs after the existence
     // checks. We only need the IDs to round-trip — no real loop kicks off
-    // because the handler short-circuits on the 64KB cap.
+    // because the handler short-circuits on the byte cap
+    // (`validation::MAX_MESSAGE_BYTES`).
     let h = boot();
 
     // Register two minimal agents directly via the kernel registry. The
@@ -415,7 +416,9 @@ async fn comms_send_rejects_oversize_message() {
         .register(agent_b.clone())
         .expect("register bob");
 
-    let oversize = "x".repeat(64 * 1024 + 1);
+    // One byte past the byte cap so `check_message_size` rejects with 413,
+    // regardless of how the cap is tuned over time (byte-vs-char-cap audit).
+    let oversize = "x".repeat(librefang_api::validation::MAX_MESSAGE_BYTES + 1);
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -500,4 +503,136 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
             .contains("own from_agent_id"),
         "{body}"
     );
+}
+
+/// SECURITY (audit: comms-send-no-audit-log).
+///
+/// `comms_send` records every successful cross-agent send into the
+/// hash-chained audit log so a forensic reviewer can answer "which
+/// agent talked to which?" with tamper-evident evidence. The kernel's
+/// own `AgentMessage` row only records token usage for the receiver —
+/// it does not capture the from→to relationship.
+///
+/// This test exercises the route end-to-end with the bare network
+/// router (no auth middleware → unattributed entry, matching loopback
+/// / `require_auth = false` mode) and inspects the audit log on
+/// success. It tolerates the kernel returning Err (no live LLM
+/// configured in the mock kernel) by asserting the failure path does
+/// NOT record `comms_send`, which is the other half of the contract:
+/// audit fires only on success.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
+    let h = boot();
+
+    let agent_a = librefang_types::agent::AgentEntry {
+        id: librefang_types::agent::AgentId::new(),
+        name: "alice".into(),
+        state: librefang_types::agent::AgentState::Running,
+        ..Default::default()
+    };
+    let agent_b = librefang_types::agent::AgentEntry {
+        id: librefang_types::agent::AgentId::new(),
+        name: "bob".into(),
+        state: librefang_types::agent::AgentState::Running,
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(agent_a.clone())
+        .expect("register alice");
+    h.state
+        .kernel
+        .agent_registry()
+        .register(agent_b.clone())
+        .expect("register bob");
+
+    // Snapshot the audit log before — there should be no `comms_send`
+    // entries yet. We snapshot to avoid coupling to whatever the
+    // kernel records during boot (e.g. retention-trim metadata).
+    let before_count = h
+        .state
+        .kernel
+        .audit()
+        .recent(usize::MAX)
+        .into_iter()
+        .filter(|e| e.detail.contains("comms_send"))
+        .count();
+    assert_eq!(
+        before_count, 0,
+        "no comms_send audit entries should exist before the call"
+    );
+
+    let msg = "héllo 漢字 🎉"; // multi-byte; len-in-bytes != chars-count
+    let expected_chars = msg.chars().count();
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        "/api/comms/send",
+        Some(serde_json::json!({
+            "from_agent_id": agent_a.id.to_string(),
+            "to_agent_id": agent_b.id.to_string(),
+            "message": msg,
+        })),
+    )
+    .await;
+
+    let comms_entries: Vec<_> = h
+        .state
+        .kernel
+        .audit()
+        .recent(usize::MAX)
+        .into_iter()
+        .filter(|e| e.detail.contains("comms_send"))
+        .collect();
+
+    match status {
+        StatusCode::OK => {
+            assert_eq!(
+                comms_entries.len(),
+                1,
+                "exactly one comms_send audit row expected after a successful send"
+            );
+            let entry = &comms_entries[0];
+            assert_eq!(entry.outcome, "ok");
+            assert_eq!(entry.channel.as_deref(), Some("api"));
+            // The detail string carries a JSON object with from/to/len.
+            // We don't pin the exact serialization shape, just the
+            // substrings the doc and audit-doc recommendation specify.
+            let from_str = agent_a.id.to_string();
+            let to_str = agent_b.id.to_string();
+            assert!(
+                entry.detail.contains(&from_str),
+                "audit detail must record `from`; got: {}",
+                entry.detail
+            );
+            assert!(
+                entry.detail.contains(&to_str),
+                "audit detail must record `to`; got: {}",
+                entry.detail
+            );
+            assert!(
+                entry.detail.contains(&format!("\"len\":{expected_chars}")),
+                "audit detail must record character count ({expected_chars}, NOT byte count {}); \
+                 got: {}",
+                msg.len(),
+                entry.detail,
+            );
+        }
+        StatusCode::INTERNAL_SERVER_ERROR => {
+            // Failure path: the kernel's send_message returned Err
+            // (no LLM agent loop running in this mock kernel). The
+            // route MUST NOT record an audit row on failure — the
+            // chain documents what really happened, not what was
+            // attempted at the API boundary.
+            assert!(
+                comms_entries.is_empty(),
+                "comms_send audit row must NOT be recorded on Err path; \
+                 found {} entries: {:?}",
+                comms_entries.len(),
+                comms_entries,
+            );
+        }
+        other => panic!("unexpected status {other}: comms_send returned neither 200 nor 500"),
+    }
 }

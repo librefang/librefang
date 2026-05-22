@@ -507,6 +507,29 @@ impl LibreFangKernel {
                     self.metering
                         .update_budget(|current| *current = new_budget.clone());
                 }
+                HotAction::ReloadExternalAuth => {
+                    // Drop the OIDC discovery + JWKS caches that the
+                    // API layer holds in `librefang-api::oauth`. The
+                    // invalidator is installed by the API server at
+                    // boot (see `set_oauth_cache_invalidator`); embedded
+                    // kernels without the HTTP surface leave it unset
+                    // and we only log, because there is no live OIDC
+                    // validation happening to invalidate against.
+                    if let Some(inv) = self.oauth_cache_invalidator.get() {
+                        info!(
+                            "Hot-reload: external_auth IdP identity changed \
+                             — flushing OIDC discovery + JWKS caches"
+                        );
+                        inv.invalidate();
+                    } else {
+                        info!(
+                            "Hot-reload: external_auth IdP identity changed \
+                             but no OAuth cache invalidator installed; \
+                             stale OIDC discovery / JWKS entries will \
+                             persist until natural TTL"
+                        );
+                    }
+                }
                 HotAction::UpdateQueueConcurrency => {
                     use librefang_runtime::command_lane::Lane;
                     let cc = &new_config.queue.concurrency;

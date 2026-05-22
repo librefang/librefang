@@ -662,21 +662,28 @@ pub(crate) struct BatchResolveRequest {
     decision: String,
 }
 
+/// Maximum number of approvals resolvable in a single batch call.
+///
+/// Distinct from the agents' `BULK_LIMIT` (50): batch approval is a UI-
+/// driven flow where an operator selecting "approve all" on a busy
+/// dashboard view legitimately resolves up to ~100 pending requests at
+/// once. Lowering the cap silently would degrade that workflow, so the
+/// approvals lane keeps its historical 100 even after migrating onto
+/// the shared `validate_bulk_size` guard
+/// (`docs/issues/bulk-with-capacity-no-validate.md`).
+const BULK_APPROVAL_LIMIT: usize = 100;
+
 #[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Batch resolve results", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BatchResolveRequest>,
 ) -> impl IntoResponse {
-    const MAX_BATCH_SIZE: usize = 100;
-
-    if body.ids.len() > MAX_BATCH_SIZE {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("batch size {} exceeds maximum {MAX_BATCH_SIZE}", body.ids.len())}),
-            ),
-        );
+    // Guard BEFORE the `Vec::with_capacity(body.ids.len())` below — without
+    // this an attacker could send an array of empty strings within the
+    // 8 MiB body limit and force millions of pre-allocated entries.
+    if let Err(resp) = crate::validation::validate_bulk_size(body.ids.len(), BULK_APPROVAL_LIMIT) {
+        return resp;
     }
 
     let decision = match body.decision.as_str() {

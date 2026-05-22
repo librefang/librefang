@@ -427,10 +427,10 @@ impl LibreFangKernel {
                     // when the agent has already hit its trigger
                     // budget; log + skip rather than failing the
                     // spawn. (audit: trigger-engine-no-per-agent-cap)
-                    if let Err(e) =
-                        self.workflows
-                            .triggers
-                            .register(agent_id, pattern, prompt, 0)
+                    if let Err(e) = self
+                        .workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0)
                     {
                         warn!(
                             agent = %name,

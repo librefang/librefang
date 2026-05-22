@@ -38,25 +38,40 @@ struct BackupManifest {
     components: Vec<String>,
 }
 
-/// POST /api/backup — Create a backup archive of kernel state.
+/// Outcome of a successful `create_backup_blocking` run.
 ///
-/// Returns the backup metadata including the filename. The archive is stored
-/// in `<home_dir>/backups/` with a timestamped filename.
-#[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = crate::types::JsonObject)))]
-pub async fn create_backup(
-    State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let home_dir = &state.kernel.home_dir();
+/// Carries everything the async handler needs to build the JSON
+/// response and record an audit entry, so the spawn_blocking closure
+/// stays purely sync and owns no axum / kernel handles.
+struct BackupOutcome {
+    filename: String,
+    backup_path: std::path::PathBuf,
+    size_bytes: u64,
+    components: Vec<String>,
+    created_at: String,
+}
+
+/// Categorised failure mode for `create_backup_blocking`.
+///
+/// Maps 1:1 onto the original handler's distinct ApiErrorResponse
+/// branches so the translated client-facing message stays identical
+/// after the spawn_blocking refactor.
+enum BackupBuildError {
+    CreateDir(String),
+    CreateFile(String),
+    Finalize(String),
+}
+
+/// Sync, blocking implementation of `create_backup`. Walks the home
+/// directory tree (`walkdir` + `std::fs::read`) and produces a zip
+/// archive. Must be dispatched via `tokio::task::spawn_blocking` —
+/// running it directly on the axum/tokio worker stalls every other
+/// request scheduled on that worker for the duration of the walk
+/// (refs `docs/issues/blocking-fs-on-executor.md`).
+fn create_backup_blocking(home_dir: std::path::PathBuf) -> Result<BackupOutcome, BackupBuildError> {
     let backups_dir = home_dir.join("backups");
-    if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-create-dir-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
-    }
+    std::fs::create_dir_all(&backups_dir)
+        .map_err(|e| BackupBuildError::CreateDir(e.to_string()))?;
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("librefang_backup_{timestamp}.zip");
@@ -65,16 +80,8 @@ pub async fn create_backup(
     let mut components: Vec<String> = Vec::new();
 
     // Create zip archive
-    let file = match std::fs::File::create(&backup_path) {
-        Ok(f) => f,
-        Err(e) => {
-            return ApiErrorResponse::internal(t.t_args(
-                "api-error-backup-create-file-failed",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple();
-        }
-    };
+    let file = std::fs::File::create(&backup_path)
+        .map_err(|e| BackupBuildError::CreateFile(e.to_string()))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -224,38 +231,102 @@ pub async fn create_backup(
         }
     }
 
-    if let Err(e) = zip.finish() {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-backup-finalize-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
-    }
+    zip.finish()
+        .map_err(|e| BackupBuildError::Finalize(e.to_string()))?;
 
-    let size = std::fs::metadata(&backup_path)
+    let size_bytes = std::fs::metadata(&backup_path)
         .map(|m| m.len())
         .unwrap_or(0);
 
+    Ok(BackupOutcome {
+        filename,
+        backup_path,
+        size_bytes,
+        components,
+        created_at: manifest.created_at,
+    })
+}
+
+/// POST /api/backup — Create a backup archive of kernel state.
+///
+/// Returns the backup metadata including the filename. The archive is stored
+/// in `<home_dir>/backups/` with a timestamped filename.
+///
+/// The actual zip-build work (`walkdir` + `std::fs::read`/`write` over the
+/// whole `~/.librefang/` tree) is dispatched onto
+/// `tokio::task::spawn_blocking` — running it directly on the axum/tokio
+/// worker would stall every other request scheduled on that worker for
+/// the duration of the walk (seconds, on a multi-GB home).
+#[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = crate::types::JsonObject)))]
+pub async fn create_backup(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let home_dir = state.kernel.home_dir().to_path_buf();
+
+    // Dispatch the heavy `walkdir` + `std::fs` work onto a blocking
+    // thread. We must not hold any `!Send` value (notably
+    // `ErrorTranslator`, which wraps the fluent bundle) across this
+    // `.await` — the axum `Handler` bound rejects non-Send futures
+    // with a cryptic trait-bound error. The translator is constructed
+    // separately on each error branch below so it never crosses the
+    // suspend point.
+    let result = tokio::task::spawn_blocking(move || create_backup_blocking(home_dir)).await;
+
+    let outcome = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(BackupBuildError::CreateDir(msg))) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-create-dir-failed", &[("error", &msg)]),
+            )
+            .into_json_tuple();
+        }
+        Ok(Err(BackupBuildError::CreateFile(msg))) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-create-file-failed", &[("error", &msg)]),
+            )
+            .into_json_tuple();
+        }
+        Ok(Err(BackupBuildError::Finalize(msg))) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-finalize-failed", &[("error", &msg)]),
+            )
+            .into_json_tuple();
+        }
+        Err(join_err) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-finalize-failed",
+                &[("error", &format!("backup task join: {join_err}"))],
+            ))
+            .into_json_tuple();
+        }
+    };
+
     tracing::info!(
-        "Backup created: {filename} ({} bytes, {} components)",
-        size,
-        components.len()
+        "Backup created: {} ({} bytes, {} components)",
+        outcome.filename,
+        outcome.size_bytes,
+        outcome.components.len()
     );
     state.kernel.audit().record(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
-        format!("Backup created: {filename}"),
+        format!("Backup created: {}", outcome.filename),
         "completed",
     );
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "filename": filename,
-            "path": backup_path.to_string_lossy(),
-            "size_bytes": size,
-            "components": components,
-            "created_at": manifest.created_at,
+            "filename": outcome.filename,
+            "path": outcome.backup_path.to_string_lossy(),
+            "size_bytes": outcome.size_bytes,
+            "components": outcome.components,
+            "created_at": outcome.created_at,
         })),
     )
 }

@@ -32,10 +32,7 @@ use crate::MeteringSubsystemApi;
 ///   `message.trim()`.
 ///
 /// Audit: silent-marker-substring-match.
-pub(crate) fn strip_silent_cron_marker(
-    message: &str,
-    is_internal_cron: bool,
-) -> (String, bool) {
+pub(crate) fn strip_silent_cron_marker(message: &str, is_internal_cron: bool) -> (String, bool) {
     let is_silent = is_internal_cron && message.trim_start().starts_with("[SILENT]");
     if !is_silent {
         return (message.trim().to_string(), false);
@@ -932,8 +929,7 @@ impl LibreFangKernel {
         // the literal `[SILENT]` substring (audit:
         // silent-marker-substring-match).
         let is_internal_cron = sender_context.is_some_and(|ctx| ctx.is_internal_cron);
-        let (message_for_llm, is_silent_cron) =
-            strip_silent_cron_marker(message, is_internal_cron);
+        let (message_for_llm, is_silent_cron) = strip_silent_cron_marker(message, is_internal_cron);
 
         // Build link context from user message (auto-extract URLs for the agent)
         let message_with_links = if let Some(link_ctx) =
@@ -1374,8 +1370,7 @@ mod silent_marker_tests {
 
     #[test]
     fn cron_call_strips_leading_marker_and_trims() {
-        let (out, silent) =
-            strip_silent_cron_marker("[SILENT]   run housekeeping  ", true);
+        let (out, silent) = strip_silent_cron_marker("[SILENT]   run housekeeping  ", true);
         assert_eq!(out, "run housekeeping");
         assert!(silent);
     }
@@ -1408,10 +1403,8 @@ mod silent_marker_tests {
         // With the prefix anchor the message reaches the LLM intact
         // and the silent flag stays off — the operator must place
         // the marker at the start to opt in.
-        let (out, silent) = strip_silent_cron_marker(
-            "Channel said: [SILENT] mode unrelated note",
-            true,
-        );
+        let (out, silent) =
+            strip_silent_cron_marker("Channel said: [SILENT] mode unrelated note", true);
         assert_eq!(out, "Channel said: [SILENT] mode unrelated note");
         assert!(!silent);
     }
@@ -1421,10 +1414,8 @@ mod silent_marker_tests {
         // The previous implementation used `replace("[SILENT]", "")`
         // which scrubbed every occurrence. Now only the leading one
         // is consumed; later occurrences (if any) survive intact.
-        let (out, silent) = strip_silent_cron_marker(
-            "[SILENT] note: keep this [SILENT] tag literal",
-            true,
-        );
+        let (out, silent) =
+            strip_silent_cron_marker("[SILENT] note: keep this [SILENT] tag literal", true);
         assert_eq!(out, "note: keep this [SILENT] tag literal");
         assert!(silent);
     }
