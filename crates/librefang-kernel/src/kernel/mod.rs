@@ -774,6 +774,21 @@ pub struct LibreFangKernel {
     /// don't take effect on the active filter (the hot-reload action is a
     /// no-op with a warning).
     pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
+
+    /// Optional OAuth/OIDC cache invalidator. Implemented by
+    /// `librefang-api::oauth` (which owns the JWKS + discovery
+    /// `LazyLock`s) and injected post-construction via
+    /// [`Self::set_oauth_cache_invalidator`]. Fired from
+    /// `apply_hot_actions_inner` when
+    /// [`crate::config_reload::HotAction::ReloadExternalAuth`] is
+    /// queued, so an IdP swap takes effect on the next token
+    /// validation instead of waiting out the 1h cache TTL.
+    ///
+    /// Absent for embedded kernels that don't run the HTTP surface —
+    /// in that case `[external_auth]` edits are a no-op anyway since
+    /// no OIDC validation is happening.
+    pub(crate) oauth_cache_invalidator:
+        OnceLock<crate::oauth_cache_invalidator::OauthCacheInvalidatorArc>,
 }
 
 /// Bounded in-memory delivery receipt tracker.

@@ -126,6 +126,37 @@ async fn create_workflow(h: &Harness) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: poll for a workflow run to appear instead of guessing at a fixed
+// sleep. The trigger → workflow dispatch happens on a spawned task, so the run
+// is recorded asynchronously after `publish_typed_event`. Polling on the
+// observable side effect (a run with the expected workflow_id) removes the
+// wall-clock race that made a fixed 150ms sleep flaky under CI load.
+//
+// Returns the matching run, or `None` if none appears within the 5s deadline
+// (25ms poll interval). Callers craft their own assertion message so the
+// failure can name the domain-specific context (e.g. the case-insensitive
+// name-lookup forms in test 5).
+// ---------------------------------------------------------------------------
+
+async fn wait_for_workflow_run(
+    h: &Harness,
+    wf_id: librefang_kernel::workflow::WorkflowId,
+) -> Option<librefang_kernel::workflow::WorkflowRun> {
+    let engine = h.state.kernel.workflow_engine();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let runs = engine.list_runs(None).await;
+        if let Some(run) = runs.into_iter().find(|r| r.workflow_id == wf_id) {
+            return Some(run);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test 1: trigger with workflow_id fires a workflow run on a matching event
 // ---------------------------------------------------------------------------
 
@@ -181,18 +212,14 @@ async fn trigger_with_workflow_id_fires_workflow_on_matching_event() {
     );
     h.state.kernel.publish_typed_event(event).await;
 
-    // Give the spawned workflow dispatch task time to create the run.
-    // We don't wait for full LLM execution (none in the test kernel) —
-    // just for create_run to be recorded.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-    // Confirm a run was created for the workflow.
-    let engine = h.state.kernel.workflow_engine();
-    let runs = engine.list_runs(None).await;
-    let wf_run = runs.iter().find(|r| r.workflow_id == wf_id);
+    // The spawned workflow dispatch task records the run asynchronously. We
+    // don't wait for full LLM execution (none in the test kernel) — just poll
+    // until create_run is recorded.
+    let wf_run = wait_for_workflow_run(&h, wf_id).await;
     assert!(
         wf_run.is_some(),
-        "Expected at least one run for workflow {wf_id_str}, got runs: {runs:?}"
+        "Expected at least one run for workflow {wf_id_str} within 5s; got runs: {:?}",
+        h.state.kernel.workflow_engine().list_runs(None).await
     );
 }
 
@@ -453,14 +480,15 @@ async fn trigger_workflow_id_resolves_name_case_insensitively() {
     );
     h.state.kernel.publish_typed_event(event).await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-    let engine = h.state.kernel.workflow_engine();
-    let runs = engine.list_runs(None).await;
-    let wf_run = runs.iter().find(|r| r.workflow_id == wf_uuid);
+    // Poll for the run instead of guessing at a fixed sleep. If the
+    // case-insensitive name lookup fails to resolve `lowercase_form` to the
+    // `mixed_name` workflow, no run is ever recorded and this fails with a clear
+    // message naming both forms and the expected workflow id.
+    let wf_run = wait_for_workflow_run(&h, wf_uuid).await;
     assert!(
         wf_run.is_some(),
-        "case-insensitive name lookup must resolve `{lowercase_form}` to workflow `{mixed_name}` (id {wf_uuid:?}); got runs: {runs:?}"
+        "case-insensitive name lookup must resolve `{lowercase_form}` to workflow `{mixed_name}` (id {wf_uuid:?}) within 5s; got runs: {:?}",
+        h.state.kernel.workflow_engine().list_runs(None).await
     );
 }
 

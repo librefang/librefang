@@ -273,10 +273,7 @@ mod tests {
     fn api_error_generic_interpolates_underlying_error() {
         for lang in SUPPORTED_LANGUAGES {
             let t = ErrorTranslator::new(lang);
-            let result = t.t_args(
-                "api-error-generic",
-                &[("error", "session DB corrupted")],
-            );
+            let result = t.t_args("api-error-generic", &[("error", "session DB corrupted")]);
             assert_ne!(
                 result, "api-error-generic",
                 "lang '{lang}': api-error-generic must be defined; got literal key",
