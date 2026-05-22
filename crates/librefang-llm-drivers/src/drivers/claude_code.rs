@@ -489,10 +489,22 @@ impl ClaudeCodeDriver {
             }
         }
 
+        // Two-step resolution (houko review of #4997): when
+        // CLAUDE_CODE_HOME is set-but-invalid, `Option::or_else` skips
+        // the platform-home branch (the receiver is `Some`), so the
+        // documented fallback never ran. Validate the override first;
+        // only fall through to HOME/USERPROFILE when the override is
+        // absent **or** rejected.
+        let validate = |raw: std::ffi::OsString| -> Option<std::ffi::OsString> {
+            if raw.is_empty() || !std::path::Path::new(&raw).is_dir() {
+                None
+            } else {
+                Some(raw)
+            }
+        };
         let candidate = std::env::var_os("CLAUDE_CODE_HOME")
-            .or_else(|| std::env::var_os(env_var))
-            .filter(|p| !p.is_empty())
-            .filter(|p| std::path::Path::new(p).is_dir());
+            .and_then(validate)
+            .or_else(|| std::env::var_os(env_var).and_then(validate));
 
         if let Some(home) = candidate {
             cmd.env(env_var, home);
@@ -2092,6 +2104,103 @@ mod tests {
                 "HOME".to_string(),
                 Some(dir.path().to_string_lossy().into_owned()),
             )),
+        );
+    }
+
+    /// Regression for the houko 2026-05-22 review on #4997. Earlier
+    /// the resolver used
+    /// `var_os("CLAUDE_CODE_HOME").or_else(|| var_os(env_var)).filter(is_dir)`
+    /// — `or_else` short-circuits when the override is `Some(invalid)`,
+    /// so the platform-home fallback documented in CLAUDE.md never ran
+    /// and the child inherited `HOME=/nonexistent` (the exact failure
+    /// this PR exists to fix). The fix validates the override **before**
+    /// falling back; this test pins it.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_falls_back_to_platform_home_when_override_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: #[serial_test::serial] serialises env-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("CLAUDE_CODE_HOME", "/this/path/definitely/does/not/exist");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        // SAFETY: restore env BEFORE asserting.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        // Invalid override → fallback to the *valid* platform HOME. The
+        // child must NOT inherit the broken `/this/path/...` value.
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+            "invalid CLAUDE_CODE_HOME must fall back to valid platform HOME",
+        );
+    }
+
+    /// Companion to the test above: when BOTH the override AND the
+    /// platform HOME are invalid, no override is written (the existing
+    /// diagnostic warning surfaces it).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_writes_nothing_when_both_override_and_home_invalid() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::set_var("CLAUDE_CODE_HOME", "/also/not/a/dir");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert!(
+            resolved.iter().all(|(k, _)| k != "HOME"),
+            "no HOME override expected when both override and platform HOME are invalid, got: {resolved:?}",
         );
     }
 
