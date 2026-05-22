@@ -1,7 +1,7 @@
 use librefang_types::agent::AgentManifest;
 use regex_lite::Regex;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -977,20 +977,88 @@ fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> V
         .collect()
 }
 
-/// Global cache of compiled regex patterns (keyed by the raw pattern string).
-/// Avoids recompiling the same patterns on every incoming message.
-static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+/// Upper bound on cached compiled regex patterns. Sized to comfortably
+/// hold the largest realistic operator-curated set (per-channel
+/// keyword routes, per-agent allowlists) plus headroom; once it's
+/// exceeded the bounded eviction kicks in so the cache memory
+/// footprint stays predictable even when patterns are
+/// agent-or-config-controlled. Each entry is the source `String` +
+/// the compiled `Regex`, low single-digit KB at most — so the cap
+/// pins the worst case in the low tens of MB, not "unbounded".
+/// Audit: regex-cache-unbounded.
+const MAX_REGEX_CACHE_ENTRIES: usize = 4096;
+
+/// Bounded compile cache for `regex_matches`. FIFO eviction (oldest
+/// pattern out) rather than full LRU — for the router workload
+/// (operator-curated route patterns, mostly stable) FIFO is a
+/// strictly bounded approximation with no per-hit bookkeeping cost.
+/// `entries` is `pattern -> Option<Regex>`: `None` caches a
+/// compilation failure so a flood of invalid patterns doesn't
+/// recompile every call. `order` records insertion order so eviction
+/// is O(1).
+struct RegexCache {
+    entries: HashMap<String, Option<Regex>>,
+    order: VecDeque<String>,
+}
+
+impl RegexCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Compile-and-cache: returns the cached compilation outcome for
+    /// `pattern` (Some(Regex) on a syntactically valid pattern,
+    /// None on a compile error). When inserting a new entry past
+    /// the cap, evicts the oldest cached entry first.
+    fn get_or_compile(&mut self, pattern: &str) -> Option<&Regex> {
+        if !self.entries.contains_key(pattern) {
+            // Evict before insert so we never breach the cap, even
+            // for one tick. Loop because an operator could in theory
+            // lower the cap at compile time and the cache would have
+            // backlog above the new ceiling on the first call.
+            while self.entries.len() >= MAX_REGEX_CACHE_ENTRIES {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.entries.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+            let compiled = Regex::new(&format!("(?i){pattern}")).ok();
+            self.entries.insert(pattern.to_string(), compiled);
+            self.order.push_back(pattern.to_string());
+        }
+        // Unwrap-safe: we just inserted on miss; on hit the
+        // contains_key check guards the entry.
+        self.entries
+            .get(pattern)
+            .expect("entry inserted on miss path or guarded by contains_key on hit path")
+            .as_ref()
+    }
+}
+
+/// Global cache of compiled regex patterns. Keyed by the raw pattern
+/// string with FIFO eviction at [`MAX_REGEX_CACHE_ENTRIES`] — avoids
+/// recompiling the same patterns on every incoming message while
+/// preventing the unbounded-growth DoS the audit flagged (an agent /
+/// manifest pattern would otherwise live in the cache forever).
+static REGEX_CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
 
 fn regex_matches(message: &str, pattern: &str) -> bool {
-    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
-    let regex = map.entry(pattern.to_string()).or_insert_with(|| {
-        match Regex::new(&format!("(?i){pattern}")) {
-            Ok(r) => r,
-            Err(_) => Regex::new("(?!x)x").unwrap(), // never-match sentinel
-        }
-    });
-    regex.is_match(message)
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(RegexCache::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    // None == compile error → never matches. Mirrors the historical
+    // "never-match sentinel" branch but without the panic-risk of
+    // the previous `Regex::new("(?!x)x").unwrap()` (regex_lite
+    // doesn't support look-around, so the sentinel would have
+    // panicked the first time any invalid pattern reached this
+    // path).
+    guard
+        .get_or_compile(pattern)
+        .map(|r| r.is_match(message))
+        .unwrap_or(false)
 }
 
 fn english_variants(text: &str) -> Vec<String> {
@@ -1755,4 +1823,93 @@ system_prompt = "override"
     // NOTE: builtin:router agent was removed. The test
     // `test_builtin_router_spawns_metadata_template_and_cleans_up` was deleted.
     // Assistant now handles routing directly via LLM tools.
+
+    /// Audit: regex-cache-unbounded. The fix replaced the unbounded
+    /// `HashMap<String, Regex>` with a FIFO-evicting cache capped at
+    /// `MAX_REGEX_CACHE_ENTRIES`. These tests exercise the local
+    /// `RegexCache` struct directly (the global static is shared
+    /// across the whole test binary; mutating it would flake other
+    /// tests).
+    #[test]
+    fn regex_cache_reuses_compiled_pattern_within_capacity() {
+        let mut cache = RegexCache::new();
+        let r1 = cache.get_or_compile("hello").unwrap() as *const Regex;
+        let r2 = cache.get_or_compile("hello").unwrap() as *const Regex;
+        assert!(
+            std::ptr::eq(r1, r2),
+            "second lookup for the same pattern must return the cached compilation"
+        );
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "exactly one entry for a single distinct pattern"
+        );
+    }
+
+    #[test]
+    fn regex_cache_evicts_oldest_when_capacity_exceeded() {
+        // Drive the cache past MAX_REGEX_CACHE_ENTRIES with N+2
+        // distinct patterns. The eviction policy is FIFO so the
+        // first two patterns must be gone; the last MAX must
+        // remain.
+        let mut cache = RegexCache::new();
+        for i in 0..(MAX_REGEX_CACHE_ENTRIES + 2) {
+            let pat = format!("pat{i}");
+            cache.get_or_compile(&pat);
+        }
+        assert_eq!(
+            cache.entries.len(),
+            MAX_REGEX_CACHE_ENTRIES,
+            "cache must never grow past MAX_REGEX_CACHE_ENTRIES"
+        );
+        // The two oldest patterns were evicted; the newest two
+        // are still present.
+        assert!(!cache.entries.contains_key("pat0"));
+        assert!(!cache.entries.contains_key("pat1"));
+        let newest = format!("pat{}", MAX_REGEX_CACHE_ENTRIES + 1);
+        assert!(cache.entries.contains_key(&newest));
+    }
+
+    #[test]
+    fn regex_cache_match_behavior_survives_eviction() {
+        // After being evicted, the same pattern must still produce
+        // the same match outcome — the eviction is a memory bound,
+        // not a behavioural one. Re-fetching pays a compile cost
+        // but the match result is identical.
+        let mut cache = RegexCache::new();
+        let matches_before = cache.get_or_compile("hello").unwrap().is_match("hello world");
+        assert!(matches_before);
+        // Flood the cache so "hello" gets evicted.
+        for i in 0..(MAX_REGEX_CACHE_ENTRIES + 1) {
+            cache.get_or_compile(&format!("flood{i}"));
+        }
+        assert!(!cache.entries.contains_key("hello"));
+        // Re-fetch — must compile fresh and still match.
+        let matches_after = cache.get_or_compile("hello").unwrap().is_match("hello world");
+        assert!(matches_after, "match outcome must survive an eviction round-trip");
+    }
+
+    #[test]
+    fn regex_cache_invalid_pattern_caches_compile_failure_as_none() {
+        // A syntactically invalid pattern caches `None` (compile
+        // failure) so a flood of bad patterns doesn't re-spend the
+        // regex compiler on every call AND doesn't panic. Replaces
+        // the historical `Regex::new("(?!x)x").unwrap()` sentinel
+        // which would have panicked under `regex_lite` (no
+        // look-around). The user-visible behaviour
+        // (`regex_matches` returns false for invalid patterns) is
+        // preserved.
+        let mut cache = RegexCache::new();
+        let outcome = cache.get_or_compile("[invalid");
+        assert!(outcome.is_none(), "invalid pattern must cache as None");
+        assert!(
+            cache.entries.contains_key("[invalid"),
+            "the failure result still occupies a cache slot so a flood of \
+             invalid patterns can't recompile on every call"
+        );
+        // Second call must hit the cached failure, not recompile.
+        let second = cache.get_or_compile("[invalid");
+        assert!(second.is_none());
+        assert_eq!(cache.entries.len(), 1);
+    }
 }
