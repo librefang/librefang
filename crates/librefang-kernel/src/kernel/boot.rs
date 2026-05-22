@@ -214,9 +214,32 @@ impl LibreFangKernel {
         // clients pick up proxy configuration from config.toml / env vars.
         librefang_runtime::http_client::init_proxy(config.proxy.clone());
 
-        // Ensure data directory exists
+        // Ensure data directory exists, then tighten to owner-only
+        // (0o700). Audit: sqlite-file-permissions — the directory
+        // permission complements the per-file 0o600 that
+        // `librefang_memory::substrate::restrict_db_file_permissions`
+        // applies to `librefang.db` (+ -wal / -shm): even if a
+        // future db-file create races the chmod, the directory
+        // hides everything inside from other UIDs / users on the
+        // same host. Non-Unix is a no-op (chmod-style permissions
+        // don't carry the same meaning on Windows).
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| LibreFangError::BootFailed(format!("Failed to create data dir: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(
+                &config.data_dir,
+                std::fs::Permissions::from_mode(0o700),
+            ) {
+                tracing::warn!(
+                    path = %config.data_dir.display(),
+                    error = %e,
+                    "failed to tighten data dir permissions to 0o700 — \
+                     directory may be world-readable"
+                );
+            }
+        }
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;

@@ -243,6 +243,23 @@ pub(super) fn safe_trim_messages(
         for (i, msg) in rescued.into_iter().enumerate() {
             session_messages.insert(i, msg);
         }
+
+        // Audit: safe-trim-messages-session-copy-no-repair. The
+        // working `messages` copy below repairs itself after the
+        // same trim shape, but the *persisted* `session_messages`
+        // didn't — so a daemon reload could load history that:
+        //   - starts with an assistant turn (Gemini and other
+        //     strict providers reject this with INVALID_ARGUMENT);
+        //   - has a dangling ToolUse with no matching ToolResult
+        //     (provider rejects the turn);
+        //   - has a "rescued pinned at position 0" assistant
+        //     message with no subsequent user turn (same shape).
+        // Run the same repair pair on the persisted blob so the
+        // reload-after-trim path can't load an unsendable history.
+        *session_messages = crate::session_repair::validate_and_repair(session_messages);
+        *session_messages = crate::session_repair::ensure_starts_with_user(
+            std::mem::take(session_messages),
+        );
     }
 
     if messages.len() <= max_history {
@@ -412,5 +429,62 @@ pub(super) fn sanitize_sender_label(name: &str) -> String {
         "user".to_string()
     } else {
         trimmed
+    }
+}
+
+#[cfg(test)]
+mod safe_trim_session_repair_tests {
+    use super::*;
+    use librefang_types::message::{Message, Role};
+
+    /// Audit: safe-trim-messages-session-copy-no-repair. After
+    /// trim + pinned-rescue, the persisted `session_messages` must
+    /// also go through `validate_and_repair` + `ensure_starts_with_user`
+    /// — otherwise the on-disk blob can start with an assistant
+    /// turn (the rescued-pinned-at-position-0 case), and a daemon
+    /// reload feeds it straight to the next LLM request, which
+    /// strict providers (Gemini) reject with INVALID_ARGUMENT.
+    #[test]
+    fn safe_trim_repairs_persisted_session_after_pinning_assistant() {
+        // Build a history that, after trim, would have an assistant
+        // pinned at position 0 with no preceding user. Layout:
+        //   [user, assistant(pinned), user, assistant, user, ..., user]
+        // with max_history small enough that the trim point lands
+        // after the pinned assistant, so the rescue re-inserts it
+        // at position 0.
+        let mut session: Vec<Message> = Vec::new();
+        session.push(Message::user("seed"));
+        let mut pinned = Message::assistant("delegation result — pinned");
+        pinned.pinned = true;
+        session.push(pinned);
+        // Fill up so the trim has to chop a lot.
+        for i in 0..40 {
+            session.push(Message::user(format!("u{i}")));
+            session.push(Message::assistant(format!("a{i}")));
+        }
+
+        let mut working = session.clone();
+        let _ = safe_trim_messages(
+            &mut working,
+            &mut session,
+            "agent-under-test",
+            "current user message",
+            10,
+        );
+
+        // The persisted session MUST start with a user message
+        // after the trim, even though a pinned assistant got
+        // rescued to position 0 before the repair pass.
+        assert!(
+            !session.is_empty(),
+            "trim should leave a non-empty session"
+        );
+        assert_eq!(
+            session[0].role,
+            Role::User,
+            "persisted session_messages[0] must be User after trim+repair, \
+             got {:?} — this is the regression the audit closed",
+            session[0].role
+        );
     }
 }
