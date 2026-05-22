@@ -1061,9 +1061,13 @@ async fn handle_code_exchange(
             .into_response();
     }
 
+    // SECURITY: log only the email domain at INFO — full email is PII and
+    // production INFO logs typically ship to aggregators with longer retention
+    // than DEBUG. The domain alone preserves the diagnostic value (which IdP
+    // tenant signed in) without leaking the user identifier.
     info!(
         sub = %claims.sub,
-        email = ?claims.email,
+        domain = %claims.email.as_deref().and_then(|e| e.rsplit('@').next()).unwrap_or(""),
         provider = %provider.id,
         "External auth login successful"
     );
