@@ -552,7 +552,446 @@ pub fn build_reload_plan_with_caps(
         ));
     }
 
+    // ----- Backfilled field coverage (#config-reload-coverage) -----
+    //
+    // Every `KernelConfig` field reaches one of the three branches below or
+    // one of the hand-tuned branches above. The
+    // `every_config_field_is_reload_classified` test enumerates the struct
+    // via `KernelConfig::known_top_level_fields()` and fails if a field is
+    // missing from BOTH this function's coverage and
+    // [`classified_reload_fields`]. Keep the two in sync.
+    //
+    // Classification rules used here (see the doc that drove this backfill):
+    //   * RESTART  — the value is captured once at boot / server
+    //                construction (into a kernel field, the axum router, a
+    //                background task, or a cached LLM driver) and there is no
+    //                hot action wired to rebuild that consumer. A bare config
+    //                swap would silently no-op, so we demand a restart.
+    //   * NOOP     — the value is read live from `config_ref()` /
+    //                `self.config.load()` on every message / request, so the
+    //                ArcSwap config swap performed by `reload_config` makes
+    //                the change effective on the next use with no extra work.
+    // When the live-read path could not be verified, the field is classed
+    // RESTART (the safe default) rather than guessed into NOOP/HotReload.
+
+    // Helper: record a restart-required change for `field` when it differs.
+    // Scoped in its own block so the mutable borrow of `plan` ends at the
+    // closing brace — the `noop` closure below can then re-borrow `plan`
+    // without a `drop()` (clippy flags `drop()` on a non-`Drop` closure).
+    {
+        let mut restart_if_changed = |changed: bool, field: &str| {
+            if changed {
+                plan.restart_required = true;
+                plan.restart_reasons
+                    .push(format!("{field} changed (restart required)"));
+            }
+        };
+
+        // -- RESTART: boot- / server-captured, no hot action wired --
+        restart_if_changed(old.config_version != new.config_version, "config_version");
+        restart_if_changed(old.cors_origin != new.cors_origin, "cors_origin");
+        restart_if_changed(old.trusted_hosts != new.trusted_hosts, "trusted_hosts");
+        restart_if_changed(
+            old.trusted_proxies != new.trusted_proxies,
+            "trusted_proxies",
+        );
+        restart_if_changed(
+            old.trust_forwarded_for != new.trust_forwarded_for,
+            "trust_forwarded_for",
+        );
+        restart_if_changed(
+            old.allowed_mount_roots != new.allowed_mount_roots,
+            "allowed_mount_roots",
+        );
+        restart_if_changed(
+            old.require_auth_for_reads != new.require_auth_for_reads,
+            "require_auth_for_reads",
+        );
+        restart_if_changed(
+            old.external_auth_proxy != new.external_auth_proxy,
+            "external_auth_proxy",
+        );
+        restart_if_changed(
+            field_changed(&old.channel_role_mapping, &new.channel_role_mapping),
+            "channel_role_mapping",
+        );
+        restart_if_changed(old.include != new.include, "include");
+        restart_if_changed(
+            field_changed(&old.exec_policy, &new.exec_policy),
+            "exec_policy",
+        );
+        restart_if_changed(field_changed(&old.bindings, &new.bindings), "bindings");
+        restart_if_changed(field_changed(&old.tool_exec, &new.tool_exec), "tool_exec");
+        restart_if_changed(
+            field_changed(&old.auth_profiles, &new.auth_profiles),
+            "auth_profiles",
+        );
+        restart_if_changed(field_changed(&old.vertex_ai, &new.vertex_ai), "vertex_ai");
+        restart_if_changed(
+            field_changed(&old.azure_openai, &new.azure_openai),
+            "azure_openai",
+        );
+        restart_if_changed(field_changed(&old.oauth, &new.oauth), "oauth");
+        restart_if_changed(
+            field_changed(
+                &old.provider_request_timeout_secs,
+                &new.provider_request_timeout_secs,
+            ),
+            "provider_request_timeout_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.provider_proxy_urls, &new.provider_proxy_urls),
+            "provider_proxy_urls",
+        );
+        restart_if_changed(
+            old.local_probe_interval_secs != new.local_probe_interval_secs,
+            "local_probe_interval_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.health_check, &new.health_check),
+            "health_check",
+        );
+        restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
+        restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
+        restart_if_changed(field_changed(&old.registry, &new.registry), "registry");
+        restart_if_changed(
+            field_changed(&old.rate_limit, &new.rate_limit),
+            "rate_limit",
+        );
+        restart_if_changed(old.strict_config != new.strict_config, "strict_config");
+        restart_if_changed(
+            field_changed(&old.parallel_tools, &new.parallel_tools),
+            "parallel_tools",
+        );
+        restart_if_changed(
+            old.workflow_stale_timeout_minutes != new.workflow_stale_timeout_minutes,
+            "workflow_stale_timeout_minutes",
+        );
+        restart_if_changed(
+            old.workflow_default_total_timeout_secs != new.workflow_default_total_timeout_secs,
+            "workflow_default_total_timeout_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.background, &new.background),
+            "background",
+        );
+        restart_if_changed(old.log_dir != new.log_dir, "log_dir");
+        restart_if_changed(old.workspaces_dir != new.workspaces_dir, "workspaces_dir");
+        restart_if_changed(field_changed(&old.llm, &new.llm), "llm");
+        restart_if_changed(field_changed(&old.reload, &new.reload), "reload");
+        restart_if_changed(
+            old.max_request_body_bytes != new.max_request_body_bytes,
+            "max_request_body_bytes",
+        );
+        restart_if_changed(
+            old.max_upload_size_bytes != new.max_upload_size_bytes,
+            "max_upload_size_bytes",
+        );
+        restart_if_changed(
+            old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
+            "max_concurrent_bg_llm",
+        );
+        restart_if_changed(
+            field_changed(&old.external_auth, &new.external_auth),
+            "external_auth",
+        );
+        restart_if_changed(
+            field_changed(&old.auto_dream, &new.auto_dream),
+            "auto_dream",
+        );
+        restart_if_changed(field_changed(&old.audit, &new.audit), "audit");
+        restart_if_changed(field_changed(&old.telemetry, &new.telemetry), "telemetry");
+        restart_if_changed(
+            field_changed(&old.context_engine, &new.context_engine),
+            "context_engine",
+        );
+        restart_if_changed(field_changed(&old.session, &new.session), "session");
+        restart_if_changed(
+            field_changed(&old.task_board, &new.task_board),
+            "task_board",
+        );
+        restart_if_changed(field_changed(&old.broadcast, &new.broadcast), "broadcast");
+        restart_if_changed(
+            field_changed(&old.auto_reply, &new.auto_reply),
+            "auto_reply",
+        );
+        restart_if_changed(field_changed(&old.canvas, &new.canvas), "canvas");
+        restart_if_changed(old.update_channel != new.update_channel, "update_channel");
+        restart_if_changed(field_changed(&old.inbox, &new.inbox), "inbox");
+        restart_if_changed(
+            field_changed(&old.prompt_intelligence, &new.prompt_intelligence),
+            "prompt_intelligence",
+        );
+        restart_if_changed(field_changed(&old.docker, &new.docker), "docker");
+        restart_if_changed(
+            field_changed(&old.trusted_manifest_signers, &new.trusted_manifest_signers),
+            "trusted_manifest_signers",
+        );
+        // `terminal` is read live per-request for `max_windows`, but the tmux
+        // wiring (`tmux_enabled` / `tmux_binary_path`) is captured once at
+        // server construction (server.rs). Conservative: restart-required.
+        restart_if_changed(field_changed(&old.terminal, &new.terminal), "terminal");
+    }
+
+    // -- NOOP: read live from `config_ref()` / `self.config.load()` per
+    //    message or per request; the ArcSwap config swap makes the change
+    //    effective on the next use with no explicit reapply action. --
+    {
+        let mut noop_if_changed = |changed: bool, field: &str| {
+            if changed {
+                plan.noop_changes.push(format!(
+                    "{field} changed (effective on next message/request)"
+                ));
+            }
+        };
+
+        noop_if_changed(
+            old.agent_max_iterations != new.agent_max_iterations,
+            "agent_max_iterations",
+        );
+        noop_if_changed(
+            old.max_history_messages != new.max_history_messages,
+            "max_history_messages",
+        );
+        noop_if_changed(
+            old.max_agent_call_depth != new.max_agent_call_depth,
+            "max_agent_call_depth",
+        );
+        noop_if_changed(
+            old.tool_timeout_secs != new.tool_timeout_secs,
+            "tool_timeout_secs",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_timeouts, &new.tool_timeouts),
+            "tool_timeouts",
+        );
+        noop_if_changed(field_changed(&old.thinking, &new.thinking), "thinking");
+        noop_if_changed(field_changed(&old.triggers, &new.triggers), "triggers");
+        noop_if_changed(
+            field_changed(&old.notification, &new.notification),
+            "notification",
+        );
+        noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
+        noop_if_changed(field_changed(&old.media, &new.media), "media");
+        noop_if_changed(field_changed(&old.links, &new.links), "links");
+        noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
+        noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
+        noop_if_changed(
+            field_changed(&old.gateway_compression, &new.gateway_compression),
+            "gateway_compression",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_results, &new.tool_results),
+            "tool_results",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_invoke, &new.tool_invoke),
+            "tool_invoke",
+        );
+        noop_if_changed(
+            field_changed(&old.default_routing, &new.default_routing),
+            "default_routing",
+        );
+        noop_if_changed(old.prompt_caching != new.prompt_caching, "prompt_caching");
+        noop_if_changed(
+            field_changed(&old.prompt_cache, &new.prompt_cache),
+            "prompt_cache",
+        );
+        noop_if_changed(
+            field_changed(&old.compaction, &new.compaction),
+            "compaction",
+        );
+        noop_if_changed(old.qwen_code_path != new.qwen_code_path, "qwen_code_path");
+        noop_if_changed(
+            old.cron_session_max_tokens != new.cron_session_max_tokens,
+            "cron_session_max_tokens",
+        );
+        noop_if_changed(
+            old.cron_session_max_messages != new.cron_session_max_messages,
+            "cron_session_max_messages",
+        );
+        noop_if_changed(
+            old.cron_session_warn_fraction != new.cron_session_warn_fraction,
+            "cron_session_warn_fraction",
+        );
+        noop_if_changed(
+            old.cron_session_warn_total_tokens != new.cron_session_warn_total_tokens,
+            "cron_session_warn_total_tokens",
+        );
+        noop_if_changed(
+            old.cron_session_compaction_mode != new.cron_session_compaction_mode,
+            "cron_session_compaction_mode",
+        );
+        noop_if_changed(
+            old.cron_session_compaction_keep_recent != new.cron_session_compaction_keep_recent,
+            "cron_session_compaction_keep_recent",
+        );
+    }
+
     plan
+}
+
+// ---------------------------------------------------------------------------
+// Reload-classification coverage (drift guard)
+// ---------------------------------------------------------------------------
+
+/// `#[serde(alias = …)]` names on `KernelConfig` top-level fields.
+///
+/// `KernelConfig::known_top_level_fields()` derives its list from the
+/// schemars schema and folds in these aliases (see
+/// `librefang_types::config::validation`). The aliases are NOT real struct
+/// fields, so the coverage test must exclude them before comparing against
+/// the set of fields `build_reload_plan` classifies. Keep in sync with the
+/// `alias = "…"` attributes on the `KernelConfig` struct.
+pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
+    "listen_addr",     // alias for api_listen
+    "approval_policy", // alias for approval
+];
+
+/// The exhaustive set of `KernelConfig` field names that
+/// [`build_reload_plan`] inspects and classifies (RequiresRestart /
+/// HotReload / Ignore).
+///
+/// This is a literal mirror of every field touched in
+/// `build_reload_plan_with_caps`. The
+/// `every_config_field_is_reload_classified` test asserts that this set is a
+/// superset of every real `KernelConfig` field, so a newly-added field that
+/// is not also wired into `build_reload_plan` fails the build instead of
+/// silently no-op-ing on `POST /api/config/reload`.
+///
+/// **When you add a field to `KernelConfig`:** add a branch to
+/// `build_reload_plan_with_caps` AND its name here. The test will remind you
+/// if you forget.
+pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
+    [
+        // -- hand-tuned branches at the top of build_reload_plan --
+        "api_listen",
+        "api_key",
+        "dashboard_user",
+        "dashboard_pass",
+        "dashboard_pass_hash",
+        "network_enabled",
+        "network",
+        "memory",
+        "memory_wiki",
+        "proxy",
+        "default_model",
+        "home_dir",
+        "data_dir",
+        "stable_prefix_mode",
+        "vault",
+        "channels",
+        "sidecar_channels",
+        "skills",
+        "usage_footer",
+        "web",
+        "browser",
+        "approval",
+        "max_cron_jobs",
+        "webhook_triggers",
+        "extensions",
+        "mcp_servers",
+        "taint_rules",
+        "a2a",
+        "fallback_providers",
+        "credential_pools",
+        "provider_urls",
+        "provider_regions",
+        "tool_policy",
+        "users",
+        "proactive_memory",
+        "queue",
+        "budget",
+        "sanitize",
+        "provider_api_keys",
+        "log_level",
+        "language",
+        "mode",
+        // -- backfilled RESTART branches --
+        "config_version",
+        "cors_origin",
+        "trusted_hosts",
+        "trusted_proxies",
+        "trust_forwarded_for",
+        "allowed_mount_roots",
+        "require_auth_for_reads",
+        "external_auth_proxy",
+        "channel_role_mapping",
+        "include",
+        "exec_policy",
+        "bindings",
+        "tool_exec",
+        "auth_profiles",
+        "vertex_ai",
+        "azure_openai",
+        "oauth",
+        "provider_request_timeout_secs",
+        "provider_proxy_urls",
+        "local_probe_interval_secs",
+        "health_check",
+        "heartbeat",
+        "plugins",
+        "registry",
+        "rate_limit",
+        "strict_config",
+        "parallel_tools",
+        "workflow_stale_timeout_minutes",
+        "workflow_default_total_timeout_secs",
+        "background",
+        "log_dir",
+        "workspaces_dir",
+        "llm",
+        "reload",
+        "max_request_body_bytes",
+        "max_upload_size_bytes",
+        "max_concurrent_bg_llm",
+        "external_auth",
+        "auto_dream",
+        "audit",
+        "telemetry",
+        "context_engine",
+        "session",
+        "task_board",
+        "broadcast",
+        "auto_reply",
+        "canvas",
+        "update_channel",
+        "inbox",
+        "prompt_intelligence",
+        "docker",
+        "trusted_manifest_signers",
+        "terminal",
+        // -- backfilled NOOP branches --
+        "agent_max_iterations",
+        "max_history_messages",
+        "max_agent_call_depth",
+        "tool_timeout_secs",
+        "tool_timeouts",
+        "thinking",
+        "triggers",
+        "notification",
+        "tts",
+        "media",
+        "links",
+        "privacy",
+        "pairing",
+        "gateway_compression",
+        "tool_results",
+        "tool_invoke",
+        "default_routing",
+        "prompt_caching",
+        "prompt_cache",
+        "compaction",
+        "qwen_code_path",
+        "cron_session_max_tokens",
+        "cron_session_max_messages",
+        "cron_session_warn_fraction",
+        "cron_session_warn_total_tokens",
+        "cron_session_compaction_mode",
+        "cron_session_compaction_keep_recent",
+    ]
+    .into_iter()
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,5 +1781,64 @@ mod tests {
             noop_changes: vec![],
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
+    }
+
+    // -----------------------------------------------------------------------
+    // Reload-classification coverage (drift guard)
+    // -----------------------------------------------------------------------
+
+    /// Every real `KernelConfig` field must be classified by
+    /// `build_reload_plan`. Without this, a contributor who adds a config
+    /// field but forgets to wire it into the reload planner ships a silent
+    /// no-op on `POST /api/config/reload` — the documented default failure
+    /// mode (see `docs/issues/config-reload-coverage.md`).
+    ///
+    /// The struct field set is enumerated via
+    /// `KernelConfig::known_top_level_fields()`, which is derived at runtime
+    /// from the schemars JSON Schema and therefore sees every field
+    /// regardless of `#[serde(skip_serializing_if = …)]` — the
+    /// `serde_json::to_value(&default)` approach would miss the ~20 fields
+    /// that serialize-skip at their default value (e.g. `trusted_hosts`,
+    /// `agent_max_iterations`). Serde aliases that the schema folds in
+    /// (`listen_addr`, `approval_policy`) are not real fields and are
+    /// excluded.
+    #[test]
+    fn every_config_field_is_reload_classified() {
+        let aliases: std::collections::BTreeSet<&str> =
+            super::KERNEL_CONFIG_FIELD_ALIASES.iter().copied().collect();
+        let fields: std::collections::BTreeSet<&str> = KernelConfig::known_top_level_fields()
+            .iter()
+            .copied()
+            .filter(|f| !aliases.contains(f))
+            .collect();
+
+        let covered = super::classified_reload_fields();
+
+        let missing: Vec<&str> = fields.difference(&covered).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "KernelConfig fields not classified in build_reload_plan: {missing:?}\n\
+             Add a branch to `build_reload_plan_with_caps` (RequiresRestart / \
+             HotReload / Ignore) AND the field name to `classified_reload_fields()`."
+        );
+
+        // Catch the inverse drift too: a name in `classified_reload_fields()`
+        // that no longer exists on the struct (renamed / removed field) would
+        // otherwise rot silently. The alias-folded schema list is the source
+        // of truth for what's real.
+        let known: std::collections::BTreeSet<&str> = KernelConfig::known_top_level_fields()
+            .iter()
+            .copied()
+            .collect();
+        let stale: Vec<&str> = covered
+            .iter()
+            .copied()
+            .filter(|f| !known.contains(f) && !aliases.contains(f))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "`classified_reload_fields()` lists names that are not \
+             KernelConfig fields (renamed/removed?): {stale:?}"
+        );
     }
 }

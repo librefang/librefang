@@ -6105,7 +6105,9 @@ pub async fn install_extension(
         Err(e) => {
             let err_str = e.to_string();
             let status = match e {
-                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_types::integration::IntegrationError::NotFound(_) => {
+                    StatusCode::NOT_FOUND
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             return (status, Json(serde_json::json!({"error": err_str})));

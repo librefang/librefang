@@ -200,6 +200,42 @@
         }
       }
     },
+    "/api/a2a/agents/{id}/approve": {
+      "post": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "POST /api/a2a/agents/{id}/approve — Approve a pending external A2A agent.",
+        "description": "Promotes the agent from the pending list into the kernel's trusted external-agent\nlist, allowing it to receive tasks via `/api/a2a/send`. The `{id}` path segment\nshould be the URL-encoded discovery URL of the agent returned by\n`POST /api/a2a/discover`.\n\nThis endpoint exists to enforce operator oversight of newly discovered agents\n(Bug #3786). Discovered agents are placed in a pending state and cannot be used\nuntil an operator explicitly calls this endpoint.",
+        "operationId": "a2a_approve_external",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Discovery URL of the pending agent (URL-encoded)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent approved and promoted to trusted list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No pending agent found for the given URL"
+          }
+        }
+      }
+    },
     "/api/a2a/discover": {
       "post": {
         "tags": [
@@ -2810,6 +2846,245 @@
         }
       }
     },
+    "/api/approvals/audit": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "audit_log",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Offset",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Filter by agent",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tool_name",
+            "in": "query",
+            "description": "Filter by tool",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit log entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/batch": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "batch_resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Batch resolve results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/count": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "GET /api/approvals/count — Lightweight pending count for notification badges.",
+        "operationId": "approval_count",
+        "responses": {
+          "200": {
+            "description": "Pending approval count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/session/{session_id}": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "GET /api/approvals/session/{session_id} — List pending approvals for a session.",
+        "description": "Mirrors `has_blocking_approval(session_key)` from Hermes-Agent: returns all\npending `ApprovalRequest`s whose `session_id` field matches the path param.",
+        "operationId": "list_approvals_for_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending approvals for session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/session/{session_id}/approve_all": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session atomically.",
+        "operationId": "approve_all_for_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveAllForSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "All pending session approvals approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "TOTP required for one or more items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Pending set changed since request was issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/session/{session_id}/reject_all": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "POST /api/approvals/session/{session_id}/reject_all — Reject all pending\napprovals for the given session atomically.",
+        "description": "Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, \"deny\",\nresolve_all=True)`.",
+        "operationId": "reject_all_for_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All pending session approvals rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/approvals/{id}": {
       "get": {
         "tags": [
@@ -2875,6 +3150,47 @@
         "responses": {
           "200": {
             "description": "Request approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}/modify": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "modify_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Approval ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Request modified",
             "content": {
               "application/json": {
                 "schema": {
@@ -3465,6 +3781,96 @@
         }
       }
     },
+    "/api/authz/check": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/authz/check — admin-only **user-policy-only** decision query.",
+        "description": "Answers \"would user X's per-user RBAC policy permit tool Y on channel\nZ?\" by calling [`AuthManager::resolve_decision_for_user`], which walks\nLayer A (the user's own `tool_policy` / `tool_categories` /\n`channel_tool_rules`) and Layer B (role-escalation: would an admin\nhave allowed it?).\n\n**Scope is intentionally narrow — this is NOT the full runtime gate\ndecision.** The production tool-gate path additionally intersects with:\n- per-agent [`ToolPolicy::check_tool`] (allow/blocklist from\n  `agent.toml` — varies per agent),\n- global `ApprovalPolicy.channel_rules` (e.g. `shell_*` always\n  requires approval regardless of user policy),\n- the existing per-call approval / capability gates.\n\nThose layers depend on which agent is invoking the tool and the\nruntime context, neither of which this query carries. So an `Allow`\nhere can still surface as `NeedsApproval` or `Deny` at runtime if a\nper-agent ToolPolicy or channel rule says so. The response always\ncarries `scope: \"user_policy_only\"` to make this contract explicit\nto operators debugging gate mismatches; widening to the full gate\npath is a future RFC (would require an `agent_id` query param —\nbreaking API change).\n\nReturns 404 when the user can't be matched, so external callers can\ndistinguish \"not registered\" from \"registered but denied\". The\nruntime gate path treats unknown senders as guests; the diagnostic\nsurface here surfaces the configuration gap explicitly.",
+        "operationId": "check",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "query",
+            "description": "User UUID or configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Tool / action name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "Channel context (telegram, slack, api, ...)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User-policy decision payload (scope = user_policy_only)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzCheckResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown user"
+          }
+        }
+      }
+    },
+    "/api/authz/effective/{user_id}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/authz/effective/{user_id} — admin-only effective-permissions snapshot.",
+        "description": "`user_id` accepts either a UUID (the canonical `UserId` form) or the\nraw configured name (re-derived via `UserId::from_name`) so operators\ncan paste a name from `config.toml` directly into the URL — same\nsemantics as `/api/budget/users/{user_id}`.\n\nReturns 404 when no user matches; we intentionally do NOT synthesize\n\"guest defaults\" because the simulator's value is showing the operator\nwhat they configured, not inventing inputs.",
+        "operationId": "effective_permissions",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User UUID or configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective permissions snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown user"
+          }
+        }
+      }
+    },
     "/api/auto-dream/agents/{id}/abort": {
       "post": {
         "tags": [
@@ -3979,6 +4385,84 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "PUT /api/budget/users/{user_id} — admin-only per-user budget upsert.",
+        "description": "`user_id` accepts the same forms as the GET sibling (UUID or configured\nname). The request body mirrors `UserBudgetConfig` and is a **full\nreplacement** of the user's budget — all four keys are required, any\nmissing key returns 400. Set a window to `0.0` to mean \"unlimited on\nthat window\" (same semantics as the kernel-side metering check); this\nis **not** the same as omitting the key.\n\n```json\n{ \"max_hourly_usd\": 1.0, \"max_daily_usd\": 10.0, \"max_monthly_usd\": 100.0,\n  \"alert_threshold\": 0.8 }\n```\n\nFull-replace was chosen over PATCH semantics so `curl -X PUT` with a\npartial body cannot silently zero out other windows (`UserBudgetConfig`\nderives `#[serde(default)]`, which would otherwise default any omitted\nfield to `0.0` / `0.8` and clear an existing cap).\n\nOn success the cap takes effect on the **next** LLM call — already-\nbilled responses are returned unchanged. Persists to `config.toml` via\n`users::persist_users` and triggers a kernel reload (auth manager picks\nup the new `UserConfig.budget`).",
+        "operationId": "update_user_budget",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User UUID or configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Budget written and reloaded — body is the canonical UserBudgetConfig (max_hourly_usd, max_daily_usd, max_monthly_usd, alert_threshold)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or partial budget payload"
+          },
+          "403": {
+            "description": "Caller is not an admin"
+          },
+          "404": {
+            "description": "No user matches the given id/name"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "DELETE /api/budget/users/{user_id} — clear the per-user budget.",
+        "description": "Sets `UserConfig.budget` back to `None` and persists. Subsequent LLM\ncalls from this user are bounded only by global / per-agent /\nper-provider caps. Returns 200 even when the user had no budget set\n(idempotent — same shape as `delete_agent_budget`'s sibling pattern).",
+        "operationId": "delete_user_budget",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User UUID or configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Budget cleared (or already absent)"
+          },
+          "403": {
+            "description": "Caller is not an admin"
+          },
+          "404": {
+            "description": "No user matches the given id/name"
           }
         }
       }
@@ -4606,6 +5090,24 @@
         }
       }
     },
+    "/api/config/export": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/config/export — Download config.toml as a file attachment.",
+        "description": "Reads the raw config.toml from disk. If the file does not exist, falls back\nto serializing the in-memory config so a download is always available.",
+        "operationId": "export_config",
+        "responses": {
+          "200": {
+            "description": "config.toml file download",
+            "content": {
+              "application/toml": {}
+            }
+          }
+        }
+      }
+    },
     "/api/config/reload": {
       "post": {
         "tags": [
@@ -4678,6 +5180,146 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/context-engine/chain": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/chain — Show the active context engine topology.",
+        "description": "Describes whether the engine is the default (no plugin), a single plugin,\nor a stacked chain of plugins, and lists hook coverage for each.",
+        "operationId": "context_engine_chain",
+        "responses": {
+          "200": {
+            "description": "Engine chain topology",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/context-engine/config": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/config — Live context engine configuration snapshot.",
+        "description": "Returns the `[context_engine]` section of the running daemon's configuration,\nincluding `engine`, `plugin`, `plugin_stack`, and the full resolved hook\nsettings such as `hook_timeout_secs`, `on_hook_failure`, `max_retries`,\n`persistent_subprocess`, and the Round 11 additions.",
+        "operationId": "context_engine_config",
+        "responses": {
+          "200": {
+            "description": "Context engine configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/context-engine/health": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/health — Lightweight smoke test of the active plugin engine.",
+        "description": "Verifies that all declared hook scripts exist on disk and are executable\n(for native runtime). Does not invoke any hook subprocess.\nReturns 200 when healthy, 503 when degraded.",
+        "operationId": "context_engine_health",
+        "responses": {
+          "200": {
+            "description": "Engine healthy"
+          },
+          "204": {
+            "description": "No plugin engine configured"
+          },
+          "503": {
+            "description": "Engine degraded — hook scripts missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/context-engine/metrics": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/metrics — Hook invocation metrics for the running context engine.",
+        "description": "Returns per-hook counters (calls, successes, failures, cumulative latency in ms).\nReturns 204 when the active context engine does not expose metrics (e.g. the\ndefault engine with no plugin configured).",
+        "operationId": "context_engine_metrics",
+        "responses": {
+          "200": {
+            "description": "Hook metrics snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No metrics available (no plugin engine active)"
+          }
+        }
+      }
+    },
+    "/api/context-engine/sandbox-policy": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/sandbox-policy — Sandboxing policy for active plugins.",
+        "description": "Reports the effective filesystem and network isolation settings for every\nplugin that is currently loaded in the context engine chain.  The policy\nis derived from each plugin's `allow_filesystem`, `allow_network`, and\n`max_memory_mb` fields together with the global context engine defaults.",
+        "operationId": "context_engine_sandbox_policy",
+        "responses": {
+          "200": {
+            "description": "Sandbox policy for active plugins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No plugin engine configured"
+          }
+        }
+      }
+    },
+    "/api/context-engine/traces": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/context-engine/traces — Recent hook invocation traces (ring buffer, last 100).",
+        "description": "Returns per-invocation debug data: hook name, timestamp, elapsed_ms, success/failure,\ninput/output previews. Returns 204 when no plugin engine is active.",
+        "operationId": "context_engine_traces",
+        "responses": {
+          "200": {
+            "description": "Hook invocation traces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No plugin engine active"
           }
         }
       }
@@ -4757,6 +5399,40 @@
       }
     },
     "/api/cron/jobs/{id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/cron/jobs/{id} — Get a single cron job by ID.",
+        "description": "Response carries the cron `JobMeta` plus two #3693 observability\nfields:\n- `session_message_count` (`usize`): messages in the persistent\n  `(agent, \"cron\")` session.\n- `session_token_count` (`u64`): kernel-estimated tokens for those\n  messages (system prompt and tools excluded — same accounting as\n  the prune path).",
+        "operationId": "get_cron_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cron job details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found"
+          }
+        }
+      },
       "put": {
         "tags": [
           "workflows"
@@ -5015,6 +5691,27 @@
         "responses": {
           "200": {
             "description": "Catalog entry detail + install status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/goals/templates": {
+      "get": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "GET /api/goals/templates — List built-in goal templates.",
+        "operationId": "list_goal_templates",
+        "responses": {
+          "200": {
+            "description": "Goal templates",
             "content": {
               "application/json": {
                 "schema": {
@@ -5310,6 +6007,43 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "DELETE /api/hands/{hand_id} — Uninstall a user-installed hand.",
+        "description": "Only hands that live under `home_dir/workspaces/{id}/` can be removed.\nBuilt-in hands (shipped by librefang-registry under `home_dir/registry/hands/`)\ncannot be uninstalled because the next registry sync would recreate them.\nHands with live instances must be deactivated first.",
+        "operationId": "uninstall_hand",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hand uninstalled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Hand not found or is a built-in"
+          },
+          "409": {
+            "description": "Hand is still active — deactivate first"
+          }
+        }
       }
     },
     "/api/hands/{hand_id}/activate": {
@@ -5411,6 +6145,77 @@
         "responses": {
           "200": {
             "description": "Auto-install missing dependencies for a hand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/manifest": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/{hand_id}/manifest — Return the hand's HAND.toml as text.",
+        "description": "Reads the on-disk HAND.toml from either the registry or workspaces dir\nso comments and original formatting survive. Falls back to serializing\nthe in-memory `HandDefinition` if the file isn't on disk (e.g. installed\nprogrammatically), so the endpoint always has something to return for\nany hand the registry knows about.",
+        "operationId": "get_hand_manifest",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HAND.toml content",
+            "content": {
+              "application/toml": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/secret": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/{hand_id}/secret — Set an environment variable (secret) for a hand requirement.",
+        "operationId": "set_hand_secret",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Secret saved",
             "content": {
               "application/json": {
                 "schema": {
@@ -5608,6 +6413,27 @@
           },
           "404": {
             "description": "Webhook triggers not enabled"
+          }
+        }
+      }
+    },
+    "/api/inbox/status": {
+      "get": {
+        "tags": [
+          "inbox"
+        ],
+        "summary": "GET /api/inbox/status — Return inbox configuration and file counts.",
+        "operationId": "inbox_status",
+        "responses": {
+          "200": {
+            "description": "Inbox status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5944,6 +6770,117 @@
         }
       }
     },
+    "/api/mcp/servers/{name}/auth/revoke": {
+      "delete": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "DELETE /api/mcp/servers/{name}/auth/revoke",
+        "description": "Revokes OAuth tokens for an MCP server and clears auth state.",
+        "operationId": "auth_revoke",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "MCP server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Auth revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "MCP server not found"
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{name}/auth/start": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "POST /api/mcp/servers/{name}/auth/start",
+        "description": "Initiates a UI-driven OAuth PKCE authorization flow for the specified\nMCP server. Discovers OAuth metadata, performs Dynamic Client\nRegistration if needed, generates PKCE challenge, and returns the\nauthorization URL for the UI to redirect to.",
+        "operationId": "auth_start",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "MCP server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Auth flow started — returns auth URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Server has no HTTP transport or discovery failed"
+          },
+          "404": {
+            "description": "MCP server not found"
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{name}/auth/status": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/servers/{name}/auth/status",
+        "description": "Returns the current OAuth authentication state for an MCP server.",
+        "operationId": "auth_status",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "MCP server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Auth status for the MCP server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "MCP server not found"
+          }
+        }
+      }
+    },
     "/api/mcp/servers/{name}/reconnect": {
       "post": {
         "tags": [
@@ -5975,6 +6912,57 @@
           },
           "404": {
             "description": "MCP server not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{name}/taint": {
+      "patch": {
+        "tags": [
+          "mcp"
+        ],
+        "operationId": "patch_mcp_server_taint",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Taint settings updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Server not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -6202,6 +7190,47 @@
         "responses": {
           "200": {
             "description": "Consolidation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/count": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Count memories for an agent, optionally filtered by level (user/session/agent).",
+        "operationId": "memory_count_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Memory level filter (user, session, agent)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memory count",
             "content": {
               "application/json": {
                 "schema": {
@@ -6514,6 +7543,107 @@
         }
       }
     },
+    "/api/memory/agents/{id}/relations": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Query the knowledge graph for relations matching a pattern.",
+        "description": "All query parameters are optional — omitting all returns up to 100 relations.\nResults include full source entity, relation, and target entity for each match.",
+        "operationId": "memory_query_relations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Source entity name or ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "description": "Relation type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Target entity name or ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching relations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Store relation triples into the knowledge graph for an agent.",
+        "description": "Accepts an array of `{ subject, subject_type, relation, object, object_type }` triples.\nDeduplicates automatically: existing identical relations are skipped.",
+        "operationId": "memory_store_relations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relations stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/memory/agents/{id}/search": {
       "get": {
         "tags": [
@@ -6597,6 +7727,37 @@
         }
       }
     },
+    "/api/memory/bulk-delete": {
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Bulk-delete multiple memories by ID.",
+        "operationId": "memory_bulk_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Bulk delete results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/memory/cleanup": {
       "post": {
         "tags": [
@@ -6608,6 +7769,76 @@
         "responses": {
           "200": {
             "description": "Cleanup result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/config": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "memory_config_get",
+        "responses": {
+          "200": {
+            "description": "Memory configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "memory_config_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Memory configuration updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/decay": {
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Trigger manual confidence decay across all memories.",
+        "description": "Applies time-based exponential decay: memories not accessed recently\nlose confidence, while frequently accessed memories get boosted.\nNormally runs automatically during maintenance, but this endpoint\nallows triggering it on demand.",
+        "operationId": "memory_decay",
+        "responses": {
+          "200": {
+            "description": "Decay result",
             "content": {
               "application/json": {
                 "schema": {
@@ -7128,6 +8359,27 @@
         }
       }
     },
+    "/api/network/trusted-peers": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "SECURITY (#3873): GET /api/network/trusted-peers — list every TOFU-pinned\npeer this node will accept under each `node_id`. Operators read this to\nverify what their daemon trusts and out-of-band-compare fingerprints\nwith remote operators before federating.",
+        "operationId": "network_trusted_peers",
+        "responses": {
+          "200": {
+            "description": "List TOFU-pinned peers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pairing/complete": {
       "post": {
         "tags": [
@@ -7332,6 +8584,615 @@
           },
           "404": {
             "description": "Peer not found"
+          }
+        }
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins — List all installed context engine plugins.",
+        "operationId": "list_plugins",
+        "responses": {
+          "200": {
+            "description": "List installed plugins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/doctor": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/doctor — Diagnose runtime availability + per-plugin readiness.",
+        "description": "Probes every supported runtime (`python`, `node`, `go`, ...) for its\nlauncher on PATH, then cross-references with every installed plugin to\nflag which ones will fail at hook time because their runtime is missing.",
+        "operationId": "plugin_doctor",
+        "responses": {
+          "200": {
+            "description": "Runtime availability + per-plugin diagnostics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/install": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/install — Install a plugin from registry, local path, or git URL.",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof re-installing. A different body under the same key is rejected\nwith 409 Conflict.\n\nRequest body:\n```json\n{\"source\": \"registry\", \"name\": \"qdrant-recall\"}\n{\"source\": \"local\", \"path\": \"/path/to/plugin\"}\n{\"source\": \"git\", \"url\": \"https://github.com/user/plugin.git\", \"branch\": \"main\"}\n```",
+        "operationId": "install_plugin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Plugin installed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "409": {
+            "description": "Plugin already installed or Idempotency-Key conflict"
+          }
+        }
+      }
+    },
+    "/api/plugins/registries": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/registries — List configured plugin registries and their available plugins.",
+        "operationId": "list_plugin_registries",
+        "responses": {
+          "200": {
+            "description": "Configured registries with available plugins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plugins/scaffold": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/scaffold — Create a new plugin from template.",
+        "description": "Request body:\n```json\n{\n  \"name\": \"my-plugin\",\n  \"description\": \"My custom plugin\",\n  \"runtime\": \"python\"  // optional: python (default) | v | node | deno | go | native\n}\n```",
+        "operationId": "scaffold_plugin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Plugin scaffolded"
+          },
+          "409": {
+            "description": "Plugin already exists"
+          }
+        }
+      }
+    },
+    "/api/plugins/uninstall": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/uninstall — Remove an installed plugin.",
+        "description": "Request body: `{\"name\": \"plugin-name\"}`",
+        "operationId": "uninstall_plugin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin removed"
+          },
+          "404": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/:name — Get details of a specific plugin.",
+        "operationId": "get_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/advanced-config": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/:name/advanced-config — Round 11 hook configuration fields.",
+        "description": "Returns the advanced configuration fields added in Round 11:\n`circuit_breaker`, `after_turn_queue_depth`, `prewarm_subprocesses`,\n`allow_filesystem`, and `otel_endpoint`.  These fields are read directly\nfrom the installed plugin's `plugin.toml` manifest.",
+        "operationId": "plugin_advanced_config",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Advanced hook configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/disable": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/disable — Disable a plugin without uninstalling it.",
+        "description": "Creates a `.disabled` marker file. The running context engine must be\nrestarted for the change to take effect.",
+        "operationId": "disable_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin disabled"
+          },
+          "400": {
+            "description": "Plugin not found or already disabled"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/enable": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/enable — Enable a disabled plugin.",
+        "description": "Removes the `.disabled` marker file. The running context engine must be\nrestarted for the change to take effect.",
+        "operationId": "enable_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin enabled"
+          },
+          "400": {
+            "description": "Plugin not found or already enabled"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/env": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/:name/env — Plugin environment variable configuration.",
+        "description": "Returns the static `[env]` key-value pairs defined in the plugin manifest\n(with sensitive values masked) and the `[hooks.env_schema]` declarations\nthat describe which environment variables the plugin requires or accepts.\nRequired variables (keys prefixed with `!`) are checked against the current\ndaemon environment and their presence is reported in `resolved`.",
+        "operationId": "plugin_env",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin environment configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/install-deps": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/install-deps — Install Python dependencies for a plugin.",
+        "operationId": "install_plugin_deps",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dependencies installed"
+          },
+          "400": {
+            "description": "Installation failed"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/lint": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/:name/lint — Validate plugin manifest and hook script structure.",
+        "description": "Returns a lint report with errors (structural problems) and warnings\n(best-practice suggestions). Does not execute any hook scripts.",
+        "operationId": "lint_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lint report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/prewarm": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/prewarm — Pre-warm persistent hook subprocesses.",
+        "description": "Triggers a warmup reload of the plugin so that when `persistent_subprocess = true`\nthe interpreter is already running before the first real hook call.  If the\nplugin does not declare `persistent_subprocess = true` the response body will\nindicate that pre-warming is not applicable; no error is returned.\n\nReloading the plugin manifest also picks up any changes to `plugin.toml`\nwithout requiring a full daemon restart.",
+        "operationId": "prewarm_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prewarm result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plugin not found"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/reload": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/reload — Re-read `plugin.toml` from disk and validate it.",
+        "description": "Script changes (edits to hook `.py` / binary files) take effect immediately\nbecause scripts are re-executed fresh on every invocation. Manifest changes\n(adding or removing hook declarations) are reflected in the response but\nrequire an **agent restart** to become active in the running context engine.",
+        "operationId": "reload_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest reloaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Reload failed (invalid name or bad manifest)"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/sign": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/sign — Compute and write SHA-256 integrity hashes into plugin.toml.",
+        "description": "After signing, the plugin will be verified against these hashes on every load.\nRe-run after editing any hook scripts to keep the hashes up to date.",
+        "operationId": "sign_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hashes written to plugin.toml",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Plugin not found or no hooks declared"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/status": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "GET /api/plugins/:name/status — Current runtime status of an installed plugin.",
+        "description": "Returns the plugin's manifest info plus whether it is currently active in the\nrunning context engine (i.e. matches the configured `plugin` or appears in\n`plugin_stack`).",
+        "operationId": "plugin_status",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Plugin not found or invalid name"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/test-hook": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/test-hook — Invoke a specific hook with test input.",
+        "description": "Runs the hook subprocess with the given JSON input and returns the output.\nUseful for debugging and validating hook scripts without sending real messages.\n\nRequest body:\n```json\n{\n  \"hook\": \"ingest\",\n  \"input\": {\"type\": \"ingest\", \"agent_id\": \"test\", \"message\": \"hello\", \"peer_id\": null}\n}\n```",
+        "operationId": "test_plugin_hook",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Hook output"
+          },
+          "400": {
+            "description": "Hook not declared or invocation failed"
+          }
+        }
+      }
+    },
+    "/api/plugins/{name}/upgrade": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "POST /api/plugins/:name/upgrade — Upgrade an installed plugin from a new source.",
+        "description": "Removes the current version and reinstalls from the given source. The\n`.disabled` state is preserved. Requires a context engine restart.\n\nRequest body (same as install):\n```json\n{\"source\": \"registry\", \"name\": \"qdrant-recall\"}\n{\"source\": \"local\", \"path\": \"/path/to/newer-version\"}\n{\"source\": \"git\", \"url\": \"https://github.com/user/plugin.git\", \"branch\": \"main\"}\n```",
+        "operationId": "upgrade_plugin",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Plugin name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin upgraded"
+          },
+          "400": {
+            "description": "Plugin not installed or upgrade failed"
           }
         }
       }
@@ -8070,6 +9931,70 @@
         }
       }
     },
+    "/api/sessions/search": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "GET /api/sessions/search?q=...&agent_id=... — Full-text search across session content.",
+        "operationId": "search_sessions",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "FTS5 search query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Optional agent ID filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items (default 50, max 500)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Items to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing query parameter"
+          }
+        }
+      }
+    },
     "/api/sessions/{id}": {
       "get": {
         "tags": [
@@ -8494,6 +10419,48 @@
         }
       }
     },
+    "/api/skills/registry": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).",
+        "operationId": "list_skill_registry",
+        "responses": {
+          "200": {
+            "description": "Official skills available in the FangHub registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/reload": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the\nin-memory registry. Use this after dropping a skill directory into the\nskills folder manually (install/uninstall via API already reload\nautomatically). Returns the new installed skill count.",
+        "operationId": "reload_skills",
+        "responses": {
+          "200": {
+            "description": "Rescan the skills directory from disk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/skills/uninstall": {
       "post": {
         "tags": [
@@ -8521,6 +10488,350 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/skills/{name}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Get detailed information about a specific skill, including linked files,\ntags, evolution history, and readiness status.",
+        "operationId": "get_skill_detail",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill detail with evolution history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Skill not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/evolve/delete": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/evolve/delete — delete a locally-evolved skill.",
+        "operationId": "evolve_delete_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Non-local skill — deletion refused"
+          },
+          "404": {
+            "description": "Skill not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/evolve/file": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/evolve/file — add a supporting file.",
+        "operationId": "evolve_write_file",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "File written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path / over size limit"
+          },
+          "404": {
+            "description": "Skill not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "DELETE /api/skills/{name}/evolve/file — remove a supporting file.\nPath is supplied via the `?path=` query string since axum's DELETE\nbody handling is inconsistent across clients.",
+        "operationId": "evolve_remove_file",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Relative path of the file to remove",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing 'path' parameter"
+          },
+          "404": {
+            "description": "Skill or file not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/evolve/patch": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/evolve/patch — fuzzy find-and-replace.",
+        "operationId": "evolve_patch_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Skill patched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request / fuzzy match failed"
+          },
+          "404": {
+            "description": "Skill not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/evolve/rollback": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/evolve/rollback — roll back to previous version.",
+        "operationId": "evolve_rollback_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill rolled back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Skill or snapshot not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/evolve/update": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/{name}/evolve/update — full-rewrite prompt_context.",
+        "operationId": "evolve_update_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Skill updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request / security-blocked content"
+          },
+          "404": {
+            "description": "Skill not found"
+          }
+        }
+      }
+    },
+    "/api/skills/{name}/file": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills/{name}/file?path=... — return the contents of a\nsupporting file so the dashboard can render it. Share the same\nsecurity rules as `skill_read_file` (no absolute paths, no traversal,\nmust resolve within the skill directory, size-capped).",
+        "operationId": "get_supporting_file",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Relative file path inside the skill directory",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File contents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path"
+          },
+          "404": {
+            "description": "Skill or file not found"
           }
         }
       }
@@ -8592,6 +10903,38 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/toml": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/toml — Get the raw TOML content of a template.",
+        "operationId": "get_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template TOML content as plain text",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -8959,6 +11302,27 @@
         }
       }
     },
+    "/api/usage/by-model/performance": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.",
+        "operationId": "usage_by_model_performance",
+        "responses": {
+          "200": {
+            "description": "Model performance metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/usage/daily": {
       "get": {
         "tags": [
@@ -9192,6 +11556,87 @@
         }
       }
     },
+    "/api/users/{name}/policy": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "get_user_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-user policy slice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "PUT /api/users/{name}/policy — upsert the per-user RBAC M3 policy slice.",
+        "description": "Body shape:\n```json\n{\n  \"tool_policy\":        {...} | null,\n  \"tool_categories\":    {...} | null,\n  \"memory_access\":      {...} | null,\n  \"channel_tool_rules\": {\"telegram\": {...}, ...}\n}\n```\n\nEach top-level key is independently optional:\n  * key absent       → preserve existing value (so a partial edit\n                       from the dashboard never clobbers a section\n                       the form didn't expose),\n  * key present null → clear the field,\n  * key present obj  → replace.\n\n`channel_tool_rules` collapses absent/null to \"preserve\" (use an empty\nobject `{}` to clear all rules), since a `null` map is rarely what an\noperator means.\n\nOwner-only — covered by `middleware::is_owner_only_write` which gates\nevery mutating call under `/api/users*`. Per-user policy edits change\nsomeone's authorization surface, which is unambiguously an Owner action.",
+        "operationId": "update_user_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated user policy slice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/users/{name}/rotate-key": {
       "post": {
         "tags": [
@@ -9270,6 +11715,135 @@
         }
       }
     },
+    "/api/workflow-templates": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflow-templates — List all workflow templates with optional search/filter.",
+        "operationId": "list_workflow_templates",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search name, description, tags",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Filter by category",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of workflow templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workflow-templates/{id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflow-templates/:id — Get full template details.",
+        "operationId": "get_workflow_template",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Template not found"
+          }
+        }
+      }
+    },
+    "/api/workflow-templates/{id}/instantiate": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflow-templates/:id/instantiate — Create a live workflow from a template.",
+        "operationId": "instantiate_template",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Workflow created from template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters"
+          },
+          "404": {
+            "description": "Template not found"
+          }
+        }
+      }
+    },
     "/api/workflows": {
       "get": {
         "tags": [
@@ -9324,7 +11898,270 @@
         }
       }
     },
+    "/api/workflows/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflows/runs/:run_id — Get detailed info for a single workflow run.",
+        "operationId": "get_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow run details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run not found"
+          }
+        }
+      }
+    },
+    "/api/workflows/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.",
+        "description": "Transitions `Pending`, `Running`, or `Paused` runs to `Cancelled`.\nReturns 200 with `{\"run_id\": ..., \"state\": \"cancelled\"}` on success,\n400 for a malformed run ID, 404 if the run does not exist, or 409 if\nthe run is already in a terminal state (includes `{\"state\": <state>}`\nso callers can distinguish completed vs failed vs cancelled conflicts).",
+        "operationId": "cancel_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed run ID"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Run already in terminal state"
+          }
+        }
+      }
+    },
+    "/api/workflows/runs/{run_id}/operator": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/runs/:run_id/operator — Resolve a paused operator\nstep with an operator decision and drive the workflow forward (#5133).",
+        "description": "Auth: goes through the normal auth layer (NOT on the public allowlist).\nThe authenticated operator is the security boundary for this resolution\n— no resume token is required (unlike the generic `/resume` endpoint).\n\n- 200 `{\"run_id\":..,\"state\":\"running\"}` — resolution accepted; the run\n  resumes asynchronously (Approve/Edit/Input) or has been marked Failed\n  (Reject).\n- 400 — malformed run ID / unknown action / missing required payload.\n- 404 — run not found.\n- 409 — run not paused, not an operator-step pause, or the action is\n  not authorised at this step.",
+        "operationId": "operator_action_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Operator action accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed run ID / action / payload"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Not an operator pause or action not authorised"
+          }
+        }
+      }
+    },
+    "/api/workflows/runs/{run_id}/pause": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/runs/:run_id/pause — Pause a workflow run.",
+        "description": "Returns 200 with `{\"run_id\": \"...\", \"resume_token\": \"<uuid>\"}` on success.\n\n**SECURITY**: the `resume_token` in the response body is the ONLY surface\nfrom which the plaintext token is ever visible. Do not log this response.\n\nReturns 404 if the run is not found, 409 if the run is already paused\n(with the existing token hash) or already terminal.",
+        "operationId": "pause_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Run paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed run ID"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Run already paused or terminal"
+          }
+        }
+      }
+    },
+    "/api/workflows/runs/{run_id}/resume": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/runs/:run_id/resume — Resume a paused workflow run.",
+        "description": "Returns 200 with `{\"run_id\": \"...\", \"state\": \"running\"}` immediately after\nthe resume is initiated. The actual workflow continues asynchronously.\n\nReturns 401 if the resume token does not match.\nReturns 404 if the run is not found.\nReturns 409 if the run is not paused or is a DAG workflow (unsupported).",
+        "operationId": "resume_workflow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Workflow run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Run resumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed run ID or missing token"
+          },
+          "401": {
+            "description": "Token mismatch"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Run not paused or DAG unsupported"
+          }
+        }
+      }
+    },
     "/api/workflows/{id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflows/:id — Get a single workflow by ID.",
+        "operationId": "get_workflow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow not found"
+          }
+        }
+      },
       "put": {
         "tags": [
           "workflows"
@@ -9391,6 +12228,51 @@
         "responses": {
           "200": {
             "description": "Workflow deleted"
+          },
+          "404": {
+            "description": "Workflow not found"
+          }
+        }
+      }
+    },
+    "/api/workflows/{id}/dry-run": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/:id/dry-run — Validate and preview a workflow without executing it.",
+        "operationId": "dry_run_workflow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry-run preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           },
           "404": {
             "description": "Workflow not found"
@@ -9742,6 +12624,31 @@
           }
         }
       },
+      "ApproveAllForSessionRequest": {
+        "type": "object",
+        "description": "POST /api/approvals/session/{session_id}/approve_all — Approve all pending\napprovals for the given session atomically.\n\nMirrors Hermes-Agent's `resolve_gateway_approval(session_key, \"once\",\nresolve_all=True)`.  TOTP pre-check is enforced — if any pending request\nrequires TOTP, the entire batch is rejected before any mutation.",
+        "properties": {
+          "expected_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Optional count of approvals the caller expects to be pending.\nIf provided, the server verifies the actual pending count matches\nbefore approving.  Returns 409 Conflict if the count changed.",
+            "minimum": 0
+          },
+          "expected_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of approval IDs the caller expects to be pending.\nIf provided, the server verifies the actual pending set matches before\napproving.  Returns 409 Conflict if a new high-risk approval landed\nbetween the operator viewing the list and clicking approve_all."
+          }
+        },
+        "additionalProperties": false
+      },
       "AttachmentRef": {
         "type": "object",
         "description": "A file attachment reference (from a prior upload).",
@@ -9760,6 +12667,53 @@
           }
         },
         "additionalProperties": false
+      },
+      "AuthzCheckResponse": {
+        "type": "object",
+        "description": "Response body for `GET /api/authz/check`.\n\nDashboard surfaces (when added) MUST display the disclaimer that\ngoes with `scope = \"user_policy_only\"`: \"User-policy decision only —\nruntime gate may differ\" because per-agent `ToolPolicy` and global\n`ApprovalPolicy.channel_rules` are not consulted by this endpoint.\nToday no dashboard page consumes this endpoint; new consumers must\nhonour that contract before shipping.",
+        "required": [
+          "user",
+          "action",
+          "decision",
+          "allowed",
+          "scope"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Echoes the `action` query parameter."
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "Convenience flag — true only when `decision == \"allow\"`."
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Echoes the `channel` query parameter, or `null` when omitted."
+          },
+          "decision": {
+            "type": "string",
+            "description": "Decision label: `\"allow\"`, `\"deny\"`, or `\"needs_approval\"`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable reason when the decision is not `allow`. `None`\nfor `allow`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "**Always** `\"user_policy_only\"`. Marker that this decision is\ncomputed from the user's RBAC slice alone (Layer A + Layer B in\n[`AuthManager::resolve_decision_for_user`]) and does NOT include\nper-agent `ToolPolicy::check_tool`, global\n`ApprovalPolicy.channel_rules`, or the per-call approval gate.\nThe runtime tool-gate may therefore deny or require approval for\na tool that this endpoint reports as allowed."
+          },
+          "user": {
+            "type": "string",
+            "description": "Echoes the `user` query parameter (UUID or name as supplied)."
+          }
+        }
       },
       "BulkActionResult": {
         "type": "object",

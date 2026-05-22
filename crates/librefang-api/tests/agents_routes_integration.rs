@@ -11,6 +11,11 @@
 //!   GET   /api/agents/{id}         (happy path + invalid id 400 + unknown 404)
 //!   PATCH /api/agents/{id}         (success, invalid payload, unknown 404,
 //!                                   read-after-write via GET, auth gate 401)
+//!   PUT   /api/agents/{id}/suspend (suspend → state Suspended, unknown 404,
+//!                                   invalid id 400)
+//!   PUT   /api/agents/{id}/resume  (resume → state Running, unknown 404)
+//!   PUT   /api/agents/{id}/mode    (mode change persisted + read-after-write,
+//!                                   unknown 404, invalid id 400)
 //!
 //! Run: cargo test -p librefang-api --test agents_routes_integration
 
@@ -140,6 +145,28 @@ fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
         .header("authorization", format!("Bearer {}", TEST_TOKEN))
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+/// PUT with no body — used by the suspend/resume lifecycle routes, which
+/// take only the `{id}` path param.
+fn put_empty(path: &str, bearer: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().method(Method::PUT).uri(path);
+    if let Some(token) = bearer {
+        b = b.header("authorization", format!("Bearer {}", token));
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+/// PUT with a JSON body — used by the `/mode` lifecycle route.
+fn put_json(path: &str, body: serde_json::Value, bearer: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        b = b.header("authorization", format!("Bearer {}", token));
+    }
+    b.body(Body::from(body.to_string())).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,4 +1356,229 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
         body["compacted_summary"].is_null(),
         "non-canonical pinned session must have null compacted_summary: {body:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle cluster: PUT /api/agents/{id}/suspend, /resume, /mode
+//
+// First slice of the agents-mutation-routes backfill
+// (docs/issues/agents-mutation-routes-untested.md). These mutate registry
+// state, so each write is followed by a GET read-back asserting the
+// observable side effect (`state` / `mode` in the agent detail payload).
+// The success-path "status" string returned by each handler is also pinned
+// so a future handler refactor that silently flips the response shape is
+// caught.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_suspend_agent_sets_state_to_suspended() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "suspend-target");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_empty(&format!("/api/agents/{}/suspend", id), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(body["status"], "suspended");
+    assert_eq!(body["agent_id"], id.to_string());
+
+    // Read-after-write — GET should report the agent as Suspended.
+    // `get_agent` renders state via `format!("{:?}", ..)`, so it is the
+    // Debug (PascalCase) form, not the snake_case serde rename.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["state"], "Suspended",
+        "agent must be Suspended: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_resume_agent_sets_state_to_running() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "resume-target");
+
+    // Suspend first so resume has an observable transition to assert.
+    let (status, _) = send(
+        h.app.clone(),
+        put_empty(&format!("/api/agents/{}/suspend", id), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(body["state"], "Suspended", "precondition: {body:?}");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_empty(&format!("/api/agents/{}/resume", id), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(body["status"], "running");
+    assert_eq!(body["agent_id"], id.to_string());
+
+    // Read-after-write — GET should now report the agent as Running.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["state"], "Running",
+        "agent must be Running after resume: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_agent_mode_persists_new_mode() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "mode-target");
+
+    // Default spawned mode is Full ("full"); flip to Observe and Assist and
+    // assert each persists via read-after-write.
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(
+        body["mode"], "full",
+        "precondition: default mode is full: {body:?}"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{}/mode", id),
+            serde_json::json!({"mode": "observe"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(body["status"], "updated");
+    assert_eq!(body["mode"], "observe");
+
+    // Read-after-write — GET reflects the new mode.
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["mode"], "observe",
+        "mode must persist as observe: {body:?}"
+    );
+
+    // A second change to a different mode must also persist (not stuck).
+    let (status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{}/mode", id),
+            serde_json::json!({"mode": "assist"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(
+        body["mode"], "assist",
+        "mode must persist as assist: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_agent_mode_rejects_unknown_mode_value() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "mode-bad-value");
+
+    // `SetModeRequest` deserializes a known `AgentMode` variant; an
+    // unrecognized string is a body deserialization failure handled by the
+    // typed `Json` extractor. The semantic guarantee the issue cares about
+    // is 4xx (client error), never a 5xx — assert that, not the exact
+    // 400-vs-422 split, which the plain axum `Json` rejection owns.
+    let (status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{}/mode", id),
+            serde_json::json!({"mode": "wat"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "unknown mode value must be a 4xx client error, not a 5xx; got {status}"
+    );
+}
+
+// --- Negative paths: unknown agent must be a clean 4xx, never 500 ---------
+// (refs the "agent-not-found-returns-500" issue: these handlers must map a
+// missing agent to 404 with the `agent_not_found` code, not bubble a 5xx.)
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_suspend_unknown_agent_returns_404() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+    let (status, body) = send(
+        h.app.clone(),
+        put_empty(
+            &format!("/api/agents/{}/suspend", unknown),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+    assert_eq!(body["code"], "agent_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_resume_unknown_agent_returns_404() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+    let (status, body) = send(
+        h.app.clone(),
+        put_empty(&format!("/api/agents/{}/resume", unknown), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+    assert_eq!(body["code"], "agent_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_mode_unknown_agent_returns_404() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{}/mode", unknown),
+            serde_json::json!({"mode": "full"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+    assert_eq!(body["code"], "agent_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_suspend_invalid_id_returns_400() {
+    let h = boot(TEST_TOKEN).await;
+    let (status, body) = send(
+        h.app.clone(),
+        put_empty("/api/agents/not-a-uuid/suspend", Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(body["code"], "invalid_agent_id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_mode_invalid_id_returns_400() {
+    let h = boot(TEST_TOKEN).await;
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            "/api/agents/not-a-uuid/mode",
+            serde_json::json!({"mode": "full"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(body["code"], "invalid_agent_id");
 }
