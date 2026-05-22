@@ -53,6 +53,60 @@ pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// Used alongside [`MAX_MESSAGE_BYTES`]: both must be satisfied.
 pub const MAX_MESSAGE_CHARS: usize = 100_000;
 
+/// Maximum size of a `PromptVersion.system_prompt` field in UTF-8 bytes.
+///
+/// LLM-cost-amplification guard: once a `PromptVersion` is activated,
+/// every subsequent LLM call carries its `system_prompt` verbatim, so an
+/// uncapped field is a direct money-loss vector against the operator's
+/// LLM bill. The 1 MB `RequestBodyLimitLayer` is too loose to act as a
+/// safety net here — a 32 KiB cap sits well above any realistic hand-
+/// authored prompt and well below LLM context-window saturation.
+///
+/// Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`.
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
+
+/// Maximum size of a `PromptVersion.system_prompt` field in unicode
+/// scalar values (`str::chars().count()`).
+///
+/// Complementary cap to [`MAX_SYSTEM_PROMPT_BYTES`]: ASCII prompts hit
+/// the byte cap first, but a CJK-heavy prompt encodes at ~3 bytes per
+/// glyph and a billable character is closer to one token regardless of
+/// script. This cap ensures the per-call token cost is bounded in both
+/// encodings.
+pub const MAX_SYSTEM_PROMPT_CHARS: usize = 16 * 1024;
+
+/// Validate that a `PromptVersion.system_prompt` fits inside both
+/// [`MAX_SYSTEM_PROMPT_BYTES`] and [`MAX_SYSTEM_PROMPT_CHARS`]. Returns
+/// a `ValidationError` whose body includes both counts plus the
+/// configured caps so operators can diagnose which limit triggered.
+/// Returns `Ok(())` when both checks pass.
+///
+/// Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`.
+pub fn check_system_prompt_size(system_prompt: &str) -> Result<(), ValidationError> {
+    let bytes = system_prompt.len();
+    if bytes > MAX_SYSTEM_PROMPT_BYTES {
+        let chars = system_prompt.chars().count();
+        return Err(ValidationError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!(
+                "system_prompt exceeds maximum byte length: {bytes} bytes / {chars} chars \
+                 exceeds byte cap of {MAX_SYSTEM_PROMPT_BYTES} bytes"
+            ),
+        });
+    }
+    let chars = system_prompt.chars().count();
+    if chars > MAX_SYSTEM_PROMPT_CHARS {
+        return Err(ValidationError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!(
+                "system_prompt exceeds maximum character length: {chars} chars / {bytes} bytes \
+                 exceeds character cap of {MAX_SYSTEM_PROMPT_CHARS} chars"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Validate that a chat-message body fits inside both
 /// [`MAX_MESSAGE_BYTES`] and [`MAX_MESSAGE_CHARS`]. Returns a
 /// `ValidationError` whose body includes both counts plus the
@@ -410,7 +464,10 @@ mod tests {
         // but well under the new 256 KiB byte cap AND 100 K char
         // cap. Must accept now.
         let msg: String = std::iter::repeat_n('文', 30_000).collect();
-        assert!(msg.len() > 64 * 1024, "test fixture must exceed historical 64 KiB cap");
+        assert!(
+            msg.len() > 64 * 1024,
+            "test fixture must exceed historical 64 KiB cap"
+        );
         assert!(
             check_message_size(&msg).is_ok(),
             "CJK message at 30K chars / ~90 KiB must pass under the new fair caps"
@@ -440,7 +497,10 @@ mod tests {
         // 100_001 × 2 bytes = ~200 KiB (under MAX_MESSAGE_BYTES);
         // 100_001 chars (over MAX_MESSAGE_CHARS).
         let msg: String = std::iter::repeat_n('а', MAX_MESSAGE_CHARS + 1).collect();
-        assert!(msg.len() < MAX_MESSAGE_BYTES, "fixture must respect byte cap");
+        assert!(
+            msg.len() < MAX_MESSAGE_BYTES,
+            "fixture must respect byte cap"
+        );
         let err = check_message_size(&msg).expect_err("must reject past char cap");
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
