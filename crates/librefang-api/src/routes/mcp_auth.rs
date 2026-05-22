@@ -563,6 +563,26 @@ pub async fn auth_callback(
         }
     };
 
+    // Reject empty / whitespace-only `code` BEFORE any vault read, before
+    // any outbound network call, and before any auth-state mutation.
+    // `serde_urlencoded` (axum's `Query` extractor) deserializes the bare
+    // `?code=` form into `Some("")`, which without this guard would slip
+    // past the `None` arm further down and reach the outbound token-
+    // exchange POST. At that point the daemon would send the PKCE
+    // verifier alongside an empty code to the IdP token endpoint,
+    // leaking the verifier into the IdP's access log without producing
+    // any useful exchange. Placing the guard here — after the state-
+    // format gate (so the rejection still requires a credible flow id)
+    // but before the vault load of `pkce_state` / `pkce_verifier` and
+    // before the proxied `http_client.post(...)` further down — keeps
+    // the verifier inside the vault on any empty-code probe.
+    let code_param = match params.code.as_deref().map(str::trim) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            return auth_failed("Missing authorization code.");
+        }
+    };
+
     // Find server config to get URL
     let cfg = state.kernel.config_snapshot();
     let server_url = match cfg.mcp_servers.iter().find(|s| s.name == name) {
@@ -657,12 +677,9 @@ pub async fn auth_callback(
         return auth_failed(format!("{error}: {desc}"));
     }
 
-    let code = match params.code {
-        Some(ref c) => c.clone(),
-        None => {
-            return auth_failed("Missing authorization code.");
-        }
-    };
+    // The `code` was already validated as present and non-empty above
+    // (before any vault read), so unwrap is safe here.
+    let code = code_param;
 
     let pkce_verifier = match load("pkce_verifier") {
         Some(v) => v,
