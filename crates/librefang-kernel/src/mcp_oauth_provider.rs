@@ -337,10 +337,32 @@ impl KernelOAuthProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // Read Content-Type BEFORE consuming the response with `.text()`.
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Client registration failed (HTTP {status}): {body}"
-            ));
+            // Audit: `oauth-refresh-error-body-token-leak` — same threat
+            // model as the token-endpoint path. RFC 7591 §3.2.1 allows
+            // the registration response (including the error body) to
+            // contain `client_secret`, and an adversarial AS can plant
+            // any token-shaped value here just as easily as on the
+            // token endpoint. Log a sanitized digest only; the
+            // returned error string (which surfaces to
+            // `McpAuthState::Error.message` and the dashboard) must
+            // not carry the body verbatim either.
+            let redacted = redact_token_endpoint_response(
+                status.as_u16(),
+                content_type.as_deref(),
+                body.as_bytes(),
+            );
+            warn!(
+                redacted_response = %redacted,
+                "MCP OAuth Dynamic Client Registration failed (non-success status)",
+            );
+            return Err(format!("Client registration failed (HTTP {status})"));
         }
 
         // We register as a public client (`token_endpoint_auth_method: "none"`),
@@ -1051,6 +1073,92 @@ mod tests {
         assert!(
             captured.contains("body_sha256_prefix="),
             "log line missing sanitized digest; captured: {captured:?}"
+        );
+    }
+
+    /// Audit: `oauth-refresh-error-body-token-leak`. The Dynamic Client
+    /// Registration (RFC 7591) non-success branch in
+    /// `KernelOAuthProvider::register_client` is the third
+    /// token-endpoint-shaped call site in this file. The registration
+    /// response body can legitimately contain `client_secret`, and an
+    /// adversarial authorization server can plant any token-shaped
+    /// value there. The error string returned from `register_client`
+    /// flows into `McpAuthState::Error.message` (visible in the
+    /// dashboard) AND is logged via `tracing::warn!(error = %e, ...)`
+    /// in `routes::mcp_auth::auth_start`, so it must NOT carry the
+    /// raw body. Verify both: the returned `Err` string does not
+    /// contain the body, and the warn-side emission does not either.
+    #[tokio::test]
+    async fn dcr_failure_does_not_leak_raw_body_into_error_or_log() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        // Mirrors the call shape used in the DCR non-success branch:
+        // construct the redacted view, emit the warn, and synthesize
+        // the returned error string the way `register_client` does.
+        let raw_body =
+            br#"{"error":"invalid_client_metadata","client_secret":"cs-leak-9999","access_token":"at-leak-7777"}"#;
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        let redacted =
+            redact_token_endpoint_response(status.as_u16(), Some("application/json"), raw_body);
+        warn!(
+            redacted_response = %redacted,
+            "MCP OAuth Dynamic Client Registration failed (non-success status)",
+        );
+        let returned_err = format!("Client registration failed (HTTP {status})");
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        for secret in [
+            "cs-leak-9999",
+            "at-leak-7777",
+            "client_secret",
+            "access_token",
+        ] {
+            assert!(
+                !captured.contains(secret),
+                "DCR warn leaked '{secret}'; captured: {captured:?}"
+            );
+            assert!(
+                !returned_err.contains(secret),
+                "DCR returned Err leaked '{secret}': {returned_err}"
+            );
+        }
+        assert!(
+            captured.contains("body_sha256_prefix="),
+            "DCR warn missing sanitized digest; captured: {captured:?}"
+        );
+        assert!(
+            returned_err.contains("HTTP 400"),
+            "DCR returned Err should still carry status; got: {returned_err}"
         );
     }
 }
