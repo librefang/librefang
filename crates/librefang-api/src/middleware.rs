@@ -900,12 +900,12 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     // without a bearer token (A2A spec intent). All other /a2a/* paths require
     // auth (Bug #3781).
     PublicRoute::exact_get("/a2a/agents"),
-    // `/api/auth/providers` is intentionally NOT here. It enumerates the
-    // configured identity providers (display names + scopes), which is
-    // information-gathering surface that `require_auth_for_reads` exists to
-    // close. It lives in `PUBLIC_ROUTES_DASHBOARD_READS` below so it is gated
-    // by that flag; in open mode the handler additionally strips everything but
-    // the provider names (see `oauth::auth_providers`).
+    // `/api/auth/providers` is intentionally NOT here. Enumerating the
+    // configured identity providers is information-gathering surface that
+    // `require_auth_for_reads` exists to close, so it lives in
+    // `PUBLIC_ROUTES_DASHBOARD_READS` below and is gated by that flag. The
+    // handler returns names-only (id + display_name) to every caller and never
+    // exposes the OAuth scope configuration (see `oauth::auth_providers`).
     // Auth login: exact for the base endpoint, prefix for the
     // provider-specific suffix `/api/auth/login/{provider}`. The
     // unsuffixed `prefix_get("/api/auth/login")` would have matched
@@ -953,8 +953,8 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/a2a/agents"),
     PublicRoute::exact_get("/api/agents"),
     // Provider enumeration: public only in open mode (no `require_auth_for_reads`).
-    // Even then the handler returns names-only when the caller is
-    // unauthenticated; full detail (scopes) requires a valid token.
+    // The handler returns names-only (id + display_name) to every caller; the
+    // IdP scope configuration is never exposed through this endpoint.
     PublicRoute::exact_get("/api/auth/providers"),
     PublicRoute::exact_get("/api/auto-dream/status"),
     PublicRoute::exact_get("/api/budget"),

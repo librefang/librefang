@@ -502,20 +502,21 @@ impl TokenStore {
 /// Gated by `require_auth_for_reads` at the middleware layer (it lives in
 /// `PUBLIC_ROUTES_DASHBOARD_READS`): in strict mode an unauthenticated caller
 /// gets 401 before reaching this handler. In open mode the route is reachable
-/// without a token, so to keep the IdP enumeration from leaking the OAuth scope
-/// configuration to anonymous callers, an unauthenticated request receives
-/// names-only (`id` + `display_name`) — the minimum the login UI needs to
-/// render its buttons — while an authenticated caller additionally sees
-/// `scopes`.
+/// without a token.
 ///
-/// `api_user` is `Some` exactly when the auth middleware attributed a valid
-/// token to the request (it inserts `AuthenticatedApiUser` into the request
-/// extensions); `None` means the request arrived via the public-read path.
+/// The response is intentionally names-only (`id` + `display_name`) for **every**
+/// caller — the minimum the login UI needs to render its provider buttons. The
+/// per-provider OAuth `scopes` (and any other configuration detail) are never
+/// returned here, so the IdP scope configuration cannot be enumerated through
+/// this endpoint regardless of the caller's privilege. (An earlier revision
+/// keyed `scopes` exposure on the `AuthenticatedApiUser` extension, but the
+/// static `api_key` — the highest-privilege credential — is identity-less and
+/// never carries that extension, so the gate both under-disclosed to the admin
+/// key and inverted the privilege ordering. Scopes aren't security-sensitive,
+/// but they also aren't needed here; admins read full provider config from the
+/// auth-gated `/api/config` surface instead.)
 #[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = crate::types::JsonObject)))]
-pub async fn auth_providers(
-    State(state): State<Arc<AppState>>,
-    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
-) -> impl IntoResponse {
+pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
     let ext_auth = &cfg.external_auth;
 
@@ -526,25 +527,17 @@ pub async fn auth_providers(
         }));
     }
 
-    let authenticated = api_user.is_some();
     let providers = resolve_providers(ext_auth).await;
     let summary: Vec<serde_json::Value> = providers
         .iter()
         .map(|p| {
-            if authenticated {
-                serde_json::json!({
-                    "id": p.id,
-                    "display_name": p.display_name,
-                    "scopes": p.scopes,
-                })
-            } else {
-                // Names-only in public mode: omit `scopes` (and any other
-                // configuration detail) from anonymous callers.
-                serde_json::json!({
-                    "id": p.id,
-                    "display_name": p.display_name,
-                })
-            }
+            // Names-only for all callers: omit `scopes` (and any other
+            // configuration detail) so the IdP scope set is never enumerable
+            // through this endpoint.
+            serde_json::json!({
+                "id": p.id,
+                "display_name": p.display_name,
+            })
         })
         .collect();
 
