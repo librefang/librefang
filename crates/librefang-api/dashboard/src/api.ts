@@ -1237,6 +1237,12 @@ export interface AgentDetail {
    *  - 'allowlist' — manifest pinned the list in `skills`.
    *  - 'none' — skills_disabled = true. */
   skills_mode?: "all" | "allowlist" | "none";
+  /** MCP servers assigned to this agent (allowlist). Empty = all. */
+  mcp_servers?: string[];
+  /** MCP server assignment mode:
+   *  - 'all' — manifest doesn't pin an allowlist (the default).
+   *  - 'allowlist' — manifest pinned the list in `mcp_servers`. */
+  mcp_servers_mode?: "all" | "allowlist";
   /** Human-readable schedule summary derived from manifest.schedule:
    *  'manual' for reactive, the cron expression, 'proactive', or
    *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
@@ -1412,6 +1418,55 @@ export type AgentSchedulePatch =
  * which only accepts the model-tuning subset. */
 export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** GET /api/agents/{id}/mcp_servers — agent MCP server assignment info. */
+export interface AgentMcpServersResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist";
+}
+
+export async function getAgentMcpServers(agentId: string): Promise<AgentMcpServersResponse> {
+  return get<AgentMcpServersResponse>(`/api/agents/${encodeURIComponent(agentId)}/mcp_servers`);
+}
+
+/** PUT /api/agents/{id}/mcp_servers — update the agent's MCP server allowlist. */
+export async function setAgentMcpServers(agentId: string, servers: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/mcp_servers`, { mcp_servers: servers });
+}
+
+/** GET /api/agents/{id}/skills — agent skill assignment info. */
+export interface AgentSkillsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  disabled: boolean;
+}
+
+export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
+  return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/** PUT /api/agents/{id}/skills — update the agent's skill allowlist. */
+export async function setAgentSkills(agentId: string, skills: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`, { skills });
+}
+
+/** GET /api/agents/{id}/channels — agent channel assignment info. */
+export interface AgentChannelsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist";
+}
+
+export async function getAgentChannels(agentId: string): Promise<AgentChannelsResponse> {
+  return get<AgentChannelsResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`);
+}
+
+/** PUT /api/agents/{id}/channels — update the agent's channel allowlist. */
+export async function setAgentChannels(agentId: string, channels: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`, { channels });
 }
 
 export interface AgentToolsResponse {
@@ -1778,73 +1833,6 @@ export async function saveSidecarConfig(
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
-
-/** One QR-login lifecycle state, mirrors `QrStatusKind` in the
- * `librefang-channels` crate. Wire form is snake_case per the
- * `#[serde(rename_all = "snake_case")]` on the Rust enum. */
-export type QrStatusKind =
-  | "pending"
-  | "scanning"
-  | "confirmed"
-  | "expired"
-  | "failed";
-
-/** Projection of `ChannelStatus.qr` returned by
- * `GET /api/channels/{name}/qr`. Lifecycle:
- * - `pending` — sidecar fetched a QR; render and wait.
- * - `scanning` — user scanned, platform is finalising.
- * - `confirmed` — login succeeded; the sidecar's in-memory session
- *    continues with the captured credential. The operator follows
- *    the `message` ("set WECHAT_BOT_TOKEN in secrets.env to skip QR
- *    next time") to persist; auto-persist was dropped because the
- *    only available endpoint is a full-form upsert that would wipe
- *    other schema-managed env keys on a partial save.
- * - `expired` / `failed` — terminal failure; show `message`.
- *
- * `updated_at` advances on every state transition so consumers can
- * use it as a cheap diff signal between polls. */
-export interface QrState {
-  status: QrStatusKind;
-  qr_code: string;
-  qr_url?: string;
-  message?: string;
-  expires_at?: string;
-  updated_at: string;
-}
-
-/** Fetch the current QR-login state for a channel.
- *
- * Returns `null` when the sidecar is running but has not published a
- * QR session yet (HTTP 204 — e.g. WeChat sidecar still authenticating
- * from a cached `WECHAT_BOT_TOKEN`). 404 is surfaced as a thrown
- * `ApiError` like every other route — the caller distinguishes
- * "unknown channel" (impossible if the dashboard listed it) from
- * "sidecar not running" via the message.
- *
- * The pre-migration `wechatQrStart` / `wechatQrStatus` /
- * `whatsappQrStart` / `whatsappQrStatus` quadruple was removed when
- * those adapters migrated to sidecars — the sidecar now drives the
- * QR lifecycle itself and emits `qr_ready` / `qr_status` events, the
- * daemon caches `ChannelStatus.qr`, and this single endpoint reads it. */
-export async function getChannelQr(channelName: string): Promise<QrState | null> {
-  // The route returns 204 No Content when the sidecar is running but
-  // has not published a QR session — e.g. WeChat already authenticated
-  // from a cached `WECHAT_BOT_TOKEN`, no scan needed. The shared
-  // `get<T>` helper doesn't model that branch (it always parses JSON),
-  // so this endpoint uses `fetch` directly.
-  const response = await fetch(
-    `/api/channels/${encodeURIComponent(channelName)}/qr`,
-    { headers: buildHeaders() },
-  );
-  if (response.status === 204) {
-    return null;
-  }
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-  return (await response.json()) as QrState;
-}
-
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
@@ -3032,15 +3020,6 @@ export async function setSessionLabel(
   });
 }
 
-export async function setSessionModelOverride(
-  sessionId: string,
-  modelOverride: string | null
-): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
-    model_override: modelOverride
-  });
-}
-
 export async function listMemories(params?: {
   agentId?: string;
   offset?: number;
@@ -3420,32 +3399,14 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 // ── Network / Peers ──────────────────────────────────
 
 export interface NetworkStatusResponse {
-  // `online` is strictly "the OFP PeerNode actually bound a listener"
-  // (peer_node_ref().is_some() on the daemon). `enabled` is the looser
-  // config-mirror (`network_enabled && !shared_secret.is_empty()`) — so
-  // `enabled === true && online === false` is the genuine "configured
-  // but listener bind failed" state, surfaced separately from
-  // "disabled". Both fields ship for SDK back-compat; the dashboard
-  // reads `online`.
   online?: boolean;
-  enabled?: boolean;
   node_id?: string;
   protocol_version?: string;
-  // Daemon emits both `listen_addr` (dashboard-aligned) and
-  // `listen_address` (legacy SDK consumers). They carry the same value;
-  // both may be `""` when OFP is disabled.
   listen_addr?: string;
-  listen_address?: string;
-  // `peer_count` equals `connected_peers`. Both ship for SDK
-  // back-compat; the dashboard reads `peer_count` when present.
   peer_count?: number;
-  connected_peers?: number;
-  total_peers?: number;
   // SECURITY (#3873): null when this node has no Ed25519 identity
   // (HMAC-only legacy mode); operators should treat that as "new defense
-  // is dormant" and investigate. Distinct from "OFP disabled" — when
-  // `online === false` the identity simply has not been initialized
-  // because OFP never started.
+  // is dormant" and investigate.
   identity_fingerprint?: string | null;
   pinned_peers?: number;
   [key: string]: unknown;

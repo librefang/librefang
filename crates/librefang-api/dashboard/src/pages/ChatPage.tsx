@@ -1385,7 +1385,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                     key={img.file_id}
                     href={src}
                     target="_blank"
-                    rel="noopener noreferrer"
+                    rel="noreferrer noopener"
                     className="block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[240px]"
                   >
                     <img
@@ -1402,7 +1402,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                   key={img.file_id}
                   href={src}
                   target="_blank"
-                  rel="noopener noreferrer"
+                  rel="noreferrer noopener"
                   className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[11px] text-text hover:border-brand/40 transition-colors max-w-[220px]"
                 >
                   <FileText className="h-3 w-3 text-text-dim shrink-0" />

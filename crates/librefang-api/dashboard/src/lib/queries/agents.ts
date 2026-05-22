@@ -12,6 +12,9 @@ import {
   loadAgentSession,
   listTools,
   getAgentTools,
+  getAgentMcpServers,
+  getAgentSkills,
+  getAgentChannels,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -107,6 +110,27 @@ export const agentQueries = {
       queryKey: toolKeys.list(),
       queryFn: listTools,
     }),
+  mcpServers: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.mcpServers(agentId),
+      queryFn: () => getAgentMcpServers(agentId),
+      enabled: !!agentId,
+      staleTime: STALE_MS,
+    }),
+  skills: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.skills(agentId),
+      queryFn: () => getAgentSkills(agentId),
+      enabled: !!agentId,
+      staleTime: STALE_MS,
+    }),
+  channels: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.channels(agentId),
+      queryFn: () => getAgentChannels(agentId),
+      enabled: !!agentId,
+      staleTime: STALE_MS,
+    }),
 };
 
 export function useAgents(
@@ -158,4 +182,16 @@ export function useTools(options: QueryOverrides = {}) {
 
 export function useAgentTools(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentTools(agentId), options));
+}
+
+export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.mcpServers(agentId), options));
+}
+
+export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.skills(agentId), options));
+}
+
+export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

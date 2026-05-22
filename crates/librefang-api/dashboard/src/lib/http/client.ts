@@ -36,7 +36,6 @@ export {
   getBudgetStatus,
   // channels & comms
   listChannels,
-  getChannelQr,
   getCommsTopology,
   listCommsEvents,
   // config & registry
@@ -132,6 +131,12 @@ export {
   listTools,
   getAgentTools,
   getAgentTemplateToml,
+  // agent-level mcp
+  getAgentMcpServers,
+  // agent-level skills
+  getAgentSkills,
+  // agent-level channels
+  getAgentChannels,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -193,7 +198,6 @@ export {
   switchAgentSession,
   deleteSession,
   setSessionLabel,
-  setSessionModelOverride,
   deletePromptVersion,
   activatePromptVersion,
   createPromptVersion,
@@ -237,6 +241,12 @@ export {
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
+  // agent-level mcp
+  setAgentMcpServers,
+  // agent-level skills
+  setAgentSkills,
+  // agent-level channels
+  setAgentChannels,
   // mcp
   addMcpServer,
   updateMcpServer,
@@ -397,4 +407,10 @@ export type {
   EffectiveMemoryAccess,
   EffectiveBudget,
   EffectiveChannelToolPolicy,
+  // agent-level mcp
+  AgentMcpServersResponse,
+  // agent-level skills
+  AgentSkillsResponse,
+  // agent-level channels
+  AgentChannelsResponse,
 } from "../../api";

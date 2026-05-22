@@ -25,7 +25,7 @@ export function WorkflowStepImageGallery({ refs, label }: Props) {
             key={ref.src}
             href={ref.src}
             target="_blank"
-            rel="noopener noreferrer"
+            rel="noreferrer noopener"
             className="block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[200px]"
             title={ref.alt}
           >
