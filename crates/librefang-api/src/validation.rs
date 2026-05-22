@@ -248,9 +248,12 @@ pub fn check_json_depth(
 ///
 /// Audit: `docs/issues/migrate-arbitrary-paths.md`. `POST /api/migrate` used
 /// to consume `source_dir` / `target_dir` via `PathBuf::from(...)` with no
-/// containment check. Admin is dev/ops, not the trust ceiling: a compromised
-/// Admin token (leaked CI env, phishing) became a full daemon-UID
-/// write primitive and a `.exists()` oracle for arbitrary filesystem paths.
+/// containment check, and the sibling `POST /api/migrate/scan` had the same
+/// flaw via `req.path` — the 200-vs-400 branch on the latter is a pure
+/// `.exists()` oracle even without the write primitive. Admin is dev/ops,
+/// not the trust ceiling: a compromised Admin token (leaked CI env,
+/// phishing) became a full daemon-UID write primitive and a `.exists()`
+/// oracle for arbitrary filesystem paths.
 ///
 /// Behaviour:
 /// - `require_exists = true` (source paths): the input MUST already exist on

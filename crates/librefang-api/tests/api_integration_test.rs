@@ -752,6 +752,48 @@ async fn test_run_migrate_accepts_paths_inside_home() {
     );
 }
 
+/// `POST /api/migrate/scan { path: "/etc" }` must be rejected with 400 — pins
+/// that the sibling scan endpoint also enforces containment. Without this,
+/// the 200-vs-400 `Directory not found` branch of `migrate_scan` is a
+/// `.exists()` oracle for arbitrary daemon-UID-readable paths even after
+/// `run_migrate` was hardened.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_migrate_scan_rejects_path_outside_home() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate/scan")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "path": "/etc" })).unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "migrate_scan path='/etc' must be rejected — outside the allowed migration roots"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("path") && err_text.contains("allowed"),
+        "error must name the rejected field and the allowlist policy: {err_text}"
+    );
+}
+
 /// End-to-end coverage for the global `enforce_json_body_depth` middleware
 /// wired into `server::build_router` (PR #5412). Unit tests in
 /// `middleware.rs` exercise the layer against a `Router::new()` stub; this

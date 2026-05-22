@@ -1747,11 +1747,30 @@ pub async fn migrate_detect() -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
-    let path = std::path::PathBuf::from(&req.path);
-    if !path.exists() {
-        return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
-    }
+pub async fn migrate_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateScanRequest>,
+) -> impl IntoResponse {
+    // SECURITY: same containment policy as `run_migrate` below. Without it,
+    // the 200-vs-400 `Directory not found` branch is a `.exists()` oracle
+    // for any path readable as the daemon UID — see
+    // `docs/issues/migrate-arbitrary-paths.md`. The probe path is the
+    // sibling of the write primitive `run_migrate` patches; both endpoints
+    // share the same audit-cited threat model and must share the same
+    // allowlist (default: `home_dir`).
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    let allowed_roots: Vec<&std::path::Path> = vec![home_dir.as_path()];
+
+    let path = match crate::validation::validate_path_containment(
+        "path",
+        std::path::Path::new(req.path.trim()),
+        &allowed_roots,
+        true, // scan target must already exist
+    ) {
+        Ok(p) => p,
+        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+    };
+
     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
 }
