@@ -755,6 +755,49 @@ const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
 const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
 const SESSION_RECOVERY_EXPIRE_MS = 30 * 60 * 1000; // 30 min
 
+
+// Unwrap nested message wrappers so contextInfo (quotedMessage, mentions,
+// forwards) is visible to handlers regardless of whether the inbound message
+// came from a normal chat, a disappearing-messages session (ephemeralMessage),
+// view-once media, an edited message, a document with caption, or a sibling
+// device on the same WA account (deviceSentMessage). Pre-fix the gateway only
+// handled the documentWithCaptionMessage shape inline; quotes from ephemeral /
+// view-once / edited replies came through with the `[In risposta a: "..."]`
+// prefix missing because the handler read fields off the outer wrapper instead
+// of the inner message.
+//
+// WhatsApp routinely produces *nested* wrappers — e.g. editing an ephemeral
+// message yields `editedMessage.message.ephemeralMessage.message.<payload>`,
+// and `viewOnceMessageV2` is commonly seen inside `ephemeralMessage` on
+// disappearing-mode chats — so we recurse, mirroring Baileys'
+// `normalizeMessageContent` idiom. Depth is bounded to 5: in field reports
+// the deepest observed chain is 3, and any plausible legitimate combination
+// of (ephemeral × edited × viewOnce × deviceSent × documentWithCaption) fits
+// well under that. The bound is a defense against a malformed / adversarial
+// payload that loops back on itself; on reaching it we return the partially
+// unwrapped node (safer than throwing — downstream handlers already cope
+// with unrecognized shapes via `|| ''` / `|| null` fall-throughs).
+//
+// Note: `protocolMessage` is intentionally NOT a content wrapper (it carries
+// receipts/revokes/key-rotations, not user-visible payload); the
+// `!text && !downloadableMedia` short-circuit further downstream drops it
+// harmlessly. Do not add it here.
+const MAX_UNWRAP_DEPTH = 5;
+function unwrapMessageWrappers(m, depth = 0) {
+  if (!m || depth >= MAX_UNWRAP_DEPTH) return m;
+  const inner = (
+    m.ephemeralMessage?.message
+    || m.viewOnceMessage?.message
+    || m.viewOnceMessageV2?.message
+    || m.viewOnceMessageV2Extension?.message
+    || m.editedMessage?.message
+    || m.deviceSentMessage?.message
+    || m.documentWithCaptionMessage?.message
+  );
+  if (!inner || inner === m) return m;
+  return unwrapMessageWrappers(inner, depth + 1);
+}
+
 function normalizeBaseJid(jid) {
   if (!jid) return '';
   // Strip device suffix "<id>:<device>@<server>" → "<id>@<server>"
@@ -1674,7 +1717,7 @@ async function startConnection() {
       }
 
       const sender = msg.key.remoteJid || '';
-      const innerMsg = msg.message || {};
+      const innerMsg = unwrapMessageWrappers(msg.message) || {};
 
       // Signal session recovery: inbound message with null payload ⇒ libsignal
       // rejected the ciphertext before stub 39 was emitted. Force a fresh
@@ -2574,6 +2617,13 @@ function getDownloadableMedia(innerMsg) {
   if (innerMsg.audioMessage)    return { type: 'audioMessage',    msg: innerMsg.audioMessage };
   if (innerMsg.stickerMessage)  return { type: 'stickerMessage',  msg: innerMsg.stickerMessage };
   if (innerMsg.documentMessage) return { type: 'documentMessage', msg: innerMsg.documentMessage };
+  // Defense in depth: `unwrapMessageWrappers` already collapses
+  // `documentWithCaptionMessage` upstream of every caller, so this branch is
+  // normally dead. Kept so that a future caller that bypasses the unwrap
+  // helper (e.g. raw test fixtures, retried payloads) still resolves the
+  // inner documentMessage. Do not "clean up" without also removing the
+  // matching `innerMsg.documentWithCaptionMessage?.message?.documentMessage?.caption`
+  // fallback in the text-extraction block.
   if (innerMsg.documentWithCaptionMessage?.message?.documentMessage) {
     return { type: 'documentMessage', msg: innerMsg.documentWithCaptionMessage.message.documentMessage };
   }
@@ -3786,6 +3836,8 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 // Export for testing
 module.exports = {
   markdownToWhatsApp,
+  unwrapMessageWrappers,
+  MAX_UNWRAP_DEPTH,
   extractNotifyOwner,
   extractRelayCommands,
   ownerIntentsRelay,

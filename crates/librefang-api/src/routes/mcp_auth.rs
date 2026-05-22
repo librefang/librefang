@@ -14,9 +14,39 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use librefang_kernel::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use subtle::ConstantTimeEq;
 use url::Url;
+
+/// Per-process random fingerprint used for unauthenticated MCP OAuth
+/// flows. Generated once per daemon at first use via `OsRng`; never
+/// persisted. Replaces the historical constant `SHA256("anon")[..16]`
+/// (audit: caller-fingerprint-anon-constant), which gave every
+/// anonymous flow on every daemon the same vault namespace and
+/// nullified the per-caller binding designed into `auth_start` /
+/// `callback` (`flow_id` still kept concurrent flows isolated, but
+/// the broader namespace was shared with anyone who could hit the
+/// loopback API).
+///
+/// Implications:
+///   * Different daemons (or restarts of the same daemon) hash to
+///     different namespaces, so a malicious dev tool that scraped a
+///     fingerprint from one daemon can't use it against another or
+///     against a restarted instance.
+///   * Vault entries written under the anonymous fingerprint do not
+///     survive a daemon restart — same as before (anonymous flows
+///     were never durable across restarts; the random `flow_id` and
+///     in-memory CSRF state already had that property).
+static ANON_FINGERPRINT: LazyLock<[u8; 16]> = LazyLock::new(|| {
+    use rand::Rng;
+    let mut buf = [0u8; 16];
+    // `rand::rng()` is a CSPRNG (ChaCha-based) seeded from the OS
+    // entropy source — same shape as the recovery-code generator in
+    // `librefang_kernel::approval` so we stay consistent with how
+    // other security-relevant entropy is sourced in the project.
+    rand::rng().fill_bytes(&mut buf);
+    buf
+});
 
 /// SHA-256 prefix of the caller's user_id (UUID).  Embedded into the vault
 /// key + flow_id so a callback initiated by user A cannot be redeemed
@@ -26,17 +56,20 @@ use url::Url;
 /// in-flight flows on a single daemon, not preimage resistance, so 16 hex
 /// chars of SHA-256 is sufficient.
 fn caller_fingerprint(user: &Option<Extension<AuthenticatedApiUser>>) -> String {
-    let raw = match user {
-        Some(Extension(u)) => u.user_id.to_string(),
-        // No identity attached — fall back to a constant so single-user
-        // deployments (no RBAC configured) still produce deterministic
-        // vault keys.  The flow_id random nonce still keeps concurrent
-        // anonymous flows isolated.
-        None => "anon".to_string(),
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
-    hex::encode(hasher.finalize())[..16].to_string()
+    match user {
+        Some(Extension(u)) => {
+            let raw = u.user_id.to_string();
+            let mut hasher = Sha256::new();
+            hasher.update(raw.as_bytes());
+            hex::encode(hasher.finalize())[..16].to_string()
+        }
+        // No identity attached — fall back to the per-process random
+        // fingerprint. Single-user deployments still get a stable
+        // namespace within the lifetime of one daemon (the
+        // `LazyLock` is initialised once), but the namespace is no
+        // longer a global constant shared across every install.
+        None => hex::encode(*ANON_FINGERPRINT),
+    }
 }
 
 fn callback_text(body: String) -> Response {
@@ -1109,10 +1142,57 @@ mod tests {
     }
 
     #[test]
-    fn caller_fingerprint_anonymous_is_stable() {
+    fn caller_fingerprint_anonymous_is_stable_within_process() {
+        // Within one daemon lifetime the anonymous namespace is
+        // stable so single-user deployments still get deterministic
+        // vault keys — `LazyLock` initialises once and reuses.
         let fp1 = caller_fingerprint(&None);
         let fp2 = caller_fingerprint(&None);
         assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn caller_fingerprint_anonymous_is_no_longer_the_legacy_constant() {
+        // Audit: caller-fingerprint-anon-constant. The pre-fix
+        // implementation hashed the literal string "anon" with SHA-256
+        // and took the first 16 hex chars (`973dfe46…`), so every
+        // anonymous MCP OAuth flow on every install shared the same
+        // vault namespace. With OsRng-seeded per-process fingerprint
+        // this MUST no longer be the case — any equality here would
+        // mean the random-seed code path silently regressed.
+        let legacy_constant = {
+            let mut h = Sha256::new();
+            h.update(b"anon");
+            hex::encode(h.finalize())[..16].to_string()
+        };
+        let observed = caller_fingerprint(&None);
+        assert_ne!(
+            observed, legacy_constant,
+            "anonymous fingerprint must NOT equal the historical SHA256(\"anon\")[..16] \
+             constant — OsRng path appears bypassed"
+        );
+        assert_eq!(observed.len(), 32, "still 16 bytes hex-encoded = 32 chars");
+        assert!(
+            observed.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint must remain hex-encoded for downstream vault-key composition"
+        );
+    }
+
+    #[test]
+    fn caller_fingerprint_anonymous_differs_from_any_named_user() {
+        // Cross-check: the random anonymous fingerprint must not
+        // collide with a fingerprint derived from a real user_id.
+        // Collision probability is 2^-64 ≈ negligible — this guards
+        // against a refactor accidentally reusing the named-user
+        // hash path for the anonymous case.
+        let user = AuthenticatedApiUser {
+            name: "alice".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("alice"),
+        };
+        let named = caller_fingerprint(&Some(Extension(user)));
+        let anon = caller_fingerprint(&None);
+        assert_ne!(named, anon);
     }
 
     fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
