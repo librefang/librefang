@@ -32,9 +32,27 @@
 //! (it only signals the runtime to migrate *other* tasks off this worker),
 //! so the task-local is fully visible inside `append_to_session`'s
 //! `block_in_place` — which is the #5126 detection point.
+//!
+//! ## Why a `parking_lot::Mutex`, not a `RefCell`
+//!
+//! Earlier revisions used `RefCell<HashSet<AgentId>>`. `RefCell` panics
+//! when a `borrow()` overlaps a `borrow_mut()` from the same thread, and
+//! the agent loop is async: a future contributor adding any borrow that
+//! lives across an `.await` (even a `tracing::info_span!` carrying a
+//! borrowed reference, or a `?` between borrow and await) would crash the
+//! whole worker. Today no borrow spans an `.await`, but the invariant is
+//! fragile and unenforced by the type system.
+//!
+//! `parking_lot::Mutex` removes that footgun: every access is a critical
+//! section bounded by an explicit `lock()` / drop, the compiler will not
+//! let you accidentally extend the lifetime, and the lock cannot be
+//! poisoned. Cross-thread contention is impossible because the registry
+//! lives behind a `task_local!` — a Mutex inside a task-local is, by
+//! construction, owned by exactly one task — so the lock is effectively
+//! free at runtime.
 
 use librefang_types::agent::AgentId;
-use std::cell::RefCell;
+use parking_lot::Mutex;
 use std::collections::HashSet;
 
 tokio::task_local! {
@@ -48,7 +66,11 @@ tokio::task_local! {
     /// LLM-prompt ordering boundary (the #3298 determinism rule does not
     /// apply here). The diagnostic cycle-path snapshot is sorted by the
     /// inner `Uuid` in [`held_snapshot`] for a stable error message.
-    static HELD_AGENT_LOCKS: RefCell<HashSet<AgentId>>;
+    ///
+    /// Wrapped in `parking_lot::Mutex` (not `RefCell`) so that holding a
+    /// reference across an unrelated `.await` cannot panic — see the
+    /// module docs.
+    static HELD_AGENT_LOCKS: Mutex<HashSet<AgentId>>;
 }
 
 /// Run `fut` with the held-locks registry available for the current task.
@@ -67,7 +89,7 @@ where
         fut.await
     } else {
         HELD_AGENT_LOCKS
-            .scope(RefCell::new(HashSet::new()), fut)
+            .scope(Mutex::new(HashSet::new()), fut)
             .await
     }
 }
@@ -78,7 +100,7 @@ where
 /// behaviour for non-agent-loop callers.
 pub fn is_held(agent_id: AgentId) -> bool {
     HELD_AGENT_LOCKS
-        .try_with(|set| set.borrow().contains(&agent_id))
+        .try_with(|set| set.lock().contains(&agent_id))
         .unwrap_or(false)
 }
 
@@ -88,7 +110,7 @@ pub fn is_held(agent_id: AgentId) -> bool {
 /// `HashSet`). Empty when called outside a [`scope`].
 pub fn held_snapshot() -> Vec<AgentId> {
     let mut v: Vec<AgentId> = HELD_AGENT_LOCKS
-        .try_with(|set| set.borrow().iter().copied().collect())
+        .try_with(|set| set.lock().iter().copied().collect())
         .unwrap_or_default();
     v.sort_by_key(|a| a.0);
     v
@@ -122,7 +144,7 @@ impl HeldLockGuard {
     /// so existing non-agent-loop lock acquirers keep working unchanged.
     pub fn register(agent_id: AgentId) -> Self {
         let inserted = HELD_AGENT_LOCKS
-            .try_with(|set| set.borrow_mut().insert(agent_id))
+            .try_with(|set| set.lock().insert(agent_id))
             .unwrap_or(false);
         Self { agent_id, inserted }
     }
@@ -135,7 +157,7 @@ impl Drop for HeldLockGuard {
             // which cannot happen while this guard (a stack value inside
             // the scoped future) is alive. The `let _ =` is defensive.
             let _ = HELD_AGENT_LOCKS.try_with(|set| {
-                set.borrow_mut().remove(&self.agent_id);
+                set.lock().remove(&self.agent_id);
             });
         }
     }
@@ -208,6 +230,72 @@ mod tests {
             .await;
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn nested_access_does_not_panic() {
+        // Regression coverage for the `RefCell` -> `parking_lot::Mutex`
+        // migration. With the previous `RefCell` representation, calling
+        // any registry method while a borrow from a *prior* call site is
+        // still live on the stack triggers an "already borrowed" panic at
+        // runtime. The new `Mutex` representation releases the guard at
+        // the end of each accessor expression, so chained calls compose
+        // freely.
+        //
+        // We exercise the dangerous shape: register guard A, then while
+        // its `Drop` is conceptually pending, observe the set via
+        // `held_snapshot` and `is_held`, then register guard B and let
+        // both drop in reverse order. None of these calls must panic.
+        let a = AgentId::new();
+        let b = AgentId::new();
+        scope(async move {
+            let _ga = HeldLockGuard::register(a);
+            // Read-side access while a write-side guard is alive.
+            assert!(is_held(a));
+            let snap_after_a = held_snapshot();
+            assert_eq!(snap_after_a, vec![a]);
+
+            // Nested registration while the outer guard is alive — under
+            // `RefCell` this would have been the panic site if any of the
+            // surrounding reads happened to hold a `Ref` across this
+            // mutating call.
+            let _gb = HeldLockGuard::register(b);
+            assert!(is_held(a) && is_held(b));
+            let mut snap_both = held_snapshot();
+            snap_both.sort_by_key(|x| x.0);
+            let mut expected = vec![a, b];
+            expected.sort_by_key(|x| x.0);
+            assert_eq!(snap_both, expected);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_tasks_do_not_panic_or_share_state() {
+        // The registry is per-task by design, so the two tasks below
+        // never share state. The point of running this on the
+        // multi-thread runtime is to confirm that the synchronization
+        // primitive change (RefCell -> parking_lot::Mutex) does not
+        // introduce cross-task contention, panics, or poisoning when
+        // tasks run truly in parallel on separate worker threads.
+        let agents: Vec<AgentId> = (0..8).map(|_| AgentId::new()).collect();
+        let mut handles = Vec::new();
+        for agent in agents.clone() {
+            handles.push(tokio::spawn(scope(async move {
+                let _g = HeldLockGuard::register(agent);
+                // Yield repeatedly so the runtime is free to interleave
+                // tasks across worker threads while guards are alive.
+                for _ in 0..16 {
+                    assert!(is_held(agent));
+                    let snap = held_snapshot();
+                    assert_eq!(snap, vec![agent], "no cross-task bleed");
+                    tokio::task::yield_now().await;
+                }
+            })));
+        }
+        for h in handles {
+            h.await.expect("task must not panic");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
