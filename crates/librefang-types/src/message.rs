@@ -258,7 +258,18 @@ impl MessageContent {
                         _ => None,
                     };
                     if let Some(mt) = media {
-                        let placeholder = format!("[Image ({mt}) previously processed]");
+                        // Phrase the placeholder so an LLM, on re-reading the
+                        // session, infers "I already received and analyzed this
+                        // image earlier in this thread" rather than the literal
+                        // "[Image previously processed]" which a model can
+                        // mistake for "no image was delivered". The model
+                        // saying "I did not receive any image" is the symptom
+                        // we are guarding against here.
+                        let placeholder = format!(
+                            "[Image ({mt}) — already received and analyzed by you (the assistant) earlier in this conversation; \
+                             the raw bytes were removed from history to save context tokens. Your earlier turn in this thread \
+                             contains your analysis of this image — refer to it rather than claiming the image is missing.]"
+                        );
                         *block = ContentBlock::Text {
                             text: placeholder,
                             provider_metadata: None,
@@ -638,7 +649,7 @@ mod tests {
         // Image block should now be a text placeholder
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
         // Original text should still be present
         assert!(text.contains("What is this?"));
     }
@@ -707,7 +718,7 @@ mod tests {
         assert!(content.strip_images());
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
     }
 
     #[test]
@@ -736,8 +747,8 @@ mod tests {
         assert!(content.strip_images());
         assert!(!content.has_images());
         let text = content.text_content();
-        assert!(text.contains("[Image (image/png) previously processed]"));
-        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+        assert!(text.contains("[Image (image/png) — already received and analyzed"));
+        assert!(text.contains("[Image (image/jpeg) — already received and analyzed"));
         assert!(text.contains("between"));
     }
 
