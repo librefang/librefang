@@ -2476,13 +2476,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("test.db");
 
-        let _substrate = MemorySubstrate::open_with_pool_size(
-            &db_path,
-            0.0,
-            ChunkConfig::default(),
-            1,
-        )
-        .expect("substrate open");
+        let _substrate =
+            MemorySubstrate::open_with_pool_size(&db_path, 0.0, ChunkConfig::default(), 1)
+                .expect("substrate open");
 
         let mode = std::fs::metadata(&db_path)
             .expect("db exists after open")
@@ -2507,13 +2503,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("test.db");
 
-        let substrate = MemorySubstrate::open_with_pool_size(
-            &db_path,
-            0.0,
-            ChunkConfig::default(),
-            1,
-        )
-        .expect("substrate open");
+        let substrate =
+            MemorySubstrate::open_with_pool_size(&db_path, 0.0, ChunkConfig::default(), 1)
+                .expect("substrate open");
 
         // Forcibly trigger a WAL flush by creating a session — that
         // makes `-wal` / `-shm` appear so the helper has something to

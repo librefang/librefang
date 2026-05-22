@@ -192,6 +192,74 @@ const DISCOVERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(
 static DISCOVERY_CACHE: std::sync::LazyLock<DiscoveryCache> =
     std::sync::LazyLock::new(DiscoveryCache::default);
 
+// ── Cache invalidation (hot-reload) ─────────────────────────────────────
+
+/// Drop every cached JWKS keyset and OIDC discovery document.
+///
+/// Called from the kernel hot-reload pipeline (via the
+/// [`librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator`]
+/// trait) whenever `[external_auth]` is reloaded with a new
+/// identity-provider identity (issuer URL, JWKS URI, providers list).
+/// Without this, swapping IdPs at runtime would leave the previous
+/// provider's signing keys in cache until the natural 1h TTL —
+/// tokens issued by the new IdP would fail JWT validation against the
+/// stale keys (`No JWKS key found for kid=…`) until the entry expires.
+///
+/// Idempotent: clearing an already-empty cache is a no-op. Synchronous
+/// from the caller's perspective: each `clear()` only briefly takes
+/// the per-cache write lock to drop entries (no network I/O).
+pub fn invalidate_oauth_caches() {
+    // The caches are guarded by `tokio::sync::RwLock` because the
+    // fetch path holds the write guard across an `.await` on the HTTP
+    // round-trip. Invalidation only needs synchronous access; spawn a
+    // detached task when we're on a runtime, fall back to a
+    // single-threaded runtime + block_on when not (only hit from
+    // synchronous tests).
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Detached drop on the runtime — kernel `apply_hot_actions_inner`
+            // already holds the config-reload write lock, so we don't
+            // need the clear to complete synchronously: any subsequent
+            // login attempt re-takes the cache lock and serialises
+            // naturally with this task.
+            let h2 = handle.clone();
+            handle.spawn(async {
+                JWKS_CACHE.inner.write().await.clear();
+            });
+            h2.spawn(async {
+                DISCOVERY_CACHE.inner.write().await.clear();
+            });
+        }
+        Err(_) => {
+            // No tokio runtime — build a single-threaded one for the
+            // clear and tear it down. Only exercised by synchronous
+            // unit tests; the production path always has a runtime.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("transient tokio runtime for cache invalidation");
+            rt.block_on(async {
+                JWKS_CACHE.inner.write().await.clear();
+                DISCOVERY_CACHE.inner.write().await.clear();
+            });
+        }
+    }
+}
+
+/// Adapter that implements the kernel-facing
+/// [`librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator`]
+/// trait. Constructed once at API-server boot and handed to the kernel
+/// via `set_oauth_cache_invalidator`.
+pub struct OauthCacheInvalidatorImpl;
+
+impl librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator
+    for OauthCacheInvalidatorImpl
+{
+    fn invalidate(&self) {
+        invalidate_oauth_caches();
+    }
+}
+
 // ── State (CSRF) ────────────────────────────────────────────────────────
 
 /// State parameter payload encoded as JSON and HMAC-signed.
@@ -2371,5 +2439,127 @@ mod tests {
         // Only the explicit-URL provider should succeed.
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "good");
+    }
+
+    // ── OAuth cache invalidation (refs jwks-cache-no-reload-evict.md) ───
+    //
+    // These tests pin the contract that `invalidate_oauth_caches()`
+    // empties both the JWKS and OIDC discovery caches. We seed the
+    // module-level statics directly because the cache types are
+    // private — there is no public mutator beyond the fetch path.
+    // The test runs serially via a process-wide mutex so two
+    // concurrent cases don't observe each other's writes (the caches
+    // are global to the process).
+
+    static OAUTH_CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_clears_jwks_entries() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Seed: pretend we've already cached IdP-A's signing keys.
+        {
+            let mut write = JWKS_CACHE.inner.write().await;
+            write.insert(
+                "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+                CachedJwks {
+                    keys: vec![JwksKey {
+                        kty: "RSA".to_string(),
+                        kid: Some("idp-a-key-1".to_string()),
+                        key_use: Some("sig".to_string()),
+                        alg: Some("RS256".to_string()),
+                        n: Some("AQAB".to_string()),
+                        e: Some("AQAB".to_string()),
+                        x: None,
+                        y: None,
+                        crv: None,
+                    }],
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+            assert_eq!(write.len(), 1, "seed must populate cache");
+        }
+
+        // Invalidate as the hot-reload pipeline would.
+        invalidate_oauth_caches();
+
+        // Wait for the detached invalidation task to land — it runs
+        // on the same multi-thread runtime, so a single yield is not
+        // sufficient under heavier test concurrency. Bounded retry.
+        for _ in 0..50 {
+            if JWKS_CACHE.inner.read().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            JWKS_CACHE.inner.read().await.is_empty(),
+            "invalidate_oauth_caches must drop all JWKS entries so a \
+             subsequent token validation re-fetches from the new IdP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_clears_discovery_entries() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Seed the discovery cache with a stale entry.
+        {
+            let mut write = DISCOVERY_CACHE.inner.write().await;
+            write.insert(
+                "https://idp-a.example.com".to_string(),
+                CachedDiscovery {
+                    doc: OidcDiscovery {
+                        issuer: "https://idp-a.example.com".to_string(),
+                        authorization_endpoint: "https://idp-a.example.com/authorize".to_string(),
+                        token_endpoint: "https://idp-a.example.com/token".to_string(),
+                        userinfo_endpoint: None,
+                        jwks_uri: "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+                        scopes_supported: vec![],
+                        response_types_supported: vec![],
+                        id_token_signing_alg_values_supported: vec![],
+                    },
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+            assert_eq!(write.len(), 1, "seed must populate cache");
+        }
+
+        invalidate_oauth_caches();
+
+        for _ in 0..50 {
+            if DISCOVERY_CACHE.inner.read().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            DISCOVERY_CACHE.inner.read().await.is_empty(),
+            "invalidate_oauth_caches must drop all discovery entries so a \
+             subsequent OIDC handshake re-fetches the new IdP's document"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_is_idempotent_on_empty() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Ensure both caches are empty up front.
+        JWKS_CACHE.inner.write().await.clear();
+        DISCOVERY_CACHE.inner.write().await.clear();
+
+        // Should not panic, should not deadlock.
+        invalidate_oauth_caches();
+        // Wait a tick for the detached tasks to complete.
+        tokio::task::yield_now().await;
+
+        assert!(JWKS_CACHE.inner.read().await.is_empty());
+        assert!(DISCOVERY_CACHE.inner.read().await.is_empty());
     }
 }

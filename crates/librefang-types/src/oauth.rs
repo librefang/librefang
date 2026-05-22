@@ -69,10 +69,7 @@ impl std::fmt::Debug for OAuthTokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthTokens")
             .field("access_token", &redact(&self.access_token))
-            .field(
-                "refresh_token",
-                &self.refresh_token.as_deref().map(redact),
-            )
+            .field("refresh_token", &self.refresh_token.as_deref().map(redact))
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
             .field("scope", &self.scope)
@@ -99,7 +96,11 @@ fn redact(secret: &str) -> String {
     if hint_chars == 0 {
         return format!("<redacted len={len}>");
     }
-    let hint: String = secret.chars().rev().take(hint_chars).collect::<Vec<_>>()
+    let hint: String = secret
+        .chars()
+        .rev()
+        .take(hint_chars)
+        .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect();
@@ -249,7 +250,10 @@ mod tests {
         };
         let dbg = format!("{tokens:?}");
         assert!(!dbg.contains("abc123"), "access still leaking: {dbg}");
-        assert!(dbg.contains("None"), "missing refresh must render as None: {dbg}");
+        assert!(
+            dbg.contains("None"),
+            "missing refresh must render as None: {dbg}"
+        );
     }
 
     #[test]
