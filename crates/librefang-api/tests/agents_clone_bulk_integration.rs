@@ -374,14 +374,10 @@ async fn test_reload_invalid_id_returns_400() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_reload_unknown_agent_is_rejected() {
-    // The reload handler maps EVERY kernel error — including
-    // `AgentNotFound` — to 400 BAD_REQUEST (it does not run
-    // `kernel_err_to_status`). The other agent routes return 404 for an
-    // unknown id (clone/push, see below), so this 400 is a real status-code
-    // inconsistency flagged for the maintainer; the assertion below pins the
-    // *current* behaviour so the route is no longer silently untested. Update
-    // this expectation to 404 if/when the handler is taught to distinguish
-    // AgentNotFound.
+    // The reload handler runs the shared `kernel_err_to_status` mapping, so an
+    // unknown id surfaces as 404 NOT_FOUND — consistent with the clone/push
+    // routes (which also return 404 for an unknown id). A non-UUID id is a
+    // different case (malformed request → 400, see test_reload_invalid_id).
     let h = boot(TEST_TOKEN).await;
     let (status, body) = send(
         h.app.clone(),
@@ -393,8 +389,8 @@ async fn test_reload_unknown_agent_is_rejected() {
     .await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "current reload handler returns 400 for unknown agent; body: {body}"
+        StatusCode::NOT_FOUND,
+        "reload of an unknown agent should return 404; body: {body}"
     );
     assert!(body["error"].is_string());
 }
