@@ -1055,6 +1055,12 @@ pub async fn set_provider_key(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Shape-check the path-supplied provider name BEFORE we derive an env
+    // var from it. See `docs/issues/set-provider-key-arbitrary-names.md`.
+    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
+        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+    }
+
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
@@ -1063,16 +1069,28 @@ pub async fn set_provider_key(
     };
 
     // Look up env var from catalog; for unknown/custom providers derive one.
+    // The catalog hit is the trust path (operator-curated `api_key_env`);
+    // the derive path crosses a second gate (`check_derived_env_var`) so
+    // path-supplied names can only land env vars that match the
+    // `^[A-Z][A-Z0-9_]{0,63}_API_KEY$` shape — see
+    // `docs/issues/set-provider-key-arbitrary-names.md`.
     let env_var = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog
+        let from_catalog = catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| {
-                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
-                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
-            })
+            .filter(|env| !env.trim().is_empty());
+        match from_catalog {
+            Some(env) => env,
+            None => {
+                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY.
+                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
+                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                }
+                derived
+            }
+        }
     };
 
     // Write to secrets.env file
@@ -1266,16 +1284,31 @@ pub async fn delete_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    // Shape-check the path-supplied provider name BEFORE we derive an env
+    // var from it. Mirrors `set_provider_key`; without this gate an admin
+    // could ask the daemon to `remove_var("STRIPE_API_KEY")` (etc.) on the
+    // live process. See `docs/issues/set-provider-key-arbitrary-names.md`.
+    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
+        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+    }
+
     let env_var = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog
+        let from_catalog = catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| {
-                // Custom/unknown provider — derive env var from convention
-                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
-            })
+            .filter(|env| !env.trim().is_empty());
+        match from_catalog {
+            Some(env) => env,
+            None => {
+                // Custom/unknown provider — derive env var from convention.
+                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
+                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                }
+                derived
+            }
+        }
     };
 
     if env_var.is_empty() {

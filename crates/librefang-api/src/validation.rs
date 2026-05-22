@@ -417,6 +417,87 @@ fn canonicalize_nonexistent(input: &std::path::Path) -> std::io::Result<std::pat
     Ok(resolved)
 }
 
+/// Validate that a provider name supplied on the
+/// `POST/DELETE /api/providers/{name}/key` path is well-shaped before
+/// it is used to derive an environment-variable name.
+///
+/// Contract: `^[a-z0-9-]{1,64}$`.
+///
+/// Why: `set_provider_key` / `delete_provider_key` derive
+/// `env_var = "{NAME}_API_KEY"` from the path segment when the
+/// provider is not in the catalog, then write that env var into the
+/// live `std::env` and persist it to `secrets.env`. Without a charset
+/// + length cap an Admin can plant arbitrary process-wide env vars
+/// (`STRIPE_API_KEY`, `AWS_SECRET_ACCESS_KEY`, …) — silently
+/// re-targeting any third-party crate that reads them — or submit
+/// `name = "a".repeat(1_000_000)` to plant a 1 MB env var. See
+/// `docs/issues/set-provider-key-arbitrary-names.md`.
+pub fn check_provider_name_shape(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("provider name must not be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err(format!(
+            "provider name too long: {} chars exceeds 64-char cap",
+            name.len()
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("provider name contains invalid characters (allowed: [a-z0-9-])".to_string());
+    }
+    Ok(())
+}
+
+/// Validate that a derived env-var name is safe to plant into the
+/// process environment + `secrets.env`. Used in
+/// `set_provider_key` / `delete_provider_key` when the supplied
+/// provider name is NOT in the catalog (i.e. an unknown / custom
+/// provider) and the env var is therefore derived from path input
+/// rather than catalog metadata.
+///
+/// Contract: `^[A-Z][A-Z0-9_]{0,63}_API_KEY$`.
+///
+/// The `_API_KEY` suffix requirement is the bright-line trust
+/// boundary: even a maximally permissive admin can only plant
+/// process-env vars whose name ends in `_API_KEY`, which third-party
+/// crates that read e.g. `AWS_SECRET_ACCESS_KEY` or `STRIPE_API_KEY`
+/// will not match (`STRIPE_API_KEY` matches; the audit catalogues why
+/// that is still considered safer than the unbounded prior behaviour
+/// — operator intent is "I'm registering a custom provider", and the
+/// catalog is the canonical safe path for known third-party providers).
+pub fn check_derived_env_var(env_var: &str) -> Result<(), String> {
+    if env_var.len() > 64 {
+        return Err(format!(
+            "derived env var name too long: {} chars exceeds 64-char cap",
+            env_var.len()
+        ));
+    }
+    if !env_var.ends_with("_API_KEY") {
+        return Err("derived env var name must end with _API_KEY".to_string());
+    }
+    let mut chars = env_var.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => {
+            return Err(
+                "derived env var name must start with an uppercase ASCII letter".to_string(),
+            );
+        }
+    }
+    if !env_var
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(
+            "derived env var name contains invalid characters (allowed: [A-Z0-9_])".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Validate that a string looks like a plausible identifier (agent name, key name, etc.).
 /// Allows alphanumeric characters, hyphens, underscores, and dots.
 pub fn check_identifier(field_name: &str, value: &str) -> Result<(), ValidationError> {
@@ -542,6 +623,121 @@ mod tests {
     fn test_check_identifier_path_traversal() {
         let err = check_identifier("id", "../etc/passwd").unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    // Refs docs/issues/set-provider-key-arbitrary-names.md.
+    // The provider-name shape gate stops path-derived env var planting.
+
+    #[test]
+    fn provider_name_accepts_canonical_catalog_names() {
+        for ok in [
+            "openai",
+            "anthropic",
+            "google",
+            "gemini",
+            "groq",
+            "openrouter",
+            "claude-code",
+            "gemini-cli",
+            "codex-cli",
+            "qwen-code",
+            "ollama",
+            "x", // 1 char minimum
+        ] {
+            assert!(
+                check_provider_name_shape(ok).is_ok(),
+                "must accept canonical provider name {ok:?}"
+            );
+        }
+        // Exactly 64 chars must pass.
+        let max = "a".repeat(64);
+        assert!(check_provider_name_shape(&max).is_ok());
+    }
+
+    #[test]
+    fn provider_name_rejects_empty() {
+        assert!(check_provider_name_shape("").is_err());
+    }
+
+    #[test]
+    fn provider_name_rejects_oversize() {
+        let long = "a".repeat(65);
+        assert!(check_provider_name_shape(&long).is_err());
+        let huge = "a".repeat(1_000_000);
+        let err = check_provider_name_shape(&huge).unwrap_err();
+        assert!(
+            err.contains("too long"),
+            "diagnostic must say too long: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_name_rejects_uppercase() {
+        // Uppercase breaks the catalog naming contract.
+        assert!(check_provider_name_shape("OpenAI").is_err());
+        assert!(check_provider_name_shape("STRIPE").is_err());
+    }
+
+    #[test]
+    fn provider_name_rejects_path_traversal_and_separators() {
+        for bad in [
+            "../../etc",
+            "ab/cd",
+            "..",
+            ".",
+            "./foo",
+            "a.b",
+            "a b",
+            "a_b",
+        ] {
+            assert!(
+                check_provider_name_shape(bad).is_err(),
+                "must reject {bad:?} — path/charset escape"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_name_rejects_null_and_control_chars() {
+        assert!(check_provider_name_shape("a\0b").is_err());
+        assert!(check_provider_name_shape("a\nb").is_err());
+        assert!(check_provider_name_shape("a\tb").is_err());
+    }
+
+    #[test]
+    fn derived_env_var_accepts_canonical_shapes() {
+        for ok in ["MY_PROVIDER_API_KEY", "X_API_KEY", "FOO123_API_KEY"] {
+            assert!(
+                check_derived_env_var(ok).is_ok(),
+                "must accept derived env var {ok:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_env_var_rejects_missing_suffix() {
+        for bad in ["MY_PROVIDER", "AWS_SECRET_ACCESS_KEY", "PATH", ""] {
+            let err = check_derived_env_var(bad).unwrap_err();
+            assert!(
+                err.contains("_API_KEY"),
+                "must mention suffix in diagnostic for {bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_env_var_rejects_oversize() {
+        // 65-char name (still ends in _API_KEY) — past the 64-cap.
+        let long = format!("{}_API_KEY", "A".repeat(57));
+        assert_eq!(long.len(), 65);
+        assert!(check_derived_env_var(&long).is_err());
+    }
+
+    #[test]
+    fn derived_env_var_rejects_lowercase_or_leading_digit() {
+        assert!(check_derived_env_var("my_provider_API_KEY").is_err());
+        assert!(check_derived_env_var("1FOO_API_KEY").is_err());
+        assert!(check_derived_env_var("_FOO_API_KEY").is_err());
     }
 
     #[test]
