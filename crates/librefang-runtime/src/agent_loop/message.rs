@@ -257,9 +257,8 @@ pub(super) fn safe_trim_messages(
         // Run the same repair pair on the persisted blob so the
         // reload-after-trim path can't load an unsendable history.
         *session_messages = crate::session_repair::validate_and_repair(session_messages);
-        *session_messages = crate::session_repair::ensure_starts_with_user(
-            std::mem::take(session_messages),
-        );
+        *session_messages =
+            crate::session_repair::ensure_starts_with_user(std::mem::take(session_messages));
     }
 
     if messages.len() <= max_history {
@@ -475,10 +474,7 @@ mod safe_trim_session_repair_tests {
         // The persisted session MUST start with a user message
         // after the trim, even though a pinned assistant got
         // rescued to position 0 before the repair pass.
-        assert!(
-            !session.is_empty(),
-            "trim should leave a non-empty session"
-        );
+        assert!(!session.is_empty(), "trim should leave a non-empty session");
         assert_eq!(
             session[0].role,
             Role::User,

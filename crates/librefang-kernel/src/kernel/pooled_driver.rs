@@ -144,10 +144,7 @@ impl LlmDriver for PooledDriver {
 
         // Only rate-limit is rotate-worthy here. Anything else uses
         // the existing classification + propagation policy.
-        if !matches!(
-            first_err.failover_reason(),
-            FailoverReason::RateLimit(_)
-        ) {
+        if !matches!(first_err.failover_reason(), FailoverReason::RateLimit(_)) {
             self.handle_driver_error(&api_key, &first_err);
             return Err(first_err);
         }

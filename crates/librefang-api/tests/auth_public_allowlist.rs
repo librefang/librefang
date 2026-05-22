@@ -228,10 +228,7 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // pop-under to hijack GITHUB_TOKEN via localhost (audit:
     // github-copilot-oauth-unauthenticated). The dashboard already
     // authenticates before initiating the device flow.
-    re(
-        "/api/providers/github-copilot/oauth/start",
-        Expect::Authed,
-    ),
+    re("/api/providers/github-copilot/oauth/start", Expect::Authed),
     re(
         "/api/providers/github-copilot/oauth/poll/abc123",
         Expect::Authed,
