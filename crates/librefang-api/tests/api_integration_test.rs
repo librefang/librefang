@@ -4168,3 +4168,50 @@ async fn users_rotate_key_admin_returns_403() {
         "Non-Owner users (incl. self-rotate) must be rejected"
     );
 }
+
+/// Oversize uploads must be rejected at the wire by the route-local
+/// `RequestBodyLimitLayer` (sized to `max_upload_size_bytes`) wrapping the
+/// upload sub-router in `server.rs::build_router`, NOT only by the handler's
+/// after-the-fact `body.len()` check. A body one byte over the configured
+/// cap must yield `413 PAYLOAD_TOO_LARGE` before the handler runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_over_limit_returns_413() {
+    let harness = start_full_router("").await;
+
+    // `start_full_router` boots with `KernelConfig::default()`, so the upload
+    // cap is the compiled default (`default_max_upload_size_bytes` = 10 MiB).
+    let limit = harness.state.kernel.config_ref().max_upload_size_bytes;
+    let oversize = vec![0u8; limit + 1];
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/agents/any-agent/upload")
+        .header("content-type", "text/plain")
+        .header("x-filename", "huge.txt")
+        // Real HTTP clients (reqwest, browsers) always send Content-Length for a
+        // known-size body. With it set, RequestBodyLimitLayer short-circuits to a
+        // clean 413 before reading the body. (Absent it, the layer instead wraps
+        // the body in a `Limited` stream that errors mid-read, which axum's Bytes
+        // extractor surfaces as 400 — not the wire-level cap we are asserting.)
+        .header("content-length", oversize.len().to_string())
+        .body(Body::from(oversize))
+        .unwrap();
+    // oneshot bypasses axum's connection layer, so inject a loopback
+    // ConnectInfo to clear the keyless-auth fail-closed branch (same pattern
+    // as test_run_migrate_uses_daemon_home_when_target_dir_is_empty).
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "upload one byte over max_upload_size_bytes must be rejected with 413 \
+         by the route-local RequestBodyLimitLayer"
+    );
+}

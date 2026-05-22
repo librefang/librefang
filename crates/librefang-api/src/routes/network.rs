@@ -1991,6 +1991,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
 )]
 pub async fn comms_send(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<librefang_types::comms::CommsSendRequest>,
 ) -> impl IntoResponse {
     // Validate from agent exists
@@ -1998,8 +1999,55 @@ pub async fn comms_send(
         Ok(id) => id,
         Err(_) => return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple(),
     };
-    if state.kernel.agent_registry().get(from_id).is_none() {
-        return ApiErrorResponse::not_found("Source agent not found").into_json_tuple();
+    let from_entry = match state.kernel.agent_registry().get(from_id) {
+        Some(e) => e,
+        None => return ApiErrorResponse::not_found("Source agent not found").into_json_tuple(),
+    };
+
+    // SECURITY (audit: comms-send-impersonation): caller must
+    // OWN the `from_agent_id` they claim to send from. Without
+    // this check, any authenticated low-privilege user could POST
+    // `from_agent_id = <admin-owned agent>` and forge inter-agent
+    // messages from that agent — `comms_send` is RBAC-allowed for
+    // every authenticated role, but the auth layer only proves
+    // "some user is logged in", not "this user owns this agent".
+    //
+    // Ownership is modelled via `manifest.author` (case-insensitive
+    // match against `AuthenticatedApiUser.name`); the same field
+    // `/api/agents?owner=...` already gates on at `agents.rs:971`.
+    // Admin / Owner roles can send from any agent (parity with
+    // `agents.rs:922,1133,1240`'s Admin override on other
+    // ownership-scoped operations).
+    {
+        use crate::middleware::UserRole;
+        let allowed = match api_user.as_ref().map(|u| &u.0) {
+            Some(u) if u.role >= UserRole::Admin => true,
+            Some(u) => {
+                u.name.eq_ignore_ascii_case(&from_entry.manifest.author)
+            }
+            // No auth context (unauthenticated request — only
+            // possible on loopback in `require_auth = false` mode):
+            // we have no caller identity to compare against, so
+            // refuse the impersonation surface entirely. The legacy
+            // loopback path can keep using its own agents but not
+            // mint messages from named human-owned ones.
+            None => from_entry.manifest.author.is_empty(),
+        };
+        if !allowed {
+            tracing::warn!(
+                from_agent = %from_id,
+                from_author = %from_entry.manifest.author,
+                caller = ?api_user.as_ref().map(|u| u.0.name.clone()),
+                caller_role = ?api_user.as_ref().map(|u| u.0.role),
+                "comms_send refused — caller does not own from_agent_id",
+            );
+            return ApiErrorResponse::forbidden(
+                "caller does not own from_agent_id; \
+                 comms_send may only be invoked from an agent owned by the calling user \
+                 (or by an Admin/Owner caller)",
+            )
+            .into_json_tuple();
+        }
     }
 
     // Validate to agent exists

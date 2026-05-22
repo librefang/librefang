@@ -25,6 +25,42 @@ pub const MAX_WORKFLOW_ID_LEN: usize = 256;
 /// Default maximum number of triggers that can fire from a single event.
 const DEFAULT_MAX_TRIGGERS_PER_EVENT: usize = 10;
 
+/// Error returned by [`TriggerEngine::register_with_target_enabled`]
+/// (and the convenience wrappers) when registering a new trigger
+/// would push the owning agent past [`MAX_TRIGGERS_PER_AGENT`]. The
+/// audit explicitly forbids silent truncation: operators must see
+/// when their `agent.toml` is over the cap, so this error carries
+/// the three fields needed to log it actionably.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "agent {agent_id} already has {current_count} triggers (cap is {max}); refusing to register more"
+)]
+pub struct TriggerCapExceeded {
+    pub agent_id: AgentId,
+    pub current_count: usize,
+    pub max: usize,
+}
+
+/// Hard cap on the number of triggers a single agent can hold in the
+/// runtime store.
+///
+/// Pre-cap, `register_with_target_enabled` unconditionally pushed onto
+/// `agent_triggers[agent_id]`, and `reconcile_manifest_triggers` walked
+/// the manifest's `triggers: Vec<ManifestTrigger>` creating one runtime
+/// trigger per undeclared entry. A malicious or buggy `agent.toml`
+/// declaring 100k triggers would load them all, blowing up
+/// `triggers.json` storage and turning per-event match scanning (which
+/// is O(N) over the agent's triggers) into a DoS on every fire. The
+/// `DEFAULT_MAX_TRIGGERS_PER_EVENT` cap only bounded the *fire* set,
+/// not the scanned set.
+///
+/// 50 is the same per-agent ceiling cron already enforces
+/// (`librefang-types/src/scheduler.rs::MAX_JOBS_PER_AGENT`); aligning
+/// the two means an operator's mental model for "how much an agent
+/// can ask for" is the same across both schedulers. (audit:
+/// trigger-engine-no-per-agent-cap)
+pub const MAX_TRIGGERS_PER_AGENT: usize = 50;
+
 // Re-export defaults so tests can use TriggerEngine::new() without config.
 // The constants above are kept as fallbacks; production code threads values
 // from TriggersConfig via `TriggerEngine::with_config`.
@@ -386,7 +422,7 @@ impl TriggerEngine {
         pattern: TriggerPattern,
         prompt_template: String,
         max_fires: u64,
-    ) -> TriggerId {
+    ) -> Result<TriggerId, TriggerCapExceeded> {
         self.register_with_target(
             agent_id,
             pattern,
@@ -419,7 +455,7 @@ impl TriggerEngine {
         cooldown_secs: Option<u64>,
         session_mode: Option<librefang_types::agent::SessionMode>,
         workflow_id: Option<String>,
-    ) -> TriggerId {
+    ) -> Result<TriggerId, TriggerCapExceeded> {
         self.register_with_target_enabled(
             agent_id,
             pattern,
@@ -455,7 +491,31 @@ impl TriggerEngine {
         session_mode: Option<librefang_types::agent::SessionMode>,
         workflow_id: Option<String>,
         enabled: bool,
-    ) -> TriggerId {
+    ) -> Result<TriggerId, TriggerCapExceeded> {
+        // Per-agent cap (audit: trigger-engine-no-per-agent-cap).
+        // Hold the entry's write guard across the check + push so two
+        // concurrent registers can't both observe `current == 49` and
+        // both succeed. The audit explicitly forbids silent
+        // truncation — return the structured error so callers (route
+        // handler, `reconcile_manifest_triggers`) can surface "your
+        // agent.toml has too many triggers" to the operator instead
+        // of dropping bytes on the floor.
+        let mut bucket = self.agent_triggers.entry(agent_id).or_default();
+        if bucket.len() >= MAX_TRIGGERS_PER_AGENT {
+            let err = TriggerCapExceeded {
+                agent_id,
+                current_count: bucket.len(),
+                max: MAX_TRIGGERS_PER_AGENT,
+            };
+            warn!(
+                agent_id = %agent_id,
+                current = bucket.len(),
+                max = MAX_TRIGGERS_PER_AGENT,
+                "Trigger registration refused — per-agent cap exceeded",
+            );
+            return Err(err);
+        }
+
         let trigger = Trigger {
             id: TriggerId::new(),
             agent_id,
@@ -473,10 +533,10 @@ impl TriggerEngine {
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
-        self.agent_triggers.entry(agent_id).or_default().push(id);
+        bucket.push(id);
 
         info!(trigger_id = %id, agent_id = %agent_id, ?target_agent, enabled, "Trigger registered");
-        id
+        Ok(id)
     }
 
     /// Convenience: register a cross-agent trigger where the owner's trigger
@@ -487,7 +547,7 @@ impl TriggerEngine {
         target: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
-    ) -> TriggerId {
+    ) -> Result<TriggerId, TriggerCapExceeded> {
         self.register_with_target(
             owner,
             pattern,
@@ -1040,7 +1100,7 @@ impl TriggerEngine {
                     // exists in the store as enabled=true (closes the
                     // register-then-patch race where the event bus could
                     // fire the trigger between the two operations).
-                    let new_id = self.register_with_target_enabled(
+                    match self.register_with_target_enabled(
                         agent_id,
                         pattern,
                         mt.prompt_template.clone(),
@@ -1050,14 +1110,37 @@ impl TriggerEngine {
                         mt.session_mode,
                         workflow_id,
                         mt.enabled,
-                    );
-                    claimed.insert(new_id);
-                    report.created += 1;
-                    info!(
-                        agent = %agent_id,
-                        trigger_id = %new_id,
-                        "Registered manifest trigger"
-                    );
+                    ) {
+                        Ok(new_id) => {
+                            claimed.insert(new_id);
+                            report.created += 1;
+                            info!(
+                                agent = %agent_id,
+                                trigger_id = %new_id,
+                                "Registered manifest trigger"
+                            );
+                        }
+                        Err(cap_err) => {
+                            // Audit-required behaviour: the operator
+                            // MUST see the truncation. error! at the
+                            // failure site is paired with a counted
+                            // report field so the caller (kernel
+                            // boot, agent reload) can also surface it
+                            // as a one-line summary instead of having
+                            // to grep the log.
+                            tracing::error!(
+                                agent_id = %agent_id,
+                                current = cap_err.current_count,
+                                max = cap_err.max,
+                                "Manifest trigger refused — per-agent cap exceeded; \
+                                 the remaining manifest entries for this agent will \
+                                 be processed (matching existing runtime triggers \
+                                 will still update) but no new triggers will be \
+                                 created. Trim `triggers = [...]` in agent.toml.",
+                            );
+                            report.cap_exceeded += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1136,6 +1219,13 @@ pub struct ReconcileReport {
     /// Manifest entries skipped because their `pattern` did not
     /// deserialise into a `TriggerPattern`.
     pub skipped: usize,
+    /// Manifest entries refused because registering would have
+    /// pushed the agent past [`MAX_TRIGGERS_PER_AGENT`]. Logged at
+    /// `error!` level at the rejection site; surfaced here as a
+    /// count so the caller can decide whether to fail the agent
+    /// boot or just persist the cap-truncated state (audit:
+    /// trigger-engine-no-per-agent-cap).
+    pub cap_exceeded: usize,
 }
 
 impl ReconcileReport {
@@ -1392,7 +1482,7 @@ mod tests {
             TriggerPattern::All,
             "Event occurred: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
         assert!(engine.get(id).is_some());
     }
 
@@ -1405,7 +1495,7 @@ mod tests {
             TriggerPattern::Lifecycle,
             "Lifecycle: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1433,7 +1523,7 @@ mod tests {
             },
             "Coder spawned: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // This should match
         let event = Event::new(
@@ -1467,7 +1557,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             2, // max 2 fires
-        );
+        ).unwrap();
         // Disable cooldown so we can fire rapidly in the test.
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
 
@@ -1490,7 +1580,7 @@ mod tests {
     fn test_remove_trigger() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let id = engine.register(agent_id, TriggerPattern::All, "msg".to_string(), 0);
+        let id = engine.register(agent_id, TriggerPattern::All, "msg".to_string(), 0).unwrap();
         assert!(engine.remove(id));
         assert!(engine.get(id).is_none());
     }
@@ -1499,8 +1589,8 @@ mod tests {
     fn test_remove_agent_triggers() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(agent_id, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(agent_id, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(agent_id, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        engine.register(agent_id, TriggerPattern::System, "b".to_string(), 0).unwrap();
         assert_eq!(engine.list_agent_triggers(agent_id).len(), 2);
 
         engine.remove_agent_triggers(agent_id);
@@ -1518,7 +1608,7 @@ mod tests {
             },
             "Alert: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1539,8 +1629,8 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(old_agent, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        engine.register(old_agent, TriggerPattern::System, "b".to_string(), 0).unwrap();
 
         let count = engine.reassign_agent_triggers(old_agent, new_agent);
         assert_eq!(count, 2);
@@ -1564,7 +1654,7 @@ mod tests {
     fn test_reassign_agent_triggers_no_match_returns_zero() {
         let engine = TriggerEngine::new();
         let agent_a = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0);
+        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0).unwrap();
 
         let count = engine.reassign_agent_triggers(AgentId::new(), AgentId::new());
         assert_eq!(count, 0);
@@ -1578,8 +1668,8 @@ mod tests {
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(agent_b, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0).unwrap();
+        engine.register(agent_b, TriggerPattern::System, "b".to_string(), 0).unwrap();
 
         let count = engine.reassign_agent_triggers(agent_a, agent_c);
         assert_eq!(count, 1);
@@ -1602,8 +1692,8 @@ mod tests {
             },
             "Deploy alert: {{event}}".to_string(),
             5,
-        );
-        engine.register(old_agent, TriggerPattern::Lifecycle, "lc".to_string(), 0);
+        ).unwrap();
+        engine.register(old_agent, TriggerPattern::Lifecycle, "lc".to_string(), 0).unwrap();
 
         // Take triggers — engine should be empty for old agent
         let taken = engine.take_agent_triggers(old_agent);
@@ -1640,7 +1730,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
+        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
         engine.set_enabled(tid, false);
 
         let taken = engine.take_agent_triggers(old_agent);
@@ -1667,7 +1757,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1698,7 +1788,7 @@ mod tests {
             None,
             None,
             None,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1728,7 +1818,7 @@ mod tests {
                 name_pattern: "worker".to_string(),
             },
             "Worker spawned: {{event}}".to_string(),
-        );
+        ).unwrap();
 
         let trigger = engine.get(tid).unwrap();
         assert_eq!(trigger.agent_id, owner);
@@ -1765,7 +1855,7 @@ mod tests {
             None,
             None,
             None,
-        );
+        ).unwrap();
 
         let taken = engine.take_agent_triggers(old_owner);
         assert_eq!(taken.len(), 1);
@@ -1793,7 +1883,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1822,7 +1912,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // Simulate a future-dated `last_fired_at` — far enough ahead that
         // the bug's `unwrap_or(Duration::ZERO)` path would suppress every
@@ -1866,7 +1956,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
         // Explicitly disable cooldown
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
 
@@ -1896,7 +1986,7 @@ mod tests {
                 TriggerPattern::All,
                 "Event: {{event}}".to_string(),
                 0,
-            );
+            ).unwrap();
             // Disable cooldown so all are eligible
             engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
         }
@@ -1923,7 +2013,7 @@ mod tests {
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -1947,7 +2037,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
+        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0).unwrap();
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(30);
 
         let taken = engine.take_agent_triggers(old_agent);
@@ -2025,7 +2115,7 @@ mod tests {
             },
             "Deploy alert: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let payload =
             serde_json::to_vec(&serde_json::json!({"type": "deploy", "data": {"env": "prod"}}))
@@ -2054,7 +2144,7 @@ mod tests {
             TriggerPattern::MemoryUpdate,
             "Memory changed: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2081,7 +2171,7 @@ mod tests {
             },
             "User memory changed: {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // Should match
         let event = Event::new(
@@ -2127,7 +2217,7 @@ mod tests {
             },
             "claim and work on {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // A task assigned to the delegator must NOT match.
         let event_other = Event::new(
@@ -2225,7 +2315,7 @@ mod tests {
             Some(0), // zero cooldown so the trigger fires immediately on every evaluation
             Some(SessionMode::New),
             None,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2295,7 +2385,7 @@ mod tests {
             Some(0),
             Some(SessionMode::Persistent),
             None,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2330,7 +2420,7 @@ mod tests {
             Some(0),
             None, // no per-trigger session mode
             None,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2406,7 +2496,7 @@ mod tests {
             Some(0),
             Some(SessionMode::New),
             None,
-        );
+        ).unwrap();
 
         // Sanity: override is present before the patch.
         assert_eq!(
@@ -2460,7 +2550,7 @@ mod tests {
             Some(60),
             None,
             None,
-        );
+        ).unwrap();
 
         let event = Event::new(
             AgentId::new(),
@@ -2613,7 +2703,7 @@ mod tests {
             TriggerPattern::Lifecycle,
             "runtime {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // Empty manifest, Keep policy → orphan survives.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Keep, |_| None);
@@ -2635,7 +2725,7 @@ mod tests {
             TriggerPattern::Lifecycle,
             "runtime {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // Empty manifest, Warn policy → orphan kept, no delete.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Warn, |_| None);
@@ -2654,7 +2744,7 @@ mod tests {
             TriggerPattern::Lifecycle,
             "runtime {{event}}".to_string(),
             0,
-        );
+        ).unwrap();
 
         // Empty manifest, Delete policy → orphan removed.
         let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Delete, |_| None);
@@ -2818,5 +2908,119 @@ mod tests {
         assert_eq!(second.deleted, 0);
         assert_eq!(second.orphans_kept, 0);
         assert_eq!(engine.list_agent_triggers(agent).len(), 2);
+    }
+
+    // ── Per-agent cap (audit: trigger-engine-no-per-agent-cap) ──────
+
+    /// Registering up to `MAX_TRIGGERS_PER_AGENT` for a single agent
+    /// succeeds; the (cap + 1)th registration returns `Err` and the
+    /// error carries agent_id + current_count + max so the operator
+    /// can act on it. Cap-refused registration must NOT mutate the
+    /// runtime store — partial writes would break the contract.
+    #[test]
+    fn register_refuses_past_max_per_agent_cap() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        for i in 0..MAX_TRIGGERS_PER_AGENT {
+            engine
+                .register(agent, TriggerPattern::All, format!("p{i}"), 0)
+                .unwrap_or_else(|e| panic!("register #{i} must succeed below cap; got {e:?}"));
+        }
+        assert_eq!(
+            engine.list_agent_triggers(agent).len(),
+            MAX_TRIGGERS_PER_AGENT,
+        );
+
+        let err = engine
+            .register(agent, TriggerPattern::All, "over".to_string(), 0)
+            .expect_err("register past cap must return Err");
+        assert_eq!(err.agent_id, agent);
+        assert_eq!(err.current_count, MAX_TRIGGERS_PER_AGENT);
+        assert_eq!(err.max, MAX_TRIGGERS_PER_AGENT);
+
+        assert_eq!(
+            engine.list_agent_triggers(agent).len(),
+            MAX_TRIGGERS_PER_AGENT,
+            "refused register must leave the agent's trigger count unchanged",
+        );
+    }
+
+    /// The cap is per-agent: agent A hitting it must not affect
+    /// agent B's headroom.
+    #[test]
+    fn cap_is_per_agent_not_global() {
+        let engine = TriggerEngine::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+        for i in 0..MAX_TRIGGERS_PER_AGENT {
+            engine
+                .register(a, TriggerPattern::All, format!("a{i}"), 0)
+                .unwrap();
+        }
+        assert!(engine
+            .register(a, TriggerPattern::All, "a-over".to_string(), 0)
+            .is_err());
+        // Agent B has its own headroom — first register succeeds.
+        engine
+            .register(b, TriggerPattern::All, "b-first".to_string(), 0)
+            .expect("agent B has its own headroom");
+        assert_eq!(engine.list_agent_triggers(b).len(), 1);
+    }
+
+    /// `reconcile_manifest_triggers` reports cap-exceeded entries
+    /// as a counted field on `ReconcileReport` (not silent drop)
+    /// so the caller can surface the truncation. Existing triggers
+    /// matching the manifest are still updated; only the
+    /// over-the-cap NEW entries are refused.
+    #[test]
+    fn reconcile_counts_cap_exceeded_into_report() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        // Pre-seed the agent to the cap from the runtime side, so
+        // any new manifest entry is over-the-cap.
+        for i in 0..MAX_TRIGGERS_PER_AGENT {
+            engine
+                .register(agent, TriggerPattern::All, format!("seed{i}"), 0)
+                .unwrap();
+        }
+
+        // Three NEW manifest entries with a DIFFERENT pattern from
+        // the seeds — they can't match-and-update an existing
+        // runtime trigger, so each falls through to the `None` arm
+        // and trips the cap. `mt(...)` uses `"all"` so we hand-roll
+        // entries with `"system"` to avoid the pattern match.
+        let make_trigger = |idx: usize| ManifestTrigger {
+            pattern: serde_json::Value::String("system".to_string()),
+            prompt_template: format!("manifest{idx}"),
+            max_fires: 0,
+            cooldown_secs: 0,
+            session_mode: None,
+            target_agent: None,
+            workflow_id: None,
+            enabled: true,
+        };
+        let manifest = vec![make_trigger(0), make_trigger(1), make_trigger(2)];
+
+        let report = engine.reconcile_manifest_triggers(
+            agent,
+            &manifest,
+            OrphanPolicy::Keep,
+            |_| None,
+        );
+
+        assert_eq!(
+            report.created, 0,
+            "no new manifest trigger should slip past the cap"
+        );
+        assert_eq!(
+            report.cap_exceeded, 3,
+            "all three over-cap entries must be counted",
+        );
+        assert_eq!(
+            engine.list_agent_triggers(agent).len(),
+            MAX_TRIGGERS_PER_AGENT,
+            "cap-refused entries must not bump the agent's trigger count",
+        );
     }
 }
