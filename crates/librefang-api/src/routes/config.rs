@@ -1938,6 +1938,48 @@ pub async fn run_migrate(
         }
     };
 
+    // TOCTOU close-out (audit: migrate-arbitrary-paths). For a
+    // not-yet-existing `target_dir`, `resolve_and_check_migrate_path`
+    // can only validate the deepest *existing* ancestor and then
+    // re-appends the raw tail — the returned path is reconstructed,
+    // not a real `canonicalize()` of the leaf. A local attacker with
+    // write access under the home dir could plant a symlink at one of
+    // those tail segments between this check and `run_migration`'s
+    // write, redirecting the migrator's writes outside the allowed
+    // root. Close the window by materialising the target directory
+    // tree NOW and re-canonicalising the real, existing leaf, then
+    // re-asserting containment before any migration content is
+    // written. Once it exists as a real directory, a later symlink
+    // swap can't redirect `create_dir_all` into it. Skip for dry-runs
+    // (which never touch disk).
+    if !req.dry_run {
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            return ApiErrorResponse::internal(format!(
+                "Migration failed: could not create target_dir {}: {e}",
+                target_dir.display()
+            ))
+            .into_json_tuple();
+        }
+        match target_dir.canonicalize() {
+            Ok(canon) => {
+                if !allowed_roots.iter().any(|root| canon.starts_with(root)) {
+                    return ApiErrorResponse::bad_request(format!(
+                        "invalid target_dir: {} resolves outside allowed migration roots after creation",
+                        canon.display(),
+                    ))
+                    .into_json_tuple();
+                }
+            }
+            Err(e) => {
+                return ApiErrorResponse::internal(format!(
+                    "Migration failed: could not canonicalize target_dir {}: {e}",
+                    target_dir.display()
+                ))
+                .into_json_tuple();
+            }
+        }
+    }
+
     let options = librefang_migrate::MigrateOptions {
         source,
         source_dir,
