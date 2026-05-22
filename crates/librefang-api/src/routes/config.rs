@@ -1738,6 +1738,47 @@ pub async fn migrate_detect() -> impl IntoResponse {
     )
 }
 
+/// Known framework source directories under the user's OS home, used as the
+/// migration source allow-list. Legacy OpenClaw aliases are included so the
+/// existing `~/.clawdbot` / `~/.moldbot` / `~/.moltbot` layouts still import.
+const MIGRATE_SOURCE_DIR_NAMES: &[&str] = &[
+    ".openclaw",
+    ".clawdbot",
+    ".moldbot",
+    ".moltbot",
+    ".openfang",
+    ".langchain",
+    ".autogpt",
+];
+
+/// Build the containment allow-list for a migration *source* path: the
+/// librefang home plus any known framework source directory that actually
+/// exists under the OS home.
+///
+/// #5577 confined both source and target to the librefang home, which
+/// regressed the documented "migrate from `~/.openclaw`" flow — the source
+/// dirs are siblings of `~/.librefang`, not descendants, so a real
+/// `source_dir: "~/.openclaw"` was rejected. Only *existing* directories are
+/// added: `validate_path_containment` rejects a non-canonicalizable root with
+/// a 500, so a missing `~/.autogpt` must never enter the list. Migration
+/// targets are deliberately NOT widened by this list — writes stay confined
+/// to the librefang home.
+fn migrate_source_roots(
+    librefang_home: &std::path::Path,
+    os_home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![librefang_home.to_path_buf()];
+    if let Some(home) = os_home {
+        for name in MIGRATE_SOURCE_DIR_NAMES {
+            let dir = home.join(name);
+            if dir.is_dir() {
+                roots.push(dir);
+            }
+        }
+    }
+    roots
+}
+
 /// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
 #[utoipa::path(
     post,
@@ -1757,9 +1798,11 @@ pub async fn migrate_scan(
     // `docs/issues/migrate-arbitrary-paths.md`. The probe path is the
     // sibling of the write primitive `run_migrate` patches; both endpoints
     // share the same audit-cited threat model and must share the same
-    // allowlist (default: `home_dir`).
+    // allowlist: the librefang home plus the known framework source dirs
+    // that exist under the OS home (see `migrate_source_roots`).
     let home_dir = state.kernel.home_dir().to_path_buf();
-    let allowed_roots: Vec<&std::path::Path> = vec![home_dir.as_path()];
+    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
+    let allowed_roots: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
 
     let path = match crate::validation::validate_path_containment(
         "path",
@@ -1801,20 +1844,29 @@ pub async fn run_migrate(
         }
     };
 
-    // SECURITY: Both source_dir and target_dir must canonicalize to a
-    // descendant of an allowed root (`home_dir`). Without this check, Admin
-    // can probe arbitrary filesystem paths via the 200-vs-400 oracle and
-    // write under attacker-chosen target directories — see
+    // SECURITY: source_dir and target_dir must canonicalize to a descendant
+    // of an allowed root. Without this check, Admin can probe arbitrary
+    // filesystem paths via the 200-vs-400 oracle and write under
+    // attacker-chosen target directories — see
     // `docs/issues/migrate-arbitrary-paths.md`. Admin is dev/ops, not the
     // trust ceiling; a leaked Admin token MUST NOT become a daemon-UID
     // write primitive.
+    //
+    // The source allow-list is the librefang home plus the known framework
+    // source dirs under the OS home (the documented `~/.openclaw` etc. are
+    // siblings of `~/.librefang`, not descendants — #5577 confined both to
+    // the librefang home and regressed migrate-from-OpenClaw). The target
+    // allow-list stays the librefang home only: reads may come from a source
+    // dir, but writes never leave the librefang home.
     let home_dir = state.kernel.home_dir().to_path_buf();
-    let allowed_roots: Vec<&std::path::Path> = vec![home_dir.as_path()];
+    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
+    let source_allowed: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
+    let target_allowed: Vec<&std::path::Path> = vec![home_dir.as_path()];
 
     let source_dir = match crate::validation::validate_path_containment(
         "source_dir",
         std::path::Path::new(req.source_dir.trim()),
-        &allowed_roots,
+        &source_allowed,
         true, // source must already exist
     ) {
         Ok(p) => p,
@@ -1827,7 +1879,7 @@ pub async fn run_migrate(
         match crate::validation::validate_path_containment(
             "target_dir",
             std::path::Path::new(req.target_dir.trim()),
-            &allowed_roots,
+            &target_allowed,
             false, // target may not exist yet — migration creates it
         ) {
             Ok(p) => p,
@@ -3603,5 +3655,92 @@ searxng = { url = "https://search.example.com" }
         let cfg: KernelConfig = toml::from_str(toml_src)
             .expect("inline-table shape produced by /api/config/set must parse (issue #4016)");
         assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+}
+
+#[cfg(test)]
+mod migrate_roots_tests {
+    use super::migrate_source_roots;
+    use std::path::Path;
+
+    #[test]
+    fn includes_only_existing_known_source_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let os_home = tmp.path();
+        std::fs::create_dir_all(os_home.join(".openclaw")).unwrap();
+        std::fs::create_dir_all(os_home.join(".langchain")).unwrap();
+        let lf_home = os_home.join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+
+        let roots = migrate_source_roots(&lf_home, Some(os_home));
+
+        assert!(roots.contains(&lf_home), "librefang home is always a root");
+        assert!(
+            roots.contains(&os_home.join(".openclaw")),
+            "existing source dir must be included"
+        );
+        assert!(
+            roots.contains(&os_home.join(".langchain")),
+            "existing source dir must be included"
+        );
+        // A non-existent root must NOT be added: validate_path_containment
+        // returns a 500 on a root it cannot canonicalize.
+        assert!(!roots.contains(&os_home.join(".autogpt")));
+        assert!(!roots.contains(&os_home.join(".openfang")));
+    }
+
+    #[test]
+    fn no_os_home_yields_librefang_home_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lf_home = tmp.path().join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+        assert_eq!(migrate_source_roots(&lf_home, None), vec![lf_home]);
+    }
+
+    #[test]
+    fn source_under_known_root_passes_but_target_stays_confined() {
+        // Reproduces the #5577 regression: a source under `~/.openclaw` must be
+        // accepted again, while writes (target) stay confined to the librefang
+        // home.
+        let tmp = tempfile::tempdir().unwrap();
+        let os_home = tmp.path();
+        let openclaw = os_home.join(".openclaw");
+        std::fs::create_dir_all(&openclaw).unwrap();
+        let lf_home = os_home.join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+
+        let source_roots = migrate_source_roots(&lf_home, Some(os_home));
+        let source_allowed: Vec<&Path> = source_roots.iter().map(|p| p.as_path()).collect();
+
+        // source_dir under ~/.openclaw is accepted (the regression case).
+        assert!(crate::validation::validate_path_containment(
+            "source_dir",
+            &openclaw,
+            &source_allowed,
+            true,
+        )
+        .is_ok());
+
+        // A sibling dir NOT on the allow-list is still rejected (containment held).
+        let outside = os_home.join(".evil");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(crate::validation::validate_path_containment(
+            "source_dir",
+            &outside,
+            &source_allowed,
+            true,
+        )
+        .is_err());
+
+        // Target writes stay confined to the librefang home: `~/.openclaw` is a
+        // valid *source* root but must NOT be a valid *target* root.
+        let target_allowed: Vec<&Path> = vec![lf_home.as_path()];
+        assert!(crate::validation::validate_path_containment(
+            "target_dir",
+            &openclaw,
+            &target_allowed,
+            false,
+        )
+        .is_err());
     }
 }
