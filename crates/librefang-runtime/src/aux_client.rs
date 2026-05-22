@@ -403,6 +403,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
         resolution.driver.complete(req).await.unwrap();
         assert_eq!(primary_calls.1.load(Ordering::SeqCst), 1);
@@ -543,6 +544,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
         let out = res.driver.complete(req).await.unwrap();
         match &out.content[0] {

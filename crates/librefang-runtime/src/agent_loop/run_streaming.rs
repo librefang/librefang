@@ -707,6 +707,7 @@ pub async fn run_agent_loop_streaming(
             reasoning_echo_policy,
             sender_user_id: sender_user_id.clone(),
             sender_channel: sender_channel.clone(),
+            sender_chat_id: sender_chat_id.clone(),
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

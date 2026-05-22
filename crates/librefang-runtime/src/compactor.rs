@@ -721,6 +721,7 @@ async fn summarize_messages(
         reasoning_echo_policy,
         sender_user_id: None,
         sender_channel: None,
+        sender_chat_id: None,
     };
 
     // Retry logic for transient failures
@@ -855,6 +856,7 @@ async fn summarize_in_chunks(
         reasoning_echo_policy,
         sender_user_id: None,
         sender_channel: None,
+        sender_chat_id: None,
     };
 
     match driver.complete(merge_request).await {

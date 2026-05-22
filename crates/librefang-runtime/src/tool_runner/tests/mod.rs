@@ -252,6 +252,7 @@ async fn test_tool_channel_send_blocks_secret_in_text_message() {
         Some("test_user_id"),
         None,
         None,
+        None,
         &[],
     )
     .await
@@ -281,6 +282,7 @@ async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         Some("test_user_id"),
         None,
         None,
+        None,
         &[],
     )
     .await
@@ -308,6 +310,7 @@ async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         Some(&kernel),
         None,
         Some("test_user_id"),
+        None,
         None,
         None,
         &[],
@@ -342,6 +345,7 @@ async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
         Some("12345_telegram"),
         None,
         None,
+        None,
         &[],
     )
     .await;
@@ -365,7 +369,7 @@ async fn test_tool_channel_send_requires_recipient_without_sender_id() {
         // recipient intentionally omitted
         "message": "Hello!",
     });
-    let err = tool_channel_send(&input, Some(&kernel), None, None, None, None, &[])
+    let err = tool_channel_send(&input, Some(&kernel), None, None, None, None, None, &[])
         .await
         .expect_err("channel_send must require recipient without sender_id");
     assert!(
@@ -404,12 +408,13 @@ async fn test_channel_send_rejects_recipient_mismatch_on_same_channel() {
         Some("393760105565@s.whatsapp.net"),
         Some("whatsapp"),
         None,
+        None,
         &[],
     )
     .await
     .expect_err("cross-chat dispatch must be rejected");
     assert!(
-        err.contains("does not match the current peer")
+        err.contains("does not match the current chat")
             && err.contains("Cross-chat dispatch is forbidden"),
         "expected cross-chat guard error, got: {err}"
     );
@@ -430,6 +435,7 @@ async fn test_channel_send_rejects_recipient_mismatch_on_same_channel() {
         None,
         Some("393760105565@s.whatsapp.net"),
         Some("whatsapp"),
+        None,
         None,
         &[],
     )
@@ -459,6 +465,7 @@ async fn test_channel_send_allows_recipient_mismatch_on_different_channel() {
         Some("393760105565@s.whatsapp.net"),
         Some("whatsapp"),
         None,
+        None,
         &[],
     )
     .await;
@@ -473,7 +480,7 @@ async fn test_channel_send_allows_recipient_mismatch_on_different_channel() {
             "different-channel dispatch must NOT trip the cross-chat guard; got: {err}"
         );
         assert!(
-            !err.contains("does not match the current peer"),
+            !err.contains("does not match the current chat"),
             "different-channel dispatch must NOT trip the cross-chat guard; got: {err}"
         );
     }
@@ -499,6 +506,7 @@ async fn test_channel_send_allows_when_sender_id_unset() {
         None,
         None, // sender_id unset → no peer scope
         None, // sender_channel unset → no peer scope
+        None, // sender_chat_id unset → no peer scope
         None,
         &[],
     )
@@ -532,6 +540,7 @@ async fn test_channel_send_allows_matching_recipient_same_channel() {
         Some("393760105565@s.whatsapp.net"),
         Some("whatsapp"),
         None,
+        None,
         &[],
     )
     .await;
@@ -541,6 +550,75 @@ async fn test_channel_send_allows_matching_recipient_same_channel() {
             "matching recipient on same channel must NOT trip the guard; got: {err}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_tool_channel_send_group_chat_reply_to_chat_id_passes() {
+    // Regression for the houko 2026-05-22 review on #5282: in a group
+    // chat, the legitimate `recipient` is the **conversation id**
+    // (chat_id / group jid), NOT the individual speaker (sender_id).
+    // The guard must compare against `sender_chat_id` and let group
+    // replies through; comparing against `sender_id` would block every
+    // group reply (the recipient field is the group, not the speaker).
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "120363999999@g.us",  // group jid (chat_id)
+        "message": "reply to the group",
+    });
+    let result = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"), // sender_id: individual speaker
+        Some("whatsapp"),
+        Some("120363999999@g.us"), // sender_chat_id: group
+        None,
+        &[],
+    )
+    .await;
+    if let Err(err) = result {
+        assert!(
+            !err.contains("Cross-chat dispatch is forbidden"),
+            "reply to group chat_id must NOT trip the cross-chat guard \
+             (chat_id is the conversation, sender_id is the speaker); got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tool_channel_send_group_chat_cross_dispatch_rejected() {
+    // Companion to the positive group-chat test: when sender_chat_id is
+    // populated (group context) but the recipient targets a *different*
+    // chat on the same channel, the guard must still fire.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+        approval_requests: Arc::new(AtomicUsize::new(0)),
+        user_gate_override: None,
+    });
+    let input = serde_json::json!({
+        "channel": "whatsapp",
+        "recipient": "120363888888@g.us",  // different group
+        "message": "cross-chat attempt",
+    });
+    let err = tool_channel_send(
+        &input,
+        Some(&kernel),
+        None,
+        Some("393760105565@s.whatsapp.net"),
+        Some("whatsapp"),
+        Some("120363999999@g.us"), // current group
+        None,
+        &[],
+    )
+    .await
+    .expect_err("cross-group dispatch on same channel must be rejected");
+    assert!(
+        err.contains("Cross-chat dispatch is forbidden"),
+        "expected cross-chat guard error, got: {err}"
+    );
 }
 
 // ── agent_send conversation_key routing tests ─────────────────────────────
@@ -1123,6 +1201,7 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         None,
         Some("99999"),
         None,
+        None,
         Some("caller-agent-id"),
         &[],
     )
@@ -1175,6 +1254,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         None,
         Some("42"),
         None,
+        None,
         Some("same-agent"),
         &[],
     )
@@ -1213,6 +1293,7 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         Some(&kernel),
         None,
         Some("77"),
+        None,
         None,
         Some("caller-id"),
         &[],

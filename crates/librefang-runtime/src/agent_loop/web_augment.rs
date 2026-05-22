@@ -117,6 +117,7 @@ async fn generate_search_queries(
         reasoning_echo_policy,
         sender_user_id: None,
         sender_channel: None,
+        sender_chat_id: None,
     };
 
     let response =

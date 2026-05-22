@@ -1148,6 +1148,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1204,6 +1205,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1287,6 +1289,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1395,6 +1398,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1446,6 +1450,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1688,6 +1693,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
         QwenCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -1749,6 +1755,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
         QwenCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd

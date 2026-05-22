@@ -136,6 +136,7 @@ pub(super) async fn tool_channel_send(
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
     sender_channel: Option<&str>,
+    sender_chat_id: Option<&str>,
     caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
@@ -162,25 +163,24 @@ pub(super) async fn tool_channel_send(
         return Err("Recipient cannot be empty".to_string());
     }
 
-    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19): when
-    // the MCP bridge populates the turn's peer scope (via the
-    // `X-LibreFang-Current-Peer-Jid` / `X-LibreFang-Current-Channel`
-    // headers the `claude-code` driver writes per invocation), reject
-    // dispatches that target a different recipient on the **same**
-    // channel — the model is relaying outside the turn's peer scope.
-    // Different-channel dispatches stay allowed; cross-chat escalation
-    // must go through `notify_owner`. Out-of-band callers (no peer
-    // scope: external MCP, cron, automation triggers) pass `None` and
-    // skip the guard.
-    if let (Some(expected_peer), Some(turn_channel)) = (sender_id, sender_channel) {
-        if !expected_peer.is_empty()
+    // Cross-chat dispatch guard (audio cross-chat leak 2026-05-19). The
+    // comparison key is the **conversation id** (`sender_chat_id` —
+    // Telegram chat_id, group JID, …), not the individual `sender_id`
+    // who spoke: in group chats the legitimate reply target is the
+    // group, not the speaker. When the bridge does not have a distinct
+    // chat id (DM path) we fall back to `sender_id` so DMs still
+    // enforce the guard. Out-of-band callers (external MCP, cron,
+    // automation triggers) pass both `None` and skip it.
+    let expected_chat = sender_chat_id.or(sender_id);
+    if let (Some(expected), Some(turn_channel)) = (expected_chat, sender_channel) {
+        if !expected.is_empty()
             && !turn_channel.is_empty()
             && turn_channel.eq_ignore_ascii_case(&channel)
-            && recipient != expected_peer
+            && recipient != expected
         {
             return Err(format!(
-                "channel_send recipient '{recipient}' does not match the current peer \
-                 '{expected_peer}' on channel '{channel}'. Cross-chat dispatch is forbidden — \
+                "channel_send recipient '{recipient}' does not match the current chat \
+                 '{expected}' on channel '{channel}'. Cross-chat dispatch is forbidden — \
                  to reach a different contact, use notify_owner (kernel-mediated) or wait for \
                  that contact's inbound message."
             ));

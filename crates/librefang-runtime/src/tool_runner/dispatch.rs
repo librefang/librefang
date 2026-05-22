@@ -173,10 +173,11 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel,
-        // Only consumed by `execute_tool` upstream to thread into
-        // `DeferredToolExecution.chat_id`; the raw-execution path
-        // (`execute_tool_raw`, this fn) doesn't reference it.
-        chat_id: _,
+        // Threaded into `channel_send` for the cross-chat dispatch
+        // guard (group reply must compare against conversation id,
+        // not individual sender). Also fed to `DeferredToolExecution.chat_id`
+        // by `execute_tool` upstream for approval-resume routing.
+        chat_id,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -1036,6 +1037,7 @@ pub async fn execute_tool_raw(
                 *workspace_root,
                 *sender_id,
                 *channel,
+                *chat_id,
                 *caller_agent_id,
                 &extra_refs,
             )

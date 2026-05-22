@@ -398,6 +398,22 @@ pub struct CompletionRequest {
     ///
     /// `None` for out-of-band callers with no channel context.
     pub sender_channel: Option<String>,
+    /// Platform conversation id (Telegram chat_id, WhatsApp group jid,
+    /// Discord channel id, …) the inbound turn arrived on. Distinct
+    /// from [`Self::sender_user_id`] for **group chats** — there the
+    /// chat id is the conversation while `sender_user_id` is the
+    /// individual speaker. They coincide in DMs.
+    ///
+    /// Forwarded by subprocess drivers (currently `claude-code`) to the
+    /// MCP bridge as `X-LibreFang-Current-Chat-Id` so the bridge endpoint
+    /// can rehydrate `ToolExecContext::chat_id`. `channel_send`'s
+    /// cross-chat guard compares the outbound `recipient` against this
+    /// value (with `sender_user_id` as DM fallback) so legitimate group
+    /// replies pass while cross-group dispatch on the same channel is
+    /// still rejected.
+    ///
+    /// `None` for out-of-band callers without a peer-scoped turn.
+    pub sender_chat_id: Option<String>,
 }
 
 /// A response from an LLM completion.
@@ -1019,6 +1035,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -1088,6 +1105,7 @@ mod tests {
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(

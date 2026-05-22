@@ -620,6 +620,7 @@ impl LibreFangKernel {
             reasoning_echo_policy: echo_policy,
             sender_user_id: None,
             sender_channel: None,
+            sender_chat_id: None,
         };
 
         let start = std::time::Instant::now();
