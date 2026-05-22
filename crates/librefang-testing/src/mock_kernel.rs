@@ -90,6 +90,31 @@ fn ensure_test_vault_key() {
     });
 }
 
+/// Mirror of [`ensure_test_vault_key`] for the OAuth `state` HMAC secret.
+/// `LibreFangKernel::boot_with_config` refuses to boot when
+/// `external_auth.enabled = true` and `LIBREFANG_STATE_SECRET` is unset or
+/// not a base64-encoded 32-byte value (boot.rs gate, audit:
+/// state-secret-default-random). Tests that enable external_auth boot
+/// through this builder, so seed a stable, well-shaped secret once per
+/// process — same Once-guarded, set-before-any-boot safety argument as the
+/// vault key above.
+///
+/// 32 zero bytes, base64-encoded — value is irrelevant, only shape and
+/// stability matter.
+static STATE_SECRET_INIT: Once = Once::new();
+const TEST_STATE_SECRET_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+fn ensure_test_state_secret() {
+    STATE_SECRET_INIT.call_once(|| {
+        if std::env::var_os("LIBREFANG_STATE_SECRET").is_none() {
+            // SAFETY: see `ensure_test_vault_key` — runs once, before any
+            // kernel boots in this process; all boot paths go through the
+            // builder.
+            std::env::set_var("LIBREFANG_STATE_SECRET", TEST_STATE_SECRET_B64);
+        }
+    });
+}
+
 /// Test kernel builder.
 ///
 /// Configures the kernel via the builder pattern, then call `.build()` to produce
@@ -171,6 +196,7 @@ impl MockKernelBuilder {
     /// same way they do in production (#3652).
     pub fn build(mut self) -> (Arc<LibreFangKernel>, TempDir) {
         ensure_test_vault_key();
+        ensure_test_state_secret();
         let tmp = tempfile::tempdir().expect("failed to create temp directory");
         let home_dir = tmp.path().to_path_buf();
         let data_dir = home_dir.join("data");

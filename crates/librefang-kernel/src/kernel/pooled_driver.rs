@@ -106,40 +106,63 @@ impl PooledDriver {
 
 #[async_trait]
 impl LlmDriver for PooledDriver {
-    /// Complete a non-streaming request with automatic 429 retry-once.
+    /// Complete a non-streaming request with rotate-on-rate-limit.
     ///
-    /// If the first attempt returns a rate-limit error, the request is retried
-    /// once with the same key. If the retry also fails (any error, including
-    /// a second 429), the key is marked exhausted and the error is propagated.
+    /// On the first `RateLimit` error from a key we immediately mark it
+    /// exhausted and acquire the next available key from the pool, then
+    /// retry the request on the new key. Other error classes propagate
+    /// without rotation (the wrapped driver may already retry internally
+    /// for transient HTTP failures; we only intervene for the credential-
+    /// classification cases the pool actually understands).
+    ///
+    /// Pre-fix this method retried the SAME key on first rate-limit
+    /// (`retry_request` on the same `api_key`). Combined with the
+    /// wrapped driver's own internal retry-with-backoff (typically 3
+    /// attempts) the same known-rate-limited key got hammered up to 6
+    /// times before the wrapper finally marked it exhausted and any
+    /// subsequent caller picked the next key. That wasted API budget,
+    /// slowed recovery, and inflated user-visible latency on
+    /// credentials-pool deployments (audit:
+    /// pooled-driver-no-invalidate, #5063).
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let api_key = self.acquire()?;
-        let driver = self.inner_driver(&api_key)?;
+        use librefang_llm_driver::llm_errors::FailoverReason;
 
-        // Clone before first attempt so the request is still owned for the
-        // potential retry. CompletionRequest wraps messages/tools in Arc, so
-        // clone is cheap (refcount bump, not deep copy).
+        let mut api_key = self.acquire()?;
+        // Clone before first attempt so we still own `request` if we
+        // need to rotate to a fresh key. `CompletionRequest` wraps
+        // messages/tools in Arc so this is a refcount bump, not a
+        // deep copy. We re-clone after rotation in the same shape.
         let retry_request = request.clone();
-
-        // First attempt.
-        match driver.complete(request).await {
+        let driver = self.inner_driver(&api_key)?;
+        let first_err = match driver.complete(request).await {
             Ok(response) => {
                 self.pool.mark_success(&api_key);
                 return Ok(response);
             }
-            Err(first_err) => {
-                // Retry once on rate-limit, propagate all other errors.
-                let reason = first_err.failover_reason();
-                if !matches!(
-                    reason,
-                    librefang_llm_driver::llm_errors::FailoverReason::RateLimit(_)
-                ) {
-                    self.handle_driver_error(&api_key, &first_err);
-                    return Err(first_err);
-                }
-            }
+            Err(e) => e,
+        };
+
+        // Only rate-limit is rotate-worthy here. Anything else uses
+        // the existing classification + propagation policy.
+        if !matches!(
+            first_err.failover_reason(),
+            FailoverReason::RateLimit(_)
+        ) {
+            self.handle_driver_error(&api_key, &first_err);
+            return Err(first_err);
         }
 
-        // Retry with the same key.
+        // Mark the rate-limited key exhausted immediately so the
+        // wrapped driver's internal retry-with-backoff can't keep
+        // hammering it. Acquire the NEXT pool key and retry on that
+        // one. If the pool has no other keys, propagate the original
+        // 429 — better to surface "all keys throttled" than to busy-
+        // retry the same dead key.
+        self.pool.mark_exhausted(&api_key);
+        api_key = match self.pool.acquire() {
+            Some(k) => k,
+            None => return Err(first_err),
+        };
         let driver = self.inner_driver(&api_key)?;
         match driver.complete(retry_request).await {
             Ok(response) => {

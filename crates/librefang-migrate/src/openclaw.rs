@@ -4899,7 +4899,12 @@ mod tests {
         // `[channels.<x>]` blocks — sidecar migration replaced them
         // with SkippedItem entries.
         for name in [
-            "discord", "slack", "mattermost", "signal", "matrix", "feishu",
+            "discord",
+            "slack",
+            "mattermost",
+            "signal",
+            "matrix",
+            "feishu",
             "google_chat",
         ] {
             assert!(

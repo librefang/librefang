@@ -701,9 +701,18 @@ fn estimate_cost_from_rates(
     input_per_m: f64,
     output_per_m: f64,
 ) -> f64 {
-    // Regular input tokens = total input minus cache tokens
-    let regular_input =
-        input_tokens.saturating_sub(cache_read_input_tokens + cache_creation_input_tokens);
+    // Regular input tokens = total input minus cache tokens.
+    // Audit: metering-token-overflow — the inner `+` was NOT a
+    // saturating_add. All three inputs come from LLM-provider wire
+    // data (`UsageInfo`, `u64`); a malicious or buggy provider
+    // returning `u64::MAX/2 + 1` in both cache fields panicked
+    // debug builds and silently wrapped in release, producing
+    // absurd budget rows that fed straight into spend-cap
+    // enforcement. The outer saturating_sub was already correct;
+    // only the inner sum needed the same protection.
+    let cache_total =
+        cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
+    let regular_input = input_tokens.saturating_sub(cache_total);
     let regular_input_cost = (regular_input as f64 / 1_000_000.0) * input_per_m;
 
     // Cache-read tokens are priced at 10% of input price
@@ -1518,5 +1527,60 @@ mod tests {
     fn exhaustion_store_accessor_returns_none_when_unwired() {
         let engine = setup();
         assert!(engine.exhaustion_store().is_none());
+    }
+
+    // Audit: metering-token-overflow. A buggy LLM-provider response
+    // returning huge `cache_read_input_tokens` and
+    // `cache_creation_input_tokens` used to panic debug builds at
+    // the inner `+` and silently wrap in release, producing absurd
+    // `regular_input`. Both fed straight into billing / spend-cap
+    // enforcement. After the fix the inner sum is `saturating_add`,
+    // so the cache total clamps at `u64::MAX` and `saturating_sub`
+    // keeps `regular_input` non-negative; the function returns a
+    // sane finite cost.
+    #[test]
+    fn estimate_cost_from_rates_handles_provider_returning_overflow_cache_tokens() {
+        // Inputs designed to overflow `cache_read + cache_creation`
+        // if the inner add weren't saturating.
+        let half_max = u64::MAX / 2;
+        let cost = estimate_cost_from_rates(
+            10,          // input_tokens — tiny
+            5,           // output_tokens
+            half_max + 1, // cache_read_input_tokens
+            half_max + 1, // cache_creation_input_tokens → overflow with regular `+`
+            1.0,
+            2.0,
+        );
+        // The function must return a finite f64 and never panic.
+        // Exact value is dominated by the cache costs (each scaled
+        // by the price-per-million), but its finiteness + non-NaN
+        // is the contract this test pins.
+        assert!(cost.is_finite(), "cost must be finite under overflow inputs: {cost}");
+        assert!(!cost.is_nan(), "cost must not be NaN: {cost}");
+        assert!(cost >= 0.0, "cost must be non-negative: {cost}");
+    }
+
+    #[test]
+    fn estimate_cost_from_rates_treats_cache_above_input_as_zero_regular_input() {
+        // When the provider reports cache_total > input_tokens the
+        // saturating_sub clamps regular_input to 0 — equivalent to
+        // the historical behaviour, just now also safe under the
+        // intermediate add overflow.
+        let cost = estimate_cost_from_rates(
+            100,            // input_tokens
+            0,              // output_tokens
+            1_000_000_000,  // cache_read >> input
+            0,
+            1.0,
+            1.0,
+        );
+        // Regular input cost should be 0; only cache_read cost
+        // (1B * 0.10 / 1M = 100.0) contributes.
+        let expected_cache_read_cost = 1_000_000_000.0 / 1_000_000.0 * 1.0 * 0.10;
+        assert!(
+            (cost - expected_cache_read_cost).abs() < 1e-9,
+            "cost {cost} must equal cache_read_cost ({expected_cache_read_cost}) \
+             when cache > input — regular_input should saturate to 0"
+        );
     }
 }

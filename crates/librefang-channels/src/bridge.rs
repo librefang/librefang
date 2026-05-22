@@ -2094,6 +2094,34 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     }
 }
 
+/// Sanitize a raw channel name before it reaches `SessionId`
+/// derivation. If `name` would collide with a kernel-internal system
+/// channel (`cron`, `autonomous`, `webui` — see
+/// [`crate::types::RESERVED_SYSTEM_CHANNEL_NAMES`]), prefix it with
+/// `ext-` so it derives a disjoint `SessionId` via `for_channel`
+/// instead of writing into the kernel's cron/autonomous/webui
+/// session history. Matching is case-insensitive — `for_channel`
+/// lowercases internally before hashing.
+///
+/// Audit: cron-channel-name-not-reserved. Operator-supplied
+/// `ChannelType::Custom("cron")` (and case variants) used to derive
+/// the SAME session id as the cron-fire path, so two write streams
+/// could interleave into one history. This helper is the choke
+/// point at `SenderContext` construction.
+fn sanitize_channel_name(name: &str) -> String {
+    if crate::types::is_reserved_system_channel(name) {
+        tracing::warn!(
+            requested = %name,
+            "channel name collides with reserved kernel system channel; \
+             renaming to `ext-<name>` to keep session history disjoint \
+             (audit: cron-channel-name-not-reserved)"
+        );
+        format!("ext-{}", name.trim().to_ascii_lowercase())
+    } else {
+        name.to_string()
+    }
+}
+
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
 
@@ -2508,7 +2536,10 @@ fn build_sender_context(
         Some(message.sender.platform_id.clone())
     };
     SenderContext {
-        channel: channel_type_str(&message.channel).to_string(),
+        // sanitize_channel_name guards against ChannelType::Custom
+        // collisions with reserved kernel-internal channels — see
+        // its doc-comment + audit: cron-channel-name-not-reserved.
+        channel: sanitize_channel_name(channel_type_str(&message.channel)),
         user_id: sender_user_id(message).to_string(),
         chat_id,
         display_name: message.sender.display_name.clone(),
@@ -8881,5 +8912,50 @@ mod tests {
 
         drop(concurrent_reader);
         drop(shared);
+    }
+
+    /// Audit: cron-channel-name-not-reserved. Operator-supplied
+    /// `ChannelType::Custom("cron")` MUST NOT derive the same
+    /// SessionId as the kernel-internal cron-fire path. The
+    /// `sanitize_channel_name` helper renames any reserved-name
+    /// collision to `ext-<name>` before SenderContext stores the
+    /// string — `SessionId::for_channel` then hashes the disjoint
+    /// version.
+    #[test]
+    fn sanitize_channel_name_renames_reserved_collisions() {
+        assert_eq!(sanitize_channel_name("cron"), "ext-cron");
+        assert_eq!(sanitize_channel_name("CRON"), "ext-cron");
+        assert_eq!(sanitize_channel_name("Autonomous"), "ext-autonomous");
+        assert_eq!(sanitize_channel_name("WebUI"), "ext-webui");
+        assert_eq!(sanitize_channel_name("  cron  "), "ext-cron");
+    }
+
+    #[test]
+    fn sanitize_channel_name_passes_through_normal_names() {
+        assert_eq!(sanitize_channel_name("telegram"), "telegram");
+        assert_eq!(sanitize_channel_name("slack"), "slack");
+        assert_eq!(sanitize_channel_name("ext-cron"), "ext-cron");
+        assert_eq!(sanitize_channel_name("custom-bot"), "custom-bot");
+    }
+
+    /// End-to-end coverage of the SessionId disjoint property:
+    /// `for_channel(agent, "cron")` (the kernel internal path) and
+    /// `for_channel(agent, sanitize_channel_name("cron"))` (an
+    /// attacker-controlled custom channel that lands at
+    /// `build_sender_context`) must produce DIFFERENT SessionIds.
+    /// Without the sanitize step they were identical, which was
+    /// the audit-flagged data-leak.
+    #[test]
+    fn reserved_collision_disjoins_from_kernel_session_id() {
+        use librefang_types::agent::{AgentId, SessionId};
+        let agent = AgentId::new();
+        let kernel_internal = SessionId::for_channel(agent, "cron");
+        let sanitized_external =
+            SessionId::for_channel(agent, &sanitize_channel_name("cron"));
+        assert_ne!(
+            kernel_internal, sanitized_external,
+            "operator-typed `Custom(\"cron\")` must NOT collide with the \
+             kernel's cron-fire SessionId after sanitize"
+        );
     }
 }
