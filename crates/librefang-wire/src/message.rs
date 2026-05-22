@@ -217,6 +217,90 @@ pub fn decode_message(body: &[u8]) -> Result<WireMessage, serde_json::Error> {
     serde_json::from_slice(body)
 }
 
+/// Classify which `Unknown` arm (if any) a decoded `WireMessage`
+/// matched, and the raw tag string the peer actually sent. Returns
+/// `None` when the message decoded into a known variant — the
+/// common case. Used by the receive loops to attach a `warn!` log
+/// with the offending tag so peer-misbehaviour or
+/// protocol-version-skew is visible to operators instead of being
+/// silently dropped (audit: wire-message-other-variant-silent).
+pub fn classify_unknown(body: &[u8], msg: &WireMessage) -> Option<UnknownTag> {
+    let envelope = match &msg.kind {
+        WireMessageKind::Unknown => UnknownLevel::Envelope,
+        WireMessageKind::Request(WireRequest::Unknown) => UnknownLevel::RequestMethod,
+        WireMessageKind::Response(WireResponse::Unknown) => UnknownLevel::ResponseMethod,
+        WireMessageKind::Notification(WireNotification::Unknown) => {
+            UnknownLevel::NotificationEvent
+        }
+        _ => return None,
+    };
+    // The `serde(other)` arm doesn't capture the raw tag the peer
+    // sent, so re-peek the JSON body for the relevant field. Best-
+    // effort: a body that no longer parses (somehow decoded once and
+    // now doesn't — shouldn't happen in practice) falls back to
+    // `"<unparseable>"` so the log line is still produced.
+    let raw_tag = peek_tag_for(body, envelope).unwrap_or_else(|| "<unparseable>".into());
+    Some(UnknownTag {
+        level: envelope,
+        raw_tag,
+    })
+}
+
+/// Which `serde(other)` arm a peer triggered. Determines which top-
+/// level JSON field name to inspect for the offending tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownLevel {
+    /// `WireMessageKind::Unknown` — top-level `type` field unrecognised.
+    Envelope,
+    /// `WireRequest::Unknown` — `type:"request"` but `method` field unrecognised.
+    RequestMethod,
+    /// `WireResponse::Unknown` — `type:"response"` but `method` field unrecognised.
+    ResponseMethod,
+    /// `WireNotification::Unknown` — `type:"notification"` but `event` field unrecognised.
+    NotificationEvent,
+}
+
+impl UnknownLevel {
+    /// Stable string name suitable for tracing field values.
+    pub fn name(self) -> &'static str {
+        match self {
+            UnknownLevel::Envelope => "envelope.type",
+            UnknownLevel::RequestMethod => "request.method",
+            UnknownLevel::ResponseMethod => "response.method",
+            UnknownLevel::NotificationEvent => "notification.event",
+        }
+    }
+}
+
+/// Result of [`classify_unknown`] for messages that landed in a
+/// `serde(other)` arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownTag {
+    /// Which arm matched (envelope `type`, request/response `method`,
+    /// notification `event`).
+    pub level: UnknownLevel,
+    /// The raw tag string the peer actually sent — `"future_message"`,
+    /// `"future_method"`, etc. May be `"<unparseable>"` or
+    /// `"<missing>"` for pathological inputs.
+    pub raw_tag: String,
+}
+
+fn peek_tag_for(body: &[u8], level: UnknownLevel) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = v.as_object()?;
+    let field = match level {
+        UnknownLevel::Envelope => "type",
+        UnknownLevel::RequestMethod | UnknownLevel::ResponseMethod => "method",
+        UnknownLevel::NotificationEvent => "event",
+    };
+    Some(
+        obj.get(field)
+            .and_then(|x| x.as_str())
+            .unwrap_or("<missing>")
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +450,96 @@ mod tests {
             WireMessageKind::Notification(WireNotification::Unknown) => {}
             other => panic!("expected Notification(Unknown), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_unknown_envelope_type_returns_raw_tag() {
+        // Audit: wire-message-other-variant-silent. The decoded
+        // message lands in `WireMessageKind::Unknown` but
+        // `classify_unknown` peeks the body and surfaces the raw
+        // tag the peer sent so receivers can log it.
+        let json = r#"{"id":"x","type":"future_message","payload":{"foo":1}}"#;
+        let msg: WireMessage = serde_json::from_str(json).unwrap();
+        let cls = classify_unknown(json.as_bytes(), &msg);
+        assert_eq!(
+            cls,
+            Some(UnknownTag {
+                level: UnknownLevel::Envelope,
+                raw_tag: "future_message".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unknown_request_method_returns_raw_tag() {
+        let json = r#"{"id":"x","type":"request","method":"future_method","x":1}"#;
+        let msg: WireMessage = serde_json::from_str(json).unwrap();
+        let cls = classify_unknown(json.as_bytes(), &msg);
+        assert_eq!(
+            cls,
+            Some(UnknownTag {
+                level: UnknownLevel::RequestMethod,
+                raw_tag: "future_method".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unknown_response_method_returns_raw_tag() {
+        let json = r#"{"id":"x","type":"response","method":"future_resp"}"#;
+        let msg: WireMessage = serde_json::from_str(json).unwrap();
+        let cls = classify_unknown(json.as_bytes(), &msg);
+        assert_eq!(
+            cls,
+            Some(UnknownTag {
+                level: UnknownLevel::ResponseMethod,
+                raw_tag: "future_resp".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unknown_notification_event_returns_raw_tag() {
+        let json = r#"{"id":"x","type":"notification","event":"future_event"}"#;
+        let msg: WireMessage = serde_json::from_str(json).unwrap();
+        let cls = classify_unknown(json.as_bytes(), &msg);
+        assert_eq!(
+            cls,
+            Some(UnknownTag {
+                level: UnknownLevel::NotificationEvent,
+                raw_tag: "future_event".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unknown_returns_none_for_known_variant() {
+        // Sanity: the happy-path messages don't trigger the
+        // observability hook — receivers should only log when a
+        // serde(other) arm fired.
+        let json = r#"{"id":"x","type":"request","method":"ping"}"#;
+        let msg: WireMessage = serde_json::from_str(json).unwrap();
+        assert!(classify_unknown(json.as_bytes(), &msg).is_none());
+    }
+
+    #[test]
+    fn classify_unknown_handles_missing_tag_gracefully() {
+        // A malformed peer that sent `{"id":"x"}` (no `type` field
+        // at all) won't actually decode into our enum — it'll fail
+        // at serde. But if a peer somehow lands in Unknown with a
+        // body that has no usable tag (e.g. `type` field was a
+        // number, not a string), the helper falls back to
+        // `<missing>` rather than panicking, so the warn line is
+        // still produced.
+        // Construct manually to simulate.
+        let body = b"{\"id\":\"x\",\"type\":42}".to_vec();
+        let msg = WireMessage {
+            id: "x".to_string(),
+            kind: WireMessageKind::Unknown,
+        };
+        let cls = classify_unknown(&body, &msg).unwrap();
+        assert_eq!(cls.level, UnknownLevel::Envelope);
+        assert_eq!(cls.raw_tag, "<missing>");
     }
 
     #[test]
