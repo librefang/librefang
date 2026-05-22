@@ -1574,18 +1574,18 @@ pub async fn resolve_url_attachments(
         // failure" skip semantics — the function never propagated
         // per-attachment errors anyway), and the agent's message
         // continues to send without the offending block.
-        let pinned_host =
-            match crate::webhook_store::validate_webhook_url_resolved(&att.url).await {
-                Ok(pinned) => pinned,
-                Err(reason) => {
-                    tracing::warn!(
-                        url = %att.url,
-                        error = %reason,
-                        "Attachment URL rejected by SSRF guard, skipping",
-                    );
-                    continue;
-                }
-            };
+        let pinned_host = match crate::webhook_store::validate_webhook_url_resolved(&att.url).await
+        {
+            Ok(pinned) => pinned,
+            Err(reason) => {
+                tracing::warn!(
+                    url = %att.url,
+                    error = %reason,
+                    "Attachment URL rejected by SSRF guard, skipping",
+                );
+                continue;
+            }
+        };
 
         // Build a per-attachment client with the resolver pinned to
         // the validated IP. Without `.resolve()`, reqwest does its
@@ -1597,7 +1597,16 @@ pub async fn resolve_url_attachments(
         // host. Bounded by N attachments (typically 1-3) per
         // message, so the overhead is acceptable.
         let mut builder = librefang_kernel::http_client::proxied_client_builder()
-            .timeout(std::time::Duration::from_secs(30));
+            .timeout(std::time::Duration::from_secs(30))
+            // SECURITY (audit: ssrf-attach): never follow redirects. The
+            // SSRF validation + `.resolve()` pin below only cover the
+            // originally validated host; reqwest's default policy follows
+            // up to 10 redirects using its OWN resolver, so a public URL
+            // that 3xx-redirects to an internal address (e.g. the cloud
+            // metadata endpoint 169.254.169.254) would be fetched with no
+            // re-validation, reinstating the full SSRF. Mirror the
+            // `Policy::none()` used by webhooks.rs's URL fetcher.
+            .redirect(reqwest::redirect::Policy::none());
         if let Some((ref host, addr)) = pinned_host {
             builder = builder.resolve(host, addr);
         }
