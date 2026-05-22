@@ -747,7 +747,17 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         .into_iter()
         .collect();
 
-    let registry_entries = state.kernel.agent_registry().list();
+    // Use `list_arcs()` instead of `list()` so we get `Vec<Arc<AgentEntry>>`
+    // back rather than a fresh owned clone of every entry. Each
+    // `AgentEntry` carries the full `AgentManifest`, which at scale is
+    // several KB per agent (system_prompt, tools, mcp_servers, …) — at
+    // 200 agents the deep-clone path copied ~600 KB on every dashboard
+    // budget refresh, with no value (this endpoint only reads). #3569
+    // applied the same fix to `GET /api/agents`; the budget ranking was
+    // missed at the time. Arc deref is transparent for the read-only
+    // accesses below (`.id`, `.name`, `.manifest.resources.*`).
+    // (audit: budget-ranking-deep-clone)
+    let registry_entries = state.kernel.agent_registry().list_arcs();
     let items: Vec<serde_json::Value> = registry_entries
         .iter()
         .filter_map(|entry| {
