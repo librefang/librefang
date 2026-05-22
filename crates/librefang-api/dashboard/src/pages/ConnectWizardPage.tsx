@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
 import { useConnectManual, useConnectViaQr } from "../lib/mutations/connection";
@@ -190,11 +190,6 @@ export function ConnectWizardPage() {
   }
 
   const busy = step === "scanning" || step === "connecting";
-  // i18next supports embedded HTML when interpolation.escapeValue=false (set
-  // in lib/i18n.ts). The localised string includes <strong> for emphasis;
-  // we render it via dangerouslySetInnerHTML on a span that contains no
-  // user input — translator-supplied markup only.
-  const qrCardBodyHtml = { __html: t("connect_wizard.qr_card_body") };
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-main px-6 py-12">
@@ -319,7 +314,10 @@ export function ConnectWizardPage() {
               <div className="text-sm text-text-dim space-y-1">
                 <p className="font-medium">{t("connect_wizard.qr_card_title")}</p>
                 <p>
-                  <span dangerouslySetInnerHTML={qrCardBodyHtml} />
+                  <Trans
+                    i18nKey="connect_wizard.qr_card_body"
+                    components={{ strong: <strong /> }}
+                  />
                 </p>
               </div>
             </div>
