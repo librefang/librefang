@@ -4713,6 +4713,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "librefang-types",
+ "sha2",
  "tokio",
  "tracing",
 ]

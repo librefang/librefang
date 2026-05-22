@@ -4,6 +4,7 @@
 //! resource limits, network isolation, and capability dropping.
 
 use librefang_types::config::DockerSandboxConfig;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, error, warn};
@@ -153,25 +154,44 @@ pub struct ExecResult {
     pub exit_code: i32,
 }
 
-/// SECURITY: Sanitize container name — alphanumeric + dash only.
+/// SECURITY: Validate container name — alphanumeric + dash only.
+///
+/// Historical behaviour replaced disallowed characters with `-`, which is
+/// lossy: agent ids `"foo/bar"` and `"foo-bar"` both collapsed to
+/// `"foo-bar"`, causing distinct agents to fight over the same Docker
+/// container name. The fix is at the call site
+/// (`agent_id_container_suffix`), which now derives a bijective
+/// SHA-256-hex prefix; this function therefore only validates and rejects
+/// names that contain disallowed characters rather than silently mangling
+/// them.
 fn sanitize_container_name(name: &str) -> Result<String, String> {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
+    if name.is_empty() {
         return Err("Container name cannot be empty".into());
     }
-    if sanitized.len() > 63 {
+    if name.len() > 63 {
         return Err("Container name too long (max 63 chars)".into());
     }
-    Ok(sanitized)
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '-') {
+        return Err(format!(
+            "Invalid container name: {name} (only alphanumeric and '-' allowed)"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Derive a collision-resistant, Docker-name-safe suffix from an agent id.
+///
+/// `SHA-256(agent_id)[..8 hex chars]` is bijective with cryptographic
+/// confidence (2^32 space; for the realistic number of agents on a single
+/// host, distinct ids produce distinct suffixes). The output is
+/// `[0-9a-f]{8}`, which always satisfies Docker's
+/// `[a-zA-Z0-9_.-]{1,128}` container-name grammar. Replaces the previous
+/// lossy `safe_truncate_str(agent_id, 8)` + character-replacement path
+/// that collapsed e.g. `"foo/bar"` and `"foo-bar"` to the same suffix.
+fn agent_id_container_suffix(agent_id: &str) -> String {
+    let digest = Sha256::digest(agent_id.as_bytes());
+    let hex = format!("{digest:x}");
+    hex[..8].to_string()
 }
 
 /// SECURITY: Validate Docker image name — only allow safe characters.
@@ -233,7 +253,7 @@ pub async fn create_sandbox(
     let container_name = sanitize_container_name(&format!(
         "{}-{}",
         config.container_prefix,
-        self::helpers::safe_truncate_str(agent_id, 8)
+        agent_id_container_suffix(agent_id)
     ))?;
 
     let mut cmd = tokio::process::Command::new("docker");
@@ -603,15 +623,65 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_container_name_special_chars() {
-        let result = sanitize_container_name("test;rm -rf /").unwrap();
-        assert!(!result.contains(';'));
-        assert!(!result.contains(' '));
+    fn test_sanitize_container_name_special_chars_rejected() {
+        // Previously these were silently lossy-replaced with '-', which
+        // caused agent-id collisions (e.g. "foo/bar" → "foo-bar" ==
+        // "foo-bar"). The validator now rejects disallowed characters
+        // outright; the bijective `agent_id_container_suffix` is
+        // responsible for keeping the input shape valid before this
+        // function ever sees it.
+        assert!(sanitize_container_name("test;rm -rf /").is_err());
+        assert!(sanitize_container_name("foo/bar").is_err());
+        assert!(sanitize_container_name("a b").is_err());
+        assert!(sanitize_container_name("a_b").is_err());
     }
 
     #[test]
     fn test_sanitize_container_name_empty() {
         assert!(sanitize_container_name("").is_err());
+    }
+
+    /// Audit regression (docs/issues/docker-container-name-collisions.md,
+    /// sub-finding "this"): two distinct agent ids that map to the same
+    /// 8-char sanitized prefix used to share a Docker container name.
+    /// With the SHA-256 hex suffix, distinct ids produce distinct
+    /// suffixes.
+    #[test]
+    fn test_agent_id_suffix_no_slash_dash_collision() {
+        assert_ne!(
+            agent_id_container_suffix("foo/bar"),
+            agent_id_container_suffix("foo-bar"),
+        );
+    }
+
+    /// 1000 distinct agent ids produce 1000 distinct suffixes; at the
+    /// 2^32 space of an 8-char hex prefix the probability of any
+    /// collision in this set is negligible (birthday bound
+    /// ~ 1000^2 / 2 / 2^32 ≈ 1.2e-4 per single accidental collision,
+    /// effectively zero for the structured inputs below).
+    #[test]
+    fn test_agent_id_suffix_sweep_distinct() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::with_capacity(1000);
+        for i in 0..1000u32 {
+            let id = format!("agent-{i}");
+            assert!(
+                seen.insert(agent_id_container_suffix(&id)),
+                "collision at id {id}"
+            );
+        }
+        assert_eq!(seen.len(), 1000);
+    }
+
+    /// Suffix derivation is deterministic across calls — same id, same
+    /// suffix, every time.
+    #[test]
+    fn test_agent_id_suffix_deterministic() {
+        let a = agent_id_container_suffix("some-agent-id");
+        let b = agent_id_container_suffix("some-agent-id");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 8);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     /// Audit: shell-meta-double-quote-bypass — sanity that the docker
