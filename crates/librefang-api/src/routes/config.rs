@@ -2119,6 +2119,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
                 "tool_timeout_secs",
                 "local_probe_interval_secs", "require_auth_for_reads",
+                "external_auth_proxy",
                 "dashboard_user", "log_dir", "data_dir", "home_dir",
                 "cors_origin", "trust_forwarded_for",
                 "cron_session_max_tokens", "cron_session_max_messages",

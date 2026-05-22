@@ -385,7 +385,8 @@ async fn comms_send_rejects_unknown_from_agent() {
 async fn comms_send_rejects_oversize_message() {
     // Construct two real agents so the size check runs after the existence
     // checks. We only need the IDs to round-trip — no real loop kicks off
-    // because the handler short-circuits on the 64KB cap.
+    // because the handler short-circuits on the byte cap
+    // (`validation::MAX_MESSAGE_BYTES`).
     let h = boot();
 
     // Register two minimal agents directly via the kernel registry. The
@@ -415,7 +416,9 @@ async fn comms_send_rejects_oversize_message() {
         .register(agent_b.clone())
         .expect("register bob");
 
-    let oversize = "x".repeat(64 * 1024 + 1);
+    // One byte past the byte cap so `check_message_size` rejects with 413,
+    // regardless of how the cap is tuned over time (byte-vs-char-cap audit).
+    let oversize = "x".repeat(librefang_api::validation::MAX_MESSAGE_BYTES + 1);
     let (status, body) = json_request(
         &h,
         Method::POST,
