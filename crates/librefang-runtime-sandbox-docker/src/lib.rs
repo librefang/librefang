@@ -484,6 +484,24 @@ mod tests {
         assert!(sanitize_container_name("").is_err());
     }
 
+    /// Audit: shell-meta-double-quote-bypass — sanity that the docker
+    /// sandbox's denylist mirrors the subprocess sandbox fix: command
+    /// substitution / variable expansion inside double quotes must
+    /// also reject, since `sh -c` expands them regardless of quoting.
+    /// Without this assertion the docker variant could silently
+    /// regress while the subprocess variant stays correct.
+    #[test]
+    fn test_docker_metachar_command_substitution_in_double_quotes_blocked() {
+        use self::helpers::contains_shell_metacharacters;
+        assert!(contains_shell_metacharacters(r#"echo "$(id)""#).is_some());
+        assert!(contains_shell_metacharacters(r#"echo "`id`""#).is_some());
+        assert!(contains_shell_metacharacters(r#"echo "${IFS}id""#).is_some());
+        // Chaining / redirection inside double quotes still passes
+        // (sh treats them literally).
+        assert!(contains_shell_metacharacters(r#"echo "a && b""#).is_none());
+        assert!(contains_shell_metacharacters(r#"echo "a > b""#).is_none());
+    }
+
     #[test]
     fn test_sanitize_container_name_too_long() {
         let long = "a".repeat(100);
@@ -696,6 +714,14 @@ pub mod helpers {
 
     /// Shell-metacharacter denylist (mirrors
     /// `librefang_runtime::subprocess_sandbox::contains_shell_metacharacters`).
+    ///
+    /// Quoting handling (audit: shell-meta-double-quote-bypass):
+    /// command substitution (`` ` `` , `$(`) and variable expansion
+    /// (`${`) fire inside double quotes too, so they MUST be
+    /// scanned on the raw string. The chaining / redirection /
+    /// globbing metacharacters are only meaningful outside quoted
+    /// regions and stay on the strip-then-scan path so legitimate
+    /// quoted arguments aren't false-positive-rejected.
     pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
         if command.contains('\n') || command.contains('\r') {
             return Some("embedded newline".to_string());
@@ -703,16 +729,19 @@ pub mod helpers {
         if command.contains('\0') {
             return Some("null byte".to_string());
         }
-        let unquoted = strip_quoted_regions(command);
-        if unquoted.contains('`') {
+        // Audit: shell-meta-double-quote-bypass — `sh -c` / `bash -c`
+        // expand these sequences inside `"…"` too. Scan the raw
+        // string, never the strip_quoted_regions output.
+        if command.contains('`') {
             return Some("backtick command substitution".to_string());
         }
-        if unquoted.contains("$(") {
+        if command.contains("$(") {
             return Some("$() command substitution".to_string());
         }
-        if unquoted.contains("${") {
+        if command.contains("${") {
             return Some("${} variable expansion".to_string());
         }
+        let unquoted = strip_quoted_regions(command);
         if unquoted.contains(';') {
             return Some("semicolon command chaining".to_string());
         }

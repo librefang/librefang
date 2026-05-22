@@ -357,6 +357,22 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
     }
 }
 
+/// Cookie-clear attributes used by the logout path. Unlike
+/// [`session_cookie_attrs`], we ALWAYS emit `Secure` — RFC 6265bis §5.6
+/// and current browser behaviour require the Set-Cookie attributes on a
+/// clear (`Max-Age=0`) response to match those on the original cookie,
+/// otherwise the browser keeps the live `Secure` cookie. A logout
+/// request that happened to land over plain HTTP (proxy misconfig,
+/// `X-Forwarded-Proto` missing, local-HTTP dev mode where the user
+/// signed in via HTTPS) would otherwise invalidate server-side state
+/// but leave the cookie pinned client-side until next failed auth.
+/// Modern browsers (Chromium, Firefox, Safari 16.4+) accept `Secure`
+/// on `Max-Age=0` responses regardless of transport.
+/// (audit: logout-no-secure-cookie).
+fn session_cookie_clear_attrs() -> &'static str {
+    "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
@@ -651,9 +667,11 @@ pub(crate) async fn dashboard_logout(
         }
     }
 
+    // Always emit `Secure` on the clear cookie, regardless of the
+    // logout-request transport — see `session_cookie_clear_attrs`.
     let expired_cookie = format!(
         "librefang_session=; {}; Max-Age=0",
-        session_cookie_attrs(&headers),
+        session_cookie_clear_attrs(),
     );
     (
         axum::http::StatusCode::OK,
@@ -1176,8 +1194,28 @@ pub async fn build_router(
     //   operators to remember a separate flag before reads stop leaking
     //   agent IDs to the LAN.
     let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
-    let require_auth_for_reads =
-        derive_require_auth_for_reads(configured_require_auth_for_reads, any_auth);
+    let external_auth_proxy = state.kernel.config_ref().external_auth_proxy;
+    let require_auth_for_reads = derive_require_auth_for_reads(
+        configured_require_auth_for_reads,
+        any_auth,
+        external_auth_proxy,
+    );
+    // Audit `require-auth-for-reads-false-leak`: surface the
+    // bypass-refused case loudly so an operator who set
+    // `require_auth_for_reads = false` without an external proxy
+    // sees that the bypass did NOT take effect. Without this log,
+    // the auto-clamp is silent and the operator wrongly assumes
+    // reads are open.
+    if configured_require_auth_for_reads == Some(false) && !external_auth_proxy && any_auth {
+        tracing::warn!(
+            "require_auth_for_reads = false is being IGNORED — \
+             external_auth_proxy is unset, so the reads-allowlist \
+             bypass has not been activated; dashboard reads still \
+             require a bearer token. Set `external_auth_proxy = true` \
+             only when an external auth proxy (nginx auth_request, \
+             Cloudflare Access, etc.) actually fronts the daemon."
+        );
+    }
     if require_auth_for_reads && !any_auth {
         tracing::warn!(
             "require_auth_for_reads = true but no authentication is configured \
@@ -1231,6 +1269,30 @@ pub async fn build_router(
         }
     }
 
+    // Audit `require-auth-for-reads-false-leak`: warn separately
+    // when bound to a non-loopback address WITHOUT
+    // `external_auth_proxy = true`. This is a posture mismatch even
+    // when auth is configured — an operator running `0.0.0.0`
+    // expecting their reverse proxy to attach credentials needs to
+    // explicitly opt in, both so the
+    // `require_auth_for_reads = false` escape hatch becomes
+    // honour-able AND so the operator sees that the boot-time
+    // assumption is recorded. Suppress when bound to loopback (the
+    // default, where no proxy is in play) and when the flag is
+    // already on (operator acknowledged).
+    if !bind_is_loopback && !state.kernel.config_ref().external_auth_proxy {
+        tracing::warn!(
+            "librefang is listening on a non-loopback bind ({}) with \
+             `external_auth_proxy = false` — the in-tree auth layer is the only \
+             gate. If a reverse proxy (nginx auth_request, Cloudflare Access, \
+             corporate SSO) actually fronts this daemon, set \
+             `external_auth_proxy = true` in config.toml so \
+             `require_auth_for_reads = false` is honoured and the operator \
+             posture is recorded.",
+            listen_addr
+        );
+    }
+
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
@@ -1268,8 +1330,27 @@ pub async fn build_router(
     let v1_routes = api_v1_routes();
 
     // Upload routes are defined separately so they can share the auth/rate-limit
-    // layers but bypass RequestBodyLimitLayer — the handler enforces its own
-    // configurable max_upload_size_bytes (default 10 MB).
+    // layers but bypass the *global* `RequestBodyLimitLayer` applied at
+    // `app.layer(...)` below — uploads have their own, larger, operator-
+    // configurable cap (`max_upload_size_bytes`, default 10 MB) which
+    // would otherwise be clamped by the global cap intended for JSON
+    // request bodies.
+    //
+    // Pre-#audit, the upload sub-router was merged into `app` BEFORE the
+    // global limit ran but had no limit of its own — `body: axum::body::Bytes`
+    // forces axum to buffer the entire request into RAM before the
+    // handler's after-the-fact `body.len() > upload_limit` check at
+    // `agents.rs:6054` runs. An authenticated user (the route sits inside
+    // the auth-required tree) could push a multi-gigabyte body and
+    // exhaust the daemon's RAM. The 10 MB cap was an after-the-fact
+    // check, not a wire-level cap.
+    //
+    // Fix per audit (upload-route-bypasses-body-limit): apply a
+    // route-local `RequestBodyLimitLayer` sized to the operator's
+    // `max_upload_size_bytes`. The handler's same-value check stays in
+    // place as defence-in-depth (and to surface a localised error
+    // message instead of the framework-default 413).
+    let upload_body_cap = kernel.config_ref().max_upload_size_bytes;
     let upload_routes = Router::new()
         .route(
             "/api/agents/{id}/upload",
@@ -1278,7 +1359,8 @@ pub async fn build_router(
         .route(
             "/api/v1/agents/{id}/upload",
             axum::routing::post(routes::agents::upload_file),
-        );
+        )
+        .layer(RequestBodyLimitLayer::new(upload_body_cap));
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
@@ -1360,6 +1442,14 @@ pub async fn build_router(
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
+        // JSON depth guard — buffers `application/json` bodies once,
+        // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
+        // adversarial `[[[[…]]]]` payloads at the layer boundary
+        // before any handler sees them. Sits below auth/rate-limit
+        // (so the cost of buffering is gated by auth) and above
+        // request-logging (so rejections show up in the request log
+        // with the right status). Audit: check-json-depth-unused.
+        .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -1378,8 +1468,11 @@ pub async fn build_router(
     // were merged before the security layers above and therefore covered by
     // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
     // only apply to routes registered before the layer call, so routes merged
-    // after this point (channel_routes below) are also exempt.  Upload handler
-    // enforces its own max_upload_size_bytes cap instead.
+    // after this point (channel_routes below) are also exempt.  The upload
+    // sub-router now carries its OWN `RequestBodyLimitLayer` sized to
+    // `max_upload_size_bytes` (added above), so the upload path remains
+    // wire-level capped — the global limit here is intentionally the
+    // smaller JSON-body cap and is not the upload safety net.
     let app = app.layer(RequestBodyLimitLayer::new(
         kernel.config_ref().max_request_body_bytes,
     ));
@@ -1795,8 +1888,16 @@ pub async fn run_daemon(
                 st.skillhub_cache
                     .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
 
-                // Evict expired session tokens
-                let expired_sessions = {
+                // Evict expired session tokens and persist the
+                // trimmed state to disk. Audit:
+                // active-sessions-unbounded — the in-memory `retain`
+                // here resolves the "WS upgrade is the only sweep"
+                // half of the audit, but the trimmed state never made
+                // it back to `~/.librefang/sessions.json`, so every
+                // expired token came back to life on the next daemon
+                // boot via `load_sessions`. Persisting after the
+                // prune closes that survives-restart loop.
+                let (expired_sessions, sessions_snapshot) = {
                     let mut sessions = st.active_sessions.write().await;
                     let before = sessions.len();
                     sessions.retain(|_, token| {
@@ -1805,8 +1906,19 @@ pub async fn run_daemon(
                             crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                         )
                     });
-                    before - sessions.len()
+                    let removed = before - sessions.len();
+                    // Snapshot for disk write so we can drop the
+                    // write guard before the (potentially blocking)
+                    // file syscall. Only snapshot when there's
+                    // actually something to persist — the token map
+                    // is shallow but cloning on every tick when
+                    // nothing expired would be wasted work.
+                    let snap = (removed > 0).then(|| sessions.clone());
+                    (removed, snap)
                 };
+                if let Some(snap) = sessions_snapshot {
+                    save_sessions(st.kernel.home_dir(), &snap);
+                }
 
                 // Prune stale auth-rate-limit entries (windows older than 30 minutes).
                 let before_auth_rl = st.auth_login_limiter.map.len();
@@ -2181,6 +2293,82 @@ mod observability_tests {
         );
     }
 
+    /// Audit: active-sessions-unbounded. The 5-minute GC loop in
+    /// `run_server` evicts expired tokens from the in-memory
+    /// `active_sessions` map AND persists the trimmed snapshot to
+    /// disk. Without the persist step, the in-memory state was clean
+    /// (the load_sessions filter already drops expired tokens at
+    /// boot), but the file on disk grew unbounded — every successful
+    /// login left a token there forever. Persisting after the prune
+    /// stops the audit-flagged "RAM + disk usage grow as
+    /// `n_logins × token_size`" regression on the disk side.
+    ///
+    /// This test inspects the raw file contents (not the in-memory
+    /// view from `load_sessions`, which already filters expired
+    /// tokens at load time) to confirm the trimmed write reaches
+    /// disk.
+    #[test]
+    fn save_sessions_after_retain_drops_expired_tokens_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let live = crate::password_hash::SessionToken {
+            token: "live-token".to_string(),
+            created_at: now.saturating_sub(60),
+            user_name: None,
+            user_role: None,
+        };
+        let expired = crate::password_hash::SessionToken {
+            token: "expired-token".to_string(),
+            created_at: now
+                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            user_name: None,
+            user_role: None,
+        };
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("live-token".to_string(), live);
+        sessions.insert("expired-token".to_string(), expired);
+
+        // Initial persist — both tokens on disk. Read raw bytes
+        // because `load_sessions` filters expired tokens at load,
+        // hiding the on-disk state from the in-memory caller.
+        save_sessions(home, &sessions);
+        let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_before.contains("live-token") && raw_before.contains("expired-token"),
+            "baseline: both tokens must be on disk before the GC step: {raw_before}"
+        );
+
+        // Simulate the GC retain step — same shape as the
+        // background loop in `run_server`.
+        sessions.retain(|_, token| {
+            !crate::password_hash::is_token_expired(
+                token,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+            )
+        });
+        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        save_sessions(home, &sessions);
+
+        let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            raw_after.contains("live-token"),
+            "live token must still be on disk after the GC sweep: {raw_after}"
+        );
+        assert!(
+            !raw_after.contains("expired-token"),
+            "expired token MUST NOT be on disk after the GC sweep — \
+             the audit-flagged disk-bloat lever was that expired tokens \
+             survived restart in the file: {raw_after}"
+        );
+    }
+
     // #3725: a sessions.json file already on disk at world-readable
     // permissions (i.e. left over from a daemon revision before the
     // 0600-on-write fix) must be tightened on the next load so an
@@ -2348,15 +2536,40 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 /// Resolve the effective value of `require_auth_for_reads` from the explicit
-/// config option and whether any authentication method is configured.
+/// config option, whether any authentication method is configured, and the
+/// operator's acknowledgement that an external auth proxy fronts the daemon.
 ///
-/// - `Some(explicit)` preserves the operator's stated intent verbatim.
-/// - `None` derives the value from `any_auth` so that setting any form of
+/// - `Some(true)` is always honoured (operator forcing the allowlist closed).
+/// - `Some(false)` is honoured ONLY when `external_auth_proxy = true`. The
+///   audit (`require-auth-for-reads-false-leak`) found this branch was
+///   indistinguishable from a config typo on `0.0.0.0` binds — without the
+///   acknowledgement flag, `Some(false)` is dropped to a safe default
+///   (i.e. enforce auth when `any_auth` is set) and the operator is warned at
+///   boot. The proxy assumption was not enforced in code.
+/// - `None` (default) derives from `any_auth` so that setting any form of
 ///   auth (api_key / user keys / dashboard credentials) automatically closes
 ///   the dashboard reads allowlist.
-fn derive_require_auth_for_reads(configured: Option<bool>, any_auth: bool) -> bool {
+fn derive_require_auth_for_reads(
+    configured: Option<bool>,
+    any_auth: bool,
+    external_auth_proxy: bool,
+) -> bool {
     match configured {
-        Some(explicit) => explicit,
+        Some(true) => true,
+        Some(false) => {
+            // Refuse to honour the bypass without explicit
+            // acknowledgement of the proxy fronting it. When the
+            // operator hasn't flipped `external_auth_proxy`, fall
+            // back to the `None`-equivalent derivation so we close
+            // automatically once any auth is configured. This means
+            // a single-line typo in `require_auth_for_reads` cannot
+            // by itself expose dashboard reads on `0.0.0.0`.
+            if external_auth_proxy {
+                false
+            } else {
+                any_auth
+            }
+        }
         None => any_auth,
     }
 }
@@ -2382,27 +2595,97 @@ fn is_daemon_responding(addr: &str) -> bool {
 }
 
 #[cfg(test)]
+mod session_cookie_attrs_tests {
+    use super::{session_cookie_attrs, session_cookie_clear_attrs};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn clear_attrs_always_contain_secure() {
+        // Audit: logout-no-secure-cookie. The browser refuses to
+        // overwrite a `Secure` cookie with a clear response that lacks
+        // `Secure`, so the logout-cookie clear MUST emit `Secure`
+        // regardless of the logout request's transport.
+        let attrs = session_cookie_clear_attrs();
+        assert!(
+            attrs.contains("Secure"),
+            "clear attrs must include `Secure` so browsers actually drop the cookie: {attrs}"
+        );
+        assert!(attrs.contains("HttpOnly"));
+        assert!(attrs.contains("SameSite=Lax"));
+        assert!(attrs.contains("Path=/dashboard"));
+    }
+
+    #[test]
+    fn login_attrs_remain_transport_dependent() {
+        // Sanity: the login-path attrs builder still keeps `Secure`
+        // off for plain HTTP (local-dev affordance) and on for HTTPS /
+        // X-Forwarded-Proto=https. Only the clear path is unconditional.
+        let mut h = HeaderMap::new();
+        assert!(!session_cookie_attrs(&h).contains("Secure"));
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(session_cookie_attrs(&h).contains("Secure"));
+    }
+}
+
+#[cfg(test)]
 mod derive_require_auth_for_reads_tests {
     use super::derive_require_auth_for_reads;
 
+    // Legacy callers / `external_auth_proxy = false` (the default) —
+    // the bypass-without-proxy behaviour is the audit fix.
+
     #[test]
     fn none_with_auth_enables() {
-        assert!(derive_require_auth_for_reads(None, true));
+        assert!(derive_require_auth_for_reads(None, true, false));
     }
 
     #[test]
     fn none_without_auth_disables() {
-        assert!(!derive_require_auth_for_reads(None, false));
-    }
-
-    #[test]
-    fn some_false_is_preserved_even_when_auth_configured() {
-        assert!(!derive_require_auth_for_reads(Some(false), true));
+        assert!(!derive_require_auth_for_reads(None, false, false));
     }
 
     #[test]
     fn some_true_is_preserved_even_when_no_auth_configured() {
-        assert!(derive_require_auth_for_reads(Some(true), false));
+        assert!(derive_require_auth_for_reads(Some(true), false, false));
+    }
+
+    // Audit `require-auth-for-reads-false-leak`: refuse to honour
+    // `Some(false)` without `external_auth_proxy = true`.
+
+    #[test]
+    fn some_false_without_proxy_falls_back_to_any_auth() {
+        // any_auth = true → fall back to enforce-reads
+        assert!(
+            derive_require_auth_for_reads(Some(false), true, false),
+            "Some(false) without external_auth_proxy must not bypass auth when auth is configured",
+        );
+        // any_auth = false → still don't enforce (matches None)
+        assert!(
+            !derive_require_auth_for_reads(Some(false), false, false),
+            "Some(false) without external_auth_proxy + no auth = no enforcement \
+             (the bypass is meaningless without auth)",
+        );
+    }
+
+    #[test]
+    fn some_false_with_proxy_is_honoured() {
+        assert!(
+            !derive_require_auth_for_reads(Some(false), true, true),
+            "Some(false) WITH external_auth_proxy must bypass auth as intended",
+        );
+        assert!(
+            !derive_require_auth_for_reads(Some(false), false, true),
+            "Some(false) WITH external_auth_proxy must bypass auth even without local auth",
+        );
+    }
+
+    #[test]
+    fn some_true_overrides_external_auth_proxy() {
+        // Explicit close-down always wins, even with the proxy
+        // bypass flag set. An operator forcing the allowlist closed
+        // is unambiguous.
+        assert!(derive_require_auth_for_reads(Some(true), true, true));
+        assert!(derive_require_auth_for_reads(Some(true), false, true));
     }
 }
 

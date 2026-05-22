@@ -454,6 +454,18 @@ fn json_error(status: StatusCode, code: &str, error: String) -> (StatusCode, Vec
 /// Maximum number of agents allowed in a single bulk request.
 const BULK_LIMIT: usize = 50;
 
+/// Default page size for `GET /api/agents` when the caller does not
+/// supply `limit`. Picked to match `MAX_AGENT_LIST_LIMIT` so the
+/// historical "single request returns all agents on a small
+/// deployment" behaviour survives, while large deployments fall
+/// inside the cap. Callers that need explicit small pages still get
+/// them via `?limit=`.
+const DEFAULT_AGENT_LIST_LIMIT: usize = 500;
+/// Hard cap on `limit`. Existing behaviour was
+/// `limit.map(|l| l.min(500))`, so 500 is the historical ceiling.
+/// (audit: agent-list-limit-none-unbounded).
+const MAX_AGENT_LIST_LIMIT: usize = 500;
+
 /// Validate that a bulk request array is non-empty and within the limit.
 fn validate_bulk_size(
     len: usize,
@@ -1014,13 +1026,22 @@ pub async fn list_agents(
     });
 
     // -- Pagination --
+    //
+    // Audit: agent-list-limit-none-unbounded. Before, `limit = None`
+    // meant "return every agent without truncation", and a
+    // multi-thousand-agent deployment turned this endpoint into a
+    // memory + JSON-serialization DoS sink. Now `None` defaults to
+    // `DEFAULT_AGENT_LIST_LIMIT` and an explicit `Some(n)` still
+    // clamps at `MAX_AGENT_LIST_LIMIT` (the historical ceiling). The
+    // `total` field on the paginated response already lets callers
+    // detect overflow and page.
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.map(|l| l.min(500));
-    let agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> = if let Some(lim) = limit {
-        agents.into_iter().skip(offset).take(lim).collect()
-    } else {
-        agents.into_iter().skip(offset).collect()
-    };
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_AGENT_LIST_LIMIT)
+        .min(MAX_AGENT_LIST_LIMIT);
+    let agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> =
+        agents.into_iter().skip(offset).take(limit).collect();
 
     // Bulk-fetch 24h sessions/cost so each row carries its own KPI without
     // forcing the dashboard to re-aggregate from /api/sessions (which is
@@ -1038,7 +1059,10 @@ pub async fn list_agents(
         items,
         total,
         offset,
-        limit,
+        // The server-applied cap is now always finite (see the
+        // pagination block above) so the response envelope reports
+        // it as `Some` instead of the historical `None`.
+        limit: Some(limit),
     })
     .into_response()
 }
@@ -1144,11 +1168,12 @@ pub async fn get_agent_stats(
     let substrate = state.kernel.memory_substrate();
     match substrate.agent_stats_24h(&id) {
         Ok(stats) => Json(AgentStats24hView::from(stats)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // `e` carries raw rusqlite error messages (column names,
+        // constraint identifiers, "database is locked") from the
+        // memory layer (audit: rusqlite-errors-leak). Scrub the
+        // body before sending to the client; the full chain still
+        // lands in `tracing::error!` for ops.
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -1265,11 +1290,12 @@ pub async fn list_agent_events(
             };
             Json(view).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // `e` carries raw rusqlite error messages (column names,
+        // constraint identifiers, "database is locked") from the
+        // memory layer (audit: rusqlite-errors-leak). Scrub the
+        // body before sending to the client; the full chain still
+        // lands in `tracing::error!` for ops.
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -1670,8 +1696,11 @@ pub async fn send_message(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Audit: message-byte-vs-char-cap — the byte-only check used to
+    // unfairly clip CJK users (3 bytes/glyph). The helper enforces
+    // both MAX_MESSAGE_BYTES (memory cap) and MAX_MESSAGE_CHARS
+    // (LLM-cost cap) so the limits are fair across scripts.
+    if crate::validation::check_message_size(&req.message).is_err() {
         // #3511: tag every response for which `agent_id` is known so
         // request_logging middleware can emit it as a structured field.
         return crate::extensions::with_agent_id(
@@ -2725,8 +2754,9 @@ pub async fn send_message_stream(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Audit: message-byte-vs-char-cap — see the sibling check_message_size
+    // call in `post_message`.
+    if crate::validation::check_message_size(&req.message).is_err() {
         return ApiErrorResponse::bad_request(err_too_large)
             .with_code("message_too_large")
             .with_status(StatusCode::PAYLOAD_TOO_LARGE)
@@ -4368,6 +4398,12 @@ pub async fn patch_agent(
                 );
             }
         };
+        // Localize the scrubbed internal-error message before dropping the
+        // translator (`ErrorTranslator` is `!Send`, so it must not survive
+        // across the `update_manifest` call site). The detailed cause still
+        // reaches tracing::error! below; only the generic, localized text
+        // is surfaced to the client.
+        let internal_error_msg = t.t("api-error-internal");
         drop(t);
         return match state.kernel.update_manifest(agent_id, manifest) {
             Ok(()) => (
@@ -4378,10 +4414,22 @@ pub async fn patch_agent(
                     "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
                 })),
             ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            ),
+            // Memory/kernel error scrubbed before response (audit:
+            // rusqlite-errors-leak). The full chain (column names,
+            // constraint identifiers, lock state) still reaches
+            // tracing::error! for ops; the response body is the
+            // generic, localized "Internal server error" so the client
+            // sees no schema details. Surrounding match arm shape is
+            // `(StatusCode, Json<Value>)` so we hand-construct the
+            // scrubbed pair here rather than detour through
+            // `ApiErrorResponse::into_response()`.
+            Err(e) => {
+                tracing::error!(error = %e, "agent manifest update failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": internal_error_msg})),
+                )
+            }
         };
     }
 
@@ -6617,6 +6665,38 @@ pub async fn reset_agent_identity(
 mod tests {
     use super::*;
     use librefang_channels::types::ParticipantRef;
+
+    /// Mirror of the pagination expression in `list_agents`. Pulled
+    /// out so the unit test below can drive it through opaque inputs
+    /// — clippy otherwise const-folds away the literal `None` /
+    /// `Some(usize::MAX)` we want to feed the helper.
+    fn effective_agent_list_limit(caller: Option<usize>) -> usize {
+        caller
+            .unwrap_or(DEFAULT_AGENT_LIST_LIMIT)
+            .min(MAX_AGENT_LIST_LIMIT)
+    }
+
+    #[test]
+    fn agent_list_limit_clamps_at_max_when_caller_omits_limit() {
+        // Audit: agent-list-limit-none-unbounded. The handler must
+        // resolve a missing `limit` to a finite cap (the historical
+        // `None → unpaginated` behaviour was a DoS lever on
+        // multi-thousand-agent deployments), and an oversized
+        // explicit `limit` must be clamped to the same ceiling.
+        assert_eq!(
+            effective_agent_list_limit(None),
+            DEFAULT_AGENT_LIST_LIMIT,
+            "missing limit must fall back to DEFAULT_AGENT_LIST_LIMIT, not run uncapped"
+        );
+        assert_eq!(
+            effective_agent_list_limit(Some(usize::MAX)),
+            MAX_AGENT_LIST_LIMIT,
+            "oversized limit must clamp at MAX_AGENT_LIST_LIMIT"
+        );
+        // Const sanity in a runtime form so clippy doesn't fold it
+        // out: zero cap would silently empty the list.
+        assert!(effective_agent_list_limit(Some(10)) >= 10.min(MAX_AGENT_LIST_LIMIT));
+    }
 
     /// The pre-fix prefix-match (`"image/"`) let SVG, BMP, TIFF, HEIC and
     /// friends through. Post-fix the allowlist is exact-match over the
