@@ -776,7 +776,7 @@ impl LibreFangKernel {
     /// marker stripping), so reusing it would leave the autonomous internal
     /// path — which sets a reserved `"autonomous"` channel without
     /// `is_internal_cron` — to be wrongly rewritten to `ext-autonomous`.
-    fn resolve_scope_channel(channel: &str, is_internal_system: bool) -> String {
+    pub(super) fn resolve_scope_channel(channel: &str, is_internal_system: bool) -> String {
         if is_internal_system || !librefang_channels::types::is_reserved_system_channel(channel) {
             channel.to_string()
         } else {
