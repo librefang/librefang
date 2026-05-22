@@ -77,7 +77,13 @@ const PSEUDONYM_MAP_CAP: usize = 10_000;
 /// These are compiled once at `PiiFilter` construction time.
 const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     // WhatsApp JIDs: `<digits>@lid` / `<digits>@s.whatsapp.net` / `<digits>@c.us`
-    // / `<digits>@g.us` / `<digits>@broadcast` / `<digits>@newsletter`.
+    // / `<digits>@g.us` / `<digits>@broadcast` / `<digits>@newsletter`. Also
+    // multi-device addressing — `<digits>:<device>@<domain>` (baileys /
+    // whatsmeow both emit these) — handled by the optional `(?::\d+)?` group
+    // before `@`. Without it the `phone` pattern would partial-match the
+    // leading digits and leave `:5@s.whatsapp.net` visible (houko #5469
+    // review — same partial-redact class this PR exists to eliminate).
+    //
     // Must come BEFORE `phone` so the digit prefix is consumed as part of the
     // JID and not partial-matched by `phone` (which has no lookahead support
     // in `regex_lite`). A partial match would leave the trailing digits and
@@ -86,7 +92,7 @@ const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     // the redacted text.
     (
         "whatsapp_jid",
-        r"\b\d{5,20}@(?:lid|s\.whatsapp\.net|c\.us|g\.us|broadcast|newsletter)\b",
+        r"\b\d{5,20}(?::\d+)?@(?:lid|s\.whatsapp\.net|c\.us|g\.us|broadcast|newsletter)\b",
     ),
     // Email addresses
     ("email", r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
@@ -495,6 +501,36 @@ mod tests {
         let result = filter.filter_message(text, &PrivacyMode::Redact);
         assert!(!result.contains("@lid"));
         assert!(!result.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_jid_redact_atomic_for_device_suffixed_jid() {
+        // Regression (houko #5469 review): multi-device WhatsApp JIDs
+        // (`<phone>:<device>@<domain>`) emitted by baileys / whatsmeow
+        // weren't matched by the previous pattern (which required `\d`
+        // immediately before `@`), so the `phone` rule partial-matched
+        // the leading digits and left `:<device>@<domain>` visible.
+        // Same partial-redact class this PR exists to eliminate.
+        let filter = make_filter();
+        for jid in [
+            "15551234567:5@s.whatsapp.net",
+            "15551234567:5@lid",
+            "393511083257:12@s.whatsapp.net",
+            "393511083257:1@c.us",
+        ] {
+            let text = format!("JID {jid} arrived");
+            let result = filter.filter_message(&text, &PrivacyMode::Redact);
+            assert!(
+                !result.contains("@s.whatsapp.net")
+                    && !result.contains("@lid")
+                    && !result.contains("@c.us"),
+                "device-suffixed JID `{jid}` must be atomically redacted, got: {result}"
+            );
+            assert!(
+                !result.chars().any(|c| c.is_ascii_digit() || c == ':'),
+                "no JID digit or device `:N` separator must survive, got: {result}"
+            );
+        }
     }
 
     #[test]
