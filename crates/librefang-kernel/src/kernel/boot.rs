@@ -181,6 +181,35 @@ impl LibreFangKernel {
             warn!("Config: {}", w);
         }
 
+        // Provider env-var observability (audit:
+        // provider-api-keys-no-boot-validation). `config.provider_api_keys`
+        // and `config.credential_pools[].keys[].api_key_env` declare env
+        // vars that hold provider API keys. The runtime resolves them on
+        // demand; an unset or empty value silently falls back to
+        // `auth_profiles` / default keys, so a typo
+        // (`OPENAI_API_KEY1` vs `OPENAI_API_KEY_1`) downgrades the
+        // operator's intended posture without any boot-time signal.
+        // Detection-only: walk both sources and emit one `warn!` per
+        // declared-but-unset/empty env var. Mirrors the existing
+        // `LIBREFANG_VAULT_KEY` / `LIBREFANG_STATE_SECRET` observability
+        // discipline. No boot failure.
+        for (provider, env_var, source) in collect_provider_env_var_declarations(&config) {
+            match std::env::var(&env_var) {
+                Ok(v) if !v.is_empty() => {}
+                _ => {
+                    warn!(
+                        provider = %provider,
+                        env_var = %env_var,
+                        source = source,
+                        "configured provider env var is unset or empty; \
+                         provider will fall back to other auth sources \
+                         (auth_profiles / default key). Check for typos in \
+                         the env-var name."
+                    );
+                }
+            }
+        }
+
         // Tool-exec subtable check: missing `[tool_exec.ssh]` /
         // `[tool_exec.daytona]` is fatal-on-boot rather than a warning,
         // so an operator typo doesn't silently let the daemon come up
@@ -228,10 +257,9 @@ impl LibreFangKernel {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = std::fs::set_permissions(
-                &config.data_dir,
-                std::fs::Permissions::from_mode(0o700),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700))
+            {
                 tracing::warn!(
                     path = %config.data_dir.display(),
                     error = %e,
@@ -2525,6 +2553,184 @@ fn validate_state_secret_value(raw: Option<&str>) -> Result<(), String> {
 /// existing integration suites rely on.
 fn validate_state_secret_env() -> Result<(), String> {
     validate_state_secret_value(std::env::var("LIBREFANG_STATE_SECRET").ok().as_deref())
+}
+
+/// Walk the config-declared provider env-var surface and return a flat
+/// list of `(provider, env_var, source)` triples for boot-time
+/// observability (audit: provider-api-keys-no-boot-validation).
+///
+/// Sources covered:
+/// - `provider_api_keys`: explicit `provider → env_var` map.
+/// - `credential_pools[].keys[].api_key_env`: multi-key rotation pools.
+///
+/// Empty `api_key_env` strings are skipped — those are the documented
+/// "no env var; resolve through other sources" shape for local
+/// providers, not a misconfig. The caller decides whether each
+/// triple's env var is actually set in the process environment; this
+/// function is intentionally env-free so the unit test below can pin
+/// the enumeration shape without global env state.
+fn collect_provider_env_var_declarations(
+    config: &librefang_types::config::KernelConfig,
+) -> Vec<(String, String, &'static str)> {
+    let mut out = Vec::new();
+    for (provider, env_var) in &config.provider_api_keys {
+        if env_var.is_empty() {
+            continue;
+        }
+        out.push((provider.clone(), env_var.clone(), "provider_api_keys"));
+    }
+    for pool in &config.credential_pools {
+        for key in &pool.keys {
+            if key.api_key_env.is_empty() {
+                continue;
+            }
+            out.push((
+                pool.provider.clone(),
+                key.api_key_env.clone(),
+                "credential_pools",
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod provider_env_validation {
+    //! Regression guards for the
+    //! `provider-api-keys-no-boot-validation` audit item. The boot path
+    //! enumerates declared provider env vars and warns when any is
+    //! unset or empty. We pin the enumeration shape here; the
+    //! env-reading branch is exercised indirectly through
+    //! `boot_with_config` and intentionally not re-tested here
+    //! (global-env mutation would force the whole suite serial).
+    use super::collect_provider_env_var_declarations;
+    use librefang_types::config::{
+        CredentialPoolConfig, CredentialPoolKeyConfig, CredentialPoolStrategy, KernelConfig,
+    };
+
+    fn pool(provider: &str, envs: &[&str]) -> CredentialPoolConfig {
+        CredentialPoolConfig {
+            provider: provider.to_string(),
+            strategy: CredentialPoolStrategy::default(),
+            keys: envs
+                .iter()
+                .map(|e| CredentialPoolKeyConfig {
+                    api_key_env: (*e).to_string(),
+                    label: "test".to_string(),
+                    priority: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn empty_config_yields_no_declarations() {
+        let cfg = KernelConfig::default();
+        assert!(collect_provider_env_var_declarations(&cfg).is_empty());
+    }
+
+    #[test]
+    fn provider_api_keys_entries_are_enumerated() {
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("openai".to_string(), "OPENAI_API_KEY".to_string());
+        cfg.provider_api_keys
+            .insert("nvidia".to_string(), "NVIDIA_API_KEY".to_string());
+        let got = collect_provider_env_var_declarations(&cfg);
+        // BTreeMap iteration is sorted by key → deterministic order.
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "nvidia".to_string(),
+                    "NVIDIA_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_env_var_strings_are_skipped() {
+        // `api_key_env = ""` is the documented "no env var; resolve
+        // through other sources" shape for local providers (ollama,
+        // lm-studio). Not a misconfig — must not warn.
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("ollama".to_string(), "".to_string());
+        cfg.credential_pools
+            .push(pool("openai", &["", "OPENAI_K1"]));
+        let got = collect_provider_env_var_declarations(&cfg);
+        assert_eq!(
+            got,
+            vec![(
+                "openai".to_string(),
+                "OPENAI_K1".to_string(),
+                "credential_pools"
+            )]
+        );
+    }
+
+    #[test]
+    fn credential_pool_keys_are_enumerated_per_key() {
+        let mut cfg = KernelConfig::default();
+        cfg.credential_pools.push(pool(
+            "anthropic",
+            &["ANTHROPIC_PRIMARY", "ANTHROPIC_BACKUP"],
+        ));
+        let got: Vec<_> = collect_provider_env_var_declarations(&cfg)
+            .into_iter()
+            .map(|(p, e, s)| (p, e, s))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "anthropic".to_string(),
+                    "ANTHROPIC_PRIMARY".to_string(),
+                    "credential_pools"
+                ),
+                (
+                    "anthropic".to_string(),
+                    "ANTHROPIC_BACKUP".to_string(),
+                    "credential_pools"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_sources_are_both_enumerated_with_distinct_source_tags() {
+        // Same provider declared in both surfaces — both must surface
+        // independently so the operator can locate which line in
+        // config.toml needs fixing.
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("openai".to_string(), "OPENAI_API_KEY".to_string());
+        cfg.credential_pools
+            .push(pool("openai", &["OPENAI_API_KEY_1"]));
+        let got = collect_provider_env_var_declarations(&cfg);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY_1".to_string(),
+                    "credential_pools"
+                ),
+            ]
+        );
+    }
 }
 
 /// Parse `[proactive_memory] extraction_model` into `(provider, model)` (#4871).

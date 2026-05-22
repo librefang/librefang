@@ -77,7 +77,8 @@ async fn get_json(h: &Harness, path: &str) -> (StatusCode, serde_json::Value) {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, value)
 }
 
@@ -124,6 +125,14 @@ async fn dashboard_snapshot_session_count_matches_substrate_after_seeding() {
     let substrate = h.state.kernel.memory_substrate();
     substrate.create_session(agent_id).expect("seed 1");
     substrate.create_session(agent_id).expect("seed 2");
+
+    // `/api/dashboard/snapshot` memoizes its payload with a short TTL
+    // (see `DASHBOARD_SNAPSHOT_TTL` in `routes/config.rs`). The seeds
+    // above bypass the route and go straight to the substrate, so the
+    // cached payload is stale relative to the truth we just wrote.
+    // Wait past the TTL before re-polling so the second request rebuilds
+    // and observes the new sessions.
+    tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
 
     let (status, body) = get_json(&h, "/api/dashboard/snapshot").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");

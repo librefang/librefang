@@ -2022,9 +2022,7 @@ pub async fn comms_send(
         use crate::middleware::UserRole;
         let allowed = match api_user.as_ref().map(|u| &u.0) {
             Some(u) if u.role >= UserRole::Admin => true,
-            Some(u) => {
-                u.name.eq_ignore_ascii_case(&from_entry.manifest.author)
-            }
+            Some(u) => u.name.eq_ignore_ascii_case(&from_entry.manifest.author),
             // No auth context (unauthenticated request — only
             // possible on loopback in `require_auth = false` mode):
             // we have no caller identity to compare against, so
@@ -2093,6 +2091,33 @@ pub async fn comms_send(
         .await
     {
         Ok(result) => {
+            // SECURITY (audit: comms-send-no-audit-log): record the
+            // cross-agent send in the hash-chained audit log. Every
+            // other privileged write-side action lands here (see
+            // `routes/audit.rs:103-127` for the canonical shape); the
+            // kernel's own `AgentMessage` row records token usage for
+            // the receiver but not the from→to relationship, so a
+            // forensic reviewer asking "which agent talked to which?"
+            // would have no tamper-evident answer without this entry.
+            // We use `chars().count()` (not `len()`) to stay consistent
+            // with `check_message_size` and to avoid undercounting CJK
+            // traffic — same root cause as the broader byte-vs-char
+            // cap audit.
+            let detail = serde_json::json!({
+                "from": from_id.to_string(),
+                "to": to_id.to_string(),
+                "len": req.message.chars().count(),
+            })
+            .to_string();
+            state.kernel.audit().record_with_context(
+                from_id.to_string(),
+                librefang_kernel::audit::AuditAction::AgentMessage,
+                format!("comms_send {detail}"),
+                "ok",
+                api_user.as_ref().map(|u| u.0.user_id),
+                Some("api".to_string()),
+            );
+
             let mut resp = serde_json::json!({
                 "ok": true,
                 "response": result.response,

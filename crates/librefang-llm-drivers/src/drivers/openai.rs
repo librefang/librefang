@@ -865,7 +865,7 @@ impl OpenAIDriver {
                                 });
                             }
                             ContentBlock::ImageFile { media_type, path } => {
-                                match std::fs::read(path) {
+                                match tokio::task::block_in_place(|| std::fs::read(path)) {
                                     Ok(bytes) => {
                                         use base64::Engine;
                                         let data = base64::engine::general_purpose::STANDARD
@@ -3775,5 +3775,76 @@ mod tests {
             map_oai_finish_reason(choice.finish_reason.as_deref(), false),
             StopReason::ContentFiltered
         );
+    }
+
+    /// Regression: `ContentBlock::ImageFile` paths must be read via
+    /// `tokio::task::block_in_place` so a multi-MB image read does not
+    /// stall the tokio worker pool. The base64-encoded bytes embedded
+    /// in the resulting `OaiContentPart::ImageUrl` data URL must match
+    /// the bytes on disk.
+    ///
+    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
+    /// panic on a single-threaded runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_request_imagefile_reads_bytes_without_blocking_worker() {
+        use base64::Engine;
+        use librefang_types::message::Message;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("img.png");
+        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 11, 22, 33];
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&bytes))
+            .expect("write png");
+
+        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
+        let request = CompletionRequest {
+            model: "gpt-4o-mini".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
+                    media_type: "image/png".to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                }]),
+                pinned: false,
+                timestamp: None,
+            }]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 256,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            prompt_cache_strategy: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        };
+        let wire = driver.build_request(&request).expect("build");
+        let user = wire
+            .messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message");
+        let parts = match user.content.as_ref().expect("content present") {
+            OaiMessageContent::Parts(p) => p,
+            OaiMessageContent::Text(_) => panic!("expected Parts content"),
+        };
+        let url = parts
+            .iter()
+            .find_map(|p| match p {
+                OaiContentPart::ImageUrl { image_url } => Some(image_url.url.clone()),
+                _ => None,
+            })
+            .expect("OaiContentPart::ImageUrl present");
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let want = format!("data:image/png;base64,{expected}");
+        assert_eq!(url, want, "encoded bytes must round-trip");
     }
 }

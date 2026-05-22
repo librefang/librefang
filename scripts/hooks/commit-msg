@@ -14,7 +14,7 @@
 set -eu
 
 msg_file="$1"
-if grep -qiE '(Co-Authored-By:.*(Claude|Anthropic|noreply@anthropic\.com)|Generated with .{0,40}Claude|🤖.*Claude[[:space:]]+Code)' "$msg_file"; then
+if grep -qiE '(Co-Authored-By:.*(Claude|Anthropic|noreply@anthropic\.com)|Generated with .{0,40}Claude|🤖.*Claude[[:space:]]*Code)' "$msg_file"; then
   cat >&2 <<'EOF'
 [commit-msg] Refusing commit — message contains Claude / Anthropic
 attribution (Co-Authored-By / "Generated with Claude" / 🤖 Claude Code).
