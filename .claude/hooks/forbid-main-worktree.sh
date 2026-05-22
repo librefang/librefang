@@ -147,17 +147,29 @@ case "$main_root" in
   *) exit 0 ;;
 esac
 
-msg="$(python3 "$LIB" \
+# Fail closed if the rule library is missing or broken: a partial clone
+# or corrupt lib must not silently bypass the cargo / git-mutation-on-main
+# bans via the swallowed dispatch error. Reached only for Bash commands
+# inside librefang — the Edit/Write protection above is inline bash and
+# does not depend on the lib. Exit 2 (the PreToolUse block code), not 1.
+[ -f "$LIB" ] || { echo "[forbid-main-worktree] missing $LIB" >&2; exit 2; }
+
+# check-bash-rules.py is contractually exit-0 (message on a hit, nothing
+# on a pass); a non-zero exit means the lib itself is broken — fail closed.
+if msg="$(python3 "$LIB" \
   --rules "$rules" \
   --cwd "$cwd" \
   --main-root "$main_root" \
-  --kind "${kind:-}" <<<"$cmd" 2>/dev/null || true)"
-
-if [ -n "$msg" ]; then
-  cat >&2 <<EOF
+  --kind "${kind:-}" <<<"$cmd" 2>/dev/null)"; then
+  if [ -n "$msg" ]; then
+    cat >&2 <<EOF
 [forbid-main-worktree] $msg
 Command: $cmd
 EOF
+    exit 2
+  fi
+else
+  echo "[forbid-main-worktree] rule library failed to run (corrupt or unreadable): $LIB" >&2
   exit 2
 fi
 
