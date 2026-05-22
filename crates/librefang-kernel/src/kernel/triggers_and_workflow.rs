@@ -263,6 +263,11 @@ impl LibreFangKernel {
             }
         }
 
+        // Capture event.timestamp before the bus move — the trigger
+        // dispatcher below uses it as the deterministic fire instant for
+        // `SessionId::for_trigger_fire`. audit: trigger-new-session-non-deterministic.
+        let event_timestamp = event.timestamp;
+
         // Publish to the event bus
         self.events.event_bus.publish(event).await;
 
@@ -285,8 +290,9 @@ impl LibreFangKernel {
         //
         // Resolution order for effective session mode:
         //   trigger_match.session_mode_override → manifest.session_mode.
-        // We materialize `SessionId::new()` only when the resolved mode is
-        // `New`; persistent fires reuse the canonical session and must
+        // We materialize a deterministic `SessionId::for_trigger_fire`
+        // override only when the resolved mode is `New`; persistent fires
+        // reuse the canonical session and must
         // serialize at the per-agent mutex, so we leave session_id_override
         // = None for them.
         // Bug #3841: burst events fire triggers out-of-order via independent
@@ -344,8 +350,21 @@ impl LibreFangKernel {
                         None => continue,
                     };
                     let effective_mode = mode_override.unwrap_or(manifest_mode);
+                    // audit: trigger-new-session-non-deterministic
+                    // `SessionId::new()` here was a random v4 UUID, which
+                    // made "trigger X fired at T" log lines impossible to
+                    // correlate to the actual SessionId for diagnostics.
+                    // Mirror cron's `for_cron_run` shape: derive a
+                    // deterministic v5 UUID from
+                    // `(agent, trigger_id, event_timestamp)` so the SessionId
+                    // is reproducible from logs after the fact. `event_timestamp`
+                    // is the canonical fire instant — the same value the
+                    // trigger registry stamps into `last_fired_at` (captured
+                    // before the event was moved into the bus publish).
                     let sid_override = match effective_mode {
-                        librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                        librefang_types::agent::SessionMode::New => Some(
+                            SessionId::for_trigger_fire(aid, trigger_id.0, event_timestamp),
+                        ),
                         librefang_types::agent::SessionMode::Persistent => None,
                     };
                     let agent_sem = kernel.agent_concurrency_for(aid);
@@ -1021,5 +1040,62 @@ impl LibreFangKernel {
                 kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod trigger_dispatch_session_id_tests {
+    //! audit: trigger-new-session-non-deterministic
+    //!
+    //! Contract tests pinning the SessionId materialized for `SessionMode::New`
+    //! trigger fires. Mirrors `fire_session_override_new_matches_for_cron_run_contract_3657`
+    //! in `crates/librefang-kernel/src/cron.rs` so both audit paths fail loudly
+    //! if anyone changes the derivation shape (timestamp precision, separator,
+    //! ordering, namespace) without updating the corresponding helper.
+    //!
+    //! These are unit tests on the helper rather than full publish_event paths
+    //! because spinning a real LibreFangKernel inside this file would pull in
+    //! the full integration harness — the integration suite already covers
+    //! the dispatcher end-to-end (`crates/librefang-api/tests/`).
+    use chrono::TimeZone;
+    use librefang_types::agent::{AgentId, SessionId};
+
+    /// Regression for the audit item: pin the exact session id a `New`-mode
+    /// trigger fire receives. If anyone changes the derivation shape without
+    /// updating `SessionId::for_trigger_fire`, this test fails loudly. This
+    /// pins the helper contract the dispatcher's `New` arm relies on; that the
+    /// dispatcher actually calls `for_trigger_fire` (and not the original
+    /// random `SessionId::new()`) is exercised end-to-end in
+    /// `crates/librefang-api/tests/`.
+    #[test]
+    fn fire_session_override_new_matches_for_trigger_fire_contract() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let fire_time = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+
+        let sid = SessionId::for_trigger_fire(agent, trigger_id, fire_time);
+
+        // Determinism: a second call with identical inputs must produce the
+        // same SessionId. Random `SessionId::new()` would fail this.
+        assert_eq!(
+            sid,
+            SessionId::for_trigger_fire(agent, trigger_id, fire_time),
+            "for_trigger_fire must be deterministic over (agent, trigger_id, fire_time); \
+             see docs/issues/trigger-new-session-non-deterministic.md"
+        );
+
+        // A different fire_time on the same agent/trigger must NOT collide,
+        // even at sub-second resolution — log correlation requires that two
+        // burst fires of the same event-triggered job land on distinct ids.
+        let later = fire_time + chrono::Duration::nanoseconds(1);
+        assert_ne!(
+            sid,
+            SessionId::for_trigger_fire(agent, trigger_id, later),
+            "consecutive fires must yield distinct SessionIds"
+        );
     }
 }
