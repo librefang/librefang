@@ -226,6 +226,9 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "max_history_messages",
         "default_routing",
         "require_auth_for_reads",
+        // auth-posture scalar gating require_auth_for_reads=false (#5357);
+        // rendered on the synthetic "general" section, like its siblings above.
+        "external_auth_proxy",
         "trusted_manifest_signers",
         "dashboard_user",
         "dashboard_pass",

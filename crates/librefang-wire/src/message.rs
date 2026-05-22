@@ -229,9 +229,7 @@ pub fn classify_unknown(body: &[u8], msg: &WireMessage) -> Option<UnknownTag> {
         WireMessageKind::Unknown => UnknownLevel::Envelope,
         WireMessageKind::Request(WireRequest::Unknown) => UnknownLevel::RequestMethod,
         WireMessageKind::Response(WireResponse::Unknown) => UnknownLevel::ResponseMethod,
-        WireMessageKind::Notification(WireNotification::Unknown) => {
-            UnknownLevel::NotificationEvent
-        }
+        WireMessageKind::Notification(WireNotification::Unknown) => UnknownLevel::NotificationEvent,
         _ => return None,
     };
     // The `serde(other)` arm doesn't capture the raw tag the peer

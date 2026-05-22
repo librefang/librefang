@@ -852,7 +852,8 @@ impl ContextEngine for ScriptableContextEngine {
                                 },
                                 trace_store.as_ref(),
                                 &plugin_name,
-                            );
+                            )
+                            .await;
                             Ok((output, elapsed_ms))
                         }
                         Err(e) => {
@@ -873,7 +874,8 @@ impl ContextEngine for ScriptableContextEngine {
                                 },
                                 trace_store.as_ref(),
                                 &plugin_name,
-                            );
+                            )
+                            .await;
                             Err(err_msg)
                         }
                     }

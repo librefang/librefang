@@ -299,3 +299,63 @@ async fn auth_callback_empty_flow_id_is_malformed() {
         "malformed-state probe must not mutate auth state"
     );
 }
+
+/// Callback with `code=` (empty string) must be rejected with the same
+/// "Missing authorization code." shape as the `code` query param being
+/// absent entirely. `serde_urlencoded` deserializes `code=` into
+/// `Some("")`, so a `match params.code { Some(c) => c.clone(), None => ...}`
+/// without an emptiness guard would slip the empty string through and
+/// reach the outbound token-exchange POST — at which point the daemon
+/// sends the PKCE verifier alongside an empty code to the IdP token
+/// endpoint, leaking the verifier into the IdP's access log without
+/// producing any useful token exchange. The empty-code guard must run
+/// BEFORE the vault load of `pkce_state` / `pkce_verifier` and BEFORE
+/// any outbound POST. Whitespace-only is treated equivalently.
+///
+/// Behavioural proof that the verifier isn't leaked: the response
+/// surfaces "Missing authorization code." — emitted from a code path
+/// that runs after only the state-format gate, BEFORE any vault read.
+/// If the guard regressed (e.g. someone removed the `is_empty()` check),
+/// the call would either reach the vault `pkce_state` load and surface
+/// "No pending auth flow…" instead, or — with vault seeded — reach the
+/// token-exchange POST and surface a token-exchange-failed error. Both
+/// regression shapes are caught by the substring assertion below. The
+/// auth_states map must also stay untouched: the empty-code rejection
+/// happens before either of the two state-mutating arms (nonce_match
+/// failure and error-param injection) further down.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_callback_empty_code_is_rejected_before_token_exchange() {
+    for (label, qs) in [
+        ("empty", "?code=&state=fl0w.n0nce"),
+        ("whitespace", "?code=%20%20&state=fl0w.n0nce"),
+    ] {
+        let h = boot_with_servers(vec![entry_http("srv-f", "https://example.invalid/mcp")]);
+        let (status, body) = send(
+            &h,
+            Method::GET,
+            &format!("/api/mcp/servers/srv-f/auth/callback{qs}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "[{label}] body: {body}");
+        assert!(
+            body.contains("Authorization Failed"),
+            "[{label}] expected failure text, got: {body}"
+        );
+        assert!(
+            body.contains("Missing authorization code"),
+            "[{label}] expected 'Missing authorization code' detail (proves the \
+             pre-vault-verifier-load guard fired and the verifier was not \
+             POSTed to the IdP token endpoint), got: {body}"
+        );
+        // The empty-code guard runs after the state-format gate but before
+        // any vault read, network call, or auth-state mutation. The two
+        // state-mutating arms further down (nonce_match failure and the
+        // error-param injection branch) are unreachable on this path, so
+        // the auth_states map must stay untouched.
+        let states = h.state.kernel.mcp_auth_states_ref().lock().await;
+        assert!(
+            !states.contains_key("srv-f"),
+            "[{label}] empty-code rejection must not mutate auth state, got {states:?}"
+        );
+    }
+}

@@ -273,11 +273,27 @@ async fn create_registry_content(
         }
     }
 
+    // Return a path relative to `home_dir` rather than an absolute path.
+    // The absolute form leaks the operator's OS username via
+    // `/Users/<user>` (macOS) or `/home/<user>` (Linux), which is a
+    // low-severity but unnecessary information disclosure to any caller
+    // of this endpoint. Relative paths still let the dashboard show
+    // "where" the file lives under `~/.librefang/` (e.g.
+    // `providers/openai.toml`) without revealing host filesystem layout.
+    // Falls back to the absolute path's file name if `strip_prefix`
+    // fails — defensive only; `target` is constructed from `home_dir`
+    // above so the prefix should always match.
+    let relative_path = target
+        .strip_prefix(&home_dir)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(target.file_name().unwrap_or(target.as_os_str()))
+        });
     Json(serde_json::json!({
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
-        "path": target.display().to_string(),
+        "path": relative_path.display().to_string(),
     }))
     .into_response()
 }

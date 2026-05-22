@@ -254,12 +254,48 @@ pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> 
     }
 }
 
+/// Validate a dashboard asset sub-path.
+///
+/// Returns `true` if every segment (split on both `/` and `\`) is a benign,
+/// non-empty filename — i.e. not `.`, not `..`, contains no null byte. This
+/// is the path-traversal guard for [`react_asset`]; the previous substring
+/// check `path.contains("..")` was bypassable on Windows via `\..\` segments
+/// and, in principle, by URL-encoded `%2e%2e` if the decode order ever
+/// changed. Splitting on both separators and rejecting `..` per-segment
+/// closes both bypasses without depending on filesystem canonicalization
+/// (which would require the asset to already exist).
+fn is_safe_asset_path(path: &str) -> bool {
+    // Reject embedded null bytes anywhere — defense in depth against C
+    // string truncation in any downstream consumer.
+    if path.contains('\0') {
+        return false;
+    }
+    // Split on BOTH forward slash and backslash. Backslash is a path
+    // separator on Windows; on Unix it's a legal filename character but
+    // a dashboard asset would never legitimately contain one.
+    let mut saw_segment = false;
+    for seg in path.split(|c| c == '/' || c == '\\') {
+        if seg.is_empty() {
+            // Empty segments come from leading/trailing/repeated separators;
+            // they're benign in URLs ("/a//b" canonicalizes to "/a/b") but
+            // we tolerate them only between real segments — the resolver
+            // path-joins on each, and double-separators don't traverse.
+            continue;
+        }
+        if seg == "." || seg == ".." {
+            return false;
+        }
+        saw_segment = true;
+    }
+    saw_segment
+}
+
 /// GET /dashboard/{*path} — Serve React build assets.
 pub async fn react_asset(
     State(state): State<Arc<crate::routes::AppState>>,
     Path(path): Path<String>,
 ) -> Response {
-    if path.contains("..") {
+    if !is_safe_asset_path(&path) {
         return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
     }
 
@@ -544,5 +580,102 @@ mod tests {
             got.is_none(),
             "embedded-only mode must not consult runtime dir"
         );
+    }
+
+    #[test]
+    fn safe_asset_path_accepts_legit_paths() {
+        for p in [
+            "index.html",
+            "assets/app.js",
+            "assets/img/logo.png",
+            "sub/dir/file.css",
+            "deep/nested/path/asset.svg",
+        ] {
+            assert!(is_safe_asset_path(p), "expected {p:?} to be accepted");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_dotdot_segment() {
+        // ASCII traversal — what the old `path.contains("..")` check caught.
+        for p in [
+            "..",
+            "../etc/passwd",
+            "assets/../secret.toml",
+            "sub/../../etc/passwd",
+        ] {
+            assert!(!is_safe_asset_path(p), "expected {p:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_backslash_dotdot_windows_bypass() {
+        // The Windows-bypass class: substring `path.contains("..")` happens
+        // to catch literal `..\\`, but it does NOT prevent the segment from
+        // being treated as parent-of by Windows path resolution. The
+        // segment-level validator rejects it explicitly regardless of host
+        // OS, so the audit fix holds on every platform.
+        for p in [
+            "..\\etc\\passwd",
+            "assets\\..\\secret.toml",
+            "sub\\..\\..\\etc\\passwd",
+            "..\\..\\Windows\\System32\\config\\SAM",
+        ] {
+            assert!(!is_safe_asset_path(p), "expected {p:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_url_decoded_dotdot() {
+        // Axum's `Path<String>` extractor URL-decodes capture segments
+        // before the handler sees them, so `%2e%2e` arrives as `..`. This
+        // test pins the post-decode behaviour explicitly so a future
+        // extractor change can't reopen the bypass silently.
+        let decoded = percent_decode("..%2Fetc%2Fpasswd");
+        assert_eq!(decoded, "../etc/passwd");
+        assert!(!is_safe_asset_path(&decoded));
+
+        let decoded = percent_decode("%2e%2e%2fetc%2fpasswd");
+        assert_eq!(decoded, "../etc/passwd");
+        assert!(!is_safe_asset_path(&decoded));
+
+        let decoded = percent_decode("..%5Cetc%5Cpasswd");
+        assert_eq!(decoded, "..\\etc\\passwd");
+        assert!(!is_safe_asset_path(&decoded));
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_single_dot_and_null_byte() {
+        assert!(!is_safe_asset_path("."));
+        assert!(!is_safe_asset_path("assets/./app.js"));
+        assert!(!is_safe_asset_path("assets/app.js\0.png"));
+        // Pure-empty path has no real segment — refuse rather than
+        // ambiguously resolving to dashboard root.
+        assert!(!is_safe_asset_path(""));
+        assert!(!is_safe_asset_path("/"));
+    }
+
+    /// Minimal percent-decoder for the URL-decode regression tests. We
+    /// don't want to pull `percent-encoding` into the test build just for
+    /// `%XX` -> byte; this covers exactly what axum's extractor does for
+    /// path captures (`%2e` -> `.`, `%2f` -> `/`, `%5c` -> `\`).
+    fn percent_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).expect("decoded UTF-8")
     }
 }

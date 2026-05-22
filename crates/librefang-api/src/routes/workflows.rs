@@ -474,6 +474,18 @@ fn parse_step_session_mode(
     }
 }
 
+/// Hard cap on declared workflow input parameters.
+///
+/// A workflow with hundreds of declared input parameters is almost
+/// certainly malformed or attacker-crafted; the dashboard
+/// parameter-discovery UI is unusable past a few dozen anyway. Bounds
+/// the `Vec::with_capacity(arr.len())` allocation in
+/// [`parse_input_schema`] below so a hostile
+/// `"input_schema": [{}, {}, ...]` array within the 8 MiB body cap
+/// cannot pre-allocate millions of entries
+/// (`docs/issues/bulk-with-capacity-no-validate.md`).
+const MAX_INPUT_SCHEMA_PARAMS: usize = 100;
+
 /// Parse the optional `input_schema` JSON field on a workflow payload
 /// (#4982 — gap 2 / parameter discovery).
 ///
@@ -509,8 +521,23 @@ fn parse_input_schema(val: Option<&serde_json::Value>) -> Option<Vec<WorkflowInp
     if arr.is_empty() {
         return None;
     }
-    let mut params: Vec<WorkflowInputParam> = Vec::with_capacity(arr.len());
-    for entry in arr {
+    // Cap the allocation BEFORE `Vec::with_capacity`. The parser is
+    // lenient by design (`parse_step_session_mode` style — log + skip
+    // malformed entries rather than failing the whole workflow), so an
+    // oversize array is treated the same way: log a warning, take the
+    // first `MAX_INPUT_SCHEMA_PARAMS` entries, and continue. Callers
+    // that need stricter rejection can validate up front in the
+    // top-level handler.
+    let effective_len = arr.len().min(MAX_INPUT_SCHEMA_PARAMS);
+    if arr.len() > MAX_INPUT_SCHEMA_PARAMS {
+        warn!(
+            requested = arr.len(),
+            max = MAX_INPUT_SCHEMA_PARAMS,
+            "input_schema exceeds maximum declared parameters; truncating",
+        );
+    }
+    let mut params: Vec<WorkflowInputParam> = Vec::with_capacity(effective_len);
+    for entry in arr.iter().take(effective_len) {
         match serde_json::from_value::<WorkflowInputParam>(entry.clone()) {
             Ok(p) => params.push(p),
             Err(err) => {

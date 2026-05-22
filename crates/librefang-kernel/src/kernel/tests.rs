@@ -4727,6 +4727,157 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
     kernel.shutdown();
 }
 
+/// Workflow `send_message` closure must acquire the per-agent semaphore
+/// before invoking the LLM (audit fix for `triggers_and_workflow.rs:334-336`).
+///
+/// Reproduces the exact closure shape the workflow runner uses: N parallel
+/// fan-out steps each call `agent_concurrency_for(agent_id).acquire_owned()`
+/// then run the step body. With `max_concurrent_invocations = 1` + 3
+/// parallel arms holding the permit for 100 ms, total wall time must be
+/// ~300 ms (serialised), not ~100 ms (which is what the pre-fix path
+/// allowed by bypassing the semaphore).
+///
+/// The test runs the agent in `SessionMode::New` because `Persistent` is
+/// clamped to 1 by `agent_concurrency_for` regardless of manifest cap —
+/// using `New` keeps the cap as the variable under test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_send_message_closure_honours_per_agent_semaphore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-wf-sem-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "wf-fanout-cap-agent".to_string(),
+                description: "cap=1 + 3 parallel fan-out steps must serialise".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                // New (not Persistent) so the manifest cap is honoured
+                // instead of being clamped to 1 by the Persistent guard.
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(1),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Confirm precondition: the cap really is 1 from the resolver.
+    assert_eq!(kernel.agent_concurrency_for(aid).available_permits(), 1);
+
+    // Mirror the workflow `send_message` closure body: acquire the
+    // per-agent semaphore, then run the step. We substitute a 100 ms
+    // sleep for `send_message_full` — the cap-enforcement contract is
+    // identical, and this keeps the test free of LLM driver wiring.
+    let step_body = |k: Arc<LibreFangKernel>, agent_id: librefang_types::agent::AgentId| async move {
+        let sem = k.agent_concurrency_for(agent_id);
+        let _permit = sem
+            .acquire_owned()
+            .await
+            .expect("semaphore must not be closed mid-test");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    let kernel_arc = Arc::new(kernel);
+    let start = std::time::Instant::now();
+    let mut handles = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let k = Arc::clone(&kernel_arc);
+        handles.push(tokio::spawn(step_body(k, aid)));
+    }
+    for h in handles {
+        h.await.expect("step task panicked");
+    }
+    let elapsed = start.elapsed();
+
+    // 3 parallel arms × 100 ms each, gated by cap=1 → wall ~300 ms.
+    // Floor at 250 ms (generous margin for runner scheduling jitter);
+    // pre-fix path with the semaphore bypassed would land near 100 ms.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(250),
+        "3 parallel fan-out arms with max_concurrent_invocations=1 must \
+         serialise via the per-agent semaphore (expected ≥250ms, got {elapsed:?}). \
+         If this fails, the workflow `send_message` closure has stopped \
+         acquiring `agent_concurrency_for` before calling `send_message_full` — \
+         see triggers_and_workflow.rs and the audit note at :334-336.",
+    );
+
+    Arc::try_unwrap(kernel_arc).ok().unwrap().shutdown();
+}
+
+/// Source-shape sentinel for the fix above: the production workflow
+/// `send_message` closure (and its operator-resume twin) in
+/// `triggers_and_workflow.rs` must acquire the per-agent semaphore
+/// before calling `send_message_full`. The behavioral test above proves
+/// `agent_concurrency_for(aid)` enforces the cap *if used* — this test
+/// pins that the production closures actually use it, catching a future
+/// refactor that drops the acquire and silently reintroduces the bypass.
+#[test]
+fn workflow_send_message_closure_contains_per_agent_semaphore_acquire() {
+    let src = include_str!("triggers_and_workflow.rs");
+    // Strip line+block comments so the assertion can't be satisfied by
+    // a leftover doc reference after the wiring is removed.
+    let stripped: String = {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = s.split_at(end + 2).1.to_string();
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            while let Some(start) = s.find("/*") {
+                if let Some(end_rel) = s[start..].find("*/") {
+                    let end = start + end_rel + 2;
+                    s.replace_range(start..end, "");
+                } else {
+                    s.truncate(start);
+                    in_block = true;
+                    break;
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+    // Two production sites must wrap `send_message_full` with the per-agent
+    // semaphore: `run_workflow::send_message` and
+    // `KernelOperatorResumeDriver::drive_operator_timeout::send_message`.
+    let acquire_matches = stripped.matches("agent_concurrency_for(agent_id)").count();
+    assert!(
+        acquire_matches >= 2,
+        "expected ≥2 non-comment `agent_concurrency_for(agent_id)` acquires \
+         in triggers_and_workflow.rs (one in `run_workflow::send_message`, \
+         one in `KernelOperatorResumeDriver::drive_operator_timeout::send_message`); \
+         found {acquire_matches}. Did a refactor drop the acquire and \
+         silently re-bypass `max_concurrent_invocations` on the workflow path?",
+    );
+    let acquire_owned_matches = stripped.matches("acquire_owned()").count();
+    assert!(
+        acquire_owned_matches >= 3,
+        "expected ≥3 non-comment `acquire_owned()` calls in \
+         triggers_and_workflow.rs (Lane::Trigger lane permit + 2 per-agent \
+         semaphore acquires on the workflow paths); found {acquire_owned_matches}.",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // push_notification routing — locks the global-fallback match arm.
 //
@@ -9244,4 +9395,75 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
     assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
+}
+
+// ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
+// Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
+// resolver re-sanitizes reserved channel names from UNtrusted callers, but
+// must leave the kernel's own trusted internal system constructors (cron,
+// autonomous, webui) untouched so their persistent SessionIds stay continuous
+// (the issue mandated zero migration).
+
+#[test]
+fn resolve_scope_channel_sanitizes_reserved_names_from_external_callers() {
+    // is_internal_system = false (external / channel-bridge ingress):
+    // every reserved name must be rewritten to `ext-<name>` so it cannot
+    // derive the same SessionId as the internal system path.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {reserved:?} must be rewritten to ext-<name>"
+        );
+        // Case-insensitively too — `for_channel` lowercases internally.
+        let upper = reserved.to_ascii_uppercase();
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(&upper, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {upper:?} must be rewritten case-insensitively"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_preserves_reserved_names_for_internal_system_paths() {
+    // is_internal_system = true (cron tick / autonomous tick / web UI):
+    // the reserved name passes through verbatim so the legacy
+    // for_channel(agent, "<name>") SessionId is preserved. This is the
+    // regression guard for the autonomous internal path, which sets a
+    // reserved "autonomous" channel WITHOUT is_internal_cron.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, true),
+            reserved,
+            "trusted internal reserved channel {reserved:?} must pass through unchanged \
+             so existing persistent history is not orphaned"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_leaves_legitimate_channels_untouched() {
+    // Non-reserved channels pass through regardless of the trust flag, so
+    // ordinary channel traffic (telegram, slack, …) is never disturbed.
+    for channel in ["telegram", "slack", "discord", "api", "ext-cron"] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, false),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (external)"
+        );
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, true),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (internal)"
+        );
+    }
 }

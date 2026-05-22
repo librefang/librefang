@@ -557,6 +557,14 @@ pub struct DriverConfig {
     /// Provider name.
     pub provider: String,
     /// API key.
+    ///
+    /// SECURITY: `#[serde(skip_serializing)]` so `serde_json::to_*` /
+    /// `toml::to_*` of a `DriverConfig` never emits the key in cleartext
+    /// (cache dump, diagnostic snapshot, `mcp_config.json`, cross-process
+    /// trace, etc.). `Deserialize` is unaffected — config files still
+    /// populate this field on load. Pairs with the hand-written `Debug`
+    /// below which redacts the same field for log output.
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     /// Base URL override.
     pub base_url: Option<String>,
@@ -591,7 +599,11 @@ pub struct DriverConfig {
     pub mcp_bridge: Option<McpBridgeConfig>,
     /// Per-provider proxy URL override.
     /// When set, the driver uses this proxy instead of the global proxy config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// SECURITY: `#[serde(skip_serializing)]` because authenticated-proxy
+    /// URLs commonly carry `user:pass@host` — same leak vector as `api_key`
+    /// above. `Deserialize` is preserved so config-file load still works.
+    #[serde(default, skip_serializing)]
     pub proxy_url: Option<String>,
     /// Per-provider HTTP request timeout in seconds.
     ///
@@ -1050,6 +1062,63 @@ mod tests {
             matches!(err, LlmError::Http(ref m) if m.contains("receiver dropped")),
             "expected receiver-dropped error, got: {err:?}"
         );
+    }
+
+    // Regression: `DriverConfig` has hand-written `Debug` that redacts
+    // `api_key` and `proxy_url`, but the derived `Serialize` used to emit
+    // both fields verbatim. Any `serde_json::to_*` / `toml::to_*` of a
+    // `DriverConfig` (cache dump, diagnostic snapshot, `mcp_config.json`,
+    // cross-process trace) would land the secret in cleartext. Pin
+    // `#[serde(skip_serializing)]` on both fields so the serializer
+    // cannot regress to the leaky shape.
+    #[test]
+    fn driver_config_serialize_omits_api_key_and_proxy_credentials() {
+        let sentinel_api_key = "sk-test-DEADBEEF-do-not-leak-1234567890";
+        let sentinel_proxy_user = "proxyuser";
+        let sentinel_proxy_pass = "proxysecret";
+        let proxy_url =
+            format!("http://{sentinel_proxy_user}:{sentinel_proxy_pass}@proxy.internal:8080");
+
+        let cfg = DriverConfig {
+            provider: "anthropic".to_string(),
+            api_key: Some(sentinel_api_key.to_string()),
+            base_url: Some("https://api.anthropic.com".to_string()),
+            proxy_url: Some(proxy_url.clone()),
+            ..DriverConfig::default()
+        };
+
+        let json = serde_json::to_string(&cfg).expect("DriverConfig serialize");
+        assert!(
+            !json.contains(sentinel_api_key),
+            "DriverConfig Serialize must not emit api_key cleartext (got: {json})"
+        );
+        assert!(
+            !json.contains(sentinel_proxy_pass),
+            "DriverConfig Serialize must not emit proxy_url credentials (got: {json})"
+        );
+        // Whole proxy URL (which embeds the credentials) must also be absent.
+        assert!(
+            !json.contains(&proxy_url),
+            "DriverConfig Serialize must not emit proxy_url verbatim (got: {json})"
+        );
+        // Non-secret fields are still present — skip is scoped, not blanket.
+        assert!(
+            json.contains("\"provider\":\"anthropic\""),
+            "non-secret fields must still serialize (got: {json})"
+        );
+
+        // `Deserialize` is unaffected by `skip_serializing`: a config file
+        // that includes `api_key` / `proxy_url` still loads them into the
+        // struct (the kernel populates DriverConfig from on-disk config
+        // every boot via this path).
+        let raw = format!(
+            r#"{{"provider":"anthropic","api_key":"{sentinel_api_key}","proxy_url":"{}","skip_permissions":true,"message_timeout_secs":300,"emit_caller_trace_headers":true}}"#,
+            proxy_url.replace('\\', "\\\\")
+        );
+        let parsed: DriverConfig = serde_json::from_str(&raw)
+            .expect("DriverConfig deserialize must still populate secrets");
+        assert_eq!(parsed.api_key.as_deref(), Some(sentinel_api_key));
+        assert_eq!(parsed.proxy_url.as_deref(), Some(proxy_url.as_str()));
     }
 }
 

@@ -1547,7 +1547,12 @@ impl LibreFangKernel {
             .filter(|c| !c.is_empty())
             .unwrap_or(sender_id);
         let sender_ctx = librefang_channels::types::SenderContext {
-            channel: channel.to_string(),
+            // Audit: cron-channel-name-not-reserved. `deferred.channel`
+            // was captured upstream from a `SenderContext` that may
+            // predate the construction-site sanitizer. Re-sanitize on
+            // replay so a stored unsanitized value cannot resurrect
+            // the collision.
+            channel: librefang_channels::types::sanitize_channel_name(channel),
             user_id: sender_id.to_string(),
             chat_id: Some(routing_chat_id.to_string()),
             ..Default::default()

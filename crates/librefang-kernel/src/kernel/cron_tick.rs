@@ -222,6 +222,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                         thread_id: None,
                         account_id: None,
                         is_internal_cron: true,
+                        is_internal_system: true,
                         ..Default::default()
                     };
                     let sender_ctx_owned = Some(cron_sender);
@@ -288,228 +289,52 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 || warn_threshold.is_some()
                             {
                                 let cron_sid = SessionId::for_channel(agent_id, "cron");
-                                // #3443: serialize prune through the
-                                // per-session mutex so two cron fires
-                                // for the same agent cannot both
-                                // read-modify-write and clobber each
-                                // other's keep-set.  The lock is
-                                // dropped before send_message_full
-                                // (which uses agent_msg_locks for
-                                // persistent cron sessions).
+                                // #3443 / cron-prune-lock-across-llm-await:
+                                // the per-session mutex is acquired around the
+                                // read-then-write cycle so two cron fires for
+                                // the same agent cannot clobber each other's
+                                // keep-set. **The lock MUST NOT be held across
+                                // `try_summarize_trim().await`** — under a
+                                // congested provider the LLM call can stall
+                                // for tens of seconds, and the persistent
+                                // `(agent, "cron")` lock would jam every
+                                // sibling cron fire for the duration. Instead:
+                                //
+                                //   1. Take the lock, snapshot the messages
+                                //      and record `messages_generation`.
+                                //   2. Drop the lock.
+                                //   3. Run `try_summarize_trim` lock-free.
+                                //   4. Re-acquire the lock; if
+                                //      `messages_generation` is unchanged,
+                                //      apply the trim result; otherwise drop
+                                //      our result (a concurrent fire won the
+                                //      write-back) and log the conflict.
+                                //
+                                // `Session.messages_generation` (memory crate)
+                                // is the canonical CAS counter and is already
+                                // bumped by `set_messages` /
+                                // `mark_messages_mutated`, so no new state is
+                                // introduced.
                                 let prune_lock = kernel_job
                                     .agents
                                     .session_msg_locks
                                     .entry(cron_sid)
                                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                                     .clone();
-                                let _prune_guard = prune_lock.lock().await;
-                                if let Ok(Some(mut session)) =
-                                    kernel_job.memory.substrate.get_session(cron_sid)
-                                {
-                                    use librefang_runtime::compactor::estimate_token_count;
-                                    // Compute how many messages must be removed
-                                    // to satisfy both caps. We do this without
-                                    // mutating yet so SummarizeTrim can see the
-                                    // full "to-be-dropped" prefix.
-                                    let keep_count = cron_compute_keep_count(
-                                        &session.messages,
-                                        max_messages,
-                                        max_tokens,
-                                    );
-                                    // "Did the cap demand a shrink?" — set once from
-                                    // the helper's verdict and never re-read inside the
-                                    // mutating arms. All three apply paths (SummarizeTrim
-                                    // success / fallback prune / configured prune) leave
-                                    // the session in a state that needs to be persisted
-                                    // when this is true.
-                                    let needs_compaction = keep_count < session.messages.len();
-
-                                    if needs_compaction {
-                                        use librefang_types::config::CronCompactionMode;
-                                        // #4683 review: re-route SummarizeTrim → Prune
-                                        // when the cap is too tight for [summary] +
-                                        // 1-msg-tail (keep_count < 2). Without this,
-                                        // SummarizeTrim would always write 2 messages
-                                        // back into a session whose cap permits at
-                                        // most keep_count, and the next fire would
-                                        // re-enter SummarizeTrim → endless aux LLM
-                                        // round-trips with no convergence.
-                                        let effective_compaction_mode =
-                                            cron_resolve_compaction_mode(
-                                                compaction_mode,
-                                                keep_count,
-                                            );
-                                        if compaction_mode == CronCompactionMode::SummarizeTrim
-                                            && effective_compaction_mode
-                                                == CronCompactionMode::Prune
-                                        {
-                                            tracing::warn!(
-                                                agent_id = %agent_id,
-                                                session_id = %cron_sid,
-                                                job = %job_name,
-                                                keep_count,
-                                                "cron SummarizeTrim: cap too tight for [summary] + tail (keep_count < 2); falling back to Prune"
-                                            );
-                                        }
-                                        match effective_compaction_mode {
-                                            CronCompactionMode::SummarizeTrim => {
-                                                // Attempt LLM summarization of the
-                                                // messages that would be dropped.
-                                                // Falls back to plain prune on error
-                                                // or when the LLM returns a fallback
-                                                // placeholder (used_fallback=true).
-                                                // adjust_split_for_tool_pair is applied
-                                                // inside try_summarize_trim to avoid
-                                                // cutting an Assistant{ToolUse} /
-                                                // User{ToolResult} pair.
-                                                let driver = kernel_job
-                                                    .llm
-                                                    .aux_client
-                                                    .load()
-                                                    .driver_for(
-                                                    librefang_types::config::AuxTask::Compression,
-                                                );
-                                                // Model: use the agent's model when
-                                                // available, otherwise an empty string.
-                                                // `try_summarize_trim` fast-fails on
-                                                // empty model names so we skip the LLM
-                                                // call (and the per-session mutex hold
-                                                // it would imply) entirely and route
-                                                // straight to the plain-prune fallback
-                                                // below. Missing the agent from the
-                                                // registry mid-cron is a symptom of a
-                                                // registry / scheduler inconsistency
-                                                // worth surfacing in logs.
-                                                let model = match kernel_job
-                                                    .agents.registry
-                                                    .get(agent_id)
-                                                {
-                                                    Some(e) => {
-                                                        librefang_runtime::agent_loop::strip_provider_prefix(
-                                                            &e.manifest.model.model,
-                                                            &e.manifest.model.provider,
-                                                        )
-                                                    }
-                                                    None => {
-                                                        tracing::warn!(
-                                                            agent_id = %agent_id,
-                                                            session_id = %cron_sid,
-                                                            job = %job_name,
-                                                            "cron SummarizeTrim: agent missing from registry; \
-                                                             skipping LLM summary and falling back to plain prune"
-                                                        );
-                                                        String::new()
-                                                    }
-                                                };
-
-                                                // Clamp keep_recent so [summary] + tail
-                                                // never exceeds the size cap (see
-                                                // cron_clamp_keep_recent for rationale).
-                                                let effective_keep_recent = cron_clamp_keep_recent(
-                                                    keep_recent_cfg,
-                                                    keep_count,
-                                                );
-                                                let echo_policy =
-                                                    kernel_job.lookup_reasoning_echo_policy(&model);
-                                                match try_summarize_trim(
-                                                    &session.messages,
-                                                    effective_keep_recent,
-                                                    driver,
-                                                    &model,
-                                                    echo_policy,
-                                                )
-                                                .await
-                                                {
-                                                    Some(new_messages) => {
-                                                        let kept = new_messages.len();
-                                                        session.set_messages(new_messages);
-                                                        tracing::info!(
-                                                            agent_id = %agent_id,
-                                                            session_id = %cron_sid,
-                                                            job = %job_name,
-                                                            kept,
-                                                            "cron session summarize-and-trim complete"
-                                                        );
-                                                    }
-                                                    None => {
-                                                        // LLM unavailable, returned a
-                                                        // fallback placeholder, or the
-                                                        // tool-pair adjustment left
-                                                        // nothing to summarize —
-                                                        // fall back to plain prune so
-                                                        // the fire is not blocked.
-                                                        tracing::warn!(
-                                                            agent_id = %agent_id,
-                                                            session_id = %cron_sid,
-                                                            job = %job_name,
-                                                            "cron SummarizeTrim: LLM summarization failed or returned empty; \
-                                                             falling back to Prune"
-                                                        );
-                                                        let drop_count =
-                                                            session.messages.len() - keep_count;
-                                                        apply_cron_prune(&mut session, drop_count);
-                                                    }
-                                                }
-                                            }
-                                            CronCompactionMode::Prune => {
-                                                // Plain drop-from-front.
-                                                let drop_count =
-                                                    session.messages.len() - keep_count;
-                                                apply_cron_prune(&mut session, drop_count);
-                                            }
-                                        }
-                                    }
-
-                                    // Post-compaction approach-warn (#3693):
-                                    // estimate once after any changes so
-                                    // operators see the trend before the
-                                    // provider returns 400. Estimate
-                                    // omits system_prompt / tools — those
-                                    // are added inside send_message_full
-                                    // — which slightly under-counts; the
-                                    // warn is intentionally conservative.
-                                    if let Some(threshold) = warn_threshold {
-                                        let estimated =
-                                            estimate_token_count(&session.messages, None, None)
-                                                as u64;
-                                        if estimated >= threshold {
-                                            let budget = max_tokens.or(warn_fallback);
-                                            // `post_compaction` distinguishes "we just
-                                            // shrank and the session is still over the
-                                            // soft threshold" (real signal — the
-                                            // current fire's content is large) from
-                                            // "the session was already over threshold
-                                            // before any compaction" (operator should
-                                            // tighten the cap). After SummarizeTrim
-                                            // succeeds, the synthetic summary message
-                                            // can itself be large enough to keep the
-                                            // estimate above threshold, so this warn
-                                            // landing right after a successful
-                                            // compaction is expected — not a bug.
-                                            tracing::warn!(
-                                                agent_id = %agent_id,
-                                                session_id = %cron_sid,
-                                                job = %job_name,
-                                                tokens = estimated,
-                                                threshold = threshold,
-                                                budget = ?budget,
-                                                messages = session.messages.len(),
-                                                post_compaction = needs_compaction,
-                                                "cron session approaching context budget — \
-                                                 consider lowering cron_session_max_tokens, \
-                                                 enabling cron_session_max_messages, or \
-                                                 setting session_mode = \"new\" on this job"
-                                            );
-                                        }
-                                    }
-                                    if needs_compaction {
-                                        let _ = kernel_job
-                                            .memory
-                                            .substrate
-                                            .save_session_async(&session)
-                                            .await;
-                                    }
-                                }
+                                cron_prune_session(
+                                    &kernel_job,
+                                    agent_id,
+                                    cron_sid,
+                                    &job_name,
+                                    prune_lock,
+                                    max_tokens,
+                                    max_messages,
+                                    warn_threshold,
+                                    warn_fallback,
+                                    compaction_mode,
+                                    keep_recent_cfg,
+                                )
+                                .await;
                             }
                         }
 
@@ -725,5 +550,526 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                 tracing::warn!("Cron persist failed: {e}");
             }
         }
+    }
+}
+
+/// What the lock-held planning phase decided to do.
+///
+/// Returned from `cron_prune_plan` so the SummarizeTrim branch can release
+/// the mutex *before* awaiting the LLM call. The cheap branches (Prune,
+/// nothing-to-do, warn-only) are fully resolved while the lock is held.
+enum CronPrunePlan {
+    /// Nothing left to do — either no session exists, no compaction is
+    /// needed, and the warn block (if any) already fired under the lock.
+    Done,
+    /// SummarizeTrim was selected. The LLM call must run lock-free; the
+    /// snapshot here is what we pass to `try_summarize_trim`, and
+    /// `snapshot_generation` is the `Session.messages_generation` value at
+    /// snapshot time — checked under a re-acquired lock before the
+    /// trimmed result is written back (CAS).
+    SummarizeTrim {
+        snapshot: Vec<librefang_types::message::Message>,
+        effective_keep_recent: usize,
+        keep_count: usize,
+        model: String,
+        echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+        snapshot_generation: u64,
+    },
+}
+
+/// Cron-session prune / compaction with the lock released across the LLM
+/// `try_summarize_trim` await.
+///
+/// See the in-place comment in `run_cron_scheduler_loop` (the call site)
+/// for the full rationale — the short version is that holding the
+/// per-session mutex across a slow provider call stalls every sibling
+/// cron fire for the same `(agent, "cron")` session. We split the work
+/// into three phases:
+///
+///   1. **Plan** under the lock: load the session, decide what to do,
+///      and either finish (Prune / nothing) or return a snapshot for the
+///      LLM call along with the current `messages_generation`.
+///   2. **Summarize** lock-free.
+///   3. **Apply** under a re-acquired lock, gated by a generation-counter
+///      CAS so a concurrent writer's result is never silently overwritten.
+#[allow(clippy::too_many_arguments)]
+async fn cron_prune_session(
+    kernel_job: &Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    cron_sid: SessionId,
+    job_name: &str,
+    prune_lock: Arc<tokio::sync::Mutex<()>>,
+    max_tokens: Option<u64>,
+    max_messages: Option<usize>,
+    warn_threshold: Option<u64>,
+    warn_fallback: Option<u64>,
+    compaction_mode: librefang_types::config::CronCompactionMode,
+    keep_recent_cfg: usize,
+) {
+    // Phase 1 — plan under the lock.
+    let plan = {
+        let _g = prune_lock.lock().await;
+        cron_prune_plan(
+            kernel_job,
+            agent_id,
+            cron_sid,
+            job_name,
+            max_tokens,
+            max_messages,
+            warn_threshold,
+            warn_fallback,
+            compaction_mode,
+            keep_recent_cfg,
+        )
+        .await
+    };
+
+    let (snapshot, effective_keep_recent, keep_count, model, echo_policy, snapshot_generation) =
+        match plan {
+            CronPrunePlan::Done => return,
+            CronPrunePlan::SummarizeTrim {
+                snapshot,
+                effective_keep_recent,
+                keep_count,
+                model,
+                echo_policy,
+                snapshot_generation,
+            } => (
+                snapshot,
+                effective_keep_recent,
+                keep_count,
+                model,
+                echo_policy,
+                snapshot_generation,
+            ),
+        };
+
+    // Phase 2 — summarize lock-free. Tens of seconds on a congested
+    // provider; sibling cron fires for this same `(agent, "cron")`
+    // session must not be blocked here.
+    let new_messages_opt = try_summarize_trim(
+        &snapshot,
+        effective_keep_recent,
+        {
+            kernel_job
+                .llm
+                .aux_client
+                .load()
+                .driver_for(librefang_types::config::AuxTask::Compression)
+        },
+        &model,
+        echo_policy,
+    )
+    .await;
+
+    // Phase 3 — re-acquire and CAS on `messages_generation`. If another
+    // fire already wrote to this session (its `set_messages` /
+    // `mark_messages_mutated` bumped the counter), our trimmed result is
+    // based on a stale snapshot and we drop it; the concurrent writer wins.
+    let _g = prune_lock.lock().await;
+    let mut session = match kernel_job.memory.substrate.get_session(cron_sid) {
+        Ok(Some(s)) => s,
+        Ok(None) | Err(_) => {
+            // Session disappeared (race with reset) — nothing to write back.
+            return;
+        }
+    };
+    if session.messages_generation != snapshot_generation {
+        tracing::info!(
+            agent_id = %agent_id,
+            session_id = %cron_sid,
+            job = %job_name,
+            snapshot_generation,
+            current_generation = session.messages_generation,
+            "cron SummarizeTrim: session changed during LLM call; \
+             a concurrent writer won the write-back, dropping our result"
+        );
+        return;
+    }
+
+    match new_messages_opt {
+        Some(new_messages) => {
+            let kept = new_messages.len();
+            session.set_messages(new_messages);
+            tracing::info!(
+                agent_id = %agent_id,
+                session_id = %cron_sid,
+                job = %job_name,
+                kept,
+                "cron session summarize-and-trim complete"
+            );
+        }
+        None => {
+            // LLM unavailable, returned a fallback placeholder, or the
+            // tool-pair adjustment left nothing to summarize — fall back
+            // to a plain prune so the fire is not blocked. `keep_count`
+            // was computed from the snapshot; the generation CAS above
+            // guarantees the live session is identical, so this drop_count
+            // is still correct.
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_id = %cron_sid,
+                job = %job_name,
+                "cron SummarizeTrim: LLM summarization failed or returned empty; \
+                 falling back to Prune"
+            );
+            let drop_count = session.messages.len() - keep_count;
+            apply_cron_prune(&mut session, drop_count);
+        }
+    }
+
+    // Post-compaction approach-warn (#3693), now against the post-trim
+    // session under the re-acquired lock so it sees the freshest state.
+    cron_emit_warn_threshold(
+        agent_id,
+        cron_sid,
+        job_name,
+        &session,
+        warn_threshold,
+        max_tokens,
+        warn_fallback,
+        /* post_compaction = */ true,
+    );
+
+    let _ = kernel_job
+        .memory
+        .substrate
+        .save_session_async(&session)
+        .await;
+}
+
+/// Under-lock planning step. Either resolves a cheap (no-LLM) compaction
+/// path fully (and returns `Done`), or returns a snapshot for the
+/// SummarizeTrim path that will run lock-free.
+#[allow(clippy::too_many_arguments)]
+async fn cron_prune_plan(
+    kernel_job: &Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    cron_sid: SessionId,
+    job_name: &str,
+    max_tokens: Option<u64>,
+    max_messages: Option<usize>,
+    warn_threshold: Option<u64>,
+    warn_fallback: Option<u64>,
+    compaction_mode: librefang_types::config::CronCompactionMode,
+    keep_recent_cfg: usize,
+) -> CronPrunePlan {
+    let mut session = match kernel_job.memory.substrate.get_session(cron_sid) {
+        Ok(Some(s)) => s,
+        Ok(None) | Err(_) => return CronPrunePlan::Done,
+    };
+
+    let keep_count = cron_compute_keep_count(&session.messages, max_messages, max_tokens);
+    let needs_compaction = keep_count < session.messages.len();
+
+    if !needs_compaction {
+        // Even with no compaction we still want to fire the
+        // post-compaction warn so operators see the trend.
+        cron_emit_warn_threshold(
+            agent_id,
+            cron_sid,
+            job_name,
+            &session,
+            warn_threshold,
+            max_tokens,
+            warn_fallback,
+            /* post_compaction = */ false,
+        );
+        return CronPrunePlan::Done;
+    }
+
+    use librefang_types::config::CronCompactionMode;
+    // #4683 review: re-route SummarizeTrim → Prune when the cap is too
+    // tight for [summary] + 1-msg-tail (keep_count < 2). Without this,
+    // SummarizeTrim would always write 2 messages back into a session
+    // whose cap permits at most keep_count, and the next fire would
+    // re-enter SummarizeTrim → endless aux LLM round-trips with no
+    // convergence.
+    let effective_compaction_mode = cron_resolve_compaction_mode(compaction_mode, keep_count);
+    if compaction_mode == CronCompactionMode::SummarizeTrim
+        && effective_compaction_mode == CronCompactionMode::Prune
+    {
+        tracing::warn!(
+            agent_id = %agent_id,
+            session_id = %cron_sid,
+            job = %job_name,
+            keep_count,
+            "cron SummarizeTrim: cap too tight for [summary] + tail (keep_count < 2); falling back to Prune"
+        );
+    }
+
+    match effective_compaction_mode {
+        CronCompactionMode::Prune => {
+            // Fully resolved under the lock — no await.
+            let drop_count = session.messages.len() - keep_count;
+            apply_cron_prune(&mut session, drop_count);
+            cron_emit_warn_threshold(
+                agent_id,
+                cron_sid,
+                job_name,
+                &session,
+                warn_threshold,
+                max_tokens,
+                warn_fallback,
+                /* post_compaction = */ true,
+            );
+            let _ = kernel_job
+                .memory
+                .substrate
+                .save_session_async(&session)
+                .await;
+            CronPrunePlan::Done
+        }
+        CronCompactionMode::SummarizeTrim => {
+            // Snapshot + drop lock; the LLM call runs lock-free and a
+            // re-acquired lock + generation CAS guards the write-back.
+            //
+            // Model: use the agent's model when available, otherwise an
+            // empty string. `try_summarize_trim` fast-fails on empty
+            // model names so we skip the LLM call (and the resulting
+            // lock-free await) entirely and route straight to the
+            // plain-prune fallback in the apply phase. Missing the
+            // agent from the registry mid-cron is a symptom of a
+            // registry / scheduler inconsistency worth surfacing.
+            let model = match kernel_job.agents.registry.get(agent_id) {
+                Some(e) => librefang_runtime::agent_loop::strip_provider_prefix(
+                    &e.manifest.model.model,
+                    &e.manifest.model.provider,
+                ),
+                None => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        session_id = %cron_sid,
+                        job = %job_name,
+                        "cron SummarizeTrim: agent missing from registry; \
+                         skipping LLM summary and falling back to plain prune"
+                    );
+                    String::new()
+                }
+            };
+            let effective_keep_recent = cron_clamp_keep_recent(keep_recent_cfg, keep_count);
+            let echo_policy = kernel_job.lookup_reasoning_echo_policy(&model);
+            CronPrunePlan::SummarizeTrim {
+                snapshot: session.messages.clone(),
+                effective_keep_recent,
+                keep_count,
+                model,
+                echo_policy,
+                snapshot_generation: session.messages_generation,
+            }
+        }
+    }
+}
+
+/// Emit the post-compaction "approaching context budget" warn (#3693).
+///
+/// Lifted from the inline block so both the lock-held cheap-path and the
+/// re-acquired lock-held SummarizeTrim path can call it against the
+/// freshest `session.messages` snapshot they hold.
+#[allow(clippy::too_many_arguments)]
+fn cron_emit_warn_threshold(
+    agent_id: AgentId,
+    cron_sid: SessionId,
+    job_name: &str,
+    session: &librefang_memory::session::Session,
+    warn_threshold: Option<u64>,
+    max_tokens: Option<u64>,
+    warn_fallback: Option<u64>,
+    post_compaction: bool,
+) {
+    let Some(threshold) = warn_threshold else {
+        return;
+    };
+    use librefang_runtime::compactor::estimate_token_count;
+    let estimated = estimate_token_count(&session.messages, None, None) as u64;
+    if estimated < threshold {
+        return;
+    }
+    let budget = max_tokens.or(warn_fallback);
+    // `post_compaction` distinguishes "we just shrank and the session is
+    // still over the soft threshold" (real signal — the current fire's
+    // content is large) from "the session was already over threshold
+    // before any compaction" (operator should tighten the cap). After
+    // SummarizeTrim succeeds, the synthetic summary message can itself
+    // be large enough to keep the estimate above threshold, so this warn
+    // landing right after a successful compaction is expected — not a bug.
+    tracing::warn!(
+        agent_id = %agent_id,
+        session_id = %cron_sid,
+        job = %job_name,
+        tokens = estimated,
+        threshold = threshold,
+        budget = ?budget,
+        messages = session.messages.len(),
+        post_compaction = post_compaction,
+        "cron session approaching context budget — \
+         consider lowering cron_session_max_tokens, \
+         enabling cron_session_max_messages, or \
+         setting session_mode = \"new\" on this job"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    //! Structural tests for the `cron_prune_session` lock-release pattern
+    //! introduced by the cron-prune-lock-across-llm-await fix. These tests
+    //! do not construct a full `LibreFangKernel`; instead they reproduce
+    //! the exact mutex + generation-CAS shape used in the helper above
+    //! and assert the two load-bearing invariants:
+    //!
+    //!   1. Two concurrent prune fires whose "LLM summary" step takes
+    //!      ~200ms must finish in ~200ms wall-clock, not ~400ms — i.e.
+    //!      the lock is **not** held across the slow await.
+    //!   2. When a concurrent writer bumps `messages_generation` during
+    //!      the lock-free window, the loser's CAS check fires and its
+    //!      trimmed result is dropped instead of overwriting the winner.
+    //!
+    //! Full end-to-end coverage against a real kernel + LLM driver lives
+    //! in `crates/librefang-kernel/tests/cron_compaction_test.rs` and the
+    //! `librefang-api` integration suite.
+
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
+
+    /// Mirror of the production three-phase pattern, with an injected slow
+    /// "summarize" closure standing in for `try_summarize_trim`. Returns
+    /// `(applied, snapshot_at_lock)` so tests can assert both the CAS
+    /// decision and the snapshot freshness.
+    async fn prune_with_seam<F, Fut>(
+        lock: Arc<Mutex<()>>,
+        shared_generation: Arc<std::sync::atomic::AtomicU64>,
+        summarize: F,
+    ) -> (bool, u64)
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: std::future::Future<Output = u64>,
+    {
+        use std::sync::atomic::Ordering;
+
+        // Phase 1: lock + snapshot.
+        let snapshot_generation = {
+            let _g = lock.lock().await;
+            shared_generation.load(Ordering::Acquire)
+        };
+
+        // Phase 2: lock-free await.
+        let new_value = summarize(snapshot_generation).await;
+
+        // Phase 3: re-acquire + CAS.
+        let _g = lock.lock().await;
+        let current = shared_generation.load(Ordering::Acquire);
+        if current != snapshot_generation {
+            return (false, snapshot_generation);
+        }
+        shared_generation.fetch_add(1, Ordering::Release);
+        // (Production code would apply `new_value` to the session here.)
+        let _ = new_value;
+        (true, snapshot_generation)
+    }
+
+    /// Two concurrent fires whose summarize step takes 200ms each must
+    /// finish in ~200ms wall-clock (parallel), not ~400ms (serial). If
+    /// the prune lock were held across the await, the second fire would
+    /// block on the first's lock until its summarize completed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cron_prune_release_lock_across_summarize_concurrent() {
+        let lock = Arc::new(Mutex::new(()));
+        let gen_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let lock_a = lock.clone();
+        let gen_a = gen_counter.clone();
+        let task_a = tokio::spawn(async move {
+            prune_with_seam(lock_a, gen_a, |snap| async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                snap
+            })
+            .await
+        });
+
+        let lock_b = lock.clone();
+        let gen_b = gen_counter.clone();
+        let task_b = tokio::spawn(async move {
+            prune_with_seam(lock_b, gen_b, |snap| async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                snap
+            })
+            .await
+        });
+
+        let start = Instant::now();
+        let (res_a, res_b) = tokio::join!(task_a, task_b);
+        let elapsed = start.elapsed();
+
+        // Both tasks completed.
+        res_a.expect("task A panicked");
+        res_b.expect("task B panicked");
+
+        // Wall-clock budget: 200ms ideal parallel, 400ms is fully
+        // serialized. Set the bound at 350ms to allow generous CI
+        // jitter while still failing loudly if the lock is re-introduced
+        // across the await.
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "concurrent prune fires ran serially (elapsed={elapsed:?}); \
+             the prune lock is being held across the summarize await"
+        );
+    }
+
+    /// When the generation counter is bumped during the lock-free window
+    /// (simulating a concurrent writer landing its own trim), the second
+    /// CAS check must fire and the loser's apply must be skipped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cron_prune_cas_drops_stale_writeback() {
+        use std::sync::atomic::Ordering;
+
+        let lock = Arc::new(Mutex::new(()));
+        let gen_counter = Arc::new(std::sync::atomic::AtomicU64::new(7));
+
+        // Run a single "fire" whose summarize step bumps the generation
+        // mid-flight (as if another fire wrote between our snapshot and
+        // our re-acquisition).
+        let gen_for_seam = gen_counter.clone();
+        let (applied, snapshot) = prune_with_seam(lock, gen_counter.clone(), |snap| async move {
+            // Concurrent writer: bump the counter while the seam owner
+            // is mid-await. In production this is another cron fire
+            // that completed its own apply phase.
+            gen_for_seam.fetch_add(1, Ordering::Release);
+            snap
+        })
+        .await;
+
+        assert_eq!(snapshot, 7, "snapshot must reflect the pre-bump generation");
+        assert!(
+            !applied,
+            "the loser's apply must be skipped after a concurrent generation bump"
+        );
+        // Generation reflects only the concurrent writer's bump, not ours.
+        assert_eq!(
+            gen_counter.load(Ordering::Acquire),
+            8,
+            "loser must not have bumped the generation again"
+        );
+    }
+
+    /// Without a concurrent bump, the single-fire CAS path completes
+    /// normally and the generation advances by one (our own apply).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cron_prune_cas_applies_when_uncontended() {
+        use std::sync::atomic::Ordering;
+
+        let lock = Arc::new(Mutex::new(()));
+        let gen_counter = Arc::new(std::sync::atomic::AtomicU64::new(3));
+
+        let (applied, snapshot) = prune_with_seam(lock, gen_counter.clone(), |snap| async move {
+            // No bump from a sibling writer.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            snap
+        })
+        .await;
+
+        assert_eq!(snapshot, 3);
+        assert!(applied, "uncontested single fire must apply its result");
+        assert_eq!(gen_counter.load(Ordering::Acquire), 4);
     }
 }
