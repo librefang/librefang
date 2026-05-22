@@ -606,16 +606,25 @@ impl LibreFangKernel {
                 )));
             }
         }
-        let id = self.workflows.triggers.register_with_target(
-            agent_id,
-            pattern,
-            prompt_template,
-            max_fires,
-            target_agent,
-            cooldown_secs,
-            session_mode,
-            workflow_id,
-        );
+        // Propagate the per-agent cap as InvalidInput rather than
+        // silently dropping (audit: trigger-engine-no-per-agent-cap).
+        // The route handler will return 400 so the operator sees
+        // exactly why the registration failed — same envelope as
+        // every other client-error path through this endpoint.
+        let id = self
+            .workflows
+            .triggers
+            .register_with_target(
+                agent_id,
+                pattern,
+                prompt_template,
+                max_fires,
+                target_agent,
+                cooldown_secs,
+                session_mode,
+                workflow_id,
+            )
+            .map_err(|e| KernelError::LibreFang(LibreFangError::InvalidInput(e.to_string())))?;
         if let Err(e) = self.workflows.triggers.persist() {
             warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
         }
