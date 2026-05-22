@@ -4418,8 +4418,15 @@ pub async fn add_mcp_server(
     };
 
     // Establish connection to the newly added server in the background.
+    // Wrap in `spawn_supervised` so a panic inside `connect_mcp_servers`
+    // (e.g. parse failure, OAuth handshake, tool list deserialization) is
+    // logged at `error!` rather than silently aborting the detached task
+    // and leaving the new server stuck in a half-connecting state.
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_add",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -4525,7 +4532,10 @@ pub async fn update_mcp_server(
     // Disconnect the old connection so connect_mcp_servers picks up the new config.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_update",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -4643,7 +4653,10 @@ pub async fn patch_mcp_server_taint(
     // already updates via `reload_config` without a reconnect.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_taint_patch",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -6092,7 +6105,9 @@ pub async fn install_extension(
         Err(e) => {
             let err_str = e.to_string();
             let status = match e {
-                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_types::integration::IntegrationError::NotFound(_) => {
+                    StatusCode::NOT_FOUND
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             return (status, Json(serde_json::json!({"error": err_str})));

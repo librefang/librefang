@@ -174,13 +174,25 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // unlock-time Argon2id KDF on every install request (#3598). The trait
     // exposes the high-level installer; the underlying `vault_handle` stays
     // an inherent method to keep the trait surface small.
+    //
+    // The error half is `librefang_types::integration::IntegrationError` (not
+    // the extensions-crate `ExtensionResult`) so a mock / alternate kernel can
+    // implement this trait without depending on `librefang-extensions`. The
+    // real kernel impl converts via the `From<ExtensionError>` bridge defined
+    // in that crate. The success type still references
+    // `librefang_extensions::installer::InstallResult` — eliminating that
+    // remaining leak is part of the broader kernel-depends-on-extensions
+    // refactor, tracked separately.
     // ====================================================================
 
     fn install_integration(
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult>;
+    ) -> Result<
+        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationError,
+    >;
 
     // ====================================================================
     // Inbox / auto-dream observability
@@ -861,8 +873,15 @@ impl KernelApi for LibreFangKernel {
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
-        Self::install_integration(self, template_id, provided_keys)
+    ) -> Result<
+        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationError,
+    > {
+        // The inherent method keeps returning `ExtensionResult`; convert its
+        // error into the dependency-free `IntegrationError` at the trait
+        // boundary via the `From<ExtensionError>` bridge in
+        // `librefang-extensions`.
+        Self::install_integration(self, template_id, provided_keys).map_err(Into::into)
     }
 
     // -- Inbox / auto-dream --

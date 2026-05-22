@@ -100,11 +100,94 @@ session_mode = "new"
 max_concurrent_invocations = 4
 ```
 
+### Gotcha: per-trigger `session_mode = "new"` does NOT grant parallelism
+
+This is the most common surprise, so it is spelled out in full here.
+
+A per-trigger override (`[[triggers]] … session_mode = "new"`) controls
+**session isolation** — whether *that* fire gets a fresh `SessionId` — but
+it does **not** resize the per-agent concurrency semaphore. Those are two
+independent gates:
+
+- **Fresh session per fire** comes from the *effective* session mode:
+  `trigger.session_mode` (the per-trigger override) `>` manifest
+  `session_mode`. Resolved at dispatch in
+  `triggers_and_workflow.rs` (the `effective_mode` branch): `New` →
+  `Some(SessionId::for_trigger_fire(agent, trigger_id, fire_time))` (a
+  deterministic v5 UUID since #5604), `Persistent` → `None`.
+- **Per-agent parallelism cap** comes from `agent_concurrency_for`, which
+  reads the **manifest only** — never the per-trigger override. It is
+  sized **once**, lazily, on the agent's first dispatch, from a single
+  manifest snapshot of `(session_mode, max_concurrent_invocations)`.
+
+So a trigger that mints fresh sessions still queues behind a 1-permit
+per-agent semaphore whenever the **manifest** default is `Persistent`
+(the default) — because the `Persistent + cap > 1 → 1` clamp already
+fired when the semaphore was created. The override mints isolated
+sessions that then run *serially*. The dispatcher never rescans triggers
+when acquiring the per-agent permit, so a later override can't grow an
+already-sized semaphore.
+
+**Effective per-agent cap — exact resolution order.** Override is absent
+from this list on purpose: it cannot enter the cap computation.
+
+```
+manifest.session_mode == Persistent  AND  max_concurrent_invocations > 1
+    └─► clamped to 1   (WARN logged; per-trigger override is IGNORED here)
+
+manifest.max_concurrent_invocations = Some(n)   (any other session_mode)
+    └─► n
+
+manifest.max_concurrent_invocations = None
+    └─► queue.concurrency.default_per_agent   (default 1)
+
+…then max(1) floor applied to all branches.
+```
+
+**Surprising config (mints fresh sessions, still serial).** The manifest
+default stays `Persistent`, so the cap clamps to 1 regardless of the
+per-trigger `New`:
+
+```toml
+[agents.researcher]
+# session_mode defaults to "persistent"
+max_concurrent_invocations = 4   # clamped to 1 — WARN at first dispatch
+
+[[agents.researcher.triggers]]
+event = "task_posted"
+session_mode = "new"             # isolates each fire, but does NOT lift the cap
+```
+
+**Correct config for real per-trigger parallelism.** Move `New` to the
+**manifest default** so the clamp does not fire and the requested cap
+survives; keep the per-trigger override only where you want a one-off
+deviation:
+
+```toml
+[agents.researcher]
+session_mode = "new"             # manifest default — clamp does not fire
+max_concurrent_invocations = 4   # honored: up to 4 fires run in parallel
+
+[[agents.researcher.triggers]]
+event = "task_posted"
+# inherits manifest "new"; no per-trigger override needed for parallelism
+```
+
+If you genuinely want most fires `Persistent` but one trigger parallel,
+that is **not** expressible today: the per-agent cap is a manifest-wide
+property, and a `Persistent` manifest is hard-capped at 1. Split that
+workload onto a separate agent whose manifest is `New`.
+
+This is intentional, not a bug: a single `Persistent` session has one
+shared message history, and concurrent appends to it are undefined
+(see *Persistent + cap > 1 is auto-clamped* above). The override is a
+session-isolation knob, not a concurrency knob.
+
 ## What honors `session_mode = "new"` for parallelism
 
 | Path | Materializes session_id? | Per-agent cap applies? | Effect on locks |
 |---|---|---|---|
-| Event trigger dispatch (this doc) | yes — `SessionId::new()` per fire | **yes** | per-session mutex; agent cap throttles parallelism |
+| Event trigger dispatch (this doc) | yes — `SessionId::for_trigger_fire` per fire (deterministic v5 UUID since #5604) | **yes** | per-session mutex; agent cap throttles parallelism |
 | Cron with `job.session_mode = New` | yes — `SessionId::for_cron_run(agent, run_key)` | no | deterministic session id; serializes via per-session mutex |
 | `agent_send` | yes (when receiver manifest = New) | no | per-session mutex; not throttled by per-agent cap — see scope note above |
 | Channel messages (Telegram, Slack, …) | no — always `SessionId::for_channel(agent, ch:chat)` | no | per-channel session; serial per chat |

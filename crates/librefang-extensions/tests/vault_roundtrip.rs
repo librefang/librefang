@@ -9,7 +9,10 @@
 //! - Reserved internal keys (the #3651 sentinel) are not visible via the
 //!   public `list_keys` API and cannot be overwritten via `set` / `remove`.
 //! - `decode_master_key` enforces the documented 32-byte length (CLAUDE.md
-//!   gotcha: 32 ASCII chars ≠ 32 bytes — base64 decode is mandatory).
+//!   gotcha: 32 ASCII chars ≠ 32 bytes — base64 decode is mandatory), and
+//!   surfaces a structured error for both the literal 32-ASCII-char paste
+//!   (valid base64 → 24 bytes) and non-base64 input, instead of silently
+//!   booting with a truncated key.
 
 use base64::Engine as _;
 use librefang_extensions::vault::{decode_master_key, CredentialVault, SENTINEL_KEY};
@@ -50,6 +53,56 @@ fn decode_master_key_rejects_wrong_byte_length() {
     let ok_b64 = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
     let key = decode_master_key(&ok_b64).expect("32 bytes must decode");
     assert_eq!(key.as_ref(), &[7u8; 32]);
+}
+
+/// The classic LIBREFANG_VAULT_KEY foot-gun (CLAUDE.md gotcha): an operator
+/// pastes a literal 32-character ASCII string, assuming "32 characters = 32
+/// bytes". It is not — base64 decoding is mandatory. This test feeds the
+/// literal string forms (not a value constructed by re-encoding 24 bytes,
+/// which `decode_master_key_rejects_wrong_byte_length` above already covers)
+/// and pins that BOTH failure modes surface a structured error rather than a
+/// silently mis-decoded short key.
+#[test]
+fn decode_master_key_rejects_literal_32_ascii_chars() {
+    // Case 1: 32 chars that ARE valid base64 (all in the alphabet, length a
+    // multiple of 4) but decode to 24 bytes, not 32. This is the exact value
+    // an operator gets by typing 32 random-looking characters that happen to
+    // be base64-legal. The length guard must reject it.
+    let thirty_two_ascii = "x".repeat(32);
+    assert_eq!(thirty_two_ascii.len(), 32, "fixture must be 32 ASCII chars");
+    let err = decode_master_key(&thirty_two_ascii)
+        .expect_err("a 32-char ASCII string must not decode to a 32-byte key");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Invalid key length") && msg.contains("32"),
+        "expected a length error mentioning the 32-byte requirement, got {msg:?}"
+    );
+
+    // Case 2: 32 chars containing characters OUTSIDE the base64 alphabet.
+    // These cannot decode at all, so the base64 decode branch must fire with
+    // its own structured error (not a panic, not a truncated key).
+    let thirty_two_non_base64 = "!".repeat(32);
+    assert_eq!(thirty_two_non_base64.len(), 32);
+    let err =
+        decode_master_key(&thirty_two_non_base64).expect_err("non-base64 input must be rejected");
+    assert!(
+        err.to_string().contains("decode"),
+        "expected a base64 decode error, got {:?}",
+        err.to_string()
+    );
+
+    // Sanity anchor: the documented correct recipe (`openssl rand -base64 32`
+    // produces a 44-char string decoding to 32 bytes) is accepted. We mirror
+    // that shape here so the contrast with the rejected 32-char form is
+    // explicit in one place.
+    let correct_b64 = base64::engine::general_purpose::STANDARD.encode([0xABu8; 32]);
+    assert_eq!(
+        correct_b64.len(),
+        44,
+        "openssl rand -base64 32 yields 44 chars"
+    );
+    let key = decode_master_key(&correct_b64).expect("44-char base64 must decode to 32 bytes");
+    assert_eq!(key.as_ref(), &[0xABu8; 32]);
 }
 
 #[test]

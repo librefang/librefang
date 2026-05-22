@@ -1045,6 +1045,13 @@ pub async fn auth_revoke(
                 "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {detail}"
             ))
             .with_code("vault_crypto"),
+            // `clear_tokens` never performs a refresh, so this variant cannot
+            // arise here; handle it for exhaustiveness so adding the variant
+            // is a compile-time guard rather than a silent fallthrough.
+            McpOAuthError::RefreshFailed(detail) => ApiErrorResponse::internal(format!(
+                "Sign-out failed: {detail}. Tokens may still be valid. Retry."
+            ))
+            .with_code("oauth_refresh_failed"),
         };
         return resp.into_json_tuple();
     }

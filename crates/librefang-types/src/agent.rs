@@ -278,6 +278,20 @@ const CRON_RUN_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0x7e, 0x91, 0x2c, 0x4f, 0xb5, 0xa3, 0x48, 0xd1, 0xa0, 0x6c, 0xe2, 0x83, 0x1f, 0x57, 0xc4, 0x09,
 ]);
 
+/// Distinct UUID v5 namespace for per-fire trigger session IDs.
+/// audit: trigger-new-session-non-deterministic — random `SessionId::new()`
+/// minted at `triggers_and_workflow.rs` dispatch made "trigger X fired at T"
+/// log lines impossible to correlate to a specific SessionId. Mirror the
+/// cron `for_cron_run` design: derive deterministic v5 UUID from
+/// `(agent, trigger_id, fire_time)`. Disjoint from both
+/// `CHANNEL_SESSION_NAMESPACE` and `CRON_RUN_SESSION_NAMESPACE` so a
+/// `for_trigger_fire` id can never collide with any other session-key
+/// flavour even if input strings happen to coincide.
+/// Generated via `uuidgen`: e1e39b22-c416-4e06-93a5-60657b06e003.
+const TRIGGER_FIRE_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0xe1, 0xe3, 0x9b, 0x22, 0xc4, 0x16, 0x4e, 0x06, 0x93, 0xa5, 0x60, 0x65, 0x7b, 0x06, 0xe0, 0x03,
+]);
+
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
@@ -337,6 +351,39 @@ impl SessionId {
         let name = format!("{}:{}", agent_id.0, run_key.to_lowercase());
         Self(uuid::Uuid::new_v5(
             &CRON_RUN_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+
+    /// Derive a per-fire trigger session id keyed by
+    /// `(agent, trigger_id, fire_time)`.
+    ///
+    /// audit: trigger-new-session-non-deterministic — used when an event
+    /// trigger fires with `SessionMode::New` (manifest default or
+    /// per-trigger override). The dispatcher previously minted a random
+    /// `SessionId::new()`, which made it impossible to correlate a
+    /// "trigger X fired at T" log line to the actual SessionId for
+    /// diagnostics. Mirrors `for_cron_run` so log-driven debugging on
+    /// triggers behaves the same as cron.
+    ///
+    /// `trigger_id` is taken as a raw `Uuid` to avoid a layering inversion:
+    /// the concrete `TriggerId` newtype lives in `librefang-kernel`, which
+    /// depends on this crate. The dispatcher passes `trigger_match.trigger_id.0`.
+    /// `fire_time` is the moment the dispatcher resolved the match; the
+    /// kernel event bus already carries `Event::timestamp` for this.
+    pub fn for_trigger_fire(
+        agent_id: AgentId,
+        trigger_id: uuid::Uuid,
+        fire_time: DateTime<Utc>,
+    ) -> Self {
+        let name = format!(
+            "{}:{}:{}",
+            agent_id.0,
+            trigger_id,
+            fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        );
+        Self(uuid::Uuid::new_v5(
+            &TRIGGER_FIRE_SESSION_NAMESPACE,
             name.as_bytes(),
         ))
     }
@@ -3012,6 +3059,107 @@ model = "llama-3.3-70b-versatile"
         let persistent = SessionId::for_channel(agent, "cron");
         let isolated = SessionId::for_cron_run(agent, "cron");
         assert_ne!(persistent, isolated);
+    }
+
+    // audit: trigger-new-session-non-deterministic
+    // The tests below pin the contract for `SessionId::for_trigger_fire`.
+    // Mirrors `for_cron_run_*` and `fire_session_override_new_matches_for_cron_run_contract_3657`
+    // (in `librefang-kernel/src/cron.rs`). Any change to derivation shape
+    // (timestamp precision, separator, ordering, namespace) must update all of
+    // these in lockstep — random `SessionId::new()` regressed log-correlation
+    // once, and a quiet shape change would silently repeat that.
+
+    #[test]
+    fn for_trigger_fire_deterministic() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let a = SessionId::for_trigger_fire(agent, trigger_id, t);
+        let b = SessionId::for_trigger_fire(agent, trigger_id, t);
+        assert_eq!(
+            a, b,
+            "same (agent, trigger_id, fire_time) must yield identical SessionId"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_fire_time() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t1 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let t2 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 1).unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent, trigger_id, t1),
+            SessionId::for_trigger_fire(agent, trigger_id, t2),
+            "different fire_times must yield different SessionIds"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_trigger_id() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let tid_a = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let tid_b = uuid::Uuid::parse_str("c3c4c5c6-d3d4-e3e4-f3f4-a3a4a5a6a7a8").unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent, tid_a, t),
+            SessionId::for_trigger_fire(agent, tid_b, t),
+            "different trigger_ids at the same instant must yield different SessionIds"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_agent() {
+        use chrono::TimeZone;
+        let agent_a =
+            AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let agent_b =
+            AgentId(uuid::Uuid::parse_str("d4d5d6d7-e4e5-f4f5-a4a5-b4b5b6b7b8b9").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent_a, trigger_id, t),
+            SessionId::for_trigger_fire(agent_b, trigger_id, t),
+            "different agents must yield different SessionIds for the same trigger fire"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinct_namespace_from_cron_and_channel() {
+        use chrono::TimeZone;
+        // Distinct namespaces guarantee: even if a future caller hands
+        // identical input strings to all three derivation flavours, the
+        // resulting SessionIds cannot collide. This pins
+        // TRIGGER_FIRE_SESSION_NAMESPACE as semantically disjoint from
+        // CHANNEL_SESSION_NAMESPACE and CRON_RUN_SESSION_NAMESPACE.
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        // Use the trigger_id's UUID *string* as the colliding input for the
+        // other two namespaces — purely to force the same byte sequence.
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let trigger_sid = SessionId::for_trigger_fire(agent, trigger_id, t);
+        let cron_sid = SessionId::for_cron_run(
+            agent,
+            &format!(
+                "{}:{}",
+                trigger_id,
+                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            ),
+        );
+        let channel_sid = SessionId::for_channel(
+            agent,
+            &format!(
+                "{}:{}",
+                trigger_id,
+                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            ),
+        );
+        assert_ne!(trigger_sid, cron_sid);
+        assert_ne!(trigger_sid, channel_sid);
+        assert_ne!(cron_sid, channel_sid);
     }
 
     #[test]
