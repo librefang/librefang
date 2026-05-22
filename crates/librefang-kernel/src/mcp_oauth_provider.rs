@@ -7,8 +7,87 @@
 use async_trait::async_trait;
 use librefang_extensions::ExtensionError;
 use librefang_runtime::mcp_oauth::{McpOAuthError, McpOAuthProvider, OAuthTokens};
+use sha2::{Digest, Sha256};
+use std::fmt;
 use std::path::PathBuf;
 use tracing::{debug, warn};
+
+/// Structured, sanitized view of an OAuth token-endpoint HTTP response
+/// suitable for `tracing` events.
+///
+/// Background (audit: `oauth-refresh-error-body-token-leak`): the IdP
+/// token-endpoint response body may contain `access_token` /
+/// `refresh_token` / `id_token` / `client_secret`. Some IdPs include
+/// token-shaped values even in non-success bodies; a hostile IdP can
+/// deliberately plant such values to be persisted in operator logs.
+/// Centralized log aggregators (SIEM / Loki / Splunk) typically retain
+/// longer than the OAuth flow that produced them, so a single
+/// `warn!(body = %resp.text())` leaks a bearer credential for the
+/// lifetime of that retention tier.
+///
+/// This struct collapses the response to:
+/// - HTTP status code
+/// - Content-Type (when present)
+/// - first 8 bytes (16 hex chars) of `sha256(body)`
+/// - body length in bytes
+///
+/// The raw body itself is never stored or emitted, so it can never
+/// reach a tracing layer.
+///
+/// Both `Display` and `Debug` are sanitized; serializing through
+/// either is safe.
+#[derive(Clone, serde::Serialize)]
+pub struct RedactedTokenEndpointResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    /// First 8 bytes of `sha256(body)`, hex-encoded (16 chars). Lets the
+    /// operator correlate two log lines that saw the same body without
+    /// revealing the body itself.
+    pub body_sha256_prefix: String,
+    pub body_len: usize,
+}
+
+impl fmt::Display for RedactedTokenEndpointResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "status={} content_type={} body_sha256_prefix={} body_len={}",
+            self.status,
+            self.content_type.as_deref().unwrap_or("<none>"),
+            self.body_sha256_prefix,
+            self.body_len,
+        )
+    }
+}
+
+impl fmt::Debug for RedactedTokenEndpointResponse {
+    // Deliberately identical to Display: `?value` in `tracing::warn!`
+    // must not be able to dump the raw body.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RedactedTokenEndpointResponse({self})")
+    }
+}
+
+/// Build a sanitized view of an OAuth token-endpoint response.
+///
+/// The raw body is consumed by `Sha256::digest` and dropped — it
+/// never lands in the returned value, so a subsequent
+/// `tracing::warn!(redacted = %redact_token_endpoint_response(...))`
+/// cannot leak `access_token` / `refresh_token` / `id_token` /
+/// `client_secret`.
+pub fn redact_token_endpoint_response(
+    status: u16,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> RedactedTokenEndpointResponse {
+    let digest = Sha256::digest(body);
+    RedactedTokenEndpointResponse {
+        status,
+        content_type: content_type.map(str::to_owned),
+        body_sha256_prefix: hex::encode(&digest[..8]),
+        body_len: body.len(),
+    }
+}
 
 /// Convert vault-layer errors to the public OAuth storage error taxonomy
 /// (#3750). Centralized so every callsite gets the same mapping:
@@ -182,8 +261,32 @@ impl KernelOAuthProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // Read Content-Type BEFORE consuming the response with `.text()`.
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Token refresh failed (HTTP {status}): {body}"));
+            // Audit: `oauth-refresh-error-body-token-leak`. The IdP error
+            // body may include token-shaped values (legitimately, for
+            // providers that echo session state on `invalid_grant`, or
+            // adversarially, to plant secrets in operator logs). Never
+            // emit the body verbatim — log a sanitized digest only, and
+            // surface a generic message to the caller. The caller's
+            // user-visible path already maps refresh errors to a
+            // re-auth prompt, so dropping the body here has no
+            // behavioural effect on the OAuth state machine.
+            let redacted = redact_token_endpoint_response(
+                status.as_u16(),
+                content_type.as_deref(),
+                body.as_bytes(),
+            );
+            warn!(
+                redacted_response = %redacted,
+                "MCP OAuth token refresh failed (non-success status)",
+            );
+            return Err(format!("Token refresh failed (HTTP {status})"));
         }
 
         let tokens: OAuthTokens = resp
@@ -234,10 +337,32 @@ impl KernelOAuthProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // Read Content-Type BEFORE consuming the response with `.text()`.
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Client registration failed (HTTP {status}): {body}"
-            ));
+            // Audit: `oauth-refresh-error-body-token-leak` — same threat
+            // model as the token-endpoint path. RFC 7591 §3.2.1 allows
+            // the registration response (including the error body) to
+            // contain `client_secret`, and an adversarial AS can plant
+            // any token-shaped value here just as easily as on the
+            // token endpoint. Log a sanitized digest only; the
+            // returned error string (which surfaces to
+            // `McpAuthState::Error.message` and the dashboard) must
+            // not carry the body verbatim either.
+            let redacted = redact_token_endpoint_response(
+                status.as_u16(),
+                content_type.as_deref(),
+                body.as_bytes(),
+            );
+            warn!(
+                redacted_response = %redacted,
+                "MCP OAuth Dynamic Client Registration failed (non-success status)",
+            );
+            return Err(format!("Client registration failed (HTTP {status})"));
         }
 
         // We register as a public client (`token_endpoint_auth_method: "none"`),
@@ -828,6 +953,212 @@ mod tests {
             fields.len(),
             8,
             "Unexpected field count in ALL_VAULT_FIELDS — update this assertion if new fields are intentionally added"
+        );
+    }
+
+    /// Audit: `oauth-refresh-error-body-token-leak`. The helper that
+    /// summarises a token-endpoint response MUST NOT carry the raw body
+    /// (or any token-shaped substring of it) in its `Display` or `Debug`
+    /// representation. The hex digest prefix and the lengths are the
+    /// only operator-visible information.
+    #[test]
+    fn redact_token_endpoint_response_strips_token_fields() {
+        let body = br#"{"access_token":"super-secret-12345","refresh_token":"rt-9999","id_token":"id-eyJ","client_secret":"cs-abcdef"}"#;
+        let r = redact_token_endpoint_response(400, Some("application/json"), body);
+
+        let displayed = format!("{r}");
+        let debugged = format!("{r:?}");
+
+        for secret in [
+            "super-secret-12345",
+            "rt-9999",
+            "id-eyJ",
+            "cs-abcdef",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "client_secret",
+        ] {
+            assert!(
+                !displayed.contains(secret),
+                "Display leaked '{secret}': {displayed}"
+            );
+            assert!(
+                !debugged.contains(secret),
+                "Debug leaked '{secret}': {debugged}"
+            );
+        }
+
+        assert!(displayed.contains("status=400"));
+        assert!(displayed.contains("content_type=application/json"));
+        assert!(displayed.contains(&format!("body_len={}", body.len())));
+        assert!(displayed.contains("body_sha256_prefix="));
+    }
+
+    /// Same body produces the same digest prefix — operators can
+    /// correlate two log lines that saw the same body without ever
+    /// holding the body itself.
+    #[test]
+    fn redact_token_endpoint_response_digest_is_stable() {
+        let body = br#"{"error":"invalid_grant"}"#;
+        let a = redact_token_endpoint_response(400, None, body);
+        let b = redact_token_endpoint_response(400, None, body);
+        assert_eq!(a.body_sha256_prefix, b.body_sha256_prefix);
+        // 16 hex chars = first 8 bytes of sha256.
+        assert_eq!(a.body_sha256_prefix.len(), 16);
+        assert!(
+            a.body_sha256_prefix.chars().all(|c| c.is_ascii_hexdigit()),
+            "digest prefix must be hex: {}",
+            a.body_sha256_prefix
+        );
+    }
+
+    /// End-to-end: the `try_refresh` non-success branch must emit only
+    /// a sanitized digest; a `tracing::warn!` capture across that path
+    /// must not contain the raw secret.
+    ///
+    /// We exercise the redaction path directly (the call site emits
+    /// `warn!(redacted_response = %redact_token_endpoint_response(...))`)
+    /// rather than spinning up an HTTP fake — the redaction helper is
+    /// the single chokepoint and is what the audit fix is about.
+    #[tokio::test]
+    async fn warn_emission_does_not_contain_raw_token_body() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let raw_body = br#"{"error":"invalid_grant","access_token":"super-secret-12345","refresh_token":"rt-9999"}"#;
+        let redacted = redact_token_endpoint_response(400, Some("application/json"), raw_body);
+        // Mirrors the call shape used in `try_refresh`.
+        warn!(
+            redacted_response = %redacted,
+            "MCP OAuth token refresh failed (non-success status)",
+        );
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        for secret in ["super-secret-12345", "rt-9999"] {
+            assert!(
+                !captured.contains(secret),
+                "log line leaked '{secret}'; captured: {captured:?}"
+            );
+        }
+        assert!(
+            captured.contains("body_sha256_prefix="),
+            "log line missing sanitized digest; captured: {captured:?}"
+        );
+    }
+
+    /// Audit: `oauth-refresh-error-body-token-leak`. The Dynamic Client
+    /// Registration (RFC 7591) non-success branch in
+    /// `KernelOAuthProvider::register_client` is the third
+    /// token-endpoint-shaped call site in this file. The registration
+    /// response body can legitimately contain `client_secret`, and an
+    /// adversarial authorization server can plant any token-shaped
+    /// value there. The error string returned from `register_client`
+    /// flows into `McpAuthState::Error.message` (visible in the
+    /// dashboard) AND is logged via `tracing::warn!(error = %e, ...)`
+    /// in `routes::mcp_auth::auth_start`, so it must NOT carry the
+    /// raw body. Verify both: the returned `Err` string does not
+    /// contain the body, and the warn-side emission does not either.
+    #[tokio::test]
+    async fn dcr_failure_does_not_leak_raw_body_into_error_or_log() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        // Mirrors the call shape used in the DCR non-success branch:
+        // construct the redacted view, emit the warn, and synthesize
+        // the returned error string the way `register_client` does.
+        let raw_body =
+            br#"{"error":"invalid_client_metadata","client_secret":"cs-leak-9999","access_token":"at-leak-7777"}"#;
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        let redacted =
+            redact_token_endpoint_response(status.as_u16(), Some("application/json"), raw_body);
+        warn!(
+            redacted_response = %redacted,
+            "MCP OAuth Dynamic Client Registration failed (non-success status)",
+        );
+        let returned_err = format!("Client registration failed (HTTP {status})");
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        for secret in [
+            "cs-leak-9999",
+            "at-leak-7777",
+            "client_secret",
+            "access_token",
+        ] {
+            assert!(
+                !captured.contains(secret),
+                "DCR warn leaked '{secret}'; captured: {captured:?}"
+            );
+            assert!(
+                !returned_err.contains(secret),
+                "DCR returned Err leaked '{secret}': {returned_err}"
+            );
+        }
+        assert!(
+            captured.contains("body_sha256_prefix="),
+            "DCR warn missing sanitized digest; captured: {captured:?}"
+        );
+        assert!(
+            returned_err.contains("HTTP 400"),
+            "DCR returned Err should still carry status; got: {returned_err}"
         );
     }
 }

@@ -1740,6 +1740,13 @@ pub async fn run_daemon(
     // moves the Arc; clone first so subsequent uses on this scope
     // (`start_background_agents` etc.) keep their handle.
     kernel.clone().set_self_handle();
+    // Install the OAuth cache invalidator so `apply_hot_actions_inner`
+    // can flush the OIDC discovery + JWKS `LazyLock` caches owned by
+    // `crate::oauth` when `[external_auth]` IdP identity changes via
+    // hot-reload (refs `docs/issues/jwks-cache-no-reload-evict.md`).
+    // Idempotent; safe to call once per process.
+    kernel
+        .set_oauth_cache_invalidator(std::sync::Arc::new(crate::oauth::OauthCacheInvalidatorImpl));
     kernel.start_background_agents().await;
 
     // Auto-start observability stack (OTLP collector + Prometheus + Grafana)

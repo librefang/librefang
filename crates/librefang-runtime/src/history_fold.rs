@@ -1908,7 +1908,10 @@ mod tests {
     #[async_trait::async_trait]
     impl LlmDriver for ResponseFormatRecordingDriver {
         async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            self.observed.lock().unwrap().push(req.response_format.clone());
+            self.observed
+                .lock()
+                .unwrap()
+                .push(req.response_format.clone());
             // Echo back per-id JSON so the fold proceeds end-to-end —
             // we only care about the recorded `response_format` here.
             let prompt = match &req.messages[0].content {
