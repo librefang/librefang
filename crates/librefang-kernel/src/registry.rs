@@ -354,12 +354,47 @@ impl AgentRegistry {
     /// Replace an agent's manifest wholesale. The caller is responsible for
     /// preserving runtime-only fields (workspace, tags) and invalidating any
     /// caches that depend on the manifest. Used by `reload_agent_from_disk`.
+    ///
+    /// Concurrency-affecting fields (`session_mode`,
+    /// `max_concurrent_invocations`) are intentionally NOT invalidated in
+    /// the per-agent semaphore cache — see `agent_concurrency_for` in
+    /// `kernel/accessors.rs` and the project CLAUDE.md "respawn to re-read"
+    /// policy. To make that policy visible to operators, this method emits
+    /// a single `warn!` per swap when either of those fields changed,
+    /// telling them an agent kill + respawn (or daemon restart) is
+    /// required for the new cap to take effect. Without the WARN, a
+    /// hot-reload from `Persistent + cap=1` to `New + cap=5` would
+    /// silently mint fresh sessions while still throttling them at the
+    /// old 1-permit semaphore — a half-upgraded state with no operator
+    /// signal. See `docs/issues/trigger-dispatch-two-snapshots.md`.
     pub fn replace_manifest(
         &self,
         id: AgentId,
         manifest: librefang_types::agent::AgentManifest,
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
+            let old_session_mode = entry.manifest.session_mode;
+            let new_session_mode = manifest.session_mode;
+            let old_cap = entry.manifest.max_concurrent_invocations;
+            let new_cap = manifest.max_concurrent_invocations;
+            let session_mode_changed = old_session_mode != new_session_mode;
+            let cap_changed = old_cap != new_cap;
+            if session_mode_changed || cap_changed {
+                tracing::warn!(
+                    agent_id = %id,
+                    session_mode_changed,
+                    cap_changed,
+                    old_session_mode = ?old_session_mode,
+                    new_session_mode = ?new_session_mode,
+                    old_max_concurrent_invocations = ?old_cap,
+                    new_max_concurrent_invocations = ?new_cap,
+                    "Agent manifest changed concurrency-affecting field(s); cached \
+                     per-agent semaphore is retained until the agent respawns. \
+                     Kill+respawn the agent (or restart the daemon) for the new \
+                     session_mode / max_concurrent_invocations to take effect on \
+                     trigger dispatch.",
+                );
+            }
             entry.manifest = manifest;
             entry.last_active = chrono::Utc::now();
         })?;
@@ -1290,5 +1325,180 @@ mod tests {
         registry.remove(id).expect("remove");
         let s3 = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
         assert!(matches!(s3, Ok(Ok(()))), "remove should fire event");
+    }
+
+    // ─── replace_manifest concurrency-change WARN (refs trigger-dispatch-two-snapshots) ───
+    //
+    // The per-agent semaphore cache in `agent_concurrency_for`
+    // (kernel/accessors.rs) is intentionally NOT invalidated on
+    // manifest hot-reload — operators must kill+respawn the agent.
+    // To make that policy visible, `replace_manifest` emits a single
+    // `warn!` per swap when either `session_mode` or
+    // `max_concurrent_invocations` changes. The tests below capture
+    // tracing output via a `VecWriter` fmt subscriber (same pattern as
+    // `supervised_spawn::tests::span_inherited_by_supervised_task`).
+    mod concurrency_warn {
+        use super::*;
+        use std::io;
+        use std::sync::Mutex;
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        /// Run `f` with a fmt subscriber attached, return captured stderr-style
+        /// log text. Filters to WARN+ to keep the buffer focused on what we
+        /// assert on.
+        fn capture_logs<F: FnOnce()>(f: F) -> String {
+            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let writer = VecWriter(buf.clone());
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_target(false);
+            let subscriber = tracing_subscriber::registry().with(layer).with(
+                tracing_subscriber::filter::LevelFilter::from_level(tracing::Level::WARN),
+            );
+            let _g = tracing::subscriber::set_default(subscriber);
+            f();
+            let bytes = buf.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap_or_default()
+        }
+
+        fn registered_entry(
+            registry: &AgentRegistry,
+            name: &str,
+            session_mode: SessionMode,
+            cap: Option<u32>,
+        ) -> AgentId {
+            let mut entry = test_entry(name);
+            entry.manifest.session_mode = session_mode;
+            entry.manifest.max_concurrent_invocations = cap;
+            let id = entry.id;
+            registry.register(entry).unwrap();
+            id
+        }
+
+        const WARN_SENTINEL: &str = "concurrency-affecting field(s); cached \
+             per-agent semaphore is retained";
+
+        /// Hot-reload that flips `session_mode` from Persistent → New
+        /// must emit exactly one WARN at the swap. This is the durable
+        /// hot-reload signal — the existing WARN at
+        /// `accessors.rs:967-976` only fires on FIRST semaphore
+        /// resolution and would be silent on a subsequent reload.
+        #[test]
+        fn warns_when_session_mode_changes() {
+            let logs = capture_logs(|| {
+                let registry = AgentRegistry::new();
+                let id = registered_entry(
+                    &registry,
+                    "swap-session-mode",
+                    SessionMode::Persistent,
+                    None,
+                );
+                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
+                new_manifest.session_mode = SessionMode::New;
+                registry.replace_manifest(id, new_manifest).unwrap();
+            });
+            let occurrences = logs.matches(WARN_SENTINEL).count();
+            assert_eq!(
+                occurrences, 1,
+                "expected exactly one WARN on session_mode change; got logs:\n{logs}"
+            );
+            assert!(
+                logs.contains("session_mode_changed=true"),
+                "WARN must mark session_mode_changed=true; got:\n{logs}"
+            );
+            assert!(
+                logs.contains("cap_changed=false"),
+                "WARN must mark cap_changed=false when only session_mode flipped; got:\n{logs}"
+            );
+        }
+
+        /// Hot-reload that bumps `max_concurrent_invocations` (e.g. 1 → 5)
+        /// must emit exactly one WARN.
+        #[test]
+        fn warns_when_max_concurrent_invocations_changes() {
+            let logs = capture_logs(|| {
+                let registry = AgentRegistry::new();
+                let id = registered_entry(&registry, "swap-cap", SessionMode::New, Some(1));
+                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
+                new_manifest.max_concurrent_invocations = Some(5);
+                registry.replace_manifest(id, new_manifest).unwrap();
+            });
+            let occurrences = logs.matches(WARN_SENTINEL).count();
+            assert_eq!(
+                occurrences, 1,
+                "expected exactly one WARN on cap change; got logs:\n{logs}"
+            );
+            assert!(
+                logs.contains("cap_changed=true"),
+                "WARN must mark cap_changed=true; got:\n{logs}"
+            );
+            assert!(
+                logs.contains("session_mode_changed=false"),
+                "WARN must mark session_mode_changed=false when only cap changed; got:\n{logs}"
+            );
+        }
+
+        /// When BOTH fields change in one swap, a single WARN that
+        /// names both is sufficient — we don't want to double-log.
+        #[test]
+        fn warns_once_when_both_fields_change() {
+            let logs = capture_logs(|| {
+                let registry = AgentRegistry::new();
+                let id = registered_entry(&registry, "swap-both", SessionMode::Persistent, Some(1));
+                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
+                new_manifest.session_mode = SessionMode::New;
+                new_manifest.max_concurrent_invocations = Some(8);
+                registry.replace_manifest(id, new_manifest).unwrap();
+            });
+            let occurrences = logs.matches(WARN_SENTINEL).count();
+            assert_eq!(
+                occurrences, 1,
+                "expected exactly one WARN naming both changed fields; got logs:\n{logs}"
+            );
+            assert!(
+                logs.contains("session_mode_changed=true") && logs.contains("cap_changed=true"),
+                "WARN must mark both changed flags true; got:\n{logs}"
+            );
+        }
+
+        /// Hot-reload that only touches unrelated fields (here:
+        /// description) must NOT emit the concurrency WARN. Otherwise
+        /// routine reloads (skill allowlist edits, system prompt
+        /// tweaks) would spam operators with stale warnings.
+        #[test]
+        fn no_warn_when_unrelated_field_changes() {
+            let logs = capture_logs(|| {
+                let registry = AgentRegistry::new();
+                let id = registered_entry(&registry, "swap-noop", SessionMode::Persistent, Some(1));
+                let mut new_manifest = registry.get(id).unwrap().manifest.clone();
+                new_manifest.description = "edited description, no concurrency change".to_string();
+                registry.replace_manifest(id, new_manifest).unwrap();
+            });
+            let occurrences = logs.matches(WARN_SENTINEL).count();
+            assert_eq!(
+                occurrences, 0,
+                "expected NO WARN when concurrency fields unchanged; got logs:\n{logs}"
+            );
+        }
     }
 }
