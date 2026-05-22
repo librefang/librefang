@@ -425,15 +425,60 @@ pub(crate) async fn dashboard_login(
             token,
             upgrade_hash,
         } => {
-            // If we successfully verified via legacy plaintext, log that an
-            // upgrade hash is available. The admin can persist it to config.
+            // If we successfully verified via legacy plaintext, surface
+            // the upgrade hash to the operator. (audit:
+            // dashboard-login-logs-phc-hash)
+            //
+            // Pre-fix, this branch logged the Argon2id PHC string at
+            // INFO. The PHC IS the verifier — `verify_dashboard_password`
+            // short-circuits on it at `password_hash.rs:214` — so anyone
+            // with read access to the daemon log stream (journald,
+            // container stdout, log aggregator, Sentry) could copy the
+            // string from the log, paste it into their own
+            // `config.toml: dashboard_pass_hash`, restart their daemon,
+            // and authenticate as the victim operator. No cracking
+            // required. Logs typically retain longer than passwords (no
+            // rotation story for log archives).
+            //
+            // Fix: write the upgrade hint to
+            // `~/.librefang/dashboard-pass-hash.upgrade-hint` with
+            // `chmod 0600` (same pattern as the secrets.env hardening
+            // at `librefang-migrate::openclaw.rs:655` and the sqlite
+            // file-permissions fix). The log just SIGNALS that an
+            // upgrade is available + points the operator at the file
+            // — the verifier value never enters the log stream.
             if let Some(ref hash) = upgrade_hash {
-                tracing::info!(
-                    "Dashboard password verified via legacy plaintext. \
-                     Set `dashboard_pass_hash = \"{}\"` in config.toml \
-                     and remove `dashboard_pass` to complete the migration.",
-                    hash
-                );
+                let hint_path = cfg.home_dir.join("dashboard-pass-hash.upgrade-hint");
+                match write_upgrade_hint(&hint_path, hash) {
+                    Ok(()) => {
+                        tracing::info!(
+                            path = %hint_path.display(),
+                            "Dashboard password verified via legacy plaintext. \
+                             An Argon2id upgrade hash has been written to the file \
+                             above (mode 0600). Persist it as \
+                             `dashboard_pass_hash = \"<value>\"` in config.toml, \
+                             remove `dashboard_pass`, then delete the hint file."
+                        );
+                    }
+                    Err(e) => {
+                        // Filesystem write failure — fall back to a
+                        // log line that still describes the upgrade
+                        // posture without leaking the hash itself.
+                        // Operator can re-login (the hash will be
+                        // re-derived next time) once the FS issue is
+                        // resolved.
+                        tracing::warn!(
+                            path = %hint_path.display(),
+                            error = %e,
+                            "Dashboard password verified via legacy plaintext but \
+                             we could not write the upgrade-hint file. The Argon2id \
+                             hash is held in memory only; re-login after fixing the \
+                             filesystem error to regenerate it. The hash is NOT \
+                             logged — it is the verifier and would let anyone with \
+                             log access authenticate as you."
+                        );
+                    }
+                }
             }
 
             // TOTP second-factor check for login
@@ -1002,6 +1047,50 @@ fn save_sessions(
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
     }
+}
+
+/// Atomically write the Argon2id upgrade-hint file at owner-only (0600) mode.
+///
+/// SECURITY (audit: dashboard-login-logs-phc-hash): the `hash` is the
+/// Argon2id PHC verifier — `verify_dashboard_password` short-circuits on it
+/// — so the file holding it must NEVER exist at a group/world-readable mode,
+/// not even transiently. The previous `std::fs::write` + post-write
+/// `set_permissions(0o600)` left a TOCTOU window where the file sat at
+/// `0644 & ~umask` between the two syscalls; a parallel local reader could
+/// grab the verifier in that gap. Mirror `save_sessions`: open a sibling temp
+/// file with `mode(0o600)` at create-time, `write_all` + `flush` + `sync_all`,
+/// then `rename` into place — the destination is owner-only for its entire
+/// lifetime. On non-unix the temp+rename atomicity is preserved without the
+/// mode bit (same as `save_sessions`).
+fn write_upgrade_hint(hint_path: &std::path::Path, hash: &str) -> std::io::Result<()> {
+    let body = format!(
+        "# Generated by librefang on legacy-plaintext dashboard login.\n\
+         # Set this value in config.toml as `dashboard_pass_hash = \"…\"`,\n\
+         # then remove the plaintext `dashboard_pass` field, then DELETE this file.\n\
+         # File mode is 0600 — readable only to the daemon UID.\n\
+         {hash}\n"
+    );
+    let tmp_path = hint_path.with_extension(format!("upgrade-hint.tmp.{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(body.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, hint_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 /// Remove the sessions persistence file (called on password change to force re-login).
@@ -2389,6 +2478,40 @@ mod observability_tests {
         assert_eq!(
             after, 0o600,
             "legacy permissive sessions.json must be tightened on load"
+        );
+    }
+
+    // audit: dashboard-login-logs-phc-hash — the upgrade-hint file holds the
+    // Argon2id PHC verifier and must land at 0600 atomically (created at the
+    // tight mode, never transiently world-readable). Guards against a
+    // regression to `std::fs::write` + post-write `set_permissions`.
+    #[cfg(unix)]
+    #[test]
+    fn write_upgrade_hint_creates_file_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hint_path = tmp.path().join("dashboard-pass-hash.upgrade-hint");
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaA";
+        write_upgrade_hint(&hint_path, hash).unwrap();
+        let mode = std::fs::metadata(&hint_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "upgrade-hint file holds the PHC verifier and must be owner-only"
+        );
+        let contents = std::fs::read_to_string(&hint_path).unwrap();
+        assert!(
+            contents.contains(hash),
+            "the hint file must contain the upgrade hash"
+        );
+        // No temp sibling left behind after a successful rename.
+        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "temp file must be renamed away, not left behind"
         );
     }
 }
