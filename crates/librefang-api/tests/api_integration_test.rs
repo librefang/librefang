@@ -545,6 +545,213 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     );
 }
 
+// ── /api/migrate path containment (audit: migrate-arbitrary-paths) ──────────
+//
+// `POST /api/migrate` previously consumed `source_dir` / `target_dir` via
+// `PathBuf::from(...)` with NO containment check. Admin-only, but a
+// compromised Admin token (leaked CI env, phishing) became a probe for any
+// `.exists()` readable as the daemon UID AND a write primitive into any
+// `target_dir`. The handler now canonicalizes both paths and requires them to
+// fall under an allowlist (currently just `home_dir`). These tests pin that
+// contract by hitting the FULL layered router so a future reorder or revert
+// is caught.
+
+/// `source_dir = "/etc"` (an existing system path, not under daemon home)
+/// must be rejected with 400 — pins the `.exists()` oracle closure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_outside_home() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": "/etc",
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_dir='/etc' must be rejected — outside the allowed migration roots"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("source_dir") && err_text.contains("allowed"),
+        "error must name the rejected field and the allowlist policy: {err_text}"
+    );
+}
+
+/// `source_dir = "../../../etc"` (a relative traversal) must be rejected after
+/// canonicalization — pins that `..`-style escapes don't bypass the check.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_dotdot_traversal() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": "../../../etc",
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_dir='../../../etc' must be rejected after canonicalization"
+    );
+}
+
+/// `target_dir = "/tmp/foo"` (an existing non-home directory). The previous
+/// behaviour silently wrote there. Now must be rejected — `target_dir`
+/// resolution walks up to find an existing ancestor (`/tmp`), canonicalizes
+/// it, and rejects when it's not under `home_dir`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_target_dir_outside_home() {
+    let harness = start_full_router("").await;
+
+    // Provide a valid source under home so we isolate the target-dir check.
+    let source_dir = harness.state.kernel.home_dir().join("legit-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    // /tmp/foo-<unique>: nonexistent path under /tmp, which is outside
+    // home_dir. The validator walks up to /tmp (existing) and rejects.
+    let pid = std::process::id();
+    let outside_target = format!("/tmp/librefang-migrate-outside-{pid}");
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": outside_target,
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "target_dir outside home_dir must be rejected"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("target_dir"),
+        "error must name the rejected field: {err_text}"
+    );
+
+    // And the rejected directory must NOT have been created.
+    assert!(
+        !std::path::Path::new(&outside_target).exists(),
+        "rejected target_dir must not be created on disk"
+    );
+}
+
+/// Legitimate migration under `home_dir/<sub>` must still succeed — pins that
+/// the new check does not break the happy path. Complements
+/// `test_run_migrate_uses_daemon_home_when_target_dir_is_empty` by exercising
+/// the explicit-target (nonexistent subdir of home) branch of the validator.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_accepts_paths_inside_home() {
+    let harness = start_full_router("").await;
+
+    let source_dir = harness.state.kernel.home_dir().join("containment-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    // Nonexistent target subdir of home — exercises the
+    // canonicalize_nonexistent path (walk up to home, canonicalize, append).
+    let target_dir = harness.state.kernel.home_dir().join("containment-target");
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": target_dir.display().to_string(),
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "legitimate migration with both paths under home_dir must still succeed"
+    );
+}
+
 /// End-to-end coverage for the global `enforce_json_body_depth` middleware
 /// wired into `server::build_router` (PR #5412). Unit tests in
 /// `middleware.rs` exercise the layer against a `Router::new()` stub; this

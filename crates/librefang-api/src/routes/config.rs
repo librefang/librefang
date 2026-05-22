@@ -1782,15 +1782,43 @@ pub async fn run_migrate(
         }
     };
 
+    // SECURITY: Both source_dir and target_dir must canonicalize to a
+    // descendant of an allowed root (`home_dir`). Without this check, Admin
+    // can probe arbitrary filesystem paths via the 200-vs-400 oracle and
+    // write under attacker-chosen target directories — see
+    // `docs/issues/migrate-arbitrary-paths.md`. Admin is dev/ops, not the
+    // trust ceiling; a leaked Admin token MUST NOT become a daemon-UID
+    // write primitive.
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    let allowed_roots: Vec<&std::path::Path> = vec![home_dir.as_path()];
+
+    let source_dir = match crate::validation::validate_path_containment(
+        "source_dir",
+        std::path::Path::new(req.source_dir.trim()),
+        &allowed_roots,
+        true, // source must already exist
+    ) {
+        Ok(p) => p,
+        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+    };
+
     let target_dir = if req.target_dir.trim().is_empty() {
-        state.kernel.home_dir().to_path_buf()
+        home_dir.clone()
     } else {
-        std::path::PathBuf::from(req.target_dir.trim())
+        match crate::validation::validate_path_containment(
+            "target_dir",
+            std::path::Path::new(req.target_dir.trim()),
+            &allowed_roots,
+            false, // target may not exist yet — migration creates it
+        ) {
+            Ok(p) => p,
+            Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+        }
     };
 
     let options = librefang_migrate::MigrateOptions {
         source,
-        source_dir: std::path::PathBuf::from(req.source_dir.trim()),
+        source_dir,
         target_dir,
         dry_run: req.dry_run,
     };

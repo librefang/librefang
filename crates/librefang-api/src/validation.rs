@@ -243,6 +243,123 @@ pub fn check_json_depth(
     }
 }
 
+/// Validate that a filesystem path supplied by an API caller falls inside an
+/// allowlist of permitted roots, after canonicalization.
+///
+/// Audit: `docs/issues/migrate-arbitrary-paths.md`. `POST /api/migrate` used
+/// to consume `source_dir` / `target_dir` via `PathBuf::from(...)` with no
+/// containment check. Admin is dev/ops, not the trust ceiling: a compromised
+/// Admin token (leaked CI env, phishing) became a full daemon-UID
+/// write primitive and a `.exists()` oracle for arbitrary filesystem paths.
+///
+/// Behaviour:
+/// - `require_exists = true` (source paths): the input MUST already exist on
+///   disk. We canonicalize it (resolving any `..` or symlink) and reject if
+///   the result is not a descendant of any allowed root.
+/// - `require_exists = false` (target paths): the input MAY be nonexistent
+///   because the migration will create it. We walk up to the nearest existing
+///   ancestor, canonicalize THAT, then re-append the unresolved suffix. The
+///   composed path must still be a descendant of an allowed root. This blocks
+///   `/etc/cron.d/foo` (no existing ancestor under home) and
+///   `~/.librefang/../etc/foo` (canonical ancestor is `/etc`, not home).
+///
+/// Returns the canonicalized path on success.
+pub fn validate_path_containment(
+    field_name: &str,
+    input: &std::path::Path,
+    allowed_roots: &[&std::path::Path],
+    require_exists: bool,
+) -> Result<std::path::PathBuf, ValidationError> {
+    // Canonicalize each allowed root once. A root that fails to canonicalize
+    // is a daemon-config bug, not user input, so we surface that as a server
+    // error rather than silently dropping the root.
+    let mut canon_roots: Vec<std::path::PathBuf> = Vec::with_capacity(allowed_roots.len());
+    for root in allowed_roots {
+        match root.canonicalize() {
+            Ok(c) => canon_roots.push(c),
+            Err(e) => {
+                return Err(ValidationError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    message: format!(
+                        "allowed migration root '{}' could not be canonicalized: {e}",
+                        root.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    let resolved = if require_exists {
+        input.canonicalize().map_err(|e| {
+            ValidationError::bad_request(format!(
+                "Field '{field_name}': path '{}' could not be canonicalized: {e}",
+                input.display()
+            ))
+        })?
+    } else {
+        canonicalize_nonexistent(input).map_err(|e| {
+            ValidationError::bad_request(format!(
+                "Field '{field_name}': path '{}' could not be resolved: {e}",
+                input.display()
+            ))
+        })?
+    };
+
+    if canon_roots.iter().any(|root| resolved.starts_with(root)) {
+        Ok(resolved)
+    } else {
+        Err(ValidationError::bad_request(format!(
+            "Field '{field_name}': path '{}' is outside the allowed migration roots",
+            input.display()
+        )))
+    }
+}
+
+/// Resolve a path that may not yet exist by canonicalizing the nearest
+/// existing ancestor and re-appending the unresolved suffix. This is the
+/// `target_dir` path that migration will create.
+///
+/// We deliberately do not use `std::path::absolute` alone: that would not
+/// resolve symlinks in the parent chain, leaving a TOCTOU window where
+/// `~/.librefang/legit` is a symlink to `/etc/cron.d`.
+fn canonicalize_nonexistent(input: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    // Make the input absolute first, so relative paths get anchored to the
+    // process cwd before we walk up. `absolute` is purely lexical (no FS
+    // access) so it can't fail on missing components.
+    let abs = std::path::absolute(input)?;
+
+    // Find the nearest existing ancestor.
+    let mut existing = abs.as_path();
+    let mut suffix_components: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if existing.exists() {
+            break;
+        }
+        let file_name = existing.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "no existing ancestor for path '{}' — cannot resolve symlinks",
+                    input.display()
+                ),
+            )
+        })?;
+        suffix_components.push(file_name);
+        existing = existing.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("path '{}' has no existing ancestor", input.display()),
+            )
+        })?;
+    }
+
+    let mut resolved = existing.canonicalize()?;
+    for component in suffix_components.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
 /// Validate that a string looks like a plausible identifier (agent name, key name, etc.).
 /// Allows alphanumeric characters, hyphens, underscores, and dots.
 pub fn check_identifier(field_name: &str, value: &str) -> Result<(), ValidationError> {
@@ -410,7 +527,10 @@ mod tests {
         // but well under the new 256 KiB byte cap AND 100 K char
         // cap. Must accept now.
         let msg: String = std::iter::repeat_n('文', 30_000).collect();
-        assert!(msg.len() > 64 * 1024, "test fixture must exceed historical 64 KiB cap");
+        assert!(
+            msg.len() > 64 * 1024,
+            "test fixture must exceed historical 64 KiB cap"
+        );
         assert!(
             check_message_size(&msg).is_ok(),
             "CJK message at 30K chars / ~90 KiB must pass under the new fair caps"
@@ -440,7 +560,10 @@ mod tests {
         // 100_001 × 2 bytes = ~200 KiB (under MAX_MESSAGE_BYTES);
         // 100_001 chars (over MAX_MESSAGE_CHARS).
         let msg: String = std::iter::repeat_n('а', MAX_MESSAGE_CHARS + 1).collect();
-        assert!(msg.len() < MAX_MESSAGE_BYTES, "fixture must respect byte cap");
+        assert!(
+            msg.len() < MAX_MESSAGE_BYTES,
+            "fixture must respect byte cap"
+        );
         let err = check_message_size(&msg).expect_err("must reject past char cap");
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
