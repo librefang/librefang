@@ -545,6 +545,110 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     );
 }
 
+/// End-to-end coverage for the global `enforce_json_body_depth` middleware
+/// wired into `server::build_router` (PR #5412). Unit tests in
+/// `middleware.rs` exercise the layer against a `Router::new()` stub; this
+/// drives a request through the FULL layered router so a missing wiring (or a
+/// reorder that puts the guard behind a body-consuming layer) is caught.
+///
+/// Asserts both directions:
+///   (a) a body nested deeper than `MAX_JSON_BODY_DEPTH` (32) is rejected with
+///       400 carrying the standard `validation_error` shape — proving the
+///       middleware actually fires before the handler; and
+///   (b) a normal shallow JSON body still reaches the handler and succeeds —
+///       proving the buffer-and-reconstruct path does not corrupt normal
+///       traffic.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_router_rejects_deeply_nested_json_body() {
+    let harness = start_full_router("").await;
+
+    // Build `[[[ … 1 … ]]]` with a leaf so each bracket contributes a level.
+    // 40 > MAX_JSON_BODY_DEPTH (32), so the guard must reject it. Empty
+    // arrays would have depth 0 (no items pushed), hence the inner `1`.
+    const DEPTH: usize = 40;
+    let deep_body = format!("{}1{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(deep_body))
+        .unwrap();
+    // Empty api_key + loopback ConnectInfo => the request clears auth, so the
+    // 400 we observe comes from the depth guard, not the auth layer above it.
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "deeply nested JSON must be rejected by the global depth guard"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Standard `ApiErrorResponse` shape produced by `ValidationError`. The
+    // message text distinguishes the depth guard from the handler's own
+    // `Json<MigrateRequest>` deserialization rejection (which would not carry
+    // the `validation_error` code).
+    assert_eq!(json["code"], "validation_error");
+    // The depth message surfaces in both the top-level `message` and the
+    // nested `error.message` of the standard `ApiErrorResponse` envelope; the
+    // text distinguishes the guard from any handler-level rejection.
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nesting depth"),
+        "error body should name the depth violation, got: {json}"
+    );
+
+    // (b) A shallow, well-formed JSON body for the same endpoint still flows
+    //     through the buffer+reconstruct path and reaches the handler.
+    let source_dir = harness.state.kernel.home_dir().join("depth-ok-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    let mut shallow = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    shallow
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let shallow_resp = harness.app.clone().oneshot(shallow).await.unwrap();
+    assert_eq!(
+        shallow_resp.status(),
+        StatusCode::OK,
+        "shallow JSON must still reach the handler after the depth guard buffers it"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_config_reload_hot_reloads_proxy_changes() {
     let server = start_test_server().await;
@@ -1415,10 +1519,13 @@ async fn test_agent_list_paginated_response_format() {
         body["offset"].is_number(),
         "Response should have 'offset' number"
     );
-    // limit should be null when not specified
-    assert!(
-        body["limit"].is_null(),
-        "limit should be null when not specified"
+    // Audit: agent-list-limit-none-unbounded. `limit` is now always a
+    // finite server-applied cap (DEFAULT_AGENT_LIST_LIMIT = 500), never
+    // null, so an unspecified `limit` can no longer return an
+    // unpaginated collection.
+    assert_eq!(
+        body["limit"], 500,
+        "limit should report the server-applied default cap (500) when not specified"
     );
 }
 

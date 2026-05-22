@@ -1520,19 +1520,21 @@ impl LibreFangKernel {
             }
         };
 
-        // Minimal SenderContext matching what the original tool call's
-        // SenderContext looked like — channel + user_id are the
-        // load-bearing pair for `SessionId::for_channel`. `chat_id` is
-        // populated to `sender_id` for the common DM case; in group
-        // chats the runtime doesn't currently persist a separate
-        // `chat_id` on the deferred payload, so multi-user-group
-        // resumes route to the inviting user's DM with the bot rather
-        // than the group — a known limitation tracked in the PR body
-        // as out-of-scope follow-up.
+        // Prefer the originating chat_id over sender_id. In DMs they
+        // coincide and the previous synth-from-sender_id behaviour
+        // worked by accident; in groups `sender_id` is the human user
+        // and `chat_id` is the group conversation. Routing the reply
+        // via the group's chat_id puts the agent's follow-up back in
+        // the original thread, matching #5489's intent end-to-end.
+        let routing_chat_id = deferred
+            .chat_id
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .unwrap_or(sender_id);
         let sender_ctx = librefang_channels::types::SenderContext {
             channel: channel.to_string(),
             user_id: sender_id.to_string(),
-            chat_id: Some(sender_id.to_string()),
+            chat_id: Some(routing_chat_id.to_string()),
             ..Default::default()
         };
 
@@ -1544,7 +1546,7 @@ impl LibreFangKernel {
             result_preview
         );
 
-        if let Err(e) = self
+        let loop_result = match self
             .send_message_full(
                 *agent_id,
                 &msg,
@@ -1557,18 +1559,74 @@ impl LibreFangKernel {
             )
             .await
         {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    tool_use_id = %deferred.tool_use_id,
+                    error = %e,
+                    "Failed to wake agent after approval resolution — session patched, will need an external trigger to continue"
+                );
+                return;
+            }
+        };
+
+        info!(
+            agent_id = %agent_id,
+            tool_use_id = %deferred.tool_use_id,
+            channel = channel,
+            response_len = loop_result.response.len(),
+            silent = loop_result.silent,
+            "Woke idle agent after approval resolution — routing agent reply back to originating chat"
+        );
+
+        // CRITICAL: send_message_full returns the agent's reply as
+        // `AgentLoopResult.response` but does NOT route it through
+        // the channel adapter — that's the channel bridge's job in
+        // the normal inbound flow (`bridge.rs` does
+        // `send_message_full(...)` then `send_response(adapter, ...)`).
+        // Skipping this step is what made "tap [Approve] → silence"
+        // surface in production: the agent loop ran and produced a
+        // perfect natural-language follow-up that nobody ever showed
+        // the user. Route it now via the channel registry, looking up
+        // the adapter the original tool call's `channel` field names.
+        if loop_result.silent || loop_result.response.is_empty() {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id = %deferred.tool_use_id,
+                "Agent's post-approval reply was silent/empty — nothing to forward to channel"
+            );
+            return;
+        }
+        let Some(adapter) = self.mesh.channel_adapters.get(channel) else {
             warn!(
                 agent_id = %agent_id,
                 tool_use_id = %deferred.tool_use_id,
-                error = %e,
-                "Failed to wake agent after approval resolution — session patched, will need an external trigger to continue"
+                channel = channel,
+                "No active adapter for the originating channel — agent reply produced but cannot be delivered; session has the reply persisted so the next user turn surfaces it"
             );
-        } else {
-            info!(
+            return;
+        };
+        let recipient = librefang_channels::types::ChannelUser {
+            platform_id: routing_chat_id.to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        };
+        if let Err(e) = adapter
+            .value()
+            .send(
+                &recipient,
+                librefang_channels::types::ChannelContent::Text(loop_result.response.clone()),
+            )
+            .await
+        {
+            warn!(
                 agent_id = %agent_id,
                 tool_use_id = %deferred.tool_use_id,
                 channel = channel,
-                "Woke idle agent after approval resolution with synthetic continuation"
+                recipient = %recipient.platform_id,
+                error = %e,
+                "Failed to deliver post-approval agent reply to channel — reply is still persisted in session history"
             );
         }
     }
