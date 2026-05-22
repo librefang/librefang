@@ -332,11 +332,35 @@ pub(crate) fn check_bind_auth_safety(
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
 /// issued with the `Secure` attribute.
 ///
-/// Handles the multi-proxy case where the header is comma-separated — RFC 7239
-/// semantics put the client-facing proto first (`https, http` = HTTPS reached
-/// the outermost proxy, HTTP was the back-channel), so we split and check the
-/// first value only.
-fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
+/// SECURITY (audit: `x-forwarded-proto-trusted-proxies`): the
+/// `X-Forwarded-Proto` header is only honored when the immediate TCP peer
+/// is in the operator-configured `trusted_proxies` allowlist. This mirrors
+/// the existing trust gate in `client_ip.rs` for `X-Forwarded-For` /
+/// `CF-Connecting-IP` etc.
+///
+/// - Untrusted peer (open internet, including the spoofing case where a
+///   plain-HTTP daemon receives a forged `X-Forwarded-Proto: https`):
+///   the header is ignored and we return `false`. Cookies will not be
+///   issued with `Secure`, which matches the actual transport.
+/// - Trusted peer (TLS-terminating proxy that the operator allow-listed):
+///   the header is honored. Multi-proxy comma-separated values follow
+///   RFC 7239 semantics — the client-facing proto is leftmost
+///   (`https, http` = HTTPS reached the outermost proxy, HTTP was the
+///   back-channel), so we split and check the first value only.
+///
+/// Fail-closed: when `trusted_proxies` is empty (default), no peer is
+/// trusted, so the header is always ignored. Operators of plain-HTTP
+/// dev binds don't lose `Secure` (it was already absent); operators
+/// behind TLS proxies must allow-list their proxy or use option 1 of
+/// the audit recommendation (always `Secure` when auth is enabled).
+fn request_is_https(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    trusted_proxies: &crate::client_ip::TrustedProxies,
+) -> bool {
+    if trusted_proxies.is_empty() || !trusted_proxies.contains(peer) {
+        return false;
+    }
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -347,10 +371,15 @@ fn request_is_https(headers: &axum::http::HeaderMap) -> bool {
 
 /// Build the base attribute list for the `librefang_session` cookie. `Secure`
 /// is added only when the request came in over HTTPS so local-HTTP dev keeps
-/// working; any public deployment should be proxied behind TLS (at which point
+/// working; any public deployment should be proxied behind TLS *and* have
+/// the proxy address allow-listed via `trusted_proxies` (at which point
 /// `X-Forwarded-Proto` flips the flag on automatically).
-fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
-    if request_is_https(headers) {
+fn session_cookie_attrs(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    trusted_proxies: &crate::client_ip::TrustedProxies,
+) -> &'static str {
+    if request_is_https(peer, headers, trusted_proxies) {
         "Path=/dashboard; HttpOnly; SameSite=Lax; Secure"
     } else {
         "Path=/dashboard; HttpOnly; SameSite=Lax"
@@ -388,6 +417,7 @@ fn session_cookie_clear_attrs() -> &'static str {
 )]
 pub(crate) async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -577,7 +607,7 @@ pub(crate) async fn dashboard_login(
             let cookie = format!(
                 "librefang_session={}; {}; Max-Age={}",
                 token.token,
-                session_cookie_attrs(&headers),
+                session_cookie_attrs(peer_addr.ip(), &headers, &state.trusted_proxies),
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS
             );
             (
@@ -2414,8 +2444,7 @@ mod observability_tests {
         };
         let expired = crate::password_hash::SessionToken {
             token: "expired-token".to_string(),
-            created_at: now
-                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            created_at: now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
             user_name: None,
             user_role: None,
         };
@@ -2442,7 +2471,11 @@ mod observability_tests {
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "retain dropped the expired entry in memory"
+        );
         save_sessions(home, &sessions);
 
         let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
@@ -2719,8 +2752,18 @@ fn is_daemon_responding(addr: &str) -> bool {
 
 #[cfg(test)]
 mod session_cookie_attrs_tests {
-    use super::{session_cookie_attrs, session_cookie_clear_attrs};
+    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
+    use crate::client_ip::TrustedProxies;
     use axum::http::HeaderMap;
+    use std::net::IpAddr;
+
+    fn tp(entries: &[&str]) -> TrustedProxies {
+        TrustedProxies::compile(&entries.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn clear_attrs_always_contain_secure() {
@@ -2738,15 +2781,90 @@ mod session_cookie_attrs_tests {
         assert!(attrs.contains("Path=/dashboard"));
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Audit: `x-forwarded-proto-trusted-proxies`
+    //
+    // `X-Forwarded-Proto` is now interpreted only when the immediate
+    // TCP peer is in `trusted_proxies`. These tests pin the gate.
+    // ─────────────────────────────────────────────────────────────
+
     #[test]
-    fn login_attrs_remain_transport_dependent() {
-        // Sanity: the login-path attrs builder still keeps `Secure`
-        // off for plain HTTP (local-dev affordance) and on for HTTPS /
-        // X-Forwarded-Proto=https. Only the clear path is unconditional.
+    fn xfp_ignored_when_peer_is_untrusted() {
+        // Forged `X-Forwarded-Proto: https` from the open internet
+        // against a plain-HTTP daemon. Operator has not allow-listed
+        // the source. The header MUST be ignored — `Secure` would
+        // pin the cookie to HTTPS even though the actual transport
+        // is plain HTTP, and the attacker controls the input.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("203.0.113.7");
         let mut h = HeaderMap::new();
-        assert!(!session_cookie_attrs(&h).contains("Secure"));
         h.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(session_cookie_attrs(&h).contains("Secure"));
+        assert!(
+            !request_is_https(peer, &h, &trusted),
+            "forged X-Forwarded-Proto from an untrusted peer must be ignored"
+        );
+        assert!(
+            !session_cookie_attrs(peer, &h, &trusted).contains("Secure"),
+            "untrusted peer + forged xfp must not produce `Secure` cookie"
+        );
+    }
+
+    #[test]
+    fn xfp_honored_when_peer_is_trusted() {
+        // Operator-allow-listed reverse proxy on 172.19.0.0/16
+        // (e.g. docker bridge for nginx) forwarding a real HTTPS
+        // request. We honor its claim and emit `Secure`.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(request_is_https(peer, &h, &trusted));
+        assert!(session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
+    }
+
+    #[test]
+    fn trusted_peer_without_xfp_is_plain_http() {
+        // The naive-nginx case the audit calls out. Proxy is
+        // allow-listed but the operator forgot to forward
+        // `X-Forwarded-Proto`. We have no positive evidence of
+        // TLS, so we MUST treat the request as plain HTTP. The
+        // resulting missing-`Secure` cookie is intentional — the
+        // operator notices at deploy time and fixes the proxy
+        // config, rather than discovering the gap after a leak.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let h = HeaderMap::new(); // no x-forwarded-proto
+        assert!(!request_is_https(peer, &h, &trusted));
+        assert!(!session_cookie_attrs(peer, &h, &trusted).contains("Secure"));
+    }
+
+    #[test]
+    fn empty_trusted_proxies_ignores_xfp_unconditionally() {
+        // Fail-closed default: no `trusted_proxies` configured means
+        // we never honor `X-Forwarded-Proto`, regardless of peer.
+        // (Operators of an HTTPS-direct bind don't reach this code
+        // path with a header at all; operators behind a TLS proxy
+        // must allow-list it.)
+        let trusted = tp(&[]);
+        let peer = ip("172.19.0.5"); // would be trusted under non-empty list
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!request_is_https(peer, &h, &trusted));
+    }
+
+    #[test]
+    fn xfp_multi_value_uses_leftmost_when_peer_trusted() {
+        // RFC 7239 multi-proxy chain: leftmost is client-facing.
+        // Behavior preserved across the trust-gate refactor.
+        let trusted = tp(&["172.19.0.0/16"]);
+        let peer = ip("172.19.0.5");
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        assert!(request_is_https(peer, &h, &trusted));
+
+        let mut h2 = HeaderMap::new();
+        h2.insert("x-forwarded-proto", "http, https".parse().unwrap());
+        assert!(!request_is_https(peer, &h2, &trusted));
     }
 }
 
