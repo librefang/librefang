@@ -90,6 +90,24 @@ pub struct AuthenticatedApiUser {
 /// HTTP surface must agree, otherwise an Admin API key can change
 /// configuration / rotate the bearer token / reload the daemon that a
 /// Owner is responsible for.
+/// True when the response log should demote a 4xx from WARN to DEBUG
+/// because the (status, path) pair is a known-noisy false positive,
+/// not a real signal worth alerting on.
+///
+/// Today the only case is **401 on `/api/metrics`**: the endpoint is
+/// auth-gated and `getMetricsText` in the dashboard polls it every
+/// 10 s from `useTelemetryMetrics`. Any client whose bearer expired
+/// (or never had one — Prometheus scrapers, ad-hoc `curl` watchers)
+/// produces a steady WARN stream that drowns out the real auth
+/// signal the blanket-4xx-WARN was designed to surface.
+///
+/// `uri` is the raw `OriginalUri` string (with optional query). The
+/// query is stripped before comparing so `/api/metrics?foo=bar`
+/// still suppresses correctly.
+fn is_noisy_metrics_unauth(status: u16, uri: &str) -> bool {
+    status == 401 && uri.split('?').next().is_some_and(|p| p == "/api/metrics")
+}
+
 fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // Only non-GET methods are candidates — reads are handled separately.
     if *method == axum::http::Method::GET {
@@ -118,6 +136,21 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             // cannot fill the registry or stage impersonation attempts (#3483).
             | "/api/a2a/discover"
     ) {
+        return true;
+    }
+    // `POST /api/hands/{hand_id}/install-deps` shells out to a package
+    // manager whose argv is read straight from the HAND.toml an Admin can
+    // write via `/api/registry/content/hand`. Even with the program
+    // allowlist + flag denylist added in `routes::skills::install_hand_deps`,
+    // the endpoint still spawns a process under the daemon UID, which is the
+    // exact privilege Owner controls — restrict to Owner so an Admin role
+    // (which is "config write" by design) cannot turn into "process spawn".
+    // The matching `check-deps` sibling is a read-only readiness probe and
+    // intentionally stays at Admin.
+    if *method == axum::http::Method::POST
+        && path.starts_with("/api/hands/")
+        && path.ends_with("/install-deps")
+    {
         return true;
     }
     // RBAC user-management surface (M6) — every mutating call under
@@ -344,16 +377,42 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             "API request"
         );
     } else if status >= 400 {
-        warn!(
-            request_id = %request_id,
-            method = %method,
-            path = %uri,
-            status = status,
-            latency_ms = elapsed.as_millis() as u64,
-            agent_id = %agent_id_field,
-            session_id = %session_id_field,
-            "API request"
-        );
+        // The blanket WARN-on-4xx surfaces auth storms and real client
+        // bugs — but it also surfaces a known-noisy false positive:
+        // unauthenticated polls of `/api/metrics`. The dashboard's
+        // TelemetryPage refetches every 10s, and any client whose
+        // bearer token expired (or who never logged in — Prometheus
+        // scrapers, ad-hoc `curl` watchers) hammers a steady WARN
+        // stream that drowns out the real auth signal we want to see.
+        //
+        // Demote that specific case to DEBUG. The endpoint returns
+        // operational telemetry (uptime, agent counts, token usage —
+        // see `routes/config.rs::prometheus_metrics`), so a 401 here
+        // is "you don't have the token", not "you're attacking us".
+        // Genuinely interesting 4xx on other paths still WARNs.
+        if is_noisy_metrics_unauth(status, &uri) {
+            debug!(
+                request_id = %request_id,
+                method = %method,
+                path = %uri,
+                status = status,
+                latency_ms = elapsed.as_millis() as u64,
+                agent_id = %agent_id_field,
+                session_id = %session_id_field,
+                "API request"
+            );
+        } else {
+            warn!(
+                request_id = %request_id,
+                method = %method,
+                path = %uri,
+                status = status,
+                latency_ms = elapsed.as_millis() as u64,
+                agent_id = %agent_id_field,
+                session_id = %session_id_field,
+                "API request"
+            );
+        }
     } else if method == axum::http::Method::GET {
         debug!(
             request_id = %request_id,
@@ -537,6 +596,96 @@ fn default_error_code_for_status(status: StatusCode) -> &'static str {
 
 /// API version headers middleware.
 ///
+/// Maximum JSON nesting depth accepted by the global request-body
+/// guard. Defense-in-depth against deeply-nested
+/// `[[[[…]]]]` payloads that would flow through the `Json<Value>`
+/// extractors and recurse through downstream consumers (Cypher
+/// conversion in memory routes, plugin config validators, etc.).
+/// `serde_json` has no built-in depth cap, and the crate-level
+/// `#![recursion_limit = "256"]` only applies to macro expansion —
+/// it has no effect on runtime JSON deserialization. Audit:
+/// check-json-depth-unused.
+pub const MAX_JSON_BODY_DEPTH: usize = 32;
+
+/// Tower middleware that enforces [`MAX_JSON_BODY_DEPTH`] on every
+/// `application/json` request body before the handler sees it.
+///
+/// Non-JSON bodies pass through untouched. Empty bodies pass
+/// through. A body whose `Content-Type` starts with
+/// `application/json` is buffered (already capped by the global
+/// `RequestBodyLimitLayer`), parsed once via `serde_json`, fed to
+/// `crate::validation::check_json_depth`, and re-attached to the
+/// request before forwarding. Buffering cost is paid only on JSON
+/// requests; the body bytes round-trip with no copy beyond the
+/// single `to_bytes` collect.
+///
+/// Audit: check-json-depth-unused.
+pub async fn enforce_json_body_depth(request: Request<Body>, next: Next) -> Response<Body> {
+    // Cheap pre-check: skip non-JSON content types and bail on
+    // missing Content-Type. The audit only requires the guard for
+    // `application/json` bodies; multipart uploads, plain text, raw
+    // bytes etc. are unaffected.
+    let is_json = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let lower = s.trim().to_ascii_lowercase();
+            // Match both `application/json` and `application/json;
+            // charset=utf-8` style. Strict prefix check on the
+            // media-type token only; never matches
+            // `application/jsonpatch+json` or other vendor types
+            // (those would need their own deserializer-specific
+            // guards).
+            lower == "application/json"
+                || lower.starts_with("application/json;")
+                || lower.starts_with("application/json ")
+        })
+        .unwrap_or(false);
+    if !is_json {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    // `RequestBodyLimitLayer` upstream of this middleware already
+    // caps the body size; the high ceiling here exists so a misordered
+    // layer stack doesn't silently turn this into a memory bomb —
+    // anything past it is rejected with 400 (which also short-circuits
+    // a downstream OOM). 8 MiB matches the highest cap the kernel
+    // currently exposes for `max_request_body_bytes`.
+    const HARD_CEILING_BYTES: usize = 8 * 1024 * 1024;
+    let bytes = match axum::body::to_bytes(body, HARD_CEILING_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"error": "request body too large for JSON depth guard"})
+                        .to_string(),
+                ))
+                .expect("static error response must build");
+        }
+    };
+    // Empty body — nothing to validate; forward untouched.
+    // Malformed JSON (`Err`) — forward as-is. The handler's own
+    // deserializer will return a more specific 400 with the exact
+    // column/offset, which is more useful to the client than a
+    // generic depth-check error.
+    if !bytes.is_empty() {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Err(e) = crate::validation::check_json_depth(&value, MAX_JSON_BODY_DEPTH) {
+                // `ValidationError::into_response` formats the body
+                // as the standard `ApiErrorResponse` shape; reuse it
+                // so the response matches every other 4xx the API
+                // surface returns.
+                return axum::response::IntoResponse::into_response(e);
+            }
+        }
+    }
+    let request = Request::from_parts(parts, Body::from(bytes));
+    next.run(request).await
+}
+
 /// Adds `X-API-Version` to every response so clients always know which version
 /// they are talking to. When a request targets `/api/v1/...` the header reflects
 /// `v1`; for the unversioned `/api/...` alias it returns the latest version.
@@ -657,6 +806,16 @@ impl PublicRoute {
             match_kind: PublicMatch::Exact,
         }
     }
+    // Kept available (no callers after `github-copilot/oauth/` moved
+    // behind auth in audit `github-copilot-oauth-unauthenticated`) so
+    // a future PublicRoute entry needing both prefix-match AND
+    // any-method semantics doesn't have to re-derive the constructor.
+    // Removing the constant would force the next public-prefix
+    // operator to also rediscover the `PublicMethod::Any +
+    // PublicMatch::Prefix` shape — a small but easy-to-fumble bit of
+    // API design. `prefix_get` exists for the GET-only variant and is
+    // currently the only used `PublicMatch::Prefix` arm.
+    #[allow(dead_code)]
     const fn prefix_any(path: &'static str) -> Self {
         Self {
             method: PublicMethod::Any,
@@ -710,8 +869,28 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     // contract; this PR restores it (#4868 review).
     PublicRoute::exact_any("/api/version"),
     PublicRoute::exact_any("/api/versions"),
-    // GitHub Copilot OAuth — prefix, any method
-    PublicRoute::prefix_any("/api/providers/github-copilot/oauth/"),
+    // GitHub Copilot OAuth removed from the public-prefix list
+    // (audit: github-copilot-oauth-unauthenticated).
+    //
+    // Pre-fix, both `POST /api/providers/github-copilot/oauth/start`
+    // and `GET /api/providers/github-copilot/oauth/poll/{id}` were
+    // public. A hostile pop-under page in a victim's browser could
+    // POST to `http://localhost:4545/api/providers/.../oauth/start`
+    // (simple POST → no preflight, no Origin check), display the
+    // returned `user_code` + `verification_uri` from the daemon's
+    // device-flow response in attacker-controlled UI (or
+    // social-engineer the user to enter the code at
+    // `github.com/login/device`), then poll until completion. The
+    // poll handler then writes the attacker's GitHub Copilot
+    // access token into `secrets.env` and the daemon environment
+    // (`providers.rs:2220-2236`) — every subsequent outbound LLM
+    // call routes through the attacker's GitHub account, billed
+    // to them and observable by them.
+    //
+    // The dashboard already authenticates before initiating the
+    // device flow; no legitimate unauthenticated caller exists.
+    // Removing the public-prefix entry forces the standard auth
+    // gate to apply.
 ];
 
 /// Routes that are public on **GET only**, regardless of auth config.
@@ -722,8 +901,15 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     // auth (Bug #3781).
     PublicRoute::exact_get("/a2a/agents"),
     PublicRoute::exact_get("/api/auth/providers"),
-    // Auth login prefix
-    PublicRoute::prefix_get("/api/auth/login"),
+    // Auth login: exact for the base endpoint, prefix for the
+    // provider-specific suffix `/api/auth/login/{provider}`. The
+    // unsuffixed `prefix_get("/api/auth/login")` would have matched
+    // any sibling that happened to share the prefix
+    // (`/api/auth/login-status`, `/api/auth/loginhack`, etc.) and
+    // silently leaked it as public — even though no such sibling
+    // exists today (audit: login-prefix-match).
+    PublicRoute::exact_get("/api/auth/login"),
+    PublicRoute::prefix_get("/api/auth/login/"),
     // Config schema
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
@@ -1352,6 +1538,39 @@ mod tests {
     }
 
     #[test]
+    fn is_noisy_metrics_unauth_matches_401_on_metrics_path() {
+        // Bare path.
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics"));
+        // With query string — Prometheus scrapers sometimes append
+        // `?token=…` / `?format=…`; the suppression must still apply.
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics?token=xyz"));
+        assert!(is_noisy_metrics_unauth(401, "/api/metrics?"));
+    }
+
+    #[test]
+    fn is_noisy_metrics_unauth_rejects_other_statuses_and_paths() {
+        // 403 / 404 / 500 etc. on /api/metrics keep WARNing — those
+        // are real operational signals, not auth poll noise.
+        assert!(!is_noisy_metrics_unauth(403, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(404, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(500, "/api/metrics"));
+        assert!(!is_noisy_metrics_unauth(200, "/api/metrics"));
+        // 401 on other paths must NOT be suppressed — those are the
+        // genuine auth storms the blanket WARN was built to surface.
+        assert!(!is_noisy_metrics_unauth(401, "/api/agents"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/config/reload"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/admin/shutdown"));
+        // Prefix-only matches must not slip through — `/api/metrics2`,
+        // `/api/metrics/foo`, etc. are different endpoints (or future
+        // sub-paths).
+        assert!(!is_noisy_metrics_unauth(401, "/api/metrics2"));
+        assert!(!is_noisy_metrics_unauth(401, "/api/metrics/foo"));
+        // Empty / nonsense paths don't match.
+        assert!(!is_noisy_metrics_unauth(401, ""));
+        assert!(!is_noisy_metrics_unauth(401, "/"));
+    }
+
+    #[test]
     fn test_user_role_admin_cannot_modify_config() {
         // Admin must be blocked from kernel-wide config mutations.
         let post = axum::http::Method::POST;
@@ -1432,6 +1651,43 @@ mod tests {
                 "{role:?} must be allowed to GET /api/approvals/totp/status"
             );
         }
+    }
+
+    // Install-deps spawns a package-manager process under the daemon UID
+    // from argv that Admin can author in HAND.toml. Even with the
+    // skill::install_hand_deps allowlist + flag denylist, this is the
+    // wrong privilege boundary for an Admin role — restrict to Owner.
+    // The matching `check-deps` sibling is read-only and stays at Admin.
+    #[test]
+    fn test_install_hand_deps_is_owner_only() {
+        let post = axum::http::Method::POST;
+        let install = "/api/hands/some-hand/install-deps";
+        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+            assert!(
+                !user_role_allows_request(role, &post, install),
+                "{role:?} must NOT be allowed to POST {install}"
+            );
+        }
+        assert!(
+            user_role_allows_request(UserRole::Owner, &post, install),
+            "Owner must be allowed to POST {install}"
+        );
+
+        // Sibling readiness probe stays Admin-accessible.
+        let check = "/api/hands/some-hand/check-deps";
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, check),
+            "Admin must still be allowed to POST {check} (read-only sibling)"
+        );
+
+        // Suffix-only matches must not over-restrict — e.g. a stray
+        // `/install-deps` outside `/api/hands/` (none today, but guard
+        // against future additions tripping the gate).
+        let other = "/api/plugins/foo/install-deps";
+        assert!(
+            user_role_allows_request(UserRole::Admin, &post, other),
+            "Admin must still be allowed to POST plugin install-deps ({other})"
+        );
     }
 
     #[test]
@@ -2793,6 +3049,100 @@ mod tests {
             )),
             "/api/cron/ must stay out of PUBLIC_ROUTES_DASHBOARD_READS (#5139)"
         );
+    }
+
+    /// Audit: check-json-depth-unused. The layer must reject deeply
+    /// nested JSON before the handler sees it, but only when
+    /// `Content-Type: application/json` is set. Other media types
+    /// (multipart, text/plain, raw bytes) must pass through.
+    #[tokio::test]
+    async fn enforce_json_body_depth_rejects_payload_above_max_depth() {
+        // Build a body with depth > MAX_JSON_BODY_DEPTH. Each level
+        // wraps the next in an array so depth = nesting count.
+        let deep_depth = MAX_JSON_BODY_DEPTH + 5;
+        let mut body = String::from("0");
+        for _ in 0..deep_depth {
+            body = format!("[{body}]");
+        }
+
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "deeply nested JSON must be rejected at the middleware boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_accepts_payload_at_or_below_max_depth() {
+        // Build a body at exactly MAX_JSON_BODY_DEPTH levels.
+        let mut body = String::from("0");
+        for _ in 0..MAX_JSON_BODY_DEPTH {
+            body = format!("[{body}]");
+        }
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_ignores_non_json_content_type() {
+        // The middleware must NOT buffer non-JSON requests. A deeply-
+        // bracketed `text/plain` body that would trigger a depth-
+        // exceeded JSON error must pass through untouched and reach
+        // the handler.
+        let mut body = String::from("x");
+        for _ in 0..(MAX_JSON_BODY_DEPTH + 10) {
+            body = format!("[{body}]");
+        }
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "text/plain")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-JSON content types must skip the depth guard entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_json_body_depth_passes_malformed_json_through_to_handler() {
+        // The middleware should NOT reject a malformed JSON body —
+        // the handler's own deserializer will return a more specific
+        // 4xx with the exact column. This test pins that contract:
+        // the depth guard never observes a value, so it forwards.
+        let app: Router = Router::new()
+            .route("/echo", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(enforce_json_body_depth));
+        let req = Request::post("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from("{not valid"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // Handler returns 200; the malformed JSON never matters here
+        // because the test handler is `async { "ok" }` — it doesn't
+        // deserialize. The point of this test is that the *middleware*
+        // doesn't short-circuit a 400 on malformed JSON itself.
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Regression for #4860: the inline login page must redirect to `/`

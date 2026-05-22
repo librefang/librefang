@@ -127,6 +127,42 @@ impl LibreFangKernel {
             }
         }
 
+        // OAuth state-token HMAC key sanity check (audit:
+        // state-secret-default-random).
+        //
+        // The `state_signing_key` LazyLock in `librefang-api/src/oauth.rs`
+        // falls back to `Uuid::new_v4()` when `LIBREFANG_STATE_SECRET`
+        // is unset — that is fine for unit tests (no IdP round-trip)
+        // but actively wrong for any deployment that handles real OIDC:
+        //
+        // 1. The key is per-process random, so every daemon restart
+        //    invalidates all in-flight `state` cookies — users mid-login
+        //    see "Invalid or expired state parameter" with no operator
+        //    signal as to why.
+        // 2. Multi-replica posture (the documented Cloudflare Tunnel /
+        //    reverse-proxy setup with `trusted_proxies`) is silently
+        //    broken: each replica signs with its own UUID, so a callback
+        //    routed to a different node from the auth-start node rejects
+        //    every legitimate user.
+        //
+        // Refuse to boot when `external_auth.enabled = true` and the env
+        // var is missing or malformed. Contract mirrors LIBREFANG_VAULT_KEY:
+        // base64-decoded value must be exactly 32 bytes (HMAC-SHA256
+        // security baseline). Generate one with `openssl rand -base64 32`.
+        if config.external_auth.enabled {
+            if let Err(e) = validate_state_secret_env() {
+                return Err(LibreFangError::BootFailed(format!(
+                    "[external_auth] is enabled but LIBREFANG_STATE_SECRET is {e}. \
+                     Set it to a base64-encoded 32-byte key shared across all \
+                     replicas — `openssl rand -base64 32` produces a value of \
+                     the right shape. Without this, OAuth `state` HMAC \
+                     verification fails across restarts and between replicas, \
+                     locking out legitimate users mid-login."
+                ))
+                .into());
+            }
+        }
+
         match config.mode {
             KernelMode::Stable => {
                 info!("Booting LibreFang kernel in STABLE mode — conservative defaults enforced");
@@ -143,6 +179,35 @@ impl LibreFangKernel {
         let warnings = config.validate();
         for w in &warnings {
             warn!("Config: {}", w);
+        }
+
+        // Provider env-var observability (audit:
+        // provider-api-keys-no-boot-validation). `config.provider_api_keys`
+        // and `config.credential_pools[].keys[].api_key_env` declare env
+        // vars that hold provider API keys. The runtime resolves them on
+        // demand; an unset or empty value silently falls back to
+        // `auth_profiles` / default keys, so a typo
+        // (`OPENAI_API_KEY1` vs `OPENAI_API_KEY_1`) downgrades the
+        // operator's intended posture without any boot-time signal.
+        // Detection-only: walk both sources and emit one `warn!` per
+        // declared-but-unset/empty env var. Mirrors the existing
+        // `LIBREFANG_VAULT_KEY` / `LIBREFANG_STATE_SECRET` observability
+        // discipline. No boot failure.
+        for (provider, env_var, source) in collect_provider_env_var_declarations(&config) {
+            match std::env::var(&env_var) {
+                Ok(v) if !v.is_empty() => {}
+                _ => {
+                    warn!(
+                        provider = %provider,
+                        env_var = %env_var,
+                        source = source,
+                        "configured provider env var is unset or empty; \
+                         provider will fall back to other auth sources \
+                         (auth_profiles / default key). Check for typos in \
+                         the env-var name."
+                    );
+                }
+            }
         }
 
         // Tool-exec subtable check: missing `[tool_exec.ssh]` /
@@ -178,9 +243,31 @@ impl LibreFangKernel {
         // clients pick up proxy configuration from config.toml / env vars.
         librefang_runtime::http_client::init_proxy(config.proxy.clone());
 
-        // Ensure data directory exists
+        // Ensure data directory exists, then tighten to owner-only
+        // (0o700). Audit: sqlite-file-permissions — the directory
+        // permission complements the per-file 0o600 that
+        // `librefang_memory::substrate::restrict_db_file_permissions`
+        // applies to `librefang.db` (+ -wal / -shm): even if a
+        // future db-file create races the chmod, the directory
+        // hides everything inside from other UIDs / users on the
+        // same host. Non-Unix is a no-op (chmod-style permissions
+        // don't carry the same meaning on Windows).
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| LibreFangError::BootFailed(format!("Failed to create data dir: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(
+                    path = %config.data_dir.display(),
+                    error = %e,
+                    "failed to tighten data dir permissions to 0o700 — \
+                     directory may be world-readable"
+                );
+            }
+        }
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
@@ -1428,6 +1515,7 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
+            oauth_cache_invalidator: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -2431,6 +2519,221 @@ system_prompt = "You are a helpful assistant."
     }
 }
 
+/// Pure validator for the `LIBREFANG_STATE_SECRET` shape — `None`
+/// means env unset; otherwise the raw env value is checked for base64
+/// decodability and a 32-byte payload.
+///
+/// Mirrors the `LIBREFANG_VAULT_KEY` contract enforced by
+/// `librefang_extensions::vault::decode_master_key` — same length, same
+/// encoding — so operators can use one `openssl rand -base64 32` for
+/// both keys (different values, same shape).
+///
+/// Separated from the env-var read so it is exercised directly in
+/// `state_secret_validation` tests without the global-env-mutation
+/// race that would otherwise force the suite serial.
+/// (audit: state-secret-default-random)
+fn validate_state_secret_value(raw: Option<&str>) -> Result<(), String> {
+    use base64::Engine as _;
+    let value = raw.ok_or_else(|| "unset".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|e| format!("not base64: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "the wrong length (got {} bytes, expected 32)",
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Env-reader wrapper used by `Kernel::open`. Always reads
+/// `LIBREFANG_STATE_SECRET` at the moment of boot — re-reading per
+/// boot (rather than at LazyLock init) lets a single test process
+/// boot multiple kernels with different env-var states, which the
+/// existing integration suites rely on.
+fn validate_state_secret_env() -> Result<(), String> {
+    validate_state_secret_value(std::env::var("LIBREFANG_STATE_SECRET").ok().as_deref())
+}
+
+/// Walk the config-declared provider env-var surface and return a flat
+/// list of `(provider, env_var, source)` triples for boot-time
+/// observability (audit: provider-api-keys-no-boot-validation).
+///
+/// Sources covered:
+/// - `provider_api_keys`: explicit `provider → env_var` map.
+/// - `credential_pools[].keys[].api_key_env`: multi-key rotation pools.
+///
+/// Empty `api_key_env` strings are skipped — those are the documented
+/// "no env var; resolve through other sources" shape for local
+/// providers, not a misconfig. The caller decides whether each
+/// triple's env var is actually set in the process environment; this
+/// function is intentionally env-free so the unit test below can pin
+/// the enumeration shape without global env state.
+fn collect_provider_env_var_declarations(
+    config: &librefang_types::config::KernelConfig,
+) -> Vec<(String, String, &'static str)> {
+    let mut out = Vec::new();
+    for (provider, env_var) in &config.provider_api_keys {
+        if env_var.is_empty() {
+            continue;
+        }
+        out.push((provider.clone(), env_var.clone(), "provider_api_keys"));
+    }
+    for pool in &config.credential_pools {
+        for key in &pool.keys {
+            if key.api_key_env.is_empty() {
+                continue;
+            }
+            out.push((
+                pool.provider.clone(),
+                key.api_key_env.clone(),
+                "credential_pools",
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod provider_env_validation {
+    //! Regression guards for the
+    //! `provider-api-keys-no-boot-validation` audit item. The boot path
+    //! enumerates declared provider env vars and warns when any is
+    //! unset or empty. We pin the enumeration shape here; the
+    //! env-reading branch is exercised indirectly through
+    //! `boot_with_config` and intentionally not re-tested here
+    //! (global-env mutation would force the whole suite serial).
+    use super::collect_provider_env_var_declarations;
+    use librefang_types::config::{
+        CredentialPoolConfig, CredentialPoolKeyConfig, CredentialPoolStrategy, KernelConfig,
+    };
+
+    fn pool(provider: &str, envs: &[&str]) -> CredentialPoolConfig {
+        CredentialPoolConfig {
+            provider: provider.to_string(),
+            strategy: CredentialPoolStrategy::default(),
+            keys: envs
+                .iter()
+                .map(|e| CredentialPoolKeyConfig {
+                    api_key_env: (*e).to_string(),
+                    label: "test".to_string(),
+                    priority: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn empty_config_yields_no_declarations() {
+        let cfg = KernelConfig::default();
+        assert!(collect_provider_env_var_declarations(&cfg).is_empty());
+    }
+
+    #[test]
+    fn provider_api_keys_entries_are_enumerated() {
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("openai".to_string(), "OPENAI_API_KEY".to_string());
+        cfg.provider_api_keys
+            .insert("nvidia".to_string(), "NVIDIA_API_KEY".to_string());
+        let got = collect_provider_env_var_declarations(&cfg);
+        // BTreeMap iteration is sorted by key → deterministic order.
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "nvidia".to_string(),
+                    "NVIDIA_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_env_var_strings_are_skipped() {
+        // `api_key_env = ""` is the documented "no env var; resolve
+        // through other sources" shape for local providers (ollama,
+        // lm-studio). Not a misconfig — must not warn.
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("ollama".to_string(), "".to_string());
+        cfg.credential_pools
+            .push(pool("openai", &["", "OPENAI_K1"]));
+        let got = collect_provider_env_var_declarations(&cfg);
+        assert_eq!(
+            got,
+            vec![(
+                "openai".to_string(),
+                "OPENAI_K1".to_string(),
+                "credential_pools"
+            )]
+        );
+    }
+
+    #[test]
+    fn credential_pool_keys_are_enumerated_per_key() {
+        let mut cfg = KernelConfig::default();
+        cfg.credential_pools.push(pool(
+            "anthropic",
+            &["ANTHROPIC_PRIMARY", "ANTHROPIC_BACKUP"],
+        ));
+        let got: Vec<_> = collect_provider_env_var_declarations(&cfg)
+            .into_iter()
+            .map(|(p, e, s)| (p, e, s))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "anthropic".to_string(),
+                    "ANTHROPIC_PRIMARY".to_string(),
+                    "credential_pools"
+                ),
+                (
+                    "anthropic".to_string(),
+                    "ANTHROPIC_BACKUP".to_string(),
+                    "credential_pools"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_sources_are_both_enumerated_with_distinct_source_tags() {
+        // Same provider declared in both surfaces — both must surface
+        // independently so the operator can locate which line in
+        // config.toml needs fixing.
+        let mut cfg = KernelConfig::default();
+        cfg.provider_api_keys
+            .insert("openai".to_string(), "OPENAI_API_KEY".to_string());
+        cfg.credential_pools
+            .push(pool("openai", &["OPENAI_API_KEY_1"]));
+        let got = collect_provider_env_var_declarations(&cfg);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY".to_string(),
+                    "provider_api_keys"
+                ),
+                (
+                    "openai".to_string(),
+                    "OPENAI_API_KEY_1".to_string(),
+                    "credential_pools"
+                ),
+            ]
+        );
+    }
+}
+
 /// Parse `[proactive_memory] extraction_model` into `(provider, model)` (#4871).
 ///
 /// Three accepted forms, in priority order:
@@ -2614,5 +2917,78 @@ mod extraction_model_tests {
         );
         assert_eq!(p, "anthropic");
         assert_eq!(m, "weird/model");
+    }
+}
+
+#[cfg(test)]
+mod state_secret_validation {
+    //! Regression guards for the `state-secret-default-random` audit
+    //! item. `Kernel::open` refuses to boot when
+    //! `external_auth.enabled = true` but `LIBREFANG_STATE_SECRET` is
+    //! missing or doesn't decode to exactly 32 bytes of base64 — same
+    //! shape contract as `LIBREFANG_VAULT_KEY`. The pure
+    //! `validate_state_secret_value` mirror of that check lets us pin
+    //! the accept/reject envelope without touching global env state.
+    use super::validate_state_secret_value;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn unset_env_is_rejected_with_unset() {
+        assert_eq!(validate_state_secret_value(None), Err("unset".to_string()));
+    }
+
+    #[test]
+    fn well_shaped_32_byte_secret_is_accepted() {
+        let key = b64(&[7u8; 32]);
+        assert!(validate_state_secret_value(Some(&key)).is_ok());
+    }
+
+    #[test]
+    fn well_shaped_secret_with_surrounding_whitespace_is_accepted() {
+        // Trailing newlines / spaces are a common shell-injection
+        // ergonomic (e.g. `export X=$(openssl rand ...)` keeping a
+        // newline). `.trim()` in the validator handles it.
+        let key = format!("\n  {}\n  ", b64(&[9u8; 32]));
+        assert!(validate_state_secret_value(Some(&key)).is_ok());
+    }
+
+    #[test]
+    fn non_base64_is_rejected_with_decode_error() {
+        let err = validate_state_secret_value(Some("not!base64!?")).unwrap_err();
+        assert!(
+            err.starts_with("not base64:"),
+            "expected 'not base64: …', got {err:?}",
+        );
+    }
+
+    #[test]
+    fn shorter_than_32_bytes_is_rejected_with_length_message() {
+        let key = b64(&[1u8; 16]);
+        let err = validate_state_secret_value(Some(&key)).unwrap_err();
+        assert_eq!(err, "the wrong length (got 16 bytes, expected 32)");
+    }
+
+    #[test]
+    fn longer_than_32_bytes_is_rejected_with_length_message() {
+        let key = b64(&[1u8; 48]);
+        let err = validate_state_secret_value(Some(&key)).unwrap_err();
+        assert_eq!(err, "the wrong length (got 48 bytes, expected 32)");
+    }
+
+    #[test]
+    fn empty_string_is_rejected_with_decode_error() {
+        // An explicit empty value is different from "unset" — the env
+        // var IS set, but to nothing. base64-decode of "" yields zero
+        // bytes which fails the length check; either error class is
+        // valid as long as boot is refused.
+        let err = validate_state_secret_value(Some("")).unwrap_err();
+        assert!(
+            err.starts_with("the wrong length") || err.starts_with("not base64"),
+            "expected length-or-decode rejection on empty string; got {err:?}",
+        );
     }
 }

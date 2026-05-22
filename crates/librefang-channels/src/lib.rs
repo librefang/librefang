@@ -17,6 +17,7 @@
 pub mod attachment_enrich;
 pub mod bridge;
 pub mod commands;
+mod embedded_sdk;
 pub mod formatter;
 pub mod group_history;
 pub mod http_client;

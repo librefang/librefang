@@ -943,47 +943,58 @@ impl LibreFangKernel {
     /// registry will silently retain the old capacity. This avoids a
     /// permit-loss race during live config reloads.
     pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
+        // Fast path: already constructed. Avoids hitting the registry on the
+        // hot dispatch path.
         if let Some(existing) = self.agents.agent_concurrency.get(&agent_id) {
             return existing.clone();
         }
-        // Single registry read so cap and session_mode come from the
-        // same manifest snapshot — avoids a TOCTOU window where two
-        // separate gets see manifests on either side of a swap.
-        let (manifest_cap, session_mode) = match self.agents.registry.get(agent_id) {
-            Some(e) => (
-                e.manifest.max_concurrent_invocations.map(|n| n as usize),
-                e.manifest.session_mode,
-            ),
-            None => (None, librefang_types::agent::SessionMode::default()),
-        };
-        // Clamp `persistent` agents to 1: parallel writes to the same
-        // session's message history are undefined. Emit a warn so a
-        // misconfigured manifest is visible at boot rather than silently
-        // ignored. The check lives here (the resolver) instead of a
-        // dedicated validator because the rule is structural to the
-        // dispatch path, not a TOML-time concern.
-        let resolved_cap = match (session_mode, manifest_cap) {
-            (librefang_types::agent::SessionMode::Persistent, Some(n)) if n > 1 => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    requested = n,
-                    "max_concurrent_invocations > 1 ignored — session_mode = \
-                     \"persistent\" cannot run parallel invocations safely; \
-                     clamped to 1. Set session_mode = \"new\" on the manifest \
-                     to enable parallel fires (per-trigger overrides cannot \
-                     escape the clamp — the per-agent semaphore is sized once \
-                     from the manifest default).",
-                );
-                1
-            }
-            (_, Some(n)) => n,
-            (_, None) => self.config.load().queue.concurrency.default_per_agent,
-        }
-        .max(1);
+        // Slow path: do the manifest read + clamp computation inside the
+        // entry closure so the construction (and its `tracing::warn!` clamp
+        // log) runs at most once per missed key. Two concurrent first-callers
+        // on the previous get-then-insert shape would both miss in `get()`,
+        // both perform a manifest read, and both emit a duplicate clamp warn
+        // before racing into `or_insert_with`; the entry API serializes the
+        // construction so only one of them computes `resolved_cap`.
         self.agents
             .agent_concurrency
             .entry(agent_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(resolved_cap)))
+            .or_insert_with(|| {
+                // Single registry read so cap and session_mode come from the
+                // same manifest snapshot — avoids a TOCTOU window where two
+                // separate gets see manifests on either side of a swap.
+                let (manifest_cap, session_mode) = match self.agents.registry.get(agent_id) {
+                    Some(e) => (
+                        e.manifest.max_concurrent_invocations.map(|n| n as usize),
+                        e.manifest.session_mode,
+                    ),
+                    None => (None, librefang_types::agent::SessionMode::default()),
+                };
+                // Clamp `persistent` agents to 1: parallel writes to the same
+                // session's message history are undefined. Emit a warn so a
+                // misconfigured manifest is visible at boot rather than silently
+                // ignored. The check lives here (the resolver) instead of a
+                // dedicated validator because the rule is structural to the
+                // dispatch path, not a TOML-time concern.
+                let resolved_cap = match (session_mode, manifest_cap) {
+                    (librefang_types::agent::SessionMode::Persistent, Some(n)) if n > 1 => {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            requested = n,
+                            "max_concurrent_invocations > 1 ignored — session_mode = \
+                             \"persistent\" cannot run parallel invocations safely; \
+                             clamped to 1. Set session_mode = \"new\" on the manifest \
+                             to enable parallel fires (per-trigger overrides cannot \
+                             escape the clamp — the per-agent semaphore is sized once \
+                             from the manifest default).",
+                        );
+                        1
+                    }
+                    (_, Some(n)) => n,
+                    (_, None) => self.config.load().queue.concurrency.default_per_agent,
+                }
+                .max(1);
+                Arc::new(tokio::sync::Semaphore::new(resolved_cap))
+            })
             .clone()
     }
 
@@ -1284,5 +1295,187 @@ impl LibreFangKernel {
                 "GC sweep completed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression cover for the `agent_concurrency_for` get-then-insert
+    //! audit finding (`docs/issues/agent-concurrency-get-then-insert.md`):
+    //! the manifest read + clamp computation must happen INSIDE
+    //! `entry().or_insert_with(...)` so two concurrent first-callers do not
+    //! both emit a `tracing::warn!` clamp log nor both read the registry.
+    //!
+    //! Previously the get-then-insert was idempotent (same cap → same
+    //! semaphore size) but doubled the work and the log noise under
+    //! contention. Now the entry API serializes the construction.
+
+    use super::*;
+    use librefang_types::agent::AgentManifest;
+    use std::io;
+    use std::sync::{Mutex, OnceLock};
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Shared in-memory buffer for the global tracing subscriber. Installed
+    /// exactly once (`OnceLock`) because `set_global_default` can only be
+    /// called once per process; subsequent calls would panic and cross-test
+    /// pollution would corrupt the counter. Tests that need to count their
+    /// own warns snapshot the buffer length before and after.
+    static TRACE_BUF: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+
+    #[derive(Clone)]
+    struct VecWriter(Arc<Mutex<Vec<u8>>>);
+    impl io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for VecWriter {
+        type Writer = VecWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Lazily install a process-wide tracing subscriber that captures every
+    /// formatted event into [`TRACE_BUF`]. `try_init` is a no-op if another
+    /// test binary in the same process already installed a global default —
+    /// in that case we cannot count warns and the assertion is skipped (the
+    /// pointer-equality assertion still runs and is the load-bearing check
+    /// for the entry API's atomicity).
+    fn try_install_trace_capture() -> Option<Arc<Mutex<Vec<u8>>>> {
+        let buf = TRACE_BUF
+            .get_or_init(|| Arc::new(Mutex::new(Vec::<u8>::new())))
+            .clone();
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        // `set_global_default` panics on second call; `try_init` returns an
+        // error instead so other tests with their own subscribers don't tank
+        // this one.
+        match tracing::subscriber::set_global_default(subscriber) {
+            Ok(()) => Some(buf),
+            Err(_) => None,
+        }
+    }
+
+    /// Eight concurrent first-callers on `agent_concurrency_for(same_agent_id)`
+    /// must:
+    ///
+    /// 1. all return the SAME `Arc<Semaphore>` (pointer equality), and
+    /// 2. emit AT MOST ONE clamp warn — pre-fix, two racers in the
+    ///    get-then-insert window would both compute `resolved_cap` and both
+    ///    log a duplicate warn before one of them won the
+    ///    `or_insert_with`.
+    ///
+    /// `multi_thread` flavor is required: tokio's `current_thread` runtime
+    /// would serialize the spawned tasks and hide the race entirely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn agent_concurrency_for_is_atomic_under_concurrent_first_callers() {
+        let captured = try_install_trace_capture();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-conc-atomic-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boots");
+
+        // Persistent + cap > 1 deliberately triggers the clamp branch — that
+        // is the codepath whose `tracing::warn!` we must observe firing only
+        // once. Spawning the agent itself may emit its own startup logs, so
+        // snapshot the buffer AFTER spawn and only count post-spawn growth.
+        let aid = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "atomic-resolver-test-agent".to_string(),
+                    description: "persistent + cap=4 forces the clamp branch".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    session_mode: librefang_types::agent::SessionMode::Persistent,
+                    max_concurrent_invocations: Some(4),
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent spawns");
+
+        let baseline_len = captured
+            .as_ref()
+            .map(|b| b.lock().unwrap().len())
+            .unwrap_or(0);
+
+        // Use a barrier so all eight tasks race the resolver as close to
+        // simultaneously as possible — otherwise the first call wins the
+        // entry construction before any others reach it and the race window
+        // never opens.
+        let kernel_arc = Arc::new(kernel);
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut handles = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let k = Arc::clone(&kernel_arc);
+            let b = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                b.wait().await;
+                k.agent_concurrency_for(aid)
+            }));
+        }
+        let sems: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task does not panic"))
+            .collect();
+
+        // (1) All eight resolutions must hand back the same `Arc` — that is
+        // the contract of `entry().or_insert_with(...)` regardless of which
+        // racer wins. Pre-fix this was already true; this assertion guards
+        // against a future refactor that drops the entry API.
+        let first = sems[0].clone();
+        for (i, s) in sems.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(&first, s),
+                "task {i} got a fresh semaphore; entry().or_insert_with() must \
+                 hand every concurrent first-caller the same Arc"
+            );
+        }
+        assert_eq!(
+            first.available_permits(),
+            1,
+            "persistent + cap=4 must clamp to 1 permit"
+        );
+
+        // (2) If we successfully installed the trace capture (i.e. no other
+        // test binary stole the global default first), count clamp warns
+        // since the spawn snapshot. The `or_insert_with` closure runs at
+        // most once, so the clamp warn message must appear exactly once.
+        if let Some(buf) = captured {
+            let after = buf.lock().unwrap();
+            let new_output = &after[baseline_len..];
+            let s = String::from_utf8_lossy(new_output);
+            let clamp_warns = s.matches("max_concurrent_invocations > 1 ignored").count();
+            assert_eq!(
+                clamp_warns, 1,
+                "exactly one clamp warn expected; saw {clamp_warns}. captured:\n{s}"
+            );
+        }
+
+        // Bring kernel back out of the Arc to call shutdown — only this task
+        // holds it now that all the racers have completed.
+        Arc::try_unwrap(kernel_arc)
+            .unwrap_or_else(|_| panic!("kernel Arc still has outstanding refs"))
+            .shutdown();
     }
 }

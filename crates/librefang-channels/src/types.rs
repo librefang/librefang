@@ -1,5 +1,63 @@
 //! Core channel bridge types.
 
+/// Kernel-internal channel names that derive `SessionId`s via
+/// `SessionId::for_channel(agent, name)`. Mirrors the constants in
+/// `librefang-kernel::kernel::{SYSTEM_CHANNEL_CRON,
+/// SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_WEBUI}` — duplicated
+/// here because `librefang-channels` cannot depend on
+/// `librefang-kernel` (the dependency goes the other way).
+///
+/// Audit: cron-channel-name-not-reserved — a custom channel adapter
+/// passing `channel = "cron"` (case-insensitively) used to derive the
+/// SAME `SessionId` as the cron-fire path, so two write streams could
+/// interleave into one session history. The `is_internal_cron` flag
+/// gated behaviour but not SessionId derivation.
+pub const RESERVED_SYSTEM_CHANNEL_NAMES: &[&str] = &["cron", "autonomous", "webui"];
+
+/// Returns true when `name` would collide with a kernel-internal
+/// system channel (case-insensitive). Used by `channel_type_str` to
+/// rename operator-supplied `Custom("cron")` (and friends) before
+/// they reach the SessionId derivation path. See
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`].
+pub fn is_reserved_system_channel(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    RESERVED_SYSTEM_CHANNEL_NAMES.iter().any(|r| *r == lower)
+}
+
+/// Sanitize a raw channel name before it reaches `SessionId`
+/// derivation. If `name` would collide with a kernel-internal system
+/// channel (`cron`, `autonomous`, `webui` — see
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`]), prefix it with `ext-` so it
+/// derives a disjoint `SessionId` via
+/// `SessionId::for_channel(agent, name)` instead of writing into the
+/// kernel's cron/autonomous/webui session history. Matching is
+/// case-insensitive — `for_channel` lowercases internally before
+/// hashing.
+///
+/// Audit: cron-channel-name-not-reserved. External callers that
+/// construct a `SenderContext` (HTTP request body, channel bridge
+/// adapter `ChannelType::Custom("cron")`, stored deferred-tool
+/// metadata) used to be able to drive `channel = "cron"` (or case
+/// variants) into `SessionId::for_channel` and collide with the
+/// internal cron-fire path — two independent write streams
+/// interleaving into one history. Every external `SenderContext`
+/// construction site must funnel through this helper.
+pub fn sanitize_channel_name(name: &str) -> String {
+    if is_reserved_system_channel(name) {
+        let renamed = format!("ext-{}", name.trim().to_ascii_lowercase());
+        tracing::warn!(
+            requested = %name,
+            renamed_to = %renamed,
+            "channel name collides with reserved kernel system channel; \
+             renaming to keep session history disjoint \
+             (audit: cron-channel-name-not-reserved)"
+        );
+        renamed
+    } else {
+        name.to_string()
+    }
+}
+
 /// Truncate `s` to at most `max_bytes`, respecting UTF-8 char boundaries.
 pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -364,6 +422,26 @@ pub struct SenderContext {
     /// inject `"is_internal_cron": true` through a JSON payload.
     #[serde(skip)]
     pub is_internal_cron: bool,
+    /// Set by the kernel's trusted internal system constructors (cron,
+    /// autonomous background tick, web UI) — never by external API callers.
+    ///
+    /// Marks a `SenderContext` whose `channel` deliberately equals a reserved
+    /// system name (`cron` / `autonomous` / `webui`). The kernel's
+    /// channel-derived session resolver uses this flag to skip the
+    /// reserved-name re-sanitization it applies to external callers, so the
+    /// internal paths keep deriving their legacy `for_channel(agent, "<name>")`
+    /// SessionIds and existing persistent history stays continuous. External
+    /// callers reach the resolver with this flag `false` and a reserved name
+    /// is rewritten to `ext-<name>`, keeping the two namespaces disjoint.
+    ///
+    /// Separate from [`Self::is_internal_cron`] on purpose:
+    /// `is_internal_cron` additionally gates `[SILENT]` marker stripping, which
+    /// must stay cron-only — the autonomous path must NOT strip `[SILENT]`.
+    ///
+    /// Intentionally excluded from serialization so external callers cannot
+    /// inject `"is_internal_system": true` through a JSON payload.
+    #[serde(skip)]
+    pub is_internal_system: bool,
 }
 
 /// Reference to a participant in a group chat.
@@ -492,6 +570,97 @@ pub struct ChannelStatus {
     pub messages_sent: u64,
     /// Last error message (if any).
     pub last_error: Option<String>,
+    /// Latest QR-login session state, when the adapter exposes one.
+    /// Skipped entirely from JSON when the adapter has never published
+    /// a QR event — preserves the historical `ChannelStatus` shape for
+    /// every non-QR channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr: Option<QrState>,
+}
+
+/// One QR-login session as seen by the daemon. Populated from the
+/// `qr_ready` / `qr_status` events that a sidecar emits during its
+/// authentication flow (e.g. WeChat iLink scan, WhatsApp Web pairing),
+/// and surfaced to the dashboard via `GET /api/channels/{name}/qr` so
+/// the operator can scan the code without having to read sidecar logs.
+///
+/// Lifecycle:
+/// 1. Sidecar emits `qr_ready` → `status = Pending`, `qr_code` set,
+///    optional `qr_url` populated when the platform exposes a
+///    pre-rendered scannable URL (Bluesky/WhatsApp Web), otherwise
+///    `None` and the dashboard renders `qr_code` to a canvas itself.
+/// 2. Sidecar polls the platform; intermediate progress → `qr_status`
+///    with `Scanning` (user scanned, awaiting confirm).
+/// 3. Terminal: `Confirmed` (login succeeded — sidecar continues with
+///    the obtained token), `Expired` (no scan in time), or `Failed`
+///    (network / API error). Dashboard stops polling.
+///
+/// `updated_at` advances on every state transition so dashboard polls
+/// can use it as a cheap diff signal — a stale `qr` whose
+/// `updated_at` is older than the poll's last-seen value is treated
+/// as no progress, not as a fresh QR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QrState {
+    pub status: QrStatusKind,
+    /// Raw QR payload — the string the user's phone scanner reads.
+    /// For WeChat this is an opaque iLink token; for WhatsApp Web it
+    /// is the pairing payload; for any other QR-style auth it is
+    /// whatever the platform documents as the "scan me" string.
+    pub qr_code: String,
+    /// Optional pre-formed URL. When present the dashboard renders
+    /// THIS into the canvas (often a deep-link the platform's mobile
+    /// app recognises explicitly); when absent it falls back to
+    /// encoding `qr_code` directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_url: Option<String>,
+    /// Operator-facing message — populated for `Failed` / `Expired`
+    /// (the error reason), and on `Confirmed` when the sidecar wants
+    /// to point at follow-up action ("set WECHAT_BOT_TOKEN to skip QR
+    /// next time").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// When the QR will/did expire — populated by the sidecar from
+    /// the platform's response (e.g. WeChat 5-minute window). The
+    /// dashboard uses this to show a countdown and stop polling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Wall-clock of the latest state transition. Acts as the
+    /// monotonic-ish ETag for poll-based consumers.
+    pub updated_at: DateTime<Utc>,
+}
+
+// NOTE: an earlier draft of this PR carried a `bot_token: Option<String>`
+// here so the dashboard could auto-persist on `Confirmed`. That was
+// dropped on review: the only safe persist path today is
+// `POST /api/channels/sidecar/{name}/configure`, which is a full-form
+// upsert that drops every schema-managed env key not in the payload —
+// silently wiping `WECHAT_ALLOWED_USERS` / `WECHAT_ACCOUNT_ID` / etc.
+// when called with only `{WECHAT_BOT_TOKEN}`. Until a narrow
+// `/api/channels/sidecar/{name}/secrets` endpoint exists, the sidecar
+// continues to log the captured token at DEBUG (see
+// `wechat.py::_qr_login`) and `QrState.message` instructs the operator
+// to copy it into `~/.librefang/secrets.env` themselves.
+
+/// QR-login lifecycle states. `snake_case` on the wire so the
+/// dashboard and the Python sidecar can each emit/consume the
+/// strings their convention prefers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QrStatusKind {
+    /// Sidecar has fetched a QR and is waiting for the user to scan.
+    /// This is the state set by `qr_ready`.
+    #[default]
+    Pending,
+    /// User scanned the QR; platform reports the login is in
+    /// progress (e.g. WeChat's confirm-on-phone step).
+    Scanning,
+    /// Login succeeded. `message` may carry follow-up instructions.
+    Confirmed,
+    /// QR window closed without a scan.
+    Expired,
+    /// Sidecar gave up — network error, API rejection, etc.
+    /// `message` carries the cause for the operator.
+    Failed,
 }
 
 // Re-export policy/format types from librefang-types for convenience.
@@ -1368,5 +1537,40 @@ mod tests {
         };
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.contains("Connection refused"));
+    }
+
+    /// Audit: cron-channel-name-not-reserved. The reservation list
+    /// must match (case-insensitively) the kernel-internal channel
+    /// names. A drift between this list and
+    /// `librefang-kernel::kernel::SYSTEM_CHANNEL_*` is fine
+    /// short-term but indicates an upstream channel migration —
+    /// keep the lists in sync.
+    #[test]
+    fn is_reserved_system_channel_matches_case_insensitively() {
+        for variant in [
+            "cron",
+            "CRON",
+            "Cron",
+            "  cron  ",
+            "autonomous",
+            "Autonomous",
+            "webui",
+            "WebUI",
+        ] {
+            assert!(
+                is_reserved_system_channel(variant),
+                "{variant:?} must be flagged as reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn is_reserved_system_channel_passes_through_normal_names() {
+        for name in ["telegram", "slack", "discord", "ext-cron", "custom-bot", ""] {
+            assert!(
+                !is_reserved_system_channel(name),
+                "{name:?} must NOT be flagged as reserved"
+            );
+        }
     }
 }

@@ -191,21 +191,27 @@ librefang config set-key ntfy                 # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Add to config:
+3. Add to config (ntfy runs as an out-of-process sidecar adapter, `librefang.sidecar.adapters.ntfy`):
 
 ```toml
-[channels.ntfy]
-url_env = "NTFY_URL"
-topic_env = "NTFY_TOPIC"
-# token_env = "NTFY_TOKEN"   # optional
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_SERVER_URL = "https://ntfy.sh"
+NTFY_TOPIC = "my-agent-topic"
+# NTFY_ACCOUNT_ID = "assistant"      # optional, multi-bot routing
 ```
 
-4. Restart the daemon.
+`NTFY_TOKEN` (auth, optional for public topics) belongs in `~/.librefang/secrets.env`.
+
+4. Hot-reload (`curl -X POST http://127.0.0.1:4545/api/channels/reload`) or restart the daemon.
 
 ### How It Works
 
-The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
+The sidecar subscribes to the topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
 
 ---
 

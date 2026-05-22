@@ -14,11 +14,57 @@
 use librefang_channels::types::SenderContext;
 use librefang_types::config::PrivacyMode;
 use parking_lot::RwLock;
-use regex_lite::Regex;
+// Audit: pii-filter-regex-no-size-cap. Switched from `regex_lite`
+// to the full `regex` crate so we can use `RegexBuilder` with
+// `size_limit` / `dfa_size_limit` on operator-supplied patterns.
+// regex_lite has no equivalent guard — an adversarial pattern like
+// `(a|a|...|a){50}` would push the parser into O(n²)+ compile
+// loops with the lite variant.
+use regex::{Regex, RegexBuilder};
 use std::collections::{HashMap, VecDeque};
 
 /// Placeholder used in `Redact` mode.
 const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
+
+/// Compiled-NFA size cap for operator-supplied PII patterns. 1 MiB
+/// is generous for any realistic PII rule; alternation-bomb /
+/// nested-quantifier patterns that would otherwise blow the
+/// compiler's working set hit this ceiling and are rejected.
+const PII_REGEX_SIZE_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Compiled-DFA cache cap. Same intent as `size_limit` but for the
+/// lazy-DFA cache `regex` uses to amortise scan cost. Bounded so a
+/// single pathological pattern can't dominate the cache.
+const PII_REGEX_DFA_SIZE_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Maximum source length for a PII regex. Compilation cost grows
+/// with pattern length; a hard cap on the source closes the
+/// `(a|a|…|a){50}` style alternation-bomb at parse time, before
+/// the cap-limited builder even runs.
+pub(crate) const PII_REGEX_MAX_SOURCE_LEN: usize = 4 * 1024; // 4 KiB
+
+/// Compile a PII regex with the size / source-length caps applied.
+/// Returns the compiled regex on success, or a human-readable error
+/// when the source is too long or the cap was exceeded during
+/// compilation. Used for both built-in and operator-supplied
+/// patterns so the bound is uniform.
+///
+/// Audit: pii-filter-regex-no-size-cap.
+pub(crate) fn compile_pii_regex(pat: &str) -> Result<Regex, String> {
+    if pat.len() > PII_REGEX_MAX_SOURCE_LEN {
+        return Err(format!(
+            "pattern source ({} bytes) exceeds PII_REGEX_MAX_SOURCE_LEN \
+             ({} bytes) — refusing to compile",
+            pat.len(),
+            PII_REGEX_MAX_SOURCE_LEN
+        ));
+    }
+    RegexBuilder::new(pat)
+        .size_limit(PII_REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(PII_REGEX_DFA_SIZE_LIMIT_BYTES)
+        .build()
+        .map_err(|e| e.to_string())
+}
 
 /// Maximum number of distinct PII values cached for stable pseudonyms.
 /// When exceeded, the oldest entries are evicted in FIFO order.
@@ -82,7 +128,11 @@ impl PiiFilter {
         let mut patterns = Vec::with_capacity(BUILTIN_PATTERNS.len() + custom_patterns.len());
 
         for (label, pat) in BUILTIN_PATTERNS {
-            match Regex::new(pat) {
+            // Built-in patterns go through the same `compile_pii_regex`
+            // size-cap path as operator input — keeps the bound uniform
+            // and means any future built-in that bumps against the
+            // ceiling shows up in CI test rather than at runtime.
+            match compile_pii_regex(pat) {
                 Ok(re) => patterns.push((label.to_string(), re)),
                 Err(e) => {
                     tracing::warn!(pattern = pat, error = %e, "Failed to compile built-in PII pattern");
@@ -91,7 +141,15 @@ impl PiiFilter {
         }
 
         for (i, pat) in custom_patterns.iter().enumerate() {
-            match Regex::new(pat) {
+            // Operator-supplied patterns: `compile_pii_regex` rejects
+            // any source > PII_REGEX_MAX_SOURCE_LEN at parse time and
+            // any compilation that would exceed PII_REGEX_SIZE_LIMIT_BYTES
+            // / PII_REGEX_DFA_SIZE_LIMIT_BYTES during build. The error
+            // path stays "log + skip" so a single bad rule does not
+            // disable the whole filter — but it now produces a tracing
+            // warn explicitly tagged with the cap that fired.
+            // Audit: pii-filter-regex-no-size-cap.
+            match compile_pii_regex(pat) {
                 Ok(re) => patterns.push((format!("custom_{i}"), re)),
                 Err(e) => {
                     tracing::warn!(pattern = pat, error = %e, "Failed to compile custom PII pattern — skipping");
@@ -472,5 +530,55 @@ mod tests {
         assert_eq!(index_to_label(25), "Z");
         assert_eq!(index_to_label(26), "AA");
         assert_eq!(index_to_label(27), "AB");
+    }
+
+    /// Audit: pii-filter-regex-no-size-cap. Sources past
+    /// `PII_REGEX_MAX_SOURCE_LEN` must be rejected at parse time,
+    /// before the cap-limited builder runs.
+    #[test]
+    fn compile_pii_regex_rejects_oversize_source() {
+        let pat = "a".repeat(PII_REGEX_MAX_SOURCE_LEN + 1);
+        let err = compile_pii_regex(&pat).unwrap_err();
+        assert!(
+            err.contains("PII_REGEX_MAX_SOURCE_LEN"),
+            "error message should name the source-length cap that fired: {err}"
+        );
+    }
+
+    /// Sanity that the `RegexBuilder.size_limit` API is actually
+    /// being threaded through. We can't reliably trigger the 1 MiB
+    /// PII cap with a small fixed pattern (compiler internals
+    /// vary), so this test feeds a known-large pattern through the
+    /// builder with a tiny cap to confirm the bound fires AT ALL
+    /// — guards against a future regex-crate refactor that
+    /// silently drops the parameter. A repeated character class
+    /// is sized predictably enough to hit a small cap.
+    #[test]
+    fn regex_builder_size_limit_path_actually_rejects() {
+        let pat = format!("[a-z]{{{}}}", 100); // [a-z]{100}
+        let err = RegexBuilder::new(&pat)
+            .size_limit(64) // 64 bytes — far below the compiled NFA
+            .build()
+            .unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("size") || msg.contains("limit") || msg.contains("compiled"),
+            "RegexBuilder must surface a size-limit error when the cap fires; got: {err}"
+        );
+    }
+
+    #[test]
+    fn compile_pii_regex_accepts_realistic_pii_patterns() {
+        // The actual built-in PII patterns must all compile under
+        // the cap — a regression that lowers the limit too far
+        // would otherwise silently break the entire filter.
+        for (label, pat) in BUILTIN_PATTERNS {
+            assert!(
+                compile_pii_regex(pat).is_ok(),
+                "built-in PII pattern `{label}` must compile under the size cap"
+            );
+        }
+        // And a typical operator-supplied US SSN-like pattern.
+        assert!(compile_pii_regex(r"\b\d{3}-\d{2}-\d{4}\b").is_ok());
     }
 }

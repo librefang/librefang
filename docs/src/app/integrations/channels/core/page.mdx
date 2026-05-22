@@ -427,21 +427,26 @@ librefang config set-key email                # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-3. Add to config:
+3. Add to config (email runs as an out-of-process sidecar adapter, `librefang.sidecar.adapters.email`):
 
 ```toml
-[channels.email]
-imap_host = "imap.gmail.com"
-imap_port = 993
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-username = "you@gmail.com"
-password_env = "EMAIL_PASSWORD"
-poll_interval = 30
-default_agent = "email-assistant"
+[[sidecar_channels]]
+name = "email"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.email"]
+channel_type = "email"
+[sidecar_channels.env]
+EMAIL_IMAP_HOST = "imap.gmail.com"
+EMAIL_SMTP_HOST = "smtp.gmail.com"
+EMAIL_USERNAME = "you@gmail.com"
+# EMAIL_IMAP_PORT = "993"
+# EMAIL_SMTP_PORT = "587"
+# EMAIL_POLL_INTERVAL_SECS = "30"
 ```
 
-4. Restart the daemon.
+`EMAIL_PASSWORD` belongs in `~/.librefang/secrets.env`.
+
+4. Hot-reload (`curl -X POST http://127.0.0.1:4545/api/channels/reload`) or restart the daemon.
 
 ### How It Works
 
@@ -507,18 +512,11 @@ within `limit` UTF-16 units. LibreFang sends the chunks as separate messages in 
 preserving all content. The split boundary respects Unicode scalar boundaries — no
 chunk ends in the middle of a character.
 
-### Disabling Automatic Splitting
+### Splitting and chunking are now sidecar-side
 
-For the still-in-process channels (Email, WhatsApp, …), set
-`split_long_messages = false` in the channel configuration to truncate
-rather than split long messages:
-
-```toml
-[channels.email]
-split_long_messages = false   # truncate instead of splitting
-```
-
-The default is `true`. The sidecar channels (Matrix, Discord, Slack,
-Telegram, …) always chunk at their respective platform limits — they
-own their own chunking inside the subprocess and the daemon-side knob
-does not reach them.
+Every channel adapter runs out-of-process as a sidecar now, so each
+sidecar owns its own chunking at platform limits — the pre-migration
+`split_long_messages` knob on `[channels.<name>]` is gone with the
+rest of `ChannelsConfig`. Sidecars cannot be told to truncate
+instead of split from the daemon side; if you need that behaviour
+for a custom sidecar, implement it inside that sidecar.

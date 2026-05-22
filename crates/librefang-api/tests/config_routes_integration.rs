@@ -973,20 +973,22 @@ async fn boot_fails_on_stale_channel_output_format_key() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
 
-    // A `[channels.google_chat]` block where `webhook_port` has the
-    // wrong shape (string instead of u16) — the canonical "stale
-    // renamed channel key" scenario the issue tracks: an older
-    // release tolerated a string here, the current schema is
-    // `u16`, and the operator's config still carries the old
+    // A `[[sidecar_channels]]` entry where `restart_initial_backoff_ms`
+    // has the wrong shape (string instead of `u64`) — the canonical
+    // "stale renamed channel key" scenario the issue tracks: an older
+    // release tolerated the string form, the current schema is the
+    // numeric form, and the operator's config still carries the old
     // value.
     //
-    // Witness rotated: whatsapp → webhook (both sidecar-migrated)
-    // → google_chat (the last remaining in-process channel with a
-    // numeric field suitable for the wrong-shape probe).
+    // Witness rotated: whatsapp → webhook → google_chat (all
+    // sidecar-migrated) → `[[sidecar_channels]]` itself, since
+    // every channel now lives under this array-of-tables and
+    // there are no in-process channels left to probe.
     let bad_toml = "\
-[channels.google_chat]
-service_account_env = \"GOOGLE_CHAT_SERVICE_ACCOUNT\"
-webhook_port = \"eighty-eighty\"
+[[sidecar_channels]]
+name = \"probe\"
+command = \"true\"
+restart_initial_backoff_ms = \"eighty-eighty\"
 ";
     std::fs::write(&config_path, bad_toml).expect("write bad config.toml");
 
@@ -1001,12 +1003,12 @@ webhook_port = \"eighty-eighty\"
     // TOML deserializer; we lock the substring contract on the field
     // name and the section path.
     assert!(
-        err.contains("webhook_port"),
+        err.contains("restart_initial_backoff_ms"),
         "boot error must name the offending channel field; got: {err}"
     );
     assert!(
-        err.contains("channels") && err.contains("google_chat"),
-        "boot error must locate the field under [channels.google_chat]; got: {err}"
+        err.contains("sidecar_channels"),
+        "boot error must locate the field under [[sidecar_channels]]; got: {err}"
     );
 
     // The critical regression guard from the issue: the failure must NOT

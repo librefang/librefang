@@ -198,8 +198,12 @@ use crate::types;
         // hit a fall-through 404 via the removed `find_channel_meta`
         // helper anyway. Sidecar channels go through
         // `configure_sidecar_channel` (POST /channels/sidecar/{name}/configure).
-        // whatsapp_qr_* / wechat_qr_* were removed earlier when those
-        // QR-pairing routes moved to the channel sidecars.
+        //
+        // Single read-only QR endpoint that replaces the four removed
+        // pre-migration ones (`/{wechat,whatsapp}/qr/{start,status}`).
+        // The sidecar drives the QR lifecycle; the dashboard reads
+        // `ChannelStatus.qr` through this projection.
+        routes::get_channel_qr,
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,

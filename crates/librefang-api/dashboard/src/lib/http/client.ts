@@ -36,6 +36,7 @@ export {
   getBudgetStatus,
   // channels & comms
   listChannels,
+  getChannelQr,
   getCommsTopology,
   listCommsEvents,
   // config & registry

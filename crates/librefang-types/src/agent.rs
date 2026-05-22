@@ -473,6 +473,19 @@ pub enum RunningSessionState {
 ///
 /// Controls whether background ticks, triggers, and `agent_send` calls
 /// reuse the agent's persistent session or create a fresh one each time.
+///
+/// **Strict-variant deserialization** (audit:
+/// session-mode-deserialize-fallback). serde's standard derive errors
+/// hard on unknown variants — there is no `#[serde(other)]` arm here
+/// and `#[default]` does NOT serve as a fallback for unknown variant
+/// strings (it only fires when `#[serde(default)]` is set on a
+/// container or field and the entire key is missing). The tests
+/// `session_mode_*` below pin this contract so a future refactor
+/// that adds a permissive `#[serde(other)]` arm gets caught — silently
+/// re-mapping `session_mode = "New"` (capitalised typo) to
+/// `Persistent` would run the operator straight into CLAUDE.md's
+/// warning that "concurrent writes to a single persistent session
+/// are undefined."
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
@@ -3466,5 +3479,72 @@ model = "claude-3-haiku-20240307"
                 "rejection for {name:?} should mention the reserved namespace; got: {msg}"
             );
         }
+    }
+
+    /// Audit: session-mode-deserialize-fallback. Pin serde's
+    /// strict-variant behaviour for `SessionMode`. A future refactor
+    /// that adds `#[serde(other)]` to silence "unknown variant" errors
+    /// would silently re-map operator typos (`"New"`, `"Default"`,
+    /// `""`) to whatever the catch-all arm chose — most likely
+    /// `Persistent` — and the operator who intended `New` semantics
+    /// would land on CLAUDE.md's "concurrent writes to a single
+    /// persistent session are undefined" warning.
+    #[test]
+    fn session_mode_deserializes_lowercase_persistent_and_new() {
+        let p: SessionMode = serde_json::from_str("\"persistent\"").unwrap();
+        assert_eq!(p, SessionMode::Persistent);
+        let n: SessionMode = serde_json::from_str("\"new\"").unwrap();
+        assert_eq!(n, SessionMode::New);
+    }
+
+    #[test]
+    fn session_mode_rejects_capitalised_variant_strings() {
+        // snake_case rename means uppercase / TitleCase variant names
+        // are NOT valid. The dispute resolution in the audit doc rests
+        // on this contract.
+        let err = serde_json::from_str::<SessionMode>("\"New\"").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown variant"),
+            "TitleCase `\"New\"` must error with `unknown variant`, got: {msg}"
+        );
+        let err = serde_json::from_str::<SessionMode>("\"PERSISTENT\"").unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn session_mode_rejects_empty_string_and_typos() {
+        // Common operator mistakes: blank, near-misses.
+        for bad in ["\"\"", "\"presistent\"", "\"none\"", "\"default\""] {
+            let err = serde_json::from_str::<SessionMode>(bad).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown variant"),
+                "{bad} must be rejected as unknown variant, got: {err}"
+            );
+        }
+    }
+
+    /// `Option<SessionMode>` with `#[serde(default)]` is the
+    /// per-trigger / per-cron-job override shape. `#[serde(default)]`
+    /// fires only when the entire key is missing — an explicit
+    /// `session_mode = "New"` typo still errors hard. This test
+    /// pins the boundary.
+    #[test]
+    fn optional_session_mode_default_fires_on_missing_key_not_unknown_string() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Wrap {
+            #[serde(default)]
+            session_mode: Option<SessionMode>,
+        }
+        // Key absent → None via #[serde(default)].
+        let w: Wrap = toml::from_str("").unwrap();
+        assert!(w.session_mode.is_none());
+        // Key present but capitalised → hard error, not silent None.
+        let err =
+            toml::from_str::<Wrap>("session_mode = \"New\"").expect_err("must reject capitalised");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
+        );
     }
 }

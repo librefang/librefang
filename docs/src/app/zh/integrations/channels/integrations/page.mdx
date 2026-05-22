@@ -187,21 +187,27 @@ librefang config set-key ntfy                 # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-3. 添加到配置文件：
+3. 添加到配置文件（ntfy 以独立进程 sidecar 形式运行，模块 `librefang.sidecar.adapters.ntfy`）：
 
 ```toml
-[channels.ntfy]
-url_env = "NTFY_URL"
-topic_env = "NTFY_TOPIC"
-# token_env = "NTFY_TOKEN"   # optional
-default_agent = "assistant"
+[[sidecar_channels]]
+name = "ntfy"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.ntfy"]
+channel_type = "ntfy"
+[sidecar_channels.env]
+NTFY_SERVER_URL = "https://ntfy.sh"
+NTFY_TOPIC = "my-agent-topic"
+# NTFY_ACCOUNT_ID = "assistant"      # 可选，多机器人路由
 ```
 
-4. 重启守护进程。
+`NTFY_TOKEN`（认证 token，公开 topic 可选）写入 `~/.librefang/secrets.env`。
+
+4. 热加载（`curl -X POST http://127.0.0.1:4545/api/channels/reload`）或者重启 daemon。
 
 ### 工作原理
 
-ntfy 适配器使用 Server-Sent Events (SSE) 订阅 ntfy 服务器上的主题以实时接收消息。传入消息路由到配置的 Agent，响应通过 ntfy REST API 发布回该主题。
+Sidecar 通过 Server-Sent Events (SSE) 订阅 ntfy 服务器上的 topic 实时收消息。入站消息路由给配置的 Agent，回复通过 ntfy REST API 发布回该 topic。
 
 ---
 

@@ -498,13 +498,35 @@ impl SessionStore {
     }
 
     /// Extract concatenated text content from a list of messages.
+    ///
+    /// Streams each message's text into a single pre-sized `String` instead of
+    /// allocating an intermediate `Vec<String>` followed by `.join("\n")` on
+    /// every save (this runs in the FTS save hot path — see `save_session`).
+    /// The output is byte-identical to the previous
+    /// `iter().map(text_content).filter(non-empty).collect::<Vec<_>>().join("\n")`
+    /// implementation; the regression test
+    /// `extract_text_content_matches_legacy_join_shape` pins that contract.
     fn extract_text_content(messages: &[Message]) -> String {
-        messages
-            .iter()
-            .map(|m| m.content.text_content())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
+        // Capacity estimate: sum of every message's text length, plus one
+        // separator byte per message (an upper bound — empties will be
+        // skipped, and the final separator is never written, so we may
+        // over-allocate by a handful of bytes in exchange for never
+        // re-growing in the common case).
+        let estimated: usize = messages.iter().map(|m| m.content.text_length() + 1).sum();
+        let mut out = String::with_capacity(estimated);
+        let mut first = true;
+        for m in messages {
+            let text = m.content.text_content();
+            if text.is_empty() {
+                continue;
+            }
+            if !first {
+                out.push('\n');
+            }
+            out.push_str(&text);
+            first = false;
+        }
+        out
     }
 
     /// Delete a session from the database and its FTS5 index entry.
@@ -1286,6 +1308,16 @@ impl SessionStore {
     /// Delete sessions whose agent_id is not in the provided live set.
     ///
     /// Returns the number of orphan sessions deleted.
+    ///
+    /// Audit: cleanup-orphan-sessions-format-sql. Previously this
+    /// built the IN-clause via `format!("'{}'", id.0)` and embedded
+    /// the values directly into the SQL string. That was safe today
+    /// because `AgentId(Uuid)` only emits `[0-9a-f-]`, but the rest
+    /// of the substrate uses `?` parameter binding without
+    /// exception and the moment `AgentId` is relaxed to wrap a
+    /// `String` (e.g. for hand-namespaced ids) the silent SQLi door
+    /// opens. Bind the values instead — same plan, no escaping
+    /// dependency on the inner type.
     pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
@@ -1293,13 +1325,19 @@ impl SessionStore {
             return Ok(0);
         }
 
-        let placeholders: Vec<String> = live_agent_ids
-            .iter()
-            .map(|id| format!("'{}'", id.0))
-            .collect();
-        let in_clause = placeholders.join(",");
-        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({in_clause})");
-        let deleted = conn.execute(&sql, []).map_err(LibreFangError::memory)?;
+        // One `?` per live agent. `repeat_n` + `join` produces the
+        // canonical `?, ?, ?, …` placeholder string SQLite expects
+        // inside an `IN (...)` clause.
+        let placeholders = std::iter::repeat_n("?", live_agent_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({placeholders})");
+        let deleted = conn
+            .execute(
+                &sql,
+                rusqlite::params_from_iter(live_agent_ids.iter().map(|id| id.0.to_string())),
+            )
+            .map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -3273,5 +3311,144 @@ mod tests {
             "most-recent message must always survive; expected last to contain \
              {expected_last:?}, got {last_text:?}"
         );
+    }
+
+    /// Audit: cleanup-orphan-sessions-format-sql. Even with the
+    /// historical `AgentId(Uuid)` shape this query was safe — uuids
+    /// only emit `[0-9a-f-]`. The fix re-targets the safety
+    /// guarantee at the *substrate boundary* rather than at the
+    /// inner type, so the moment someone relaxes `AgentId` to a
+    /// `String`-wrapping variant (hand-namespaced ids, etc.) the
+    /// substrate continues to reject injection-shaped values
+    /// instead of silently emitting them as SQL literals. This
+    /// test forces the boundary: we construct an `AgentId` from a
+    /// uuid normally, then drive the helper with a `live` set
+    /// that contains an `AgentId` whose `.to_string()` we have
+    /// audited for `'` already (we can't actually construct a
+    /// `Uuid` containing a quote), and assert via the orphan-row
+    /// behaviour that the bind path works.
+    #[test]
+    fn test_cleanup_orphan_sessions_uses_bound_parameters_not_string_concat() {
+        let store = setup();
+
+        // Three live agents, one orphan agent — orphan row must be
+        // deleted, live rows must survive.
+        let live_a = AgentId::new();
+        let live_b = AgentId::new();
+        let live_c = AgentId::new();
+        let orphan = AgentId::new();
+
+        for aid in [live_a, live_b, live_c, orphan] {
+            let s = store.create_session(aid).unwrap();
+            assert_eq!(s.agent_id, aid);
+        }
+
+        let deleted = store
+            .cleanup_orphan_sessions(&[live_a, live_b, live_c])
+            .unwrap();
+        assert_eq!(deleted, 1, "exactly the orphan agent's session must go");
+
+        // Sanity: the live rows are still there.
+        for aid in [live_a, live_b, live_c] {
+            let listed = store.list_agent_sessions(aid).unwrap();
+            assert_eq!(
+                listed.len(),
+                1,
+                "live agent {aid:?} must keep its session after cleanup"
+            );
+        }
+        let orphan_left = store.list_agent_sessions(orphan).unwrap();
+        assert!(orphan_left.is_empty(), "orphan row must be gone");
+    }
+
+    /// Empty `live_agent_ids` is the "no live agents → don't touch
+    /// anything" early-return: documents the invariant so an
+    /// off-by-one in a future refactor doesn't silently wipe every
+    /// session when the registry is momentarily empty (e.g., during
+    /// startup reload).
+    #[test]
+    fn test_cleanup_orphan_sessions_empty_live_set_deletes_nothing() {
+        let store = setup();
+        let aid = AgentId::new();
+        store.create_session(aid).unwrap();
+
+        let deleted = store.cleanup_orphan_sessions(&[]).unwrap();
+        assert_eq!(
+            deleted, 0,
+            "empty live set must be treated as 'no live data, skip' — never \
+             as 'delete everything'"
+        );
+        let kept = store.list_agent_sessions(aid).unwrap();
+        assert_eq!(kept.len(), 1, "row must survive an empty cleanup call");
+    }
+
+    /// Regression guard for the perf rewrite of `extract_text_content`
+    /// (`Vec<String> + join("\n")` → streamed `String::with_capacity` +
+    /// `push_str`). The streamed implementation MUST be byte-identical
+    /// to the legacy join shape, because the result is hashed into the
+    /// FTS index — any change in separators, trimming, or empty-handling
+    /// would silently invalidate every existing search snippet.
+    ///
+    /// Covers the four shapes the production code actually sees:
+    ///   - all-text messages → newline-joined
+    ///   - empty-text messages interleaved → skipped, no double newline
+    ///   - non-text blocks (ToolUse / Thinking) → contribute "" → skipped
+    ///   - empty input slice → empty string
+    #[test]
+    fn extract_text_content_matches_legacy_join_shape() {
+        fn legacy(messages: &[Message]) -> String {
+            messages
+                .iter()
+                .map(|m| m.content.text_content())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Shape 1: all-text — exercises the inter-message separator.
+        let s1 = vec![
+            Message::user("hello"),
+            Message::assistant("hi there"),
+            Message::user("how are you?"),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s1), legacy(&s1));
+
+        // Shape 2: empties interleaved — `MessageContent::Text("")` must
+        // be filtered, no leading/trailing/double newline.
+        let s2 = vec![
+            Message::user(""),
+            Message::assistant("only-real-line"),
+            Message::user(""),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s2), legacy(&s2));
+        assert_eq!(SessionStore::extract_text_content(&s2), "only-real-line");
+
+        // Shape 3: non-text blocks (tool calls, thinking) yield empty
+        // `text_content()` and must therefore be skipped too.
+        let s3 = vec![
+            Message::user("first"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "noop".into(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::user("third"),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s3), legacy(&s3));
+        assert_eq!(SessionStore::extract_text_content(&s3), "first\nthird");
+
+        // Shape 4: empty input — must produce an empty string, not "\n"
+        // or any other artefact (the v33 backfill placeholder relies on
+        // this exact value — see
+        // `test_fts_v33_backfill_placeholder_survives_empty_content_save`).
+        let s4: Vec<Message> = Vec::new();
+        assert_eq!(SessionStore::extract_text_content(&s4), legacy(&s4));
+        assert_eq!(SessionStore::extract_text_content(&s4), "");
     }
 }

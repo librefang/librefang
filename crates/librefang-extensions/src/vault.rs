@@ -704,12 +704,74 @@ impl CredentialVault {
         // file currently holds — which races between parallel tests
         // (#TOTP flake) and surprises CI/headless deployments that set
         // the env var as the source of truth.
-        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
-            let key_b64 = Zeroizing::new(key_b64);
-            return decode_master_key(&key_b64);
+        // Audit: vault-key-env-overrides-keyring. Resolve BOTH
+        // sources up front so the choice — and any disagreement
+        // between them — is visible in the daemon log instead of
+        // env silently winning. Precedence stays env-first to
+        // preserve the documented behaviour and the test-stability
+        // rationale in the original comment above; what changes is
+        // that an operator who set the env var and ALSO has a
+        // different value in the keyring sees a single WARN line
+        // naming the divergence on the next unlock, instead of
+        // never finding out their keyring is being ignored.
+        let env_key = std::env::var(VAULT_KEY_ENV).ok().map(Zeroizing::new);
+        // Side-effect-free peek when the env var is set: the divergence
+        // diagnostic must NOT trigger keyring writes / OS Keychain prompts
+        // on env-only (headless / CI / Docker) deployments. Only the
+        // genuine no-env fallback path is allowed to auto-migrate legacy
+        // keyring files (v1/v2 → v3, macOS opt-out mirror).
+        let keyring_key = if env_key.is_some() {
+            load_keyring_key_inner(false).ok()
+        } else {
+            load_keyring_key().ok()
+        };
+
+        match classify_master_key_sources(
+            env_key.as_ref().map(|s| s.as_str()),
+            keyring_key.as_ref().map(|s| s.as_str()),
+        ) {
+            MasterKeySource::EnvOverridesDifferentKeyring => {
+                // The classic divergence case. WARN once per
+                // resolution so operators investigating credential
+                // weirdness find this line by grepping for
+                // VAULT_KEY_ENV. Values stay redacted — log only
+                // the fact that they differ.
+                tracing::warn!(
+                    target: "vault::keyring",
+                    env = %VAULT_KEY_ENV,
+                    "both LIBREFANG_VAULT_KEY env var AND OS keyring are set, \
+                     and they DISAGREE; env wins (current behaviour). \
+                     If you intended the keyring value to take effect, unset \
+                     the env var on the daemon process."
+                );
+            }
+            MasterKeySource::EnvMatchesKeyring => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "env LIBREFANG_VAULT_KEY matches OS keyring value; using env source"
+                );
+            }
+            MasterKeySource::EnvOnly => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "vault master key sourced from LIBREFANG_VAULT_KEY env var \
+                     (no OS keyring entry present)"
+                );
+            }
+            MasterKeySource::KeyringOnly => {
+                tracing::debug!(
+                    target: "vault::keyring",
+                    "vault master key sourced from OS keyring \
+                     (no LIBREFANG_VAULT_KEY env var set)"
+                );
+            }
+            MasterKeySource::Neither => {}
         }
 
-        if let Ok(key_b64) = load_keyring_key() {
+        if let Some(key_b64) = env_key {
+            return decode_master_key(&key_b64);
+        }
+        if let Some(key_b64) = keyring_key {
             return decode_master_key(&key_b64);
         }
 
@@ -1102,12 +1164,68 @@ fn store_keyring_key_to_file(key_b64: &str) -> Result<(), String> {
 /// use `Argon2id(SHA-512(domain || random_id || os_material)[..32], salt)`.
 ///
 /// We retain the v2 read path for one release cycle to allow auto-migration
+/// Classification of which master-key source was available at
+/// resolution time. Used by `resolve_master_key` to emit the right
+/// observability signal. Audit: vault-key-env-overrides-keyring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MasterKeySource {
+    /// Both env and keyring set, but the two values disagree —
+    /// env wins (preserves historical precedence), but the
+    /// divergence is WARN-logged so an operator who expected the
+    /// keyring value to take effect can find out.
+    EnvOverridesDifferentKeyring,
+    /// Both env and keyring set, same value — env source used
+    /// (no divergence to warn about).
+    EnvMatchesKeyring,
+    /// Only env present.
+    EnvOnly,
+    /// Only keyring present.
+    KeyringOnly,
+    /// Neither — `resolve_master_key` returns `VaultLocked`.
+    Neither,
+}
+
+pub(crate) fn classify_master_key_sources(
+    env: Option<&str>,
+    keyring: Option<&str>,
+) -> MasterKeySource {
+    match (env, keyring) {
+        (Some(e), Some(k)) if e != k => MasterKeySource::EnvOverridesDifferentKeyring,
+        (Some(_), Some(_)) => MasterKeySource::EnvMatchesKeyring,
+        (Some(_), None) => MasterKeySource::EnvOnly,
+        (None, Some(_)) => MasterKeySource::KeyringOnly,
+        (None, None) => MasterKeySource::Neither,
+    }
+}
+
 /// on first daemon restart post-upgrade.  Plan to remove the v2 branch after
 /// release N+2 (tracked in #4159 follow-up).
 ///
 /// On a successful v2 decrypt the file is atomically re-wrapped as v3 so
 /// subsequent loads take the fast v3 path.
+/// Auto-migrating loader used by the no-env fallback path. Reads the
+/// master key from the OS keyring / file store and rewrites legacy
+/// (v1/v2) keyring files to v3 in place, plus the macOS opt-out
+/// migration. Side effects are intentional here.
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
+    load_keyring_key_inner(true)
+}
+
+/// Shared keyring loader.
+///
+/// When `migrate == true`, behaves exactly like the historical
+/// `load_keyring_key`: rewrites legacy v1/v2 files to v3, and on the
+/// macOS opt-out path force-reads the OS keyring and mirrors it to the
+/// file store.
+///
+/// When `migrate == false`, performs a SIDE-EFFECT-FREE peek: it still
+/// reads and decrypts the existing keyring value, but never calls
+/// `store_keyring_key` / `store_keyring_key_to_file` and never takes the
+/// `os_keyring::try_load_force()` macOS-migration branch (which can
+/// trigger an OS Keychain prompt). This lets `resolve_master_key`
+/// compare env vs keyring for the divergence diagnostic without
+/// incurring keyring writes/prompts on env-only deployments.
+fn load_keyring_key_inner(migrate: bool) -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
         // OS keyring first (issue #3178). `try_load` returns None for both
@@ -1136,7 +1254,12 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             // fact enabled, `try_load` already attempted this and failed,
             // so `try_load_force` will return `None` immediately and we
             // fall through to the missing-file error.
-            if !should_use_os_keyring() {
+            //
+            // Skipped entirely on a non-migrating peek (`migrate == false`):
+            // `try_load_force` can trigger an OS Keychain prompt and the
+            // mirror writes to disk — both forbidden side effects when we
+            // are only comparing env vs keyring.
+            if migrate && !should_use_os_keyring() {
                 if let Some(s) = os_keyring::try_load_force() {
                     info!(
                         "Migrated master key from OS keyring to file-based store at {:?}; \
@@ -1247,12 +1370,16 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
                         )?;
 
                     // Re-wrap with v3 fingerprint and atomically replace the file.
-                    if let Err(e) = store_keyring_key(&key_str) {
-                        warn!("Failed to migrate keyring from v2 to v3 format: {e}");
-                    } else {
-                        info!(
-                            "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
-                        );
+                    // Suppressed on a non-migrating peek (`migrate == false`):
+                    // we return the decrypted value without rewriting the file.
+                    if migrate {
+                        if let Err(e) = store_keyring_key(&key_str) {
+                            warn!("Failed to migrate keyring from v2 to v3 format: {e}");
+                        } else {
+                            info!(
+                                "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
+                            );
+                        }
                     }
 
                     return Ok(Zeroizing::new(key_str));
@@ -1285,17 +1412,22 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             .collect();
         let key_str = String::from_utf8(key_bytes).map_err(|e| format!("legacy utf8: {e}"))?;
 
-        // Re-store with proper encryption to auto-migrate
-        if let Err(e) = store_keyring_key(&key_str) {
-            warn!("Failed to migrate legacy keyring to v3 format: {e}");
-        } else {
-            info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
+        // Re-store with proper encryption to auto-migrate.
+        // Suppressed on a non-migrating peek (`migrate == false`): we
+        // return the decrypted value without rewriting the file.
+        if migrate {
+            if let Err(e) = store_keyring_key(&key_str) {
+                warn!("Failed to migrate legacy keyring to v3 format: {e}");
+            } else {
+                info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
+            }
         }
 
         Ok(Zeroizing::new(key_str))
     }
     #[cfg(test)]
     {
+        let _ = migrate;
         Err("Keyring not available in tests".to_string())
     }
 }
@@ -3260,5 +3392,52 @@ mod tests {
         // ENOENT (and the updated collector logs that path explicitly).
         let pick = resolve_command(&["definitely-not-a-real-command-1234567890"]);
         assert_eq!(pick, "definitely-not-a-real-command-1234567890");
+    }
+
+    /// Audit: vault-key-env-overrides-keyring. The classification
+    /// helper is the single source of truth for which observability
+    /// signal `resolve_master_key` emits. Pinning its truth table
+    /// here keeps the WARN-on-divergence contract testable without
+    /// having to spin up a tracing subscriber and capture log lines.
+    #[test]
+    fn classify_master_key_sources_flags_divergence() {
+        assert_eq!(
+            classify_master_key_sources(Some("env-key"), Some("keyring-key")),
+            MasterKeySource::EnvOverridesDifferentKeyring,
+            "differing env + keyring must surface as the WARN-eligible class"
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_agreement() {
+        assert_eq!(
+            classify_master_key_sources(Some("same"), Some("same")),
+            MasterKeySource::EnvMatchesKeyring,
+            "identical env + keyring must NOT WARN — no divergence to flag"
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_env_only() {
+        assert_eq!(
+            classify_master_key_sources(Some("env-key"), None),
+            MasterKeySource::EnvOnly
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_keyring_only() {
+        assert_eq!(
+            classify_master_key_sources(None, Some("keyring-key")),
+            MasterKeySource::KeyringOnly
+        );
+    }
+
+    #[test]
+    fn classify_master_key_sources_handles_neither() {
+        assert_eq!(
+            classify_master_key_sources(None, None),
+            MasterKeySource::Neither
+        );
     }
 }

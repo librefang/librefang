@@ -531,8 +531,10 @@ librefang skill list                    # 列出已安装的技能
 librefang skill search <query>          # 在 FangHub 中搜索
 librefang skill create                  # 生成技能脚手架
 
-librefang channel list                  # 列出 Channel 状态
-librefang channel setup <channel>       # 交互式配置向导
+librefang channel list                  # 列出已配置的通道
+librefang channel setup <channel>       # 按 schema 走 sidecar 配置
+librefang channel reload                # 改完 config.toml 后热加载
+librefang channel rm <channel>          # 删除一条 sidecar + reload
 
 librefang config show                   # 查看当前配置
 librefang config edit                   # 在编辑器中打开配置

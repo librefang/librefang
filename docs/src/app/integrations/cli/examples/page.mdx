@@ -200,22 +200,27 @@ librefang skill remove code-reviewer
 
 ### Channel setup
 
+Every channel runs as an out-of-process sidecar adapter. Configuration
+lives in `~/.librefang/config.toml` under `[[sidecar_channels]]`
+entries; the `librefang channel` subcommand group drives the
+surviving daemon endpoints (and the dashboard's **Channels** page
+exposes the same flow with a schema-driven form).
+
 ```bash
-# Interactive channel picker
-librefang channel setup
-
-# Direct channel setup
-librefang channel setup telegram
-
-# Check channel status
+# Show configured channels (NAME, KIND, CONFIGURED, TOKEN, 24H MSGS)
 librefang channel list
 
-# Test a channel
-librefang channel test telegram
+# Schema-driven configure for one sidecar — prompts per field
+librefang channel setup telegram
 
-# Enable/disable channels
-librefang channel enable discord
-librefang channel disable slack
+# Picker over unconfigured sidecars
+librefang channel setup
+
+# Remove a sidecar entry from config.toml + hot-reload
+librefang channel rm telegram
+
+# Hot-reload after manual config.toml edits
+librefang channel reload
 ```
 
 ### Configuration

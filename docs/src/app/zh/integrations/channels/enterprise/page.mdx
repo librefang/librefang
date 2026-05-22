@@ -106,20 +106,27 @@ librefang config set-key google_chat          # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-5. 添加到配置文件：
+5. 添加到配置文件（Google Chat 以独立进程 sidecar 形式运行，模块 `librefang.sidecar.adapters.google_chat`）：
 
 ```toml
-[channels.google_chat]
-sa_key_env = "GOOGLE_CHAT_SA_KEY"
-space_env = "GOOGLE_CHAT_SPACE"
-default_agent = "ops"
+[[sidecar_channels]]
+name = "google_chat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.google_chat"]
+channel_type = "google_chat"
+[sidecar_channels.env]
+GOOGLE_CHAT_WEBHOOK_PORT = "8090"
+# GOOGLE_CHAT_SPACE_IDS = "spaces/AAAA,spaces/BBBB"   # 可选，空 = 所有 space
+# GOOGLE_CHAT_ACCOUNT_ID = "ops"                      # 可选，多机器人路由
 ```
 
-6. 重启守护进程。
+`GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`（完整的 JSON blob 字符串 —— 不是路径）写入 `~/.librefang/secrets.env`。
+
+6. 热加载（`curl -X POST http://127.0.0.1:4545/api/channels/reload`）或者重启 daemon。
 
 ### 工作原理
 
-Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 webhook 回调接收消息。响应通过 Google Chat REST API 使用传入消息中的 space 和 thread 标识符发送。
+Sidecar 通过服务账户 JSON 认证，在 `GOOGLE_CHAT_WEBHOOK_PORT`（默认 8090）上跑自己的 HTTP webhook 服务。Google Cloud Console 上 Bot 配置的 messaging endpoint 改成 `https://<host>:<port>/webhook`。回复通过 Google Chat REST API 用入站消息里携带的 space + thread ID 发回。
 
 ---
 

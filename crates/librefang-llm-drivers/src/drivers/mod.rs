@@ -83,16 +83,27 @@ impl DriverCache {
 
     /// Build a deterministic cache key from the driver config fields that
     /// affect which concrete driver instance is produced.
+    ///
+    /// The api_key is hashed (not stored verbatim) so secrets don't sit
+    /// in HashMap keys. Audit: drivercache-defaulthasher — switched
+    /// from `std::collections::hash_map::DefaultHasher` (64-bit, prone
+    /// to birthday collisions at ~2^32 entries, and credential-pool
+    /// deployments now ship hundreds of keys per provider across
+    /// multiple instances) to SHA-256 truncated to 128 bits of hex.
+    /// 128 bits puts the birthday-collision frontier past 2^64
+    /// entries — orders of magnitude beyond any realistic pool size
+    /// — so the cache can no longer hand back a driver instance
+    /// built for a different API key. Truncation is fine here: this
+    /// is collision avoidance over a bounded keyspace, not preimage
+    /// resistance.
     fn cache_key(config: &DriverConfig) -> String {
-        // We include provider, api_key hash (not the raw key), and base_url.
-        // Hashing the api_key avoids storing secrets as map keys while still
-        // distinguishing configs that differ only by credential.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        config.api_key.as_deref().unwrap_or("").hash(&mut hasher);
-        let key_hash = hasher.finish();
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(config.api_key.as_deref().unwrap_or("").as_bytes());
+        let digest = hasher.finalize();
+        // 128 bits = 32 hex chars — compact in log lines but takes
+        // birthday collisions out of the threat model.
+        let key_hash = hex::encode(&digest[..16]);
 
         format!(
             "{}|{}|{}|{}|{}",
@@ -1108,6 +1119,88 @@ pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit: drivercache-defaulthasher. The cache key embeds a
+    /// hashed api_key so secrets don't sit in HashMap keys, but the
+    /// hash MUST be wide enough that birthday collisions are
+    /// infeasible. These tests pin the new SHA-256-truncated-to-128-
+    /// bit shape so a future refactor that swaps back to
+    /// DefaultHasher (or any 64-bit digest) gets caught by CI.
+    #[test]
+    fn cache_key_api_key_segment_is_128_bit_hex_not_64_bit_decimal() {
+        let cfg = DriverConfig {
+            provider: "openai".to_string(),
+            api_key: Some("sk-test".to_string()),
+            ..DriverConfig::default()
+        };
+        let key = DriverCache::cache_key(&cfg);
+        // Shape: "openai|<hex>|||0"
+        let parts: Vec<&str> = key.split('|').collect();
+        assert_eq!(parts.len(), 5, "cache key shape: {key}");
+        let hash_segment = parts[1];
+        assert_eq!(
+            hash_segment.len(),
+            32,
+            "api_key hash segment must be 32 hex chars (128 bits) — \
+             {hash_segment:?} of len {}",
+            hash_segment.len()
+        );
+        assert!(
+            hash_segment.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash segment must be lowercase hex, got {hash_segment:?}"
+        );
+    }
+
+    #[test]
+    fn cache_key_distinguishes_distinct_api_keys() {
+        // Two configs that differ ONLY by api_key must produce
+        // distinct cache keys. The DefaultHasher path could in
+        // theory survive this trivial test too, but it's a sanity
+        // check that the swap didn't accidentally produce a
+        // constant.
+        let a = DriverConfig {
+            provider: "openai".to_string(),
+            api_key: Some("sk-key-a".to_string()),
+            ..DriverConfig::default()
+        };
+        let b = DriverConfig {
+            api_key: Some("sk-key-b".to_string()),
+            ..a.clone()
+        };
+        assert_ne!(DriverCache::cache_key(&a), DriverCache::cache_key(&b));
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_across_calls() {
+        // The SHA-256 path must be deterministic — same input
+        // produces the same key on every call. DefaultHasher would
+        // (per HashMap rules) produce process-local but
+        // deterministic-within-process digests, so this test
+        // overlaps with the previous shape, but it also pins
+        // process-local determinism in case someone swaps in a
+        // randomised hasher later.
+        let cfg = DriverConfig {
+            provider: "openai".to_string(),
+            api_key: Some("sk-test".to_string()),
+            ..DriverConfig::default()
+        };
+        let k1 = DriverCache::cache_key(&cfg);
+        let k2 = DriverCache::cache_key(&cfg);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_handles_missing_api_key_without_panic() {
+        // Some providers (ollama, local) don't require an api_key.
+        // The empty-key hash path must produce a valid key.
+        let cfg = DriverConfig {
+            provider: "ollama".to_string(),
+            api_key: None,
+            ..DriverConfig::default()
+        };
+        let key = DriverCache::cache_key(&cfg);
+        assert!(key.starts_with("ollama|"));
+    }
 
     #[test]
     fn test_provider_defaults_groq() {

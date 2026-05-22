@@ -78,6 +78,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from .. import logging as log
@@ -412,23 +413,40 @@ class WeChatAdapter(SidecarAdapter):
 
     # ---- QR login ----------------------------------------------------
 
-    def _qr_login(self) -> str:
+    def _qr_login(
+        self,
+        emit: Optional[Callable[[dict], None]] = None,
+    ) -> str:
         """Run the QR login flow. Returns the bot_token on success.
         Raises RuntimeError on timeout / unrecoverable failure.
-        Mirrors wechat.rs:174-247."""
+        Mirrors wechat.rs:174-247.
+
+        When ``emit`` is provided, also surface the QR lifecycle to the
+        daemon via the ``qr_ready`` / ``qr_status`` sidecar events so
+        the dashboard's ``GET /api/channels/{name}/qr`` projection can
+        show the operator the scannable code without them having to
+        read sidecar logs. The parameter is optional so the existing
+        tests that drive ``_qr_login`` directly with no emit callback
+        continue to work."""
         log.info("wechat starting QR code login flow")
         status, body, raw, _ = self._get(
             "/ilink/bot/get_bot_qrcode?bot_type=3",
         )
         if status != 200 or not isinstance(body, dict):
             snippet = raw[:200].decode("utf-8", "replace") if raw else ""
-            raise RuntimeError(
+            msg = (
                 f"wechat QR code request failed "
-                f"(status={status}): {snippet}",
+                f"(status={status}): {snippet}"
             )
+            if emit is not None:
+                emit(protocol.qr_status("failed", message=msg))
+            raise RuntimeError(msg)
         qrcode = body.get("qrcode")
         if not isinstance(qrcode, str) or not qrcode:
-            raise RuntimeError("wechat QR response missing 'qrcode'")
+            msg = "wechat QR response missing 'qrcode'"
+            if emit is not None:
+                emit(protocol.qr_status("failed", message=msg))
+            raise RuntimeError(msg)
 
         log.info(
             "wechat QR code ready — scan with the WeChat app to log in",
@@ -436,23 +454,49 @@ class WeChatAdapter(SidecarAdapter):
         )
 
         encoded_qr = urllib.parse.quote(qrcode, safe="")
-        deadline = time.monotonic() + QR_LOGIN_TIMEOUT_SECS
+        deadline_monotonic = time.monotonic() + QR_LOGIN_TIMEOUT_SECS
+        # ISO 8601 expiry derived from wall clock for the daemon /
+        # dashboard projection — monotonic is for the local timeout
+        # check only and is meaningless across process boundaries.
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=QR_LOGIN_TIMEOUT_SECS,
+        )
+        if emit is not None:
+            emit(protocol.qr_ready(
+                qr_code=qrcode,
+                # iLink does not surface a pre-formed deep-link URL —
+                # the dashboard renders the raw qrcode string itself.
+                qr_url=None,
+                message=(
+                    "Scan with the WeChat app — 5-minute window"
+                ),
+                expires_at=expires_at.isoformat(),
+            ))
+
         backoff = self.initial_backoff_secs
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline_monotonic:
             if self._shutdown.is_set():
+                if emit is not None:
+                    emit(protocol.qr_status(
+                        "failed",
+                        message="QR login cancelled by shutdown",
+                    ))
                 raise RuntimeError("wechat QR login cancelled by shutdown")
             status, body, _raw, _hdrs = self._get(
                 f"/ilink/bot/get_qrcode_status?qrcode={encoded_qr}",
             )
             if status == 200 and isinstance(body, dict):
-                qr_status = body.get("status")
-                if qr_status == "confirmed":
+                qr_status_str = body.get("status")
+                if qr_status_str == "confirmed":
                     token = body.get("bot_token")
                     if not isinstance(token, str) or not token:
-                        raise RuntimeError(
-                            "wechat QR confirmed but bot_token missing",
-                        )
+                        msg = "wechat QR confirmed but bot_token missing"
+                        if emit is not None:
+                            emit(protocol.qr_status(
+                                "failed", message=msg,
+                            ))
+                        raise RuntimeError(msg)
                     # The Rust adapter relied on the dashboard's
                     # /channels/wechat/qr/start + /qr/status endpoints
                     # to capture the token and write it to secrets.env.
@@ -469,23 +513,47 @@ class WeChatAdapter(SidecarAdapter):
                         "restart (token logged at DEBUG)",
                     )
                     log.debug("wechat captured bot_token", bot_token=token)
+                    if emit is not None:
+                        # Token is NOT in the protocol event — see
+                        # `protocol.qr_status` docstring for why. The
+                        # dashboard surfaces this message verbatim;
+                        # the operator copies the token (logged at
+                        # DEBUG above) into secrets.env by hand.
+                        emit(protocol.qr_status(
+                            "confirmed",
+                            message=(
+                                "Login successful. To skip QR on next "
+                                "restart, set WECHAT_BOT_TOKEN in "
+                                "~/.librefang/secrets.env (the token "
+                                "is logged at DEBUG by this sidecar)"
+                            ),
+                        ))
                     return token
-                if qr_status == "expired":
-                    raise RuntimeError(
-                        "wechat QR code expired — restart to try again",
-                    )
-                log.debug("wechat QR status pending", status=qr_status)
+                if qr_status_str == "expired":
+                    msg = "wechat QR code expired — restart to try again"
+                    if emit is not None:
+                        emit(protocol.qr_status(
+                            "expired", message=msg,
+                        ))
+                    raise RuntimeError(msg)
+                log.debug("wechat QR status pending", status=qr_status_str)
             else:
                 log.warn("wechat QR status poll non-200", status=status)
 
             if self._shutdown.wait(backoff):
+                if emit is not None:
+                    emit(protocol.qr_status(
+                        "failed",
+                        message="QR login cancelled by shutdown",
+                    ))
                 raise RuntimeError(
                     "wechat QR login cancelled by shutdown",
                 )
             backoff = min(backoff * 2.0, 5.0)
-        raise RuntimeError(
-            "wechat QR login timed out (5 minutes) — restart to try again",
-        )
+        msg = "wechat QR login timed out (5 minutes) — restart to try again"
+        if emit is not None:
+            emit(protocol.qr_status("expired", message=msg))
+        raise RuntimeError(msg)
 
     # ---- typing ticket -----------------------------------------------
 
@@ -720,7 +788,7 @@ class WeChatAdapter(SidecarAdapter):
         # Step 1: log in (QR or persisted token).
         if self._get_token() is None:
             try:
-                token = self._qr_login()
+                token = self._qr_login(emit=emit)
             except Exception as e:  # noqa: BLE001
                 if self._shutdown.is_set():
                     return
@@ -747,7 +815,7 @@ class WeChatAdapter(SidecarAdapter):
                 # flow makes the operator aware via the QR-code log.
                 log.info("wechat re-running QR login (token cleared)")
                 try:
-                    token = self._qr_login()
+                    token = self._qr_login(emit=emit)
                 except Exception as e:  # noqa: BLE001
                     if self._shutdown.is_set():
                         return

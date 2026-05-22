@@ -22,12 +22,12 @@
 //!   prompt-resolution half (object-shaped `input` → `{{var}}` binding)
 //!   *is* covered: it computes `resolved_prompt` without an agent. See
 //!   `dry_run_binds_object_input_keys_to_template_vars`.
-//! - `POST /api/triggers` — requires a registered `AgentId` plus a
+//! - `POST /api/triggers` creation requires a registered `AgentId` plus a
 //!   `register_trigger_with_target` call into a fully-wired kernel; the
-//!   creation path is exercised indirectly via the negative-validation tests.
-//!
-//! These slots become testable once a fixture lands that registers a fake
-//! agent + a no-op LLM driver. Tracked under #3571 follow-up.
+//!   negative-validation paths (missing agent_id / pattern, bad ids) are
+//!   covered here, while the agent-backed success path and the per-agent
+//!   cap → 400 path live in `trigger_workflow_test.rs` (which seeds a real
+//!   agent via `spawn_agent`).
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -1332,5 +1332,58 @@ async fn dry_run_binds_object_input_keys_to_template_vars() {
     assert_eq!(
         body["steps"][0]["resolved_prompt"], "Brainstorm: {{challenge}} | Context: reduce churn",
         "a plain-string input must NOT bind named placeholders: {body:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// input_schema oversize guard (issue: bulk-with-capacity-no-validate)
+// ---------------------------------------------------------------------------
+
+/// POST /api/workflows with an oversize `input_schema` array must still
+/// succeed (the parser is lenient by design — log + truncate, same style
+/// as malformed individual entries), but the persisted schema MUST be
+/// capped at `MAX_INPUT_SCHEMA_PARAMS` (100). Without the cap, an
+/// `"input_schema": [{}, {}, ...]` array within the 8 MiB body limit
+/// would cause `Vec::with_capacity(arr.len())` to pre-allocate millions
+/// of entries.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_input_schema_oversize_is_truncated() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    // 150 well-formed param entries — over the 100 cap.
+    let oversized: Vec<serde_json::Value> = (0..150)
+        .map(|i| {
+            serde_json::json!({
+                "name": format!("p{i}"),
+                "param_type": "string",
+                "required": false,
+            })
+        })
+        .collect();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "oversize-schema",
+            "description": "regression: oversize input_schema truncates",
+            "steps": [
+                {"name": "draft", "agent_id": agent_id, "prompt": "x"}
+            ],
+            "input_schema": oversized,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (_, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert!(
+        schema.len() <= 100,
+        "input_schema must be capped at MAX_INPUT_SCHEMA_PARAMS (100), got {}",
+        schema.len(),
     );
 }

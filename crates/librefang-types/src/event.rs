@@ -91,7 +91,7 @@ pub enum EventPayload {
 }
 
 /// Fired when a tool invocation requires human approval before proceeding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApprovalRequestedEvent {
     /// The approval request ID.
     pub request_id: String,
@@ -103,6 +103,41 @@ pub struct ApprovalRequestedEvent {
     pub description: String,
     /// Risk classification.
     pub risk_level: String,
+    /// Platform user id of the chat that originated the agent message
+    /// whose tool call now needs approval. Populated when the request
+    /// reached the agent via a channel adapter (Telegram / Slack /
+    /// Discord etc.); `None` for non-channel sources (dashboard direct
+    /// invocation, cron, autonomous loops).
+    ///
+    /// The channel approval listener uses this to route the
+    /// `[Approve] [Deny]` keyboard **back to the originating chat** —
+    /// no `notification_recipients` / `AgentBinding` configuration
+    /// required for the common case where the user is talking to the
+    /// agent in a single chat. Skipped from JSON when absent so the
+    /// pre-fix event shape stays compatible for consumers that never
+    /// looked at this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+    /// Channel-type string (`"telegram"`, `"discord"`, …) the request
+    /// originated from. `None` for non-channel sources. Paired with
+    /// `sender_id` for the direct-route path; both must be set for
+    /// the listener to fast-path; otherwise it falls back to the
+    /// pre-fix `notification_recipients` + `AgentBinding` fan-out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Platform conversation id (Telegram `chat_id`, Discord
+    /// `channel_id`, WhatsApp JID, …) the originating message arrived
+    /// on. The bridge's approval listener prefers this over `sender_id`
+    /// for the direct-route target so a group-chat-originated tool
+    /// call gets its `[Approve] [Deny]` keyboard back in the originating
+    /// **group**, not in the human's DM with the bot.
+    ///
+    /// `None` when the source had no separately-tracked chat_id (DMs
+    /// where `sender_id == chat_id`, pre-PR clients, non-channel
+    /// sources); the listener falls back to `sender_id` in that case
+    /// so the DM happy path is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
 }
 
 /// Payload for `EventPayload::ApprovalResolved`.

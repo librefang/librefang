@@ -68,6 +68,19 @@ pub enum SidecarEvent {
     /// developed against the final wire shape.
     #[serde(rename = "typing")]
     Typing { params: SidecarTypingParams },
+    /// Sidecar has fetched a QR-login code and is waiting for the
+    /// user to scan it (WeChat iLink, WhatsApp Web pairing, …). The
+    /// daemon caches this on `ChannelStatus.qr` so
+    /// `GET /api/channels/{name}/qr` can return it to the dashboard
+    /// without requiring the operator to read sidecar logs.
+    #[serde(rename = "qr_ready")]
+    QrReady { params: SidecarQrReadyParams },
+    /// Sidecar reports a state transition on the active QR session
+    /// (scanning → confirmed / expired / failed). Replaces the
+    /// retired `/api/channels/{wechat,whatsapp}/qr/status` long-poll
+    /// the dashboard used pre-sidecar.
+    #[serde(rename = "qr_status")]
+    QrStatus { params: SidecarQrStatusParams },
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +129,43 @@ pub struct SidecarMessageParams {
 #[derive(Debug, Deserialize)]
 pub struct SidecarErrorParams {
     pub message: String,
+}
+
+/// `qr_ready` event params — see [`QrState`](crate::types::QrState)
+/// for the daemon-side projection and lifecycle.
+#[derive(Debug, Deserialize)]
+pub struct SidecarQrReadyParams {
+    /// Raw QR payload the user's scanner reads.
+    pub qr_code: String,
+    /// Optional pre-formed scan URL (deep-link). When `None` the
+    /// dashboard renders `qr_code` directly.
+    #[serde(default)]
+    pub qr_url: Option<String>,
+    /// Optional operator-visible note (e.g. "5-minute window").
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional expiry timestamp from the platform's response.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// `qr_status` event params — drives transitions out of `Pending`.
+///
+/// A previous iteration also carried a `bot_token` field for the
+/// dashboard to auto-persist on `confirmed`. That path was unsafe
+/// against the current configure endpoint (see `types.rs::QrState`
+/// for the full note) so the field was dropped from the protocol
+/// entirely. The sidecar logs the captured token at DEBUG instead
+/// and the operator copies it into `secrets.env`.
+#[derive(Debug, Deserialize)]
+pub struct SidecarQrStatusParams {
+    /// One of `scanning` / `confirmed` / `expired` / `failed`.
+    /// Anything else is treated as `failed` so a sidecar bug can't
+    /// strand the dashboard in `pending` forever.
+    pub status: String,
+    /// Operator-visible reason / next-step hint.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// Inbound typing indicator params — fed to `typing_events()`.
@@ -611,8 +661,29 @@ async fn spawn_once(
     // loader — still reach the child without a daemon restart. The
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
-    let merged_env = build_spawn_env(&ctx.home_dir, &ctx.env);
-    for (k, v) in &merged_env {
+    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.env)
+        .into_iter()
+        .collect();
+    // Embedded-SDK fallback: when the spawn command is a Python
+    // interpreter that cannot already `import librefang.sidecar`, put
+    // the daemon-bundled copy on PYTHONPATH so a fresh user with just
+    // `python3` on PATH can enable a sidecar channel without first
+    // running `pip install librefang-sdk`. No-op for developers whose
+    // editable install already wins, and for non-Python commands
+    // (`uv`, `bash`, …). See `embedded_sdk.rs` for precedence and
+    // extraction details.
+    let existing_pythonpath = env_map
+        .get("PYTHONPATH")
+        .cloned()
+        .or_else(|| std::env::var("PYTHONPATH").ok());
+    if let Some(composed) = crate::embedded_sdk::pythonpath_with_embedded(
+        &ctx.command,
+        &ctx.home_dir,
+        existing_pythonpath.as_deref(),
+    ) {
+        env_map.insert("PYTHONPATH".to_string(), composed);
+    }
+    for (k, v) in &env_map {
         cmd.env(k, v);
     }
     cmd.stdin(std::process::Stdio::piped())
@@ -943,6 +1014,86 @@ async fn spawn_once(
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());
                                     s.last_error = Some(params.message);
+                                }
+                                Ok(SidecarEvent::QrReady { params }) => {
+                                    info!(
+                                        adapter = %adapter_name,
+                                        has_url = params.qr_url.is_some(),
+                                        "Sidecar published QR for login"
+                                    );
+                                    let mut s = status_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    s.qr = Some(crate::types::QrState {
+                                        status: crate::types::QrStatusKind::Pending,
+                                        qr_code: params.qr_code,
+                                        qr_url: params.qr_url,
+                                        message: params.message,
+                                        expires_at: params.expires_at,
+                                        updated_at: Utc::now(),
+                                    });
+                                }
+                                Ok(SidecarEvent::QrStatus { params }) => {
+                                    let kind = match params.status.as_str() {
+                                        "pending" => {
+                                            crate::types::QrStatusKind::Pending
+                                        }
+                                        "scanning" => {
+                                            crate::types::QrStatusKind::Scanning
+                                        }
+                                        "confirmed" => {
+                                            crate::types::QrStatusKind::Confirmed
+                                        }
+                                        "expired" => {
+                                            crate::types::QrStatusKind::Expired
+                                        }
+                                        // Anything off-protocol is treated as
+                                        // terminal failure so the dashboard
+                                        // doesn't spin forever on a sidecar
+                                        // bug that emits a misspelled status.
+                                        _ => crate::types::QrStatusKind::Failed,
+                                    };
+                                    info!(
+                                        adapter = %adapter_name,
+                                        status = ?kind,
+                                        "QR session transitioned"
+                                    );
+                                    let mut s = status_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    // Update in place when we already have a
+                                    // session — keeps qr_code / qr_url stable
+                                    // across transitions. Drop the cached
+                                    // session entirely on a terminal-failure
+                                    // path so a stale, scanned-already QR
+                                    // doesn't leak into a future fresh login.
+                                    match s.qr.as_mut() {
+                                        Some(q) => {
+                                            q.status = kind;
+                                            if params.message.is_some() {
+                                                q.message = params.message;
+                                            }
+                                            q.updated_at = Utc::now();
+                                        }
+                                        None => {
+                                            // qr_status before qr_ready is
+                                            // technically protocol misuse, but
+                                            // we accept it so a sidecar that
+                                            // restarts mid-flow can still
+                                            // surface its state. qr_code is
+                                            // empty because we never saw the
+                                            // payload; the dashboard treats
+                                            // empty as "no scannable image".
+                                            s.qr = Some(crate::types::QrState {
+                                                status: kind,
+                                                qr_code: String::new(),
+                                                qr_url: None,
+                                                message: params.message,
+                                                expires_at: None,
+                                                updated_at: Utc::now(),
+                                            });
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     warn!(
@@ -1987,6 +2138,92 @@ mod tests {
     }
 
     #[test]
+    fn qr_ready_event_parses_with_optional_fields() {
+        // Minimal — only the required qr_code is set.
+        let minimal = r#"{"method":"qr_ready","params":{"qr_code":"opaque-token"}}"#;
+        let SidecarEvent::QrReady { params } =
+            serde_json::from_str(minimal).expect("minimal qr_ready")
+        else {
+            panic!("expected QrReady variant");
+        };
+        assert_eq!(params.qr_code, "opaque-token");
+        assert!(params.qr_url.is_none());
+        assert!(params.message.is_none());
+        assert!(params.expires_at.is_none());
+
+        // Fully-populated form a real adapter would emit.
+        let full = r#"{"method":"qr_ready","params":{
+            "qr_code":"opaque-token",
+            "qr_url":"https://platform.example.com/login?code=opaque-token",
+            "message":"Scan within 5 minutes",
+            "expires_at":"2099-01-01T00:00:00Z"
+        }}"#;
+        let SidecarEvent::QrReady { params } = serde_json::from_str(full).expect("full qr_ready")
+        else {
+            panic!("expected QrReady variant");
+        };
+        assert_eq!(params.qr_code, "opaque-token");
+        assert_eq!(
+            params.qr_url.as_deref(),
+            Some("https://platform.example.com/login?code=opaque-token"),
+        );
+        assert_eq!(params.message.as_deref(), Some("Scan within 5 minutes"));
+        assert!(params.expires_at.is_some());
+    }
+
+    #[test]
+    fn qr_status_event_parses_all_documented_states() {
+        for state in &["pending", "scanning", "confirmed", "expired", "failed"] {
+            let json = format!(r#"{{"method":"qr_status","params":{{"status":"{state}"}}}}"#);
+            let SidecarEvent::QrStatus { params } =
+                serde_json::from_str(&json).expect("qr_status parse")
+            else {
+                panic!("expected QrStatus variant for state={state}");
+            };
+            assert_eq!(params.status, *state);
+            assert!(params.message.is_none());
+        }
+    }
+
+    #[test]
+    fn qr_status_kind_serde_roundtrips_snake_case_on_the_wire() {
+        // The wire-side spec for `QrStatusKind` is snake_case. A
+        // dashboard or sidecar that emits `"Pending"` would not match,
+        // and a future enum rename to PascalCase would silently break
+        // every existing client — this test pins both directions.
+        use crate::types::QrStatusKind;
+        let cases = [
+            (QrStatusKind::Pending, "\"pending\""),
+            (QrStatusKind::Scanning, "\"scanning\""),
+            (QrStatusKind::Confirmed, "\"confirmed\""),
+            (QrStatusKind::Expired, "\"expired\""),
+            (QrStatusKind::Failed, "\"failed\""),
+        ];
+        for (kind, wire) in cases {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serialized, wire, "serialize {kind:?}");
+            let deserialized: QrStatusKind = serde_json::from_str(wire).unwrap();
+            assert_eq!(deserialized, kind, "deserialize {wire}");
+        }
+    }
+
+    #[test]
+    fn qr_state_field_skipped_when_absent_on_channel_status() {
+        // The new `qr` field MUST `#[serde(skip_serializing_if =
+        // "Option::is_none")]` so every non-QR channel keeps the
+        // historical `ChannelStatus` JSON shape and dashboard / SDK
+        // consumers that don't know about QR don't suddenly see a
+        // `"qr": null` they have to filter.
+        use crate::types::ChannelStatus;
+        let status = ChannelStatus::default();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("qr"),
+            "default ChannelStatus must not emit `qr` key, got: {json}"
+        );
+    }
+
+    #[test]
     fn test_sidecar_event_message_minimal() {
         let json = r#"{"method":"message","params":{"user_id":"u1","user_name":"Bot"}}"#;
         let event: SidecarEvent = serde_json::from_str(json).unwrap();
@@ -2749,6 +2986,66 @@ mod tests {
             last_error.contains("Failed to spawn sidecar"),
             "circuit-break message must surface the spawn-failed wrapper, got: {last_error}"
         );
+    }
+
+    /// End-to-end: drive a real child that emits `qr_ready` followed
+    /// by `qr_status: confirmed`, then assert the supervisor's stdout
+    /// reader populated `ChannelStatus.qr` accordingly. Catches a
+    /// future refactor that breaks the reader's event-dispatch path
+    /// (e.g. forgetting to wire a new variant through the match arm).
+    #[tokio::test]
+    async fn qr_events_land_on_channel_status() {
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = concat!(
+            "import sys,json,time;",
+            "print(json.dumps({'method':'ready'}),flush=True);",
+            "print(json.dumps({'method':'qr_ready','params':{",
+            "'qr_code':'opaque-token',",
+            "'qr_url':'https://example.invalid/login?code=opaque-token',",
+            "'message':'scan'}}),flush=True);",
+            "print(json.dumps({'method':'qr_status','params':{",
+            "'status':'confirmed','message':'logged in'}}),flush=True);",
+            // Stay alive long enough for the supervisor to handle both
+            // events before stdout closes; we `stop()` from the test.
+            "time.sleep(2)",
+        );
+        let config = cfg(
+            "test-qr",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let _stream = adapter.start().await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let qr = loop {
+            if let Some(q) = adapter.status().qr.clone() {
+                if matches!(q.status, crate::types::QrStatusKind::Confirmed) {
+                    break q;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "supervisor never reached confirmed QR state; last status={:?}",
+                    adapter.status().qr
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        };
+        adapter.stop().await.unwrap();
+
+        assert_eq!(qr.qr_code, "opaque-token");
+        assert_eq!(
+            qr.qr_url.as_deref(),
+            Some("https://example.invalid/login?code=opaque-token"),
+        );
+        // Last-write-wins for `message`: the qr_status arm overrides
+        // the qr_ready preamble when it carries one, so the
+        // confirmed-state message survives.
+        assert_eq!(qr.message.as_deref(), Some("logged in"));
     }
 
     #[tokio::test]

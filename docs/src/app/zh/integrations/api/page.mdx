@@ -241,14 +241,10 @@ Retry-After: 60
 | GET | `/api/memory/agents/{id}/export` | 导出 Agent 记忆 |
 | POST | `/api/memory/agents/{id}/import` | 导入 Agent 记忆 |
 | **通道** | | |
-| GET | `/api/channels` | 列出通道（44 种适配器） |
-| GET | `/api/channels/{name}` | 获取通道配置 |
-| POST | `/api/channels/{name}/configure` | 配置通道 |
-| DELETE | `/api/channels/{name}/configure` | 移除通道配置 |
-| POST | `/api/channels/{name}/test` | 测试通道 |
-| POST | `/api/channels/reload` | 重新加载所有通道 |
-| POST | `/api/channels/whatsapp/qr/start` | 启动 WhatsApp 二维码会话 |
-| GET | `/api/channels/whatsapp/qr/status` | WhatsApp 二维码状态 |
+| GET | `/api/channels` | 列出已配置 + 可发现的通道（sidecar 模式） |
+| GET | `/api/channels/registry` | 来自 registry 同步的通道元数据 |
+| POST | `/api/channels/sidecar/{name}/configure` | 保存 `[[sidecar_channels]]` 条目（按 schema 表单） |
+| POST | `/api/channels/reload` | 从磁盘热重载通道 |
 | **模板** | | |
 | GET | `/api/templates` | 列出模板 |
 | GET | `/api/templates/{name}` | 获取模板 |

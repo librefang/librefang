@@ -492,3 +492,93 @@ async fn legacy_trigger_json_loads_without_workflow_id() {
         "workflow_id must be None when absent from persisted JSON"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 7: per-agent trigger cap — the 51st registration is rejected at the
+// HTTP route with 400 (audit: trigger-engine-no-per-agent-cap).
+//
+// The kernel engine has unit coverage for the cap, but repo policy requires
+// a route-level test proving the cap surfaces as a client error (400) rather
+// than the catch-all 404 the create_trigger handler otherwise returns. We
+// exercise the real route on both ends: the first registration goes through
+// `POST /api/triggers` and must succeed (201), the bulk of the agent's quota
+// is seeded directly via the kernel for speed, then the 51st registration
+// goes through the route again and must be 400 with the cap mentioned.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_trigger_past_per_agent_cap_returns_400() {
+    use librefang_kernel::triggers::{TriggerPattern, MAX_TRIGGERS_PER_AGENT};
+
+    let h = boot().await;
+    let agent_id = spawn_agent(&h.state);
+
+    // 1. First trigger via the real HTTP route — proves the success path (201)
+    //    and that the route accepts a minimal valid payload.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/triggers",
+        Some(serde_json::json!({
+            "agent_id": agent_id.to_string(),
+            "pattern": {"content_match": {"substring": "test"}},
+            "prompt_template": "event: {{event}}",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "first POST /api/triggers must return 201: {body:?}"
+    );
+
+    // 2. Fill the remaining quota (triggers 2..=MAX) directly via the kernel.
+    //    Routing every one through HTTP `oneshot` would be needlessly slow; the
+    //    cap lives in the engine and the route is what we assert below.
+    for i in 1..MAX_TRIGGERS_PER_AGENT {
+        h.state
+            .kernel
+            .register_trigger_with_target(
+                agent_id,
+                TriggerPattern::ContentMatch {
+                    substring: format!("seed-{i}"),
+                },
+                "event: {{event}}".to_string(),
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("seeding trigger {i} within cap must succeed: {e}"));
+    }
+
+    // 3. The 51st registration goes through the real route and must be 400 —
+    //    the cap error maps to InvalidInput → bad_request, NOT the 404
+    //    "agent not found" catch-all.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/triggers",
+        Some(serde_json::json!({
+            "agent_id": agent_id.to_string(),
+            "pattern": {"content_match": {"substring": "over-the-cap"}},
+            "prompt_template": "event: {{event}}",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "registration past the per-agent cap must be 400, not 404: {body:?}"
+    );
+    let msg = body["message"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    assert!(
+        msg.contains("cap") || msg.contains("limit"),
+        "400 body must explain the cap was exceeded: {body:?}"
+    );
+}

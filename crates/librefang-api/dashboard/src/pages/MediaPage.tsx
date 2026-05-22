@@ -347,7 +347,7 @@ function ImagePanel({
                 key={i}
                 href={img.url}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
                 className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
               >
                 {img.url ? (
@@ -466,7 +466,7 @@ function SpeechPanel({
       {result && (
         <ResultBlock provider={result.provider} model={result.model} duration={result.duration_ms}>
           <audio controls src={result.url} className="w-full" />
-          <a href={result.url} target="_blank" rel="noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
+          <a href={result.url} target="_blank" rel="noopener noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
             {t("media.download")} ({result.format})
           </a>
         </ResultBlock>
@@ -615,7 +615,7 @@ function VideoPanel({
                   <span>{statusResult.width}×{statusResult.height}</span>
                 )}
                 {statusResult.duration_secs != null && <span>{statusResult.duration_secs.toFixed(1)}s</span>}
-                <a href={statusResult.file_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
+                <a href={statusResult.file_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
                   {t("media.download")}
                 </a>
               </div>
@@ -720,7 +720,7 @@ function MusicPanel({
       {result && (
         <ResultBlock provider={result.provider} model={result.model} duration={result.duration_ms}>
           <audio controls src={result.url} className="w-full" />
-          <a href={result.url} target="_blank" rel="noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
+          <a href={result.url} target="_blank" rel="noopener noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
             {t("media.download")} ({result.format})
           </a>
         </ResultBlock>

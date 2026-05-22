@@ -531,8 +531,10 @@ librefang skill list                    # List installed skills
 librefang skill search <query>          # Search FangHub
 librefang skill create                  # Scaffold a new skill
 
-librefang channel list                  # List channel status
-librefang channel setup <channel>       # Interactive setup wizard
+librefang channel list                  # Show configured channels
+librefang channel setup <channel>       # Schema-driven sidecar setup
+librefang channel reload                # Hot-reload after config.toml edits
+librefang channel rm <channel>          # Drop a sidecar entry + reload
 
 librefang config show                   # Show current config
 librefang config edit                   # Open config in editor

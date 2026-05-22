@@ -102,12 +102,11 @@ Env vars for each channel are listed in their respective setup sections below.
 
 ## Channel Overrides
 
-Every channel adapter supports `ChannelOverrides`, which let you customize per-channel behaviour at two levels:
+`ChannelOverrides` let an agent customize its behaviour per-channel. Post-sidecar migration the **channel-level** layer is gone (the `[channels.<name>.overrides]` sub-table lived on the deleted in-process `ChannelsConfig`); only **agent-level overrides** in `agent.toml` survive. Most knobs that the old channel-level table exposed are now set per-sidecar through `[sidecar_channels.env]` instead — see [the migration mapping in the channels configuration guide](/configuration/channels#channel-overrides-legacy--removed).
 
-- **Channel-level** in `config.toml` — applies to every agent that uses that channel. Add a `[channels.<name>.overrides]` section.
 - **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
 
-**Resolution order**: agent-level → channel-level → built-in default. Whichever sets the field wins; missing fields fall through to the next layer (same pattern as `exec_policy`).
+**Resolution order** (post-migration): agent-level → sidecar env var → built-in default. Whichever sets the field wins.
 
 ```toml
 # agent.toml — per-agent override (e.g. "this agent answers every DM")
@@ -118,7 +117,11 @@ group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
 ```
 
 ```toml
-# config.toml — channel-level default for every agent on that channel
+# config.toml — channel-level overrides (HISTORICAL — no longer
+# accepted). Pre-#5463, every agent on that channel inherited these
+# defaults. The block is shown for migration reference only; set the
+# equivalent on the agent (`agent.toml [channel_overrides]`) or on
+# the sidecar (`[sidecar_channels.env]` env vars like `*_DM_POLICY`).
 [channels.discord.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Discord assistant. Keep replies under 200 words."
@@ -210,8 +213,11 @@ Set `prefix_agent_name` in `ChannelOverrides` to prepend the agent's name to eve
 | `Bracket` | `[agent-name] reply text` |
 | `BoldBracket` | `**[agent-name]** reply text` (bold rendering depends on the channel's output format) |
 
+Set `prefix_agent_name` in `[channel_overrides]` on the agent manifest (`agent.toml`); the pre-migration `[channels.<name>.overrides]` location is no longer accepted.
+
 ```toml
-[channels.discord.overrides]
+# agent.toml
+[channel_overrides]
 prefix_agent_name = "BoldBracket"
 ```
 

@@ -11,17 +11,12 @@ librefang-types = { path = "../librefang-types" }
 librefang-http = { path = "../librefang-http" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-sha2 = { workspace = true }
 hex = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
 # Serialises the env-mutating ElevenLabs voice_id validator tests so

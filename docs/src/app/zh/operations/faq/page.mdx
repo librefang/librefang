@@ -257,11 +257,20 @@ librefang doctor
 
 ### Q: 通道连接失败？
 
-```bash
-# 测试通道
-librefang channel test telegram
+通道都以独立进程的 sidecar adapter 形式运行 —— 查看 sidecar
+自己的 stdout 日志找失败原因。
 
-# 检查 Bot Token
+```bash
+# 看 sidecar 是否被识别 + token / configured 状态
+librefang channel list
+
+# 改完配置后热加载通道（重启对应 sidecar 子进程）
+librefang channel reload
+
+# Tail sidecar 自己的日志
+librefang logs --filter sidecar/telegram --tail 50
+
+# 直接对上游平台做连通性探测（以 Telegram 为例）
 curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
 ```
 

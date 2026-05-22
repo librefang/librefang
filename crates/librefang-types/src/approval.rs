@@ -317,6 +317,15 @@ pub struct ApprovalRequest {
     /// Channel name (e.g. "telegram", "discord") that originated the request.
     #[serde(default)]
     pub channel: Option<String>,
+    /// Platform conversation id (Telegram `chat_id`, Discord `channel_id`,
+    /// WhatsApp JID) the originating message arrived on. Distinct from
+    /// `sender_id` in groups (sender_id = the human's platform_id;
+    /// chat_id = the group). DMs coincide. `None` for non-channel
+    /// sources. Used by the bridge's approval listener to route the
+    /// `[Approve] [Deny]` keyboard back to the **conversation** (group
+    /// or DM) instead of always to the human's DM with the bot.
+    #[serde(default)]
+    pub chat_id: Option<String>,
     /// Notification targets for this specific request (overrides policy defaults).
     #[serde(default)]
     pub route_to: Vec<NotificationTarget>,
@@ -432,7 +441,13 @@ pub struct ApprovalResponse {
 #[non_exhaustive]
 pub enum ApprovalEvent {
     /// A new approval request has been added to the pending queue.
-    Created(ApprovalRequest),
+    ///
+    /// Boxed: `ApprovalRequest` is now ~280 bytes after the chat_id
+    /// addition, much larger than the `Resolved` variant. Boxing
+    /// keeps `ApprovalEvent` small and satisfies the
+    /// `clippy::large_enum_variant` lint; serde / field-access /
+    /// match-ergonomics still work through the `Box`.
+    Created(Box<ApprovalRequest>),
     /// A pending approval has been resolved (approved, denied, modified,
     /// timed out, or skipped).
     Resolved {
@@ -922,6 +937,7 @@ mod tests {
             timeout_secs: 60,
             sender_id: None,
             channel: None,
+            chat_id: None,
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: None,

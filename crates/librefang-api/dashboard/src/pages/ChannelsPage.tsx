@@ -1,11 +1,12 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChannelItem } from "../api";
-import { useChannels } from "../lib/queries/channels";
+import { useChannels, useChannelQr } from "../lib/queries/channels";
 import {
   useReloadChannels,
   useSaveSidecarConfig,
 } from "../lib/mutations/channels";
+import QRCode from "qrcode";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -19,7 +20,7 @@ import { Select } from "../components/ui/Select";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, ChevronRight, X, Grid3X3, List,
-  Settings, AlertCircle, CheckSquare, Square, Plus,
+  Settings, AlertCircle, CheckSquare, Square, Plus, XCircle,
   MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Globe
 } from "lucide-react";
 
@@ -142,6 +143,131 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
   );
 });
 
+// QR section embedded inside DetailsModal for channels whose
+// sidecar publishes a `qr_ready` event. The pre-migration dedicated
+// "QR Login Dialog" was deleted in #5470 when the page went
+// sidecar-only; reintroducing it as a *section* here keeps the page's
+// "click card -> details" flow intact and avoids a second top-level
+// modal stack just for QR.
+//
+// Wire model: the sidecar drives the QR lifecycle (start, poll,
+// confirm) on its own. This section is a passive observer — it polls
+// `GET /api/channels/{name}/qr` every 2s while the details modal is
+// open and reacts to state transitions. On `confirmed` it auto-calls
+// `configureChannel` with the captured `bot_token` to restore the
+// pre-migration "scan once, never again" UX (writes `secrets.env` so
+// the next sidecar restart skips QR).
+function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: string) => string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const renderedQrRef = useRef<string | null>(null);
+  // Two-phase polling: keep refetching at the default 2s cadence
+  // while the QR is pre-terminal (no data yet, `pending`, or
+  // `scanning`); stop entirely once we reach `confirmed` / `expired`
+  // / `failed`. The sidecar's own QR-flow internals are still alive
+  // (an expired QR will be re-fetched on the sidecar's next restart
+  // cycle and re-published as a fresh `qr_ready`), so there's no
+  // value in hammering the daemon at 2s while we wait for the
+  // operator to react.
+  const [terminal, setTerminal] = useState(false);
+  const qrQuery = useChannelQr(channelName, {
+    enabled: true,
+    refetchInterval: terminal ? false : undefined,
+  });
+  useEffect(() => {
+    const s = qrQuery.data?.status;
+    if (s === "confirmed" || s === "expired" || s === "failed") {
+      setTerminal(true);
+    }
+  }, [qrQuery.data?.status]);
+
+  useEffect(() => {
+    const qr = qrQuery.data;
+    if (!qr) return;
+    if (qr.status !== "pending" && qr.status !== "scanning") return;
+    const content = qr.qr_url || qr.qr_code;
+    if (!canvasRef.current || !content) return;
+    if (renderedQrRef.current === content) return;
+    QRCode.toCanvas(canvasRef.current, content, { width: 256, margin: 2 });
+    renderedQrRef.current = content;
+  }, [qrQuery.data]);
+
+  // Auto-persist of the captured `bot_token` was removed on review:
+  // the only available secrets endpoint is a full-form upsert that
+  // would wipe other schema-managed env keys on a partial save (see
+  // `crates/librefang-api/src/routes/channels.rs::configure_sidecar_channel`
+  // + `sidecar_toml::write_form_managed`). The sidecar logs the
+  // token at DEBUG; the `confirmed`-state `message` instructs the
+  // operator to set `WECHAT_BOT_TOKEN` in `secrets.env` themselves.
+  // A future narrow `/api/channels/sidecar/{name}/secrets` endpoint
+  // can safely reintroduce the auto-persist path.
+
+  // Loading: query hasn't returned yet. Don't render anything visible
+  // — the section only matters once we know whether a session exists.
+  if (qrQuery.isLoading) return null;
+
+  // Hard error from the API layer (404 = no sidecar, anything else =
+  // surfaced ApiError). 404 / "not running" is the common case for
+  // channels that don't use QR auth at all — silently hide.
+  if (qrQuery.isError) return null;
+
+  // 204 — sidecar running, no QR session. Most likely the channel
+  // doesn't need QR (telegram, slack, …) or wechat authenticated from
+  // a cached token. Hide the section entirely.
+  if (qrQuery.data === null) return null;
+
+  const qr = qrQuery.data!;
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">
+        {t("channels.qr_login") || "QR Login"}
+      </h3>
+      <div className="p-4 rounded-xl bg-main/30 flex flex-col items-center gap-3">
+        {(qr.status === "pending" || qr.status === "scanning") && (
+          <div className="bg-white rounded-xl p-2">
+            <canvas ref={canvasRef} aria-label={t("mobile_pairing.qr_aria_label") || "QR code"} />
+          </div>
+        )}
+        {qr.status === "confirmed" && (
+          <div className="w-16 h-16 flex items-center justify-center bg-success/10 rounded-xl">
+            <CheckCircle2 className="w-10 h-10 text-success" />
+          </div>
+        )}
+        {(qr.status === "expired" || qr.status === "failed") && (
+          <div className="w-16 h-16 flex items-center justify-center bg-error/10 rounded-xl">
+            <XCircle className="w-10 h-10 text-error" />
+          </div>
+        )}
+        <p className="text-xs text-text-dim text-center max-w-xs">
+          {qr.message ||
+            (qr.status === "confirmed"
+              ? t("channels.login_success") || "Login successful"
+              : qr.status === "expired"
+              ? "QR code expired — restart the sidecar to try again"
+              : qr.status === "failed"
+              ? t("channels.qr_failed") || "QR login failed"
+              : `Scan with your ${channelName} app`)}
+        </p>
+        {terminal && qr.status !== "confirmed" && (
+          <Button
+            variant="secondary"
+            onClick={() => {
+              // Re-arm the 2s poll so a fresh sidecar-published QR
+              // (e.g. after restart) actually surfaces here instead
+              // of waiting for the user to close + reopen the modal.
+              setTerminal(false);
+              renderedQrRef.current = null;
+              qrQuery.refetch();
+            }}
+          >
+            {t("common.retry") || "Retry"}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Details Modal — read-only view onto a single channel. Configure /
 // reload flows live on the page header + the SidecarForm drawer; this
 // modal exists for "what is this thing" inspection plus the
@@ -223,6 +349,12 @@ function DetailsModal({ channel, onClose, t }: {
               </div>
             </div>
           )}
+
+          {/* QR-login section. Renders nothing for channels whose
+              sidecar doesn't publish a QR session (most of them), so
+              it's safe to always mount — the hook self-disables once
+              it observes a 204 / 404 from the daemon. */}
+          {channel.configured && <ChannelQrSection channelName={channel.name} t={t} />}
 
           {/* Every channel runs as an out-of-process sidecar. The modal
               is read-only; the save flow lives in `SidecarForm` (Plus →

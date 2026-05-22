@@ -239,6 +239,7 @@ impl ApprovalManager {
                 timeout_secs: 86400,
                 sender_id: None,
                 channel: None,
+                chat_id: None,
                 route_to: Vec::new(),
                 escalation_count: 0,
                 session_id,
@@ -680,7 +681,7 @@ impl ApprovalManager {
             // listening (no ACP client attached).
             let _ = self
                 .events_tx
-                .send(ApprovalEvent::Created(req_for_timeout.clone()));
+                .send(ApprovalEvent::Created(Box::new(req_for_timeout.clone())));
 
             info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
 
@@ -764,7 +765,9 @@ impl ApprovalManager {
         // Notify broadcast subscribers (#3313). The deferred path is what
         // tool execution uses, so this is the primary signal for the ACP
         // permission bridge.
-        let _ = self.events_tx.send(ApprovalEvent::Created(req_for_event));
+        let _ = self
+            .events_tx
+            .send(ApprovalEvent::Created(Box::new(req_for_event)));
         Ok(id)
     }
 
@@ -1965,6 +1968,7 @@ mod tests {
             timeout_secs,
             sender_id: None,
             channel: None,
+            chat_id: None,
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: None,
@@ -2477,6 +2481,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2508,6 +2513,7 @@ mod tests {
             }),
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
+            chat_id: None,
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
             session_id: None,
@@ -2551,6 +2557,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2592,6 +2599,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2627,6 +2635,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2666,6 +2675,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2685,6 +2695,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2712,6 +2723,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2729,6 +2741,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2758,6 +2771,7 @@ mod tests {
                 exec_policy: None,
                 sender_id: None,
                 channel: None,
+                chat_id: None,
                 workspace_root: None,
                 force_human: false,
                 session_id: None,
@@ -2778,6 +2792,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2798,6 +2813,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -2832,6 +2848,7 @@ mod tests {
                     exec_policy: None,
                     sender_id: None,
                     channel: None,
+                    chat_id: None,
                     workspace_root: None,
                     force_human: false,
                     session_id: None,
@@ -2875,6 +2892,7 @@ mod tests {
                     exec_policy: None,
                     sender_id: None,
                     channel: None,
+                    chat_id: None,
                     workspace_root: None,
                     force_human: false,
                     session_id: None,
@@ -3639,6 +3657,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -3664,6 +3683,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -3693,6 +3713,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -4112,6 +4133,7 @@ mod tests {
             }),
             sender_id: Some("operator-7".to_string()),
             channel: Some("acp".to_string()),
+            chat_id: None,
             workspace_root: Some(std::path::PathBuf::from("/tmp/restart-test")),
             force_human: false,
             session_id: Some(original_session_id),
@@ -4214,6 +4236,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             session_id: None,
@@ -4296,6 +4319,7 @@ mod tests {
             exec_policy: None,
             sender_id: None,
             channel: None,
+            chat_id: None,
             workspace_root: None,
             force_human: false,
             // *** mismatch *** — row column carries `row_session`.

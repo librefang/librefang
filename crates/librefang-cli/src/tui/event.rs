@@ -775,7 +775,6 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 // `spawn_fetch_channels` + `spawn_test_channel` retired alongside
 // the TUI Channels tab.
 
-
 /// Fetch workflow list in background.
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {

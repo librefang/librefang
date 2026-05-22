@@ -81,6 +81,14 @@ export const credentialPoolKeys = {
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
+  // QR-login state polling (replaces the pre-migration wechatQrStart /
+  // wechatQrStatus / whatsappQrStart / whatsappQrStatus quadruple).
+  // Anchored under `channelKeys.all` so `invalidateQueries({ queryKey:
+  // channelKeys.all })` after a channel configure mutation also
+  // refreshes any open QR section — e.g. after the dashboard
+  // auto-persists the captured bot_token, the next QR poll surfaces
+  // any sidecar-restart-triggered state change.
+  qr: (name: string) => [...channelKeys.all, "qr", name] as const,
 };
 
 export const commsKeys = {

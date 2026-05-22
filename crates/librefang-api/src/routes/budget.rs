@@ -592,12 +592,17 @@ async fn persist_budget(
     // abort — falling back to "" would silently drop every other section
     // (`[[users]]`, `[mcp_servers]`, `[[taint_rules]]`, …) on the next
     // write, exactly the failure mode `persist_users` documents.
-    let raw = if config_path.exists() {
-        std::fs::read_to_string(&config_path).map_err(|e| {
-            PersistBudgetError::Internal(format!("could not read existing config.toml: {e}"))
-        })?
-    } else {
-        String::new()
+    //
+    // Async-native I/O so we don't block the tokio worker while reading
+    // config.toml — refs `docs/issues/blocking-fs-on-executor.md`.
+    let raw = match tokio::fs::read_to_string(&config_path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(PersistBudgetError::Internal(format!(
+                "could not read existing config.toml: {e}"
+            )));
+        }
     };
     let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
         PersistBudgetError::Internal(format!(
@@ -632,16 +637,29 @@ async fn persist_budget(
         )));
     }
 
-    if config_path.exists() {
-        if let Some(home_dir) = config_path.parent() {
-            let backups_dir = home_dir.join("backups");
-            if std::fs::create_dir_all(&backups_dir).is_ok() {
-                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
-            }
+    // Snapshot the prior config to `backups/config.toml.prev` before we
+    // overwrite, so an operator can hand-restore if a budget edit
+    // produces an unexpected reload outcome. Best-effort: a failure
+    // here is logged and ignored, the primary write below is the
+    // authoritative path. Async-native (`tokio::fs`) to keep the
+    // executor free during the dotfile copy.
+    if let Some(home_dir) = config_path.parent() {
+        let backups_dir = home_dir.join("backups");
+        if tokio::fs::create_dir_all(&backups_dir).await.is_ok() {
+            let _ = tokio::fs::copy(&config_path, backups_dir.join("config.toml.prev")).await;
         }
     }
 
-    crate::atomic_write(&config_path, new_toml.as_bytes())
+    // `atomic_write` is synchronous because it relies on
+    // `std::fs::File::sync_all` for the fsync-then-rename durability
+    // guarantee. Dispatch via `spawn_blocking` so the fsync syscall
+    // doesn't stall the axum worker (refs
+    // `docs/issues/blocking-fs-on-executor.md`).
+    let bytes = new_toml.clone().into_bytes();
+    let write_path = config_path.clone();
+    tokio::task::spawn_blocking(move || crate::atomic_write(&write_path, &bytes))
+        .await
+        .map_err(|e| PersistBudgetError::Internal(format!("write task join: {e}")))?
         .map_err(|e| PersistBudgetError::Internal(format!("write failed: {e}")))?;
 
     state
@@ -747,7 +765,17 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         .into_iter()
         .collect();
 
-    let registry_entries = state.kernel.agent_registry().list();
+    // Use `list_arcs()` instead of `list()` so we get `Vec<Arc<AgentEntry>>`
+    // back rather than a fresh owned clone of every entry. Each
+    // `AgentEntry` carries the full `AgentManifest`, which at scale is
+    // several KB per agent (system_prompt, tools, mcp_servers, …) — at
+    // 200 agents the deep-clone path copied ~600 KB on every dashboard
+    // budget refresh, with no value (this endpoint only reads). #3569
+    // applied the same fix to `GET /api/agents`; the budget ranking was
+    // missed at the time. Arc deref is transparent for the read-only
+    // accesses below (`.id`, `.name`, `.manifest.resources.*`).
+    // (audit: budget-ranking-deep-clone)
+    let registry_entries = state.kernel.agent_registry().list_arcs();
     let items: Vec<serde_json::Value> = registry_entries
         .iter()
         .filter_map(|entry| {

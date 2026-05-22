@@ -20,6 +20,15 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
     axum::Router::new()
         .route("/channels", axum::routing::get(list_channels))
         .route("/channels/reload", axum::routing::post(reload_channels))
+        // Single read-only QR endpoint that replaces the four removed
+        // pre-migration ones (`/{wechat,whatsapp}/qr/{start,status}`).
+        // The sidecar drives the QR lifecycle and emits `qr_ready` /
+        // `qr_status` events; this handler just reads the cached
+        // `ChannelStatus.qr` from `kernel.channel_adapters_ref()`.
+        .route(
+            "/channels/{name}/qr",
+            axum::routing::get(get_channel_qr),
+        )
         .route(
             "/channels/registry",
             axum::routing::get(list_channel_registry),
@@ -969,17 +978,62 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// WhatsApp QR endpoints removed — the WhatsApp adapter migrated
-// to a sidecar (librefang.sidecar.adapters.whatsapp). The Baileys
-// gateway (when in use) owns the QR login flow end-to-end now.
+// Single read-only QR projection — replaces the four
+// pre-migration WhatsApp/WeChat endpoints with one endpoint that
+// reads `ChannelStatus.qr` (populated by the supervisor from
+// `qr_ready` / `qr_status` sidecar events; see `librefang-channels`
+// `sidecar.rs` and `types.rs::QrState`).
 // ---------------------------------------------------------------------------
 
-// WeChat QR endpoints removed — the WeChat adapter migrated to
-// a sidecar (librefang.sidecar.adapters.wechat). The sidecar
-// now runs the QR login flow itself and logs the QR string at
-// INFO; the dashboard surfaces it by tailing sidecar logs.
-
+/// GET /api/channels/{name}/qr — Return the latest QR-login state
+/// published by the sidecar.
+///
+/// The sidecar drives the QR start/poll cycle itself and emits
+/// `qr_ready` / `qr_status` events; this handler just reads the
+/// cached `ChannelStatus.qr` and returns it to the dashboard.
+///
+/// Status codes:
+/// - `200` — sidecar has published at least one QR event; payload is
+///   the current `QrState` (which may be in any lifecycle phase).
+/// - `204` — sidecar is running but has not published a QR session
+///   yet (e.g. WeChat sidecar authenticated from a cached
+///   `WECHAT_BOT_TOKEN`, no QR needed). The dashboard treats this as
+///   "no scan required" and closes the dialog.
+/// - `404` — no sidecar is currently registered under that name.
+///   With the in-process registry retired, a "known channel name"
+///   check would just duplicate "is there a running adapter?", so we
+///   collapse the two cases — easier to read in a dashboard error
+///   panel ("Sidecar not running") than two indistinguishable 404s.
+#[utoipa::path(
+    get,
+    path = "/api/channels/{name}/qr",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name (e.g. wechat, whatsapp)")
+    ),
+    responses(
+        (status = 200, description = "QR-login state", body = crate::types::JsonObject),
+        (status = 204, description = "Sidecar running, no QR session yet"),
+        (status = 404, description = "Sidecar not running", body = crate::types::JsonObject)
+    )
+)]
+pub async fn get_channel_qr(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let adapter = state.kernel.channel_adapters_ref().get(&name);
+    let Some(adapter) = adapter else {
+        return ApiErrorResponse::not_found(format!(
+            "Sidecar for '{name}' is not running — start it from the dashboard first"
+        ))
+        .into_response();
+    };
+    let status = adapter.value().status();
+    match status.qr {
+        Some(qr) => (StatusCode::OK, Json(qr)).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Channel registry metadata — loaded from ~/.librefang/channels/*.toml

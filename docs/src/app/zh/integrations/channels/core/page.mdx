@@ -413,21 +413,26 @@ librefang config set-key email                # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-3. 添加到配置文件：
+3. 添加到配置文件（Email 以独立进程 sidecar 形式运行，模块 `librefang.sidecar.adapters.email`）：
 
 ```toml
-[channels.email]
-imap_host = "imap.gmail.com"
-imap_port = 993
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-username = "you@gmail.com"
-password_env = "EMAIL_PASSWORD"
-poll_interval = 30
-default_agent = "email-assistant"
+[[sidecar_channels]]
+name = "email"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.email"]
+channel_type = "email"
+[sidecar_channels.env]
+EMAIL_IMAP_HOST = "imap.gmail.com"
+EMAIL_SMTP_HOST = "smtp.gmail.com"
+EMAIL_USERNAME = "you@gmail.com"
+# EMAIL_IMAP_PORT = "993"
+# EMAIL_SMTP_PORT = "587"
+# EMAIL_POLL_INTERVAL_SECS = "30"
 ```
 
-4. 重启守护进程。
+`EMAIL_PASSWORD` 写入 `~/.librefang/secrets.env`。
+
+4. 热加载（`curl -X POST http://127.0.0.1:4545/api/channels/reload`）或者重启 daemon。
 
 ### 工作原理
 
@@ -484,13 +489,6 @@ http://127.0.0.1:4545/
 
 `split_to_utf16_chunks(text, limit)` 将消息分割为多个连续块，每块的 UTF-16 单元数均在 `limit` 以内。LibreFang 按顺序发送各块，保留所有内容。拆分边界遵守 Unicode 标量边界——不会在字符中间结束一个块。
 
-### 禁用自动拆分
+### 拆分 / 截断现在由 sidecar 自己负责
 
-对仍为进程内适配器的渠道（Email、WhatsApp 等），可在渠道配置中设置 `split_long_messages = false` 以截断而非拆分长消息：
-
-```toml
-[channels.email]
-split_long_messages = false   # 截断而非拆分
-```
-
-默认值为 `true`。Sidecar 渠道（Matrix、Discord、Slack、Telegram 等）始终在各自平台限制处拆分——拆分逻辑由 sidecar 子进程内部处理，守护进程侧的开关对其无效。
+所有 channel adapter 现在都以独立进程 sidecar 形式运行，**各自负责** 在平台限制处做切块。`ChannelsConfig` 已被清空，迁移前 `[channels.<name>]` 上的 `split_long_messages` 选项随之消失。daemon 侧不能再告诉 sidecar "改成截断而不是拆分"；如果你的自定义 sidecar 需要这个行为，请在 sidecar 内部实现。

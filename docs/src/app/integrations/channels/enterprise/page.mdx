@@ -110,20 +110,27 @@ librefang config set-key google_chat          # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-5. Add to config:
+5. Add to config (Google Chat runs as an out-of-process sidecar adapter, `librefang.sidecar.adapters.google_chat`):
 
 ```toml
-[channels.google_chat]
-sa_key_env = "GOOGLE_CHAT_SA_KEY"
-space_env = "GOOGLE_CHAT_SPACE"
-default_agent = "ops"
+[[sidecar_channels]]
+name = "google_chat"
+command = "python3"
+args = ["-m", "librefang.sidecar.adapters.google_chat"]
+channel_type = "google_chat"
+[sidecar_channels.env]
+GOOGLE_CHAT_WEBHOOK_PORT = "8090"
+# GOOGLE_CHAT_SPACE_IDS = "spaces/AAAA,spaces/BBBB"   # optional, empty = all spaces
+# GOOGLE_CHAT_ACCOUNT_ID = "ops"                      # optional, multi-bot routing
 ```
 
-6. Restart the daemon.
+`GOOGLE_CHAT_SERVICE_ACCOUNT_JSON` (the full JSON blob — not a path) belongs in `~/.librefang/secrets.env`.
+
+6. Hot-reload (`curl -X POST http://127.0.0.1:4545/api/channels/reload`) or restart the daemon.
 
 ### How It Works
 
-The Google Chat adapter authenticates using a service account and receives messages via webhook callbacks on the shared API server at `/channels/google_chat/webhook`. Responses are sent back through the Google Chat REST API using the space and thread identifiers from the incoming message.
+The sidecar authenticates with the service account JSON and runs its own HTTP webhook server on `GOOGLE_CHAT_WEBHOOK_PORT` (default 8090). The Google Cloud Console Bot configuration messaging endpoint should point at `https://<host>:<port>/webhook`. Responses go back through the Google Chat REST API using the space and thread identifiers from each inbound message.
 
 ---
 

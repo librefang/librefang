@@ -398,9 +398,6 @@ pub(super) fn generate_identity_files(
     manifest: &AgentManifest,
     resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>,
 ) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
     let identity_dir = workspace.join(".identity");
     // Ensure `.identity/` exists before any of the per-file opens below;
     // without this, every TOOLS.md write from a fresh agent boot warns
@@ -508,18 +505,8 @@ pub(super) fn generate_identity_files(
     };
 
     for (filename, content) in editable_files {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(identity_dir.join(filename))
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(content.as_bytes());
-            }
-            Err(_) => {
-                // File already exists — preserve user edits
-            }
-        }
+        let path = identity_dir.join(filename);
+        create_new_or_cleanup(&path, content.as_bytes(), "identity file");
     }
 
     // TOOLS.md is auto-generated config — always rewrite so named workspace
@@ -538,18 +525,39 @@ pub(super) fn generate_identity_files(
 
     // Write HEARTBEAT.md for autonomous agents
     if let Some(ref hb) = heartbeat_content {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(identity_dir.join("HEARTBEAT.md"))
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(hb.as_bytes());
-            }
-            Err(_) => {
-                // File already exists — preserve user edits
-            }
+        let path = identity_dir.join("HEARTBEAT.md");
+        create_new_or_cleanup(&path, hb.as_bytes(), "HEARTBEAT.md");
+    }
+}
+
+/// Create `path` exclusively (`create_new`) and write `content`. If the file
+/// already exists, do nothing (preserves user edits). If the write fails
+/// mid-stream (ENOSPC / EIO / EDQUOT), log and remove the partial file so
+/// the next spawn isn't permanently blocked by `create_new` refusing to
+/// overwrite a corrupted zero-byte file. See
+/// `docs/issues/workspace-setup-write-all-swallow.md`.
+fn create_new_or_cleanup(path: &Path, content: &[u8], kind: &str) {
+    use std::fs::OpenOptions;
+
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(f) => write_or_cleanup(f, path, content, kind),
+        Err(_) => {
+            // File already exists — preserve user edits.
         }
+    }
+}
+
+/// Inner write step, generic over `Write` so it can be unit-tested with a
+/// failing writer. `path` is used for the cleanup `remove_file` call and
+/// the diagnostic log; `writer` is the just-opened handle.
+fn write_or_cleanup<W: std::io::Write>(mut writer: W, path: &Path, content: &[u8], kind: &str) {
+    if let Err(e) = writer.write_all(content) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "Failed to write {kind}; removing partial file so next spawn retries"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1037,5 +1045,79 @@ mod mount_tests {
         assert_eq!(resolved.len(), 2, "both decls should resolve");
         assert!(workspaces_root.join("shared/library").is_dir());
         assert!(mount_target.is_dir());
+    }
+}
+
+#[cfg(test)]
+mod identity_write_tests {
+    //! Regression tests for the audit item
+    //! `docs/issues/workspace-setup-write-all-swallow.md`: a swallowed
+    //! `write_all` after `create_new` could leave SOUL.md / HEARTBEAT.md
+    //! empty, and `create_new` then refused to overwrite on the next
+    //! spawn, permanently bricking the agent's identity files.
+
+    use super::*;
+    use std::io::{self, Write};
+
+    /// Writer that fails on the first `write` call — simulates ENOSPC /
+    /// EIO / EDQUOT after a successful `OpenOptions::create_new(...).open`.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "simulated disk full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_or_cleanup_removes_partial_file_on_write_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("SOUL.md");
+        // Simulate the post-`create_new` state: the file exists on disk
+        // (zero bytes), and the writer fails mid-stream.
+        std::fs::write(&path, b"").unwrap();
+        assert!(path.exists(), "precondition: empty file exists");
+
+        write_or_cleanup(FailingWriter, &path, b"hello", "SOUL.md");
+
+        assert!(
+            !path.exists(),
+            "partial file must be removed so next spawn's create_new can retry"
+        );
+    }
+
+    #[test]
+    fn write_or_cleanup_keeps_file_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("SOUL.md");
+        let f = std::fs::File::create(&path).unwrap();
+
+        write_or_cleanup(f, &path, b"hello", "SOUL.md");
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn create_new_or_cleanup_writes_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("SOUL.md");
+        create_new_or_cleanup(&path, b"content", "identity file");
+        assert_eq!(std::fs::read(&path).unwrap(), b"content");
+    }
+
+    #[test]
+    fn create_new_or_cleanup_preserves_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("SOUL.md");
+        std::fs::write(&path, b"user edits").unwrap();
+        create_new_or_cleanup(&path, b"overwritten", "identity file");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"user edits",
+            "create_new must refuse to overwrite, preserving user edits"
+        );
     }
 }

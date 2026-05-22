@@ -382,7 +382,22 @@ fn stream_json(entries: Vec<AuditEntry>) -> Response {
             buf.push(b',');
         }
         first = false;
-        let _ = serde_json::to_writer(&mut buf, &value);
+        // `serde_json::to_writer` into a `Vec<u8>` is infallible —
+        // the only error path is the underlying `io::Write`, and
+        // `Vec<u8>::write_all` never fails. Pre-fix this was
+        // `let _ = …` which silently swallowed the (theoretical)
+        // error and produced an output chunk containing only `,`,
+        // making the whole document invalid JSON
+        // (`[ , {...}, , {...} ]`). The invariant matters because
+        // a future refactor that swaps the writer for a real
+        // `tokio::io::AsyncWrite` (S3 streaming, gzip pipe, …)
+        // would silently corrupt every export. The `.expect` makes
+        // the invariant load-bearing — any future writer-swap that
+        // CAN fail is forced to handle the error rather than
+        // inheriting the silent-corruption behaviour.
+        // (audit: audit-export-malformed-json)
+        serde_json::to_writer(&mut buf, &value)
+            .expect("serializing serde_json::Value into Vec<u8> is infallible");
         chunks.push(Ok(buf));
     }
     chunks.push(Ok(b"]".to_vec()));
@@ -782,6 +797,52 @@ mod tests {
     }
 
     /// JSON export must include `prev_hash` for every entry. Without it,
+    /// Regression for audit `audit-export-malformed-json` — stream
+    /// `stream_json` through `serde_json::from_slice::<Vec<Value>>`
+    /// on every multi-entry export and confirm the result parses.
+    /// Pre-fix, `let _ = serde_json::to_writer` would emit a chunk
+    /// containing only `,` on a write error, producing
+    /// `[ , {...}, , {...} ]` (invalid JSON). The `expect()`
+    /// upgrade pins that invariant; this test pins the EXTERNAL
+    /// contract (every export is parseable as a JSON array of
+    /// objects with the expected fields) so a future
+    /// writer-swap regression that re-introduces silent corruption
+    /// fails here.
+    #[tokio::test]
+    async fn test_stream_json_multi_entry_is_well_formed() {
+        let mut entries = Vec::new();
+        for i in 1..=5u64 {
+            let mut e = entry(
+                i,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("detail-{i}"),
+                None,
+                None,
+            );
+            // Include realistic prev_hash / hash so the per-row
+            // payload is not trivially small.
+            e.prev_hash = format!("{:0>64}", i.saturating_sub(1));
+            e.hash = format!("{:0>64}", i);
+            entries.push(e);
+        }
+        let resp = stream_json(entries);
+        let body = body_to_string(resp).await;
+        // The full document must parse as `Vec<Value>` without any
+        // `,,` or trailing-comma artefacts.
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("export must be valid JSON array; got {e}; body={body}"));
+        assert_eq!(parsed.len(), 5, "every entry must round-trip");
+        for (i, row) in parsed.iter().enumerate() {
+            assert!(
+                row.is_object(),
+                "row {i} must be a JSON object; got {row:?}",
+            );
+            assert!(row["detail"].is_string());
+            assert!(row["hash"].is_string());
+        }
+    }
+
     /// a downstream verifier can't replay the SHA-256 chain off the dump
     /// — defeating the integrity guarantee the chain exists for.
     #[tokio::test]

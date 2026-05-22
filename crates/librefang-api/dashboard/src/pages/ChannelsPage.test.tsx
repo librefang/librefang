@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChannelsPage } from "./ChannelsPage";
 import { useDrawerStore } from "../lib/drawerStore";
-import { useChannels } from "../lib/queries/channels";
+import { useChannels, useChannelQr } from "../lib/queries/channels";
 import { useReloadChannels, useSaveSidecarConfig } from "../lib/mutations/channels";
-import type { ChannelItem } from "../api";
+import type { ChannelItem, QrState } from "../api";
 
 // The post-migration ChannelsPage routes every write through the
 // surviving endpoints:
@@ -18,6 +18,16 @@ import type { ChannelItem } from "../api";
 
 vi.mock("../lib/queries/channels", () => ({
   useChannels: vi.fn(),
+  useChannelQr: vi.fn(),
+}));
+
+// The `qrcode` package writes to <canvas>; jsdom's canvas is a no-op
+// stub but `QRCode.toCanvas` throws if it can't find a 2d context.
+// Replace with a spy so we can both prevent the throw and assert the
+// dashboard called it exactly once per unique payload (render-once
+// optimization in `ChannelQrSection`).
+vi.mock("qrcode", () => ({
+  default: { toCanvas: vi.fn(() => Promise.resolve()) },
 }));
 
 vi.mock("../lib/mutations/channels", () => ({
@@ -46,6 +56,7 @@ vi.mock("react-i18next", async () => {
 });
 
 const useChannelsMock = useChannels as unknown as ReturnType<typeof vi.fn>;
+const useChannelQrMock = useChannelQr as unknown as ReturnType<typeof vi.fn>;
 const useReloadChannelsMock = useReloadChannels as unknown as ReturnType<
   typeof vi.fn
 >;
@@ -138,6 +149,10 @@ describe("ChannelsPage", () => {
     vi.clearAllMocks();
     setMutationDefaults();
     useDrawerStore.setState({ isOpen: false, content: null });
+    // Default: no QR session. Individual tests override.
+    useChannelQrMock.mockReturnValue(
+      makeQuery<QrState | null>(null, { isLoading: false }),
+    );
   });
 
   it("renders skeleton placeholders while channels query is loading", () => {
@@ -382,5 +397,103 @@ describe("ChannelsPage", () => {
     expect(
       within(drawer).getByText(/\[\[sidecar_channels\]\]/),
     ).toBeInTheDocument();
+  });
+
+  // ── ChannelQrSection ──────────────────────────────────────────
+  //
+  // The section is embedded inside `DetailsModal` (read-only details
+  // drawer that opens when the operator clicks a configured channel
+  // card). It polls `useChannelQr` and either renders the QR canvas,
+  // a success / failure card, or hides itself entirely depending on
+  // the projection returned by `GET /api/channels/{name}/qr`.
+
+  function openDetailsForWechat(qr: QrState | null, opts?: { isError?: boolean }) {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "wechat", display_name: "WeChat", configured: true }),
+      ]),
+    );
+    useChannelQrMock.mockReturnValue(
+      makeQuery<QrState | null>(qr, { isError: opts?.isError ?? false }),
+    );
+    renderPage();
+    // Whole-card click opens DetailsModal — pick the card by its
+    // unique display_name to avoid the chevron / settings buttons.
+    fireEvent.click(screen.getByText("WeChat"));
+  }
+
+  it("renders the QR canvas while the lifecycle is `pending`", async () => {
+    const qrcode = (await import("qrcode")).default;
+    openDetailsForWechat({
+      status: "pending",
+      qr_code: "ilink-opaque-token",
+      qr_url: "https://platform.example/login?code=ilink-opaque-token",
+      message: "Scan within 5 minutes",
+      updated_at: "2030-01-01T00:00:00Z",
+    });
+    expect(screen.getByText("channels.qr_login")).toBeInTheDocument();
+    expect(screen.getByText("Scan within 5 minutes")).toBeInTheDocument();
+    // Canvas is rendered with the `qr_url` (preferred over the raw
+    // `qr_code`) — that's the platform-recognised deep-link form.
+    await waitFor(() => {
+      expect(qrcode.toCanvas).toHaveBeenCalledWith(
+        expect.anything(),
+        "https://platform.example/login?code=ilink-opaque-token",
+        expect.objectContaining({ width: 256 }),
+      );
+    });
+  });
+
+  it("renders the success card on `confirmed` with the operator instruction message", () => {
+    openDetailsForWechat({
+      status: "confirmed",
+      qr_code: "ilink-opaque-token",
+      message:
+        "Login successful. To skip QR on next restart, set WECHAT_BOT_TOKEN in ~/.librefang/secrets.env",
+      updated_at: "2030-01-01T00:00:00Z",
+    });
+    expect(
+      screen.getByText(/Login successful.*WECHAT_BOT_TOKEN.*secrets\.env/),
+    ).toBeInTheDocument();
+    // No Retry button on `confirmed` — the operator has succeeded.
+    expect(screen.queryByText("common.retry")).not.toBeInTheDocument();
+  });
+
+  it("shows the Retry button on terminal `expired` state", () => {
+    openDetailsForWechat({
+      status: "expired",
+      qr_code: "ilink-opaque-token",
+      message: "QR code expired",
+      updated_at: "2030-01-01T00:00:00Z",
+    });
+    expect(screen.getByText("QR code expired")).toBeInTheDocument();
+    expect(screen.getByText("common.retry")).toBeInTheDocument();
+  });
+
+  it("hides the section entirely when the daemon returns 204 / null", () => {
+    openDetailsForWechat(null);
+    // Section heading absent → component returned null.
+    expect(screen.queryByText("channels.qr_login")).not.toBeInTheDocument();
+  });
+
+  it("hides the section when the QR endpoint errors (e.g. 404 sidecar not running)", () => {
+    openDetailsForWechat(null, { isError: true });
+    expect(screen.queryByText("channels.qr_login")).not.toBeInTheDocument();
+  });
+
+  it("does NOT expose `bot_token` in the QrState type surface", () => {
+    // Type-level invariant: a future refactor must not add `bot_token`
+    // back without re-reviewing the partial-save data-loss issue
+    // documented in `protocol.qr_status` and `types.rs::QrState`.
+    // `bot_token` was removed from `QrState` after the initial draft
+    // exposed it; this test fails loudly if anyone re-adds the field.
+    const sample: QrState = {
+      status: "confirmed",
+      qr_code: "x",
+      updated_at: "2030-01-01T00:00:00Z",
+    };
+    // @ts-expect-error — bot_token is intentionally NOT a field.
+    sample.bot_token = "leaked";
+    expect(sample).toBeDefined();
   });
 });

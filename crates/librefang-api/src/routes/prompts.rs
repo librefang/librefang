@@ -94,9 +94,32 @@ async fn create_prompt_version(
                 .into_response()
         }
     };
+    // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md`.
+    // Reject oversize `system_prompt` BEFORE any write. Once a version is
+    // activated, its `system_prompt` rides every LLM call — an uncapped
+    // field is a direct token-cost amplification vector. Cheked against
+    // both a byte cap (memory) and a character cap (token / billing).
+    if let Err(e) = crate::validation::check_system_prompt_size(&version.system_prompt) {
+        return e.into_response();
+    }
     version.agent_id = agent_id;
     version.id = uuid::Uuid::new_v4();
     version.created_at = chrono::Utc::now();
+    // Audit: ignore client-supplied `is_active`. The create endpoint MUST
+    // NOT side-channel activation: the only legitimate path to flip a
+    // version active is `POST /prompts/versions/{id}/activate`, which
+    // additionally invariant-checks against the existing active version.
+    version.is_active = false;
+    // Audit: ignore client-supplied `version`. Versions are monotonic
+    // per agent and the server is the single source of truth — a client
+    // picking `version = 999` would break monotonicity assumptions
+    // downstream (active-version selection, list ordering, audit log).
+    // Compute `prev_max + 1` from the existing rows for this agent.
+    let next_version = match state.kernel.list_prompt_versions(agent_id) {
+        Ok(existing) => existing.iter().map(|v| v.version).max().unwrap_or(0) + 1,
+        Err(e) => return ApiErrorResponse::from(e).into_response(),
+    };
+    version.version = next_version;
     // Compute content hash from system_prompt
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
@@ -216,6 +239,15 @@ async fn create_experiment(
     experiment.agent_id = agent_id;
     experiment.id = uuid::Uuid::new_v4();
     experiment.created_at = chrono::Utc::now();
+    // Audit: `docs/issues/prompt-version-system-prompt-no-cap.md` (same
+    // defensive pattern applied to experiments). The state machine —
+    // `status`, `started_at`, `ended_at` — is server-owned and can only
+    // advance through `/start`, `/pause`, `/complete`. Ignore any
+    // client-supplied values on create so an experiment cannot be
+    // posted as already-Running with backdated `started_at`.
+    experiment.status = librefang_types::agent::ExperimentStatus::default();
+    experiment.started_at = None;
+    experiment.ended_at = None;
     // Assign IDs to variants
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();

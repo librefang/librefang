@@ -3674,7 +3674,7 @@
     "remove_failed": "Failed to remove device: {{reason}}",
     "remove_unknown_error": "unknown error",
     "error_disabled_title": "Device pairing is disabled",
-    "error_disabled_body": "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
+    "error_disabled_body": "Enable pairing in <a>Config → Security</a> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "qr_aria_label": "QR code for pairing with a mobile device",
     "btn_try_again": "Try again"
