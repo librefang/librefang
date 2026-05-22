@@ -506,6 +506,14 @@ pub struct Trigger {
 
 当 `max_fires` 设置为大于 0 的值时，触发器在 `fire_count >= max_fires` 后会自动禁用（设置 `enabled = false`）。将 `max_fires` 设为 0 表示触发器无限次触发。
 
+### 单触发器 `session_mode` 与并发
+
+触发器可以携带单触发器的 `session_mode` 覆盖（`"new"` 或 `"persistent"`），对该触发器的每次触发，它优先于 Agent manifest 的默认值生效。该覆盖**仅控制会话隔离**——即每次触发是否获得全新的 `SessionId`。
+
+它**不会**带来并发能力。每个 Agent 的并发上限（`max_concurrent_invocations`）仅由 **manifest** 计算得出；当 manifest 默认 `session_mode` 为 `"persistent"` 时，该上限被硬性钳制为 1（对同一持久会话历史的并发追加是未定义行为）。因此在默认 `Persistent` 的 Agent 上，带有 `session_mode = "new"` 的触发器会生成相互隔离的会话，但仍然串行执行。要获得真正的单触发器并发，**manifest** 必须同时设置 `session_mode = "new"` 和 `max_concurrent_invocations > 1`。
+
+精确的解析顺序与配置示例见 [Trigger dispatch concurrency](https://github.com/librefang/librefang/blob/main/docs/architecture/trigger-dispatch-concurrency.md)（"Gotcha: per-trigger `session_mode = "new"` does NOT grant parallelism" 一节）。
+
 ### 触发器使用场景
 
 **监控 Agent 健康状态：**
