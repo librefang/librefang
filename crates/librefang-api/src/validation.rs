@@ -85,6 +85,43 @@ pub fn check_message_size(message: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Validate that a bulk-endpoint array is non-empty and within `limit`.
+///
+/// Bulk handlers must call this **before** allocating any per-item
+/// buffer (e.g. `Vec::with_capacity(req.ids.len())`). Even within the
+/// 8 MiB global request-body cap, an attacker can craft an array of
+/// empty strings that would otherwise cause millions of pre-allocated
+/// entries. Issue `docs/issues/bulk-with-capacity-no-validate.md`.
+///
+/// Each call site supplies its own per-route `limit` constant — the
+/// approvals lane historically allows 100, agents bulk allows 50, etc.
+/// Lowering caps silently to a single shared value would break operator
+/// workflows, so the cap is the caller's choice.
+///
+/// Returns a tuple-shape error rather than a [`ValidationError`] so
+/// existing handlers that already build `(StatusCode, Json<Value>)`
+/// can `let Err(resp) = ...; return resp;` without further conversion.
+pub fn validate_bulk_size(
+    len: usize,
+    limit: usize,
+) -> Result<(), (StatusCode, axum::Json<serde_json::Value>)> {
+    if len == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "bulk array is empty"})),
+        ));
+    }
+    if len > limit {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!("bulk array size {len} exceeds maximum {limit}"),
+            })),
+        ));
+    }
+    Ok(())
+}
+
 // ── Error type ──────────────────────────────────────────────────────
 
 /// A validation error returned as a consistent JSON body.
@@ -410,7 +447,10 @@ mod tests {
         // but well under the new 256 KiB byte cap AND 100 K char
         // cap. Must accept now.
         let msg: String = std::iter::repeat_n('文', 30_000).collect();
-        assert!(msg.len() > 64 * 1024, "test fixture must exceed historical 64 KiB cap");
+        assert!(
+            msg.len() > 64 * 1024,
+            "test fixture must exceed historical 64 KiB cap"
+        );
         assert!(
             check_message_size(&msg).is_ok(),
             "CJK message at 30K chars / ~90 KiB must pass under the new fair caps"
@@ -440,7 +480,10 @@ mod tests {
         // 100_001 × 2 bytes = ~200 KiB (under MAX_MESSAGE_BYTES);
         // 100_001 chars (over MAX_MESSAGE_CHARS).
         let msg: String = std::iter::repeat_n('а', MAX_MESSAGE_CHARS + 1).collect();
-        assert!(msg.len() < MAX_MESSAGE_BYTES, "fixture must respect byte cap");
+        assert!(
+            msg.len() < MAX_MESSAGE_BYTES,
+            "fixture must respect byte cap"
+        );
         let err = check_message_size(&msg).expect_err("must reject past char cap");
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(

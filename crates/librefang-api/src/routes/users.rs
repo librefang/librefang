@@ -487,6 +487,16 @@ pub async fn delete_user(
     }
 }
 
+/// Hard cap on rows accepted in a single CSV/JSON import call.
+///
+/// Larger than the agents `BULK_LIMIT` because user CSV imports are an
+/// operator-driven bulk migration tool (initial onboarding, IdP sync),
+/// not an interactive UI affordance. Bounded so an attacker can't craft
+/// an array of empty rows that, even within the 8 MiB body cap, would
+/// cause `Vec::with_capacity(req.rows.len())` to pre-allocate millions
+/// of entries (`docs/issues/bulk-with-capacity-no-validate.md`).
+const BULK_USER_IMPORT_LIMIT: usize = 1000;
+
 #[utoipa::path(
     post,
     path = "/api/users/import",
@@ -500,6 +510,19 @@ pub async fn import_users(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkImportRequest>,
 ) -> impl IntoResponse {
+    // Guard BEFORE allocating any per-row buffer — see DoS note on
+    // `BULK_USER_IMPORT_LIMIT` above.
+    if let Err((status, json)) =
+        crate::validation::validate_bulk_size(req.rows.len(), BULK_USER_IMPORT_LIMIT)
+    {
+        let msg = json
+            .0
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bulk array invalid")
+            .to_string();
+        return err_response(status, msg);
+    }
     // Validate every row first so the preview can surface errors without
     // mutating state.
     let mut prepared: Vec<(usize, Result<UserConfig, String>)> = Vec::with_capacity(req.rows.len());
@@ -532,6 +555,9 @@ pub async fn import_users(
         let cfg = state.kernel.config_ref();
         let existing_names: std::collections::HashSet<&str> =
             cfg.users.iter().map(|u| u.name.as_str()).collect();
+        // `prepared.len() == req.rows.len()` (every row is pushed once
+        // above, success or fail), so this allocation is bounded by the
+        // top-level `BULK_USER_IMPORT_LIMIT` guard.
         let mut rows_out = Vec::with_capacity(prepared.len());
         let mut created = 0usize;
         let mut updated = 0usize;

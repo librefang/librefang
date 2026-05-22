@@ -466,28 +466,10 @@ const DEFAULT_AGENT_LIST_LIMIT: usize = 500;
 /// (audit: agent-list-limit-none-unbounded).
 const MAX_AGENT_LIST_LIMIT: usize = 500;
 
-/// Validate that a bulk request array is non-empty and within the limit.
-fn validate_bulk_size(
-    len: usize,
-    lang: &'static str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let t = ErrorTranslator::new(lang);
-    if len == 0 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-agent-array-empty")})),
-        ));
-    }
-    if len > BULK_LIMIT {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-agent-array-too-large", &[("max", &BULK_LIMIT.to_string())])}),
-            ),
-        ));
-    }
-    Ok(())
-}
+// `validate_bulk_size` lives at `routes/mod.rs` so non-agent bulk handlers
+// (approvals, users, workflows) can reuse the same guard before they reach
+// any `Vec::with_capacity(len)`. See
+// `docs/issues/bulk-with-capacity-no-validate.md`.
 
 /// POST /api/agents/bulk — Create multiple agents at once.
 #[utoipa::path(
@@ -505,7 +487,7 @@ pub async fn bulk_create_agents(
     Json(req): Json<BulkCreateRequest>,
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
-    if let Err(resp) = validate_bulk_size(req.agents.len(), l) {
+    if let Err(resp) = crate::validation::validate_bulk_size(req.agents.len(), BULK_LIMIT) {
         return resp;
     }
 
@@ -583,7 +565,7 @@ pub async fn bulk_delete_agents(
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
     let t = ErrorTranslator::new(l);
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
+    if let Err(resp) = crate::validation::validate_bulk_size(req.agent_ids.len(), BULK_LIMIT) {
         return resp;
     }
 
@@ -670,7 +652,7 @@ pub async fn bulk_start_agents(
 
     let l = super::resolve_lang(lang.as_ref());
     let t = ErrorTranslator::new(l);
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
+    if let Err(resp) = crate::validation::validate_bulk_size(req.agent_ids.len(), BULK_LIMIT) {
         return resp;
     }
 
@@ -744,7 +726,7 @@ pub async fn bulk_stop_agents(
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
     let t = ErrorTranslator::new(l);
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
+    if let Err(resp) = crate::validation::validate_bulk_size(req.agent_ids.len(), BULK_LIMIT) {
         return resp;
     }
 
@@ -4590,6 +4572,15 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
         .as_array()
         .ok_or("mcp_servers must be an array of strings")?;
 
+    // `BULK_LIMIT` (50) bounds the per-agent MCP server list at the same
+    // cap as the agents bulk endpoints. Sweep finding from the
+    // `Vec::with_capacity(arr.len())` DoS audit
+    // (`docs/issues/bulk-with-capacity-no-validate.md`): without this,
+    // an `{"mcp_servers": ["", "", ...]}` payload within the 8 MiB body
+    // cap would pre-allocate millions of entries.
+    if items.len() > BULK_LIMIT {
+        return Err("mcp_servers exceeds maximum allowed entries");
+    }
     let mut servers = Vec::with_capacity(items.len());
     for item in items {
         let name = item
@@ -7692,9 +7683,8 @@ mod kernel_err_to_status_tests {
 
     #[test]
     fn agent_already_exists_maps_to_409() {
-        let err = KernelError::LibreFang(LibreFangError::AgentAlreadyExists(
-            "dup-name".to_string(),
-        ));
+        let err =
+            KernelError::LibreFang(LibreFangError::AgentAlreadyExists("dup-name".to_string()));
         assert_eq!(kernel_err_to_status(&err), StatusCode::CONFLICT);
     }
 
@@ -7703,8 +7693,7 @@ mod kernel_err_to_status_tests {
         // Sanity: the catch-all preserves the pre-fix behaviour so
         // a transient kernel error doesn't surprise-surface as a
         // client-error class.
-        let err =
-            KernelError::LibreFang(LibreFangError::Internal("disk full".to_string()));
+        let err = KernelError::LibreFang(LibreFangError::Internal("disk full".to_string()));
         assert_eq!(
             kernel_err_to_status(&err),
             StatusCode::INTERNAL_SERVER_ERROR,
