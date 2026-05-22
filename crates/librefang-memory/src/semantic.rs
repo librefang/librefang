@@ -193,7 +193,11 @@ impl SemanticStore {
             return self.recall_via_vector_store(vs, qe, limit, filter.clone());
         }
 
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        // mut: needed for the `transaction()` call inside
+        // `bump_recall_access_counts` after the read is done. The
+        // read-side `stmt` borrow is explicitly dropped below
+        // before that borrow occurs.
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Build SQL: fetch candidates (broader than limit for vector re-ranking)
         let fetch_limit = if query_embedding.is_some() {
@@ -407,18 +411,27 @@ impl SemanticStore {
             );
         }
 
-        // Update access counts for returned memories. Logged on failure
-        // because the decay/consolidation engine keys TTL decisions off
-        // accessed_at — silently losing updates means "active" memories
-        // can be garbage-collected when they shouldn't be.
-        for frag in &fragments {
-            if let Err(e) = conn.execute(
-                "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
-                rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            ) {
-                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
-            }
-        }
+        // Drop the prepared SELECT explicitly so `conn` is no
+        // longer borrowed below — we need a mutable borrow to open
+        // the access-count transaction. (NLL would keep `stmt`
+        // alive to end-of-scope otherwise; the explicit drop is
+        // cheaper than restructuring the entire read into a sub-
+        // block.)
+        drop(stmt);
+
+        // Bump access_count + accessed_at on recalled fragments
+        // (audit: memory-recall-n+1-update). Pre-fix this was a
+        // per-row `conn.execute` with no transaction wrapper, which
+        // forced WAL fsync once per recalled fragment — at 100
+        // recalls per tool-augmented turn the latency dominated the
+        // recall path. Now wrapped in a single transaction +
+        // prepared statement so all UPDATEs amortise to one WAL
+        // fsync. The decay/consolidation engine keys TTL decisions
+        // off `accessed_at`, so this MUST persist; the helper keeps
+        // the per-row warn-on-failure log so silent loss of a
+        // single row's bump (e.g. transient SQLite lock) still
+        // surfaces.
+        bump_recall_access_counts(&mut conn, &fragments);
 
         Ok(fragments)
     }
@@ -447,30 +460,87 @@ impl SemanticStore {
             results.len()
         );
 
-        // Hydrate full MemoryFragments from SQLite by ID
-        let mut fragments = Vec::with_capacity(results.len());
+        // Hydrate full MemoryFragments from SQLite by ID. Pre-fix
+        // this was K calls to `get_by_id`, each opening a
+        // pool connection + preparing a statement (audit:
+        // memory-recall-n+1-update — second sub-finding). At K=50
+        // that was 50 round-trips for what is a single SELECT
+        // WHERE id IN (?,?,...). Parse all ANN-returned ids first
+        // (so a single malformed UUID fails the whole hydrate
+        // rather than silently skipping), then issue one batched
+        // SELECT. The batch preserves the ANN ranking order by
+        // re-ordering against the input vec after fetch.
+        let mut ordered_ids: Vec<MemoryId> = Vec::with_capacity(results.len());
         for r in &results {
             let mem_id = uuid::Uuid::parse_str(&r.id)
                 .map(MemoryId)
                 .map_err(LibreFangError::memory)?;
-            if let Some(frag) = self.get_by_id(mem_id, false)? {
+            ordered_ids.push(mem_id);
+        }
+        let mut by_id = self.get_by_ids_batch(&ordered_ids, false)?;
+        let mut fragments: Vec<MemoryFragment> = Vec::with_capacity(ordered_ids.len());
+        for mem_id in &ordered_ids {
+            if let Some(frag) = by_id.remove(mem_id) {
                 fragments.push(frag);
             }
         }
 
-        // Update access counts — see note on the SQLite-path update above
-        // for why silent drops would corrupt decay logic.
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
-        for frag in &fragments {
-            if let Err(e) = conn.execute(
-                "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
-                rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            ) {
-                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
-            }
+        // Update access counts — see note on the SQLite-path
+        // update above for why silent drops would corrupt decay
+        // logic. Same tx-wrapped helper. The vector-store branch
+        // has no other live conn handle at this point, so we
+        // acquire one for the write.
+        if let Ok(mut write_conn) = self.pool.get() {
+            bump_recall_access_counts(&mut write_conn, &fragments);
+        } else {
+            warn!("memory recall (vector store): pool.get() for access-count bump failed");
         }
 
         Ok(fragments)
+    }
+
+    /// Batch counterpart to [`Self::get_by_id`] used by
+    /// `recall_via_vector_store` (audit: memory-recall-n+1-update).
+    /// Issues a single `SELECT … WHERE id IN (?,?,…)` query and
+    /// returns a map keyed by `MemoryId` so the caller can re-order
+    /// against its ANN-ranked input vector. Empty input returns
+    /// an empty map without touching the pool.
+    fn get_by_ids_batch(
+        &self,
+        ids: &[MemoryId],
+        include_deleted: bool,
+    ) -> LibreFangResult<HashMap<MemoryId, MemoryFragment>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let deleted_clause = if include_deleted {
+            ""
+        } else {
+            " AND deleted = 0"
+        };
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
+             FROM memories WHERE id IN ({placeholders}){deleted_clause}",
+        );
+        let id_strs: Vec<String> = ids.iter().map(|m| m.0.to_string()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            id_strs.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), decode_memory_row)
+            .map_err(LibreFangError::memory)?;
+
+        let mut out = HashMap::with_capacity(ids.len());
+        for row in rows {
+            let frag = row.map_err(LibreFangError::memory)?;
+            out.insert(frag.id, frag);
+        }
+        Ok(out)
     }
 
     /// Get a single memory fragment by ID (including soft-deleted ones for history).
@@ -493,96 +563,12 @@ impl SemanticStore {
 
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
-        let result = stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
-            let id_str: String = row.get(0)?;
-            let agent_str: String = row.get(1)?;
-            let content: String = row.get(2)?;
-            let source_str: String = row.get(3)?;
-            let scope: String = row.get(4)?;
-            let confidence: f64 = row.get(5)?;
-            let meta_str: String = row.get(6)?;
-            let created_str: String = row.get(7)?;
-            let accessed_str: String = row.get(8)?;
-            let access_count: i64 = row.get(9)?;
-            let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
-            let image_url: Option<String> = row.get(11)?;
-            let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
-            let modality_str: Option<String> = row.get(13)?;
-            Ok((
-                id_str,
-                agent_str,
-                content,
-                source_str,
-                scope,
-                confidence,
-                meta_str,
-                created_str,
-                accessed_str,
-                access_count,
-                embedding_bytes,
-                image_url,
-                image_embedding_bytes,
-                modality_str,
-            ))
-        });
-
-        match result {
-            Ok((
-                id_str,
-                agent_str,
-                content,
-                source_str,
-                scope,
-                confidence,
-                meta_str,
-                created_str,
-                accessed_str,
-                access_count,
-                embedding_bytes,
-                image_url,
-                image_embedding_bytes,
-                modality_str,
-            )) => {
-                let id = uuid::Uuid::parse_str(&id_str)
-                    .map(MemoryId)
-                    .map_err(LibreFangError::memory)?;
-                let agent_id = uuid::Uuid::parse_str(&agent_str)
-                    .map(librefang_types::agent::AgentId)
-                    .map_err(LibreFangError::memory)?;
-                let source: MemorySource =
-                    serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-                let metadata: HashMap<String, serde_json::Value> =
-                    serde_json::from_str(&meta_str).unwrap_or_default();
-                let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
-                let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
-                let modality: MemoryModality = modality_str
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
-                    .unwrap_or_default();
-
-                Ok(Some(MemoryFragment {
-                    id,
-                    agent_id,
-                    content,
-                    embedding,
-                    metadata,
-                    source,
-                    confidence: confidence as f32,
-                    created_at,
-                    accessed_at,
-                    access_count: access_count as u64,
-                    scope,
-                    image_url,
-                    image_embedding,
-                    modality,
-                }))
-            }
+        // Row decoder lives at module scope (`decode_memory_row`) so
+        // `get_by_ids_batch` can share it without copy-pasting the
+        // ~60-line column mapping (audit:
+        // memory-recall-n+1-update).
+        match stmt.query_row(rusqlite::params![id.0.to_string()], decode_memory_row) {
+            Ok(frag) => Ok(Some(frag)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LibreFangError::memory(e)),
         }
@@ -875,6 +861,136 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+/// Row decoder shared by `MemoryStore::get_by_id` and
+/// `MemoryStore::get_by_ids_batch` (audit:
+/// memory-recall-n+1-update — second sub-finding). The closure
+/// must satisfy `FnMut(&Row) -> rusqlite::Result<MemoryFragment>`
+/// so it can be passed to both `query_row` and `query_map` —
+/// rusqlite errors propagate to the caller, which is responsible
+/// for converting them into `LibreFangError`.
+///
+/// UUID / JSON parse failures inside the row map to
+/// `rusqlite::Error::FromSqlConversionFailure` so they surface in
+/// the same channel as primitive-column errors. Most rows in
+/// practice parse cleanly; this only matters when a row is
+/// hand-mutated outside the kernel write paths (operator running
+/// SQL by hand).
+fn decode_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryFragment> {
+    fn fsql<E: std::error::Error + Send + Sync + 'static>(
+        idx: usize,
+        ty: rusqlite::types::Type,
+        e: E,
+    ) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(idx, ty, Box::new(e))
+    }
+    let id_str: String = row.get(0)?;
+    let agent_str: String = row.get(1)?;
+    let content: String = row.get(2)?;
+    let source_str: String = row.get(3)?;
+    let scope: String = row.get(4)?;
+    let confidence: f64 = row.get(5)?;
+    let meta_str: String = row.get(6)?;
+    let created_str: String = row.get(7)?;
+    let accessed_str: String = row.get(8)?;
+    let access_count: i64 = row.get(9)?;
+    let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+    let image_url: Option<String> = row.get(11)?;
+    let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+    let modality_str: Option<String> = row.get(13)?;
+
+    let id = uuid::Uuid::parse_str(&id_str)
+        .map(MemoryId)
+        .map_err(|e| fsql(0, rusqlite::types::Type::Text, e))?;
+    let agent_id = uuid::Uuid::parse_str(&agent_str)
+        .map(librefang_types::agent::AgentId)
+        .map_err(|e| fsql(1, rusqlite::types::Type::Text, e))?;
+    let source: MemorySource =
+        serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
+    let metadata: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&meta_str).unwrap_or_default();
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+    let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
+    let modality: MemoryModality = modality_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
+        .unwrap_or_default();
+    Ok(MemoryFragment {
+        id,
+        agent_id,
+        content,
+        embedding,
+        metadata,
+        source,
+        confidence: confidence as f32,
+        created_at,
+        accessed_at,
+        access_count: access_count as u64,
+        scope,
+        image_url,
+        image_embedding,
+        modality,
+    })
+}
+
+/// Bump access_count + accessed_at on every recalled fragment in
+/// a single transaction (audit: memory-recall-n+1-update — first
+/// sub-finding). Pre-fix this was a per-row `conn.execute` with
+/// no transaction wrapper, forcing one WAL fsync per row; at 100
+/// fragments per tool-augmented turn the latency dominated the
+/// recall path.
+///
+/// Failures on individual rows are logged but don't abort the
+/// remaining UPDATEs — the decay/consolidation engine keys TTL
+/// decisions off `accessed_at`, so we'd rather persist what we
+/// can than lose the whole batch on one bad row. A failure to
+/// acquire the connection or open the transaction is also
+/// logged + ignored (recall already returned the fragments to
+/// the caller; we don't want to surface a write-side error on a
+/// successful read).
+fn bump_recall_access_counts(
+    conn: &mut rusqlite::Connection,
+    fragments: &[MemoryFragment],
+) {
+    if fragments.is_empty() {
+        return;
+    }
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "memory recall: transaction() failed for access-count bump");
+            return;
+        }
+    };
+    let now = Utc::now().to_rfc3339();
+    {
+        let mut stmt = match tx.prepare(
+            "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "memory recall: stmt.prepare() failed");
+                return;
+            }
+        };
+        for frag in fragments {
+            if let Err(e) =
+                stmt.execute(rusqlite::params![now, frag.id.0.to_string()])
+            {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
+        }
+    }
+    if let Err(e) = tx.commit() {
+        warn!(error = %e, "memory recall: tx.commit() failed for access-count bump");
+    }
 }
 
 // ---------------------------------------------------------------------------

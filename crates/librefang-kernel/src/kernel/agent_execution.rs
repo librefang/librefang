@@ -14,6 +14,45 @@
 use super::*;
 use crate::MeteringSubsystemApi;
 
+/// Detect + strip the cron `[SILENT]` marker at the start of a message.
+///
+/// Returns `(message_for_llm, is_silent)`.
+/// - `is_silent` is true only when `is_internal_cron` AND the marker is
+///   the first non-whitespace token. The prefix anchor stops cron
+///   prompt templates that interpolate runtime data (channel content,
+///   tool output, user-supplied variables) from accidentally
+///   suppressing the run because the interpolated payload happened to
+///   contain a literal `[SILENT]` substring.
+/// - When `is_silent` is true the returned `message_for_llm` has the
+///   single leading `[SILENT]` token removed and is re-trimmed. If
+///   stripping would leave the message empty the unstripped (but
+///   trimmed) message is returned so the LLM still receives a
+///   non-empty turn.
+/// - When `is_silent` is false the returned `message_for_llm` is just
+///   `message.trim()`.
+///
+/// Audit: silent-marker-substring-match.
+pub(crate) fn strip_silent_cron_marker(
+    message: &str,
+    is_internal_cron: bool,
+) -> (String, bool) {
+    let is_silent = is_internal_cron && message.trim_start().starts_with("[SILENT]");
+    if !is_silent {
+        return (message.trim().to_string(), false);
+    }
+    let stripped = message
+        .trim_start()
+        .strip_prefix("[SILENT]")
+        .unwrap_or(message)
+        .trim()
+        .to_string();
+    if stripped.is_empty() {
+        (message.trim().to_string(), true)
+    } else {
+        (stripped, true)
+    }
+}
+
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
     // Module dispatch: WASM / Python / LLM
@@ -883,20 +922,18 @@ impl LibreFangKernel {
         // marker is a system-level signal for the kernel; the LLM should never
         // see it in the conversation. Stripping must happen before link-context
         // expansion so the expanded string is also clean.
-        // Only active for internal cron calls (is_internal_cron flag) — external
-        // callers cannot trigger this path, so legitimate user messages containing
-        // "[SILENT]" (e.g. "add a `[SILENT]` comment") are preserved.
+        // Only active for internal cron calls (is_internal_cron flag) AND
+        // only when the marker is at the start of the message — the
+        // `is_internal_cron` gate prevents external callers from
+        // triggering this path, and the prefix anchor stops a cron
+        // prompt that templates in runtime data (channel content,
+        // user-supplied variables) from accidentally suppressing
+        // history because the interpolated payload happened to contain
+        // the literal `[SILENT]` substring (audit:
+        // silent-marker-substring-match).
         let is_internal_cron = sender_context.is_some_and(|ctx| ctx.is_internal_cron);
-        let message_for_llm = if is_internal_cron && message.contains("[SILENT]") {
-            let stripped = message.replace("[SILENT]", "").trim().to_string();
-            if stripped.is_empty() {
-                message.trim().to_string()
-            } else {
-                stripped
-            }
-        } else {
-            message.trim().to_string()
-        };
+        let (message_for_llm, is_silent_cron) =
+            strip_silent_cron_marker(message, is_internal_cron);
 
         // Build link context from user message (auto-extract URLs for the agent)
         let message_with_links = if let Some(link_ctx) =
@@ -1126,7 +1163,12 @@ impl LibreFangKernel {
         // assistant turn from it first so the next cron fire does not see the
         // suppressed response in its context window.
         // Canonical append: skipped entirely for silent cron turns.
-        let skip_canonical_append = if is_internal_cron && message.contains("[SILENT]") {
+        // Use the same `is_silent_cron` decision the LLM-side branch
+        // used: prefix-anchored, internal-cron-only. A substring match
+        // here would diverge from `message_for_llm` and could silently
+        // suppress the assistant turn even when the LLM saw the
+        // unstripped message.
+        let skip_canonical_append = if is_silent_cron {
             // Remove the last assistant message from the in-memory session so
             // it is not included in the re-saved version.
             let removed = session
@@ -1314,5 +1356,76 @@ impl LibreFangKernel {
         self.spawn_session_label_generation(agent_id, effective_session_id);
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod silent_marker_tests {
+    use super::strip_silent_cron_marker;
+
+    #[test]
+    fn non_cron_call_never_strips_marker_even_if_present() {
+        // Sanity: outside the internal-cron path the marker is just
+        // text and must reach the LLM verbatim.
+        let (out, silent) = strip_silent_cron_marker("[SILENT] hello", false);
+        assert_eq!(out, "[SILENT] hello");
+        assert!(!silent);
+    }
+
+    #[test]
+    fn cron_call_strips_leading_marker_and_trims() {
+        let (out, silent) =
+            strip_silent_cron_marker("[SILENT]   run housekeeping  ", true);
+        assert_eq!(out, "run housekeeping");
+        assert!(silent);
+    }
+
+    #[test]
+    fn cron_call_strips_leading_marker_after_whitespace() {
+        // Operators sometimes indent their cron prompts; the marker
+        // must still anchor to the first non-whitespace token.
+        let (out, silent) = strip_silent_cron_marker("   [SILENT] do work", true);
+        assert_eq!(out, "do work");
+        assert!(silent);
+    }
+
+    #[test]
+    fn cron_call_with_marker_only_message_falls_back_to_trimmed_original() {
+        // Stripping the marker would leave an empty turn, which the LLM
+        // would reject. The helper falls back to the trimmed original
+        // so the LLM still sees `"[SILENT]"` and the silent flag is
+        // still raised so persistence is suppressed.
+        let (out, silent) = strip_silent_cron_marker("[SILENT]", true);
+        assert_eq!(out, "[SILENT]");
+        assert!(silent);
+    }
+
+    #[test]
+    fn cron_call_does_not_strip_marker_in_middle_of_message() {
+        // Regression for the substring-match foot-gun: a cron prompt
+        // template that interpolated runtime data containing the
+        // literal `[SILENT]` substring used to trigger suppression.
+        // With the prefix anchor the message reaches the LLM intact
+        // and the silent flag stays off — the operator must place
+        // the marker at the start to opt in.
+        let (out, silent) = strip_silent_cron_marker(
+            "Channel said: [SILENT] mode unrelated note",
+            true,
+        );
+        assert_eq!(out, "Channel said: [SILENT] mode unrelated note");
+        assert!(!silent);
+    }
+
+    #[test]
+    fn cron_call_strips_only_the_first_occurrence() {
+        // The previous implementation used `replace("[SILENT]", "")`
+        // which scrubbed every occurrence. Now only the leading one
+        // is consumed; later occurrences (if any) survive intact.
+        let (out, silent) = strip_silent_cron_marker(
+            "[SILENT] note: keep this [SILENT] tag literal",
+            true,
+        );
+        assert_eq!(out, "note: keep this [SILENT] tag literal");
+        assert!(silent);
     }
 }
