@@ -172,6 +172,7 @@ impl SetupWizard {
             skills_disabled: false,
             mcp_servers: vec![],
             mcp_disabled: false,
+            channels: vec![],
             metadata: HashMap::new(),
             tags: vec![],
             routing: None,

@@ -184,6 +184,12 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def get_agent_channels(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/channels")
+
+    def set_agent_channels(self, id: str, **data):
+        return self._c._request("PUT", f"/api/agents/{id}/channels", data)
+
     def clone_agent(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/clone", data)
 

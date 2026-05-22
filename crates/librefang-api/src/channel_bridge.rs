@@ -1937,6 +1937,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .and_then(|entry| entry.manifest.channel_overrides.clone())
     }
 
+    async fn agent_channel_allowlist(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| entry.manifest.channels.clone())
+            .unwrap_or_default()
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,

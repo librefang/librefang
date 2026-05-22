@@ -292,6 +292,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Return the channel allowlist for an agent (the `channels` field in
+    /// `agent.toml`). An empty list means "all channels allowed". Callers
+    /// should skip dispatching when the list is non-empty and the inbound
+    /// channel is not in it.
+    async fn agent_channel_allowlist(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
     async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
@@ -2999,6 +3007,22 @@ async fn resolve_or_fallback(
     };
 
     if let Some(id) = agent_id {
+        // Channel allowlist enforcement: if the agent declares a non-empty
+        // `channels` list in agent.toml, only dispatch when the inbound
+        // channel is in that list.
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                debug!(
+                    agent_id = %id,
+                    channel = ct,
+                    allowlist = ?allowlist,
+                    "Channel allowlist filtered out agent — inbound channel not in agent's allowlist"
+                );
+                return None;
+            }
+        }
         return Some(id);
     }
 
@@ -3013,6 +3037,20 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
+        // Check allowlist for fallback agent too
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                debug!(
+                    agent_id = %id,
+                    channel = ct,
+                    allowlist = ?allowlist,
+                    "Channel allowlist filtered out fallback agent — inbound channel not in agent's allowlist"
+                );
+                return None;
+            }
+        }
         // Auto-set this as the user's default so future messages route directly
         router.set_user_default(message.sender.platform_id.clone(), id);
     }

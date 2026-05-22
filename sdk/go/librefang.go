@@ -324,6 +324,14 @@ func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (int
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
+func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
+}
+
+func (r *AgentsResource) SetAgentChannels(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/channels", id), data, nil)
+}
+
 func (r *AgentsResource) CloneAgent(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/clone", id), data, nil)
 }

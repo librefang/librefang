@@ -479,6 +479,30 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &format!("/api/agents/{}/channels", id),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_agent_channels(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &format!("/api/agents/{}/channels", id),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn clone_agent(&self, id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
