@@ -13,6 +13,14 @@ input="$(cat)"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 LIB="$script_dir/lib/check-bash-rules.py"
 
+# Fail-closed if the rule library is missing. A half-broken clone
+# (partial checkout, accidentally-deleted lib) must NOT silently bypass
+# the safety hook — the developer should see the error and fix their
+# clone before any bash command is allowed through. Exit 2 (not 1): per
+# the Claude Code PreToolUse contract only exit 2 blocks the tool call;
+# exit 1 is a non-blocking error and the command would still run.
+[ -f "$LIB" ] || { echo "[guard-bash-safety] missing $LIB" >&2; exit 2; }
+
 py() { python3 -c "$1" 2>/dev/null || true; }
 
 # Use here-strings (`<<<"$input"`) instead of `printf … | py …` pipelines.
@@ -34,13 +42,20 @@ cmd="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get(
 
 rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch"
 
-msg="$(python3 "$LIB" --rules "$rules" <<<"$cmd" 2>/dev/null || true)"
-
-if [ -n "$msg" ]; then
-  cat >&2 <<MSG
+# check-bash-rules.py is contractually exit-0: it prints a message on a
+# rule hit and nothing on a pass. A non-zero exit therefore means the
+# library itself is broken (corrupt / unreadable / wrong interpreter) —
+# fail closed instead of letting the swallowed error allow the command.
+if msg="$(python3 "$LIB" --rules "$rules" <<<"$cmd" 2>/dev/null)"; then
+  if [ -n "$msg" ]; then
+    cat >&2 <<MSG
 [guard-bash-safety] $msg
 Command: $cmd
 MSG
+    exit 2
+  fi
+else
+  echo "[guard-bash-safety] rule library failed to run (corrupt or unreadable): $LIB" >&2
   exit 2
 fi
 
