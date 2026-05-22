@@ -87,6 +87,20 @@ pub enum HotAction {
     /// in-memory `BudgetConfig` is constructed once from `KernelConfig.budget`
     /// at boot time and never re-read.
     UpdateBudget,
+    /// `[external_auth]` (or any `[[external_auth.providers]]` entry)
+    /// changed in a way that affects IdP identity — flush the OIDC
+    /// discovery + JWKS caches owned by `librefang-api::oauth`.
+    ///
+    /// Without this action, swapping IdPs at runtime leaves the
+    /// previous provider's JWKS in cache for up to 1h (the cache TTL).
+    /// Tokens issued by the new IdP fail JWT signature validation
+    /// against the stale keys → 401 until the natural eviction.
+    /// Caches are keyed by `issuer_url` / `jwks_uri`; a new IdP means
+    /// a new key, so the stale entries would never be hit anyway,
+    /// but they bloat memory until TTL. The fast eviction also
+    /// matters when an operator rotates `issuer_url` back to a value
+    /// the cache already holds with stale keys.
+    ReloadExternalAuth,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +166,59 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
     let old_json = serde_json::to_string(old).ok();
     let new_json = serde_json::to_string(new).ok();
     old_json != new_json
+}
+
+/// Decide whether two `[external_auth]` snapshots disagree on a field
+/// that affects which OIDC discovery document / JWKS keyset is
+/// canonical — i.e. whether the existing API-side caches should be
+/// flushed.
+///
+/// The full `ExternalAuthConfig` carries operator-facing knobs
+/// (`session_ttl_secs`, `allowed_domains`, `require_email_verified`,
+/// `redirect_url`, scopes, audience) that are read directly from the
+/// live config at each request and never cached by the OIDC layer.
+/// Triggering cache eviction on those edits would force a network
+/// round-trip on the next login for no behavioural change, so we
+/// narrow the trigger set to the fields that actually key into the
+/// caches.
+///
+/// IdP-identity fields:
+///   - top-level `enabled` (toggling auth off then on should rebuild
+///     fresh — a quiesced provider may have rotated keys),
+///   - top-level `issuer_url` (discovery cache key in single-provider
+///     mode),
+///   - per-provider `id` set (a renamed provider effectively rebinds
+///     a different IdP under the same handle),
+///   - per-provider `issuer_url` and `jwks_uri` (cache keys in
+///     multi-provider mode).
+fn external_auth_idp_changed(
+    old: &librefang_types::config::ExternalAuthConfig,
+    new: &librefang_types::config::ExternalAuthConfig,
+) -> bool {
+    if old.enabled != new.enabled || old.issuer_url != new.issuer_url {
+        return true;
+    }
+    // Multi-provider: compare the (id, issuer_url, jwks_uri) tuples.
+    // Length difference alone is conclusive; otherwise zip-compare so
+    // a reordering of the providers list — which can legitimately
+    // change route precedence — does not trigger eviction unless an
+    // IdP-identity field also moved.
+    if old.providers.len() != new.providers.len() {
+        return true;
+    }
+    // Build a `(id -> (issuer_url, jwks_uri))` map for each side and
+    // diff; order-insensitive so a pure reordering doesn't churn the
+    // cache. A renamed `id` shows up as a removed entry + an added
+    // entry under the new name → diff returns `true`, which is the
+    // correct behaviour (the route handle now points at a different
+    // logical IdP slot).
+    let to_map = |cfg: &librefang_types::config::ExternalAuthConfig| {
+        cfg.providers
+            .iter()
+            .map(|p| (p.id.clone(), (p.issuer_url.clone(), p.jwks_uri.clone())))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    to_map(old) != to_map(new)
 }
 
 /// Runtime capabilities the planner needs to know about so it can correctly
@@ -418,6 +485,24 @@ pub fn build_reload_plan_with_caps(
     // silently no-op until restart. Push `UpdateBudget` to RCU the snapshot.
     if field_changed(&old.budget, &new.budget) {
         plan.hot_actions.push(HotAction::UpdateBudget);
+    }
+
+    // `[external_auth]` IdP identity changed — flush the OIDC discovery
+    // + JWKS caches that `librefang-api::oauth` keeps as module-level
+    // `LazyLock`s, keyed by `issuer_url` / `jwks_uri`. Without this, a
+    // hot-reload that swaps in a different identity provider would
+    // leave the previous IdP's JWKS in cache for up to 1h, and any
+    // re-binding of an issuer URL to a new keyset (key rotation +
+    // reconfigure in one step) would 401 every token until the
+    // natural cache TTL expires.
+    //
+    // Only fields that actually affect the cached entries should
+    // trigger eviction: changing `session_ttl_secs` or `allowed_domains`
+    // doesn't invalidate any cached key, and firing the action on
+    // every edit would waste a network round-trip on the next login.
+    // See the helper for the exact field set.
+    if external_auth_idp_changed(&old.external_auth, &new.external_auth) {
+        plan.hot_actions.push(HotAction::ReloadExternalAuth);
     }
 
     if field_changed(&old.sanitize, &new.sanitize) {
@@ -847,6 +932,173 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::UpdateToolPolicy));
+    }
+
+    // -----------------------------------------------------------------------
+    // External auth — IdP-identity changes must evict OAuth caches (refs
+    // `docs/issues/jwks-cache-no-reload-evict.md`). The positive and
+    // negative tests together pin the "only on real IdP swap" contract.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_external_auth_issuer_url_change_evicts_oauth_caches() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.external_auth.enabled = true;
+        b.external_auth.issuer_url = "https://idp-b.example.com".to_string();
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "external_auth is hot-reloadable; restart should not be required"
+        );
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "issuer_url change must queue ReloadExternalAuth so stale JWKS \
+             from the previous IdP is evicted before the next token \
+             validation: actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_provider_jwks_uri_change_evicts_oauth_caches() {
+        use librefang_types::config::OidcProvider;
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.providers.push(OidcProvider {
+            id: "corp".to_string(),
+            display_name: "Corp SSO".to_string(),
+            issuer_url: "https://idp-a.example.com".to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        });
+        b.external_auth.providers.push(OidcProvider {
+            id: "corp".to_string(),
+            display_name: "Corp SSO".to_string(),
+            // Same id, but rebound to a different IdP — the most
+            // dangerous shape because the route handle is stable but
+            // the cached keyset is now stale.
+            issuer_url: "https://idp-b.example.com".to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: "https://idp-b.example.com/.well-known/jwks.json".to_string(),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        });
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "per-provider issuer/jwks rebind must queue ReloadExternalAuth: \
+             actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_unrelated_field_does_not_evict_caches() {
+        // session_ttl_secs, allowed_domains, require_email_verified,
+        // scopes — none of these change which OIDC document or JWKS
+        // is canonical, so they must NOT churn the cache.
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.issuer_url = "https://idp.example.com".to_string();
+        b.external_auth.issuer_url = "https://idp.example.com".to_string();
+        a.external_auth.session_ttl_secs = 3_600;
+        b.external_auth.session_ttl_secs = 7_200;
+        a.external_auth.allowed_domains = vec!["a.example.com".to_string()];
+        b.external_auth.allowed_domains =
+            vec!["a.example.com".to_string(), "b.example.com".to_string()];
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "non-IdP-identity edits must NOT trigger cache eviction \
+             (would force a needless OIDC round-trip on next login): \
+             actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_provider_reorder_does_not_evict_caches() {
+        // The providers list controls route precedence. Reordering it
+        // is a legitimate operator action (e.g. promote SSO over
+        // GitHub) that does not change any IdP's signing keys.
+        use librefang_types::config::OidcProvider;
+        let p = |id: &str, issuer: &str| OidcProvider {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            issuer_url: issuer.to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: format!("{issuer}/.well-known/jwks.json"),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        };
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.providers = vec![
+            p("google", "https://accounts.google.com"),
+            p("corp", "https://idp.example.com"),
+        ];
+        b.external_auth.providers = vec![
+            p("corp", "https://idp.example.com"),
+            p("google", "https://accounts.google.com"),
+        ];
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "pure provider reorder must not evict caches: actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_disable_evicts_caches() {
+        // Disabling auth then re-enabling later is a legitimate
+        // hot-reload sequence. We treat the disable as IdP-identity
+        // change so that when the operator re-enables it, the first
+        // login fetches fresh keys (the original IdP may have rotated
+        // its signing keys while auth was off).
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        a.external_auth.issuer_url = "https://idp.example.com".to_string();
+        b.external_auth.enabled = false;
+        b.external_auth.issuer_url = "https://idp.example.com".to_string();
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "toggling external_auth.enabled must queue cache eviction: \
+             actions={:?}",
+            plan.hot_actions
+        );
     }
 
     // -----------------------------------------------------------------------

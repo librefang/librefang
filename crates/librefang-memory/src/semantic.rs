@@ -21,7 +21,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 pub use librefang_types::memory::cosine_similarity;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Semantic store backed by SQLite with optional vector search.
 ///
@@ -346,8 +346,25 @@ impl SemanticStore {
                 .map_err(LibreFangError::memory)?;
             let source: MemorySource =
                 serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-            let metadata: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&meta_str).unwrap_or_default();
+            // Refuse to silently substitute `HashMap::default()` for a TEXT
+            // blob we cannot parse — that disguises corruption (manual SQL
+            // edit, pre-#3451 FTS bug, serde drift) as "no metadata". Skip
+            // the row with a loud log so the operator can audit / repair it
+            // (audit: json-text-silent-parse-fallback).
+            let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    error!(
+                        row_id = %id_str,
+                        table = "memories",
+                        column = "metadata",
+                        error = %e,
+                        "corrupt JSON in TEXT column; skipping row in recall"
+                    );
+                    continue;
+                }
+            };
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
@@ -527,8 +544,10 @@ impl SemanticStore {
              FROM memories WHERE id IN ({placeholders}){deleted_clause}",
         );
         let id_strs: Vec<String> = ids.iter().map(|m| m.0.to_string()).collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            id_strs.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = id_strs
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
 
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let rows = stmt
@@ -906,10 +925,24 @@ fn decode_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryFragment
     let agent_id = uuid::Uuid::parse_str(&agent_str)
         .map(librefang_types::agent::AgentId)
         .map_err(|e| fsql(1, rusqlite::types::Type::Text, e))?;
-    let source: MemorySource =
-        serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-    let metadata: HashMap<String, serde_json::Value> =
-        serde_json::from_str(&meta_str).unwrap_or_default();
+    let source: MemorySource = serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
+    // Surface corruption rather than disguising it as "no metadata" — the
+    // caller (`get_by_id` / `get_by_ids_batch`) receives a `Result`, so a
+    // bad row should be loud, not a silent `HashMap::default()` (audit:
+    // json-text-silent-parse-fallback).
+    let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                row_id = %id_str,
+                table = "memories",
+                column = "metadata",
+                error = %e,
+                "corrupt JSON in TEXT column"
+            );
+            return Err(fsql(6, rusqlite::types::Type::Text, e));
+        }
+    };
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
@@ -955,10 +988,7 @@ fn decode_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryFragment
 /// logged + ignored (recall already returned the fragments to
 /// the caller; we don't want to surface a write-side error on a
 /// successful read).
-fn bump_recall_access_counts(
-    conn: &mut rusqlite::Connection,
-    fragments: &[MemoryFragment],
-) {
+fn bump_recall_access_counts(conn: &mut rusqlite::Connection, fragments: &[MemoryFragment]) {
     if fragments.is_empty() {
         return;
     }
@@ -981,9 +1011,7 @@ fn bump_recall_access_counts(
             }
         };
         for frag in fragments {
-            if let Err(e) =
-                stmt.execute(rusqlite::params![now, frag.id.0.to_string()])
-            {
+            if let Err(e) = stmt.execute(rusqlite::params![now, frag.id.0.to_string()]) {
                 warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
             }
         }
@@ -1103,8 +1131,25 @@ impl VectorStore for SqliteVectorStore {
                 skipped_non_comparable += 1;
                 continue;
             };
-            let metadata: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&meta_str).unwrap_or_default();
+            // Skip rather than silently substitute `HashMap::default()` for
+            // a corrupt `metadata` TEXT blob — that disguises corruption as
+            // a row with no metadata, which the operator cannot tell apart
+            // from a legitimately empty row (audit:
+            // json-text-silent-parse-fallback).
+            let metadata: HashMap<String, serde_json::Value> = match serde_json::from_str(&meta_str)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    error!(
+                        row_id = %id,
+                        table = "memories",
+                        column = "metadata",
+                        error = %e,
+                        "corrupt JSON in TEXT column; skipping vector search candidate"
+                    );
+                    continue;
+                }
+            };
             results.push(VectorSearchResult {
                 id,
                 payload: content,
@@ -1566,5 +1611,88 @@ mod tests {
         assert_eq!(store.count(agent_id, Some("session_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("user_memory")).unwrap(), 1);
         assert_eq!(store.count(agent_id, Some("agent_memory")).unwrap(), 0);
+    }
+
+    /// Regression for the audit item `json-text-silent-parse-fallback`.
+    ///
+    /// Pre-fix, `recall` decoded a row whose `metadata` TEXT column was
+    /// corrupt by silently substituting `HashMap::default()` — so the
+    /// caller could not distinguish "this memory has no metadata" from
+    /// "this memory's metadata is destroyed". After the fix, the loop
+    /// drops the corrupt row with a loud `error!` log and the healthy
+    /// row beside it still surfaces.
+    #[test]
+    fn recall_skips_corrupt_metadata_row_instead_of_returning_default() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .remember(
+                agent_id,
+                "healthy memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let corrupt_id = store
+            .remember(
+                agent_id,
+                "corrupt memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params!["not-json", corrupt_id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let results = store.recall("memory", 10, None).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "corrupt row must be skipped (not silently coerced to default metadata)"
+        );
+        assert_eq!(results[0].content, "healthy memory");
+    }
+
+    /// Same audit item, on the `decode_memory_row` path — used by
+    /// `get_by_id` / `get_by_ids_batch`. Pre-fix, a corrupt `metadata`
+    /// blob would silently produce a `MemoryFragment` with empty
+    /// metadata; after the fix, the row decoder returns an error so
+    /// callers see the failure instead of working with poisoned data.
+    #[test]
+    fn get_by_id_surfaces_corrupt_metadata_instead_of_defaulting() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let id = store
+            .remember(
+                agent_id,
+                "fragment",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params!["not-json", id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let res = store.get_by_id(id, false);
+        assert!(
+            res.is_err(),
+            "corrupt metadata must surface as Err from get_by_id, not be silently defaulted; \
+             got: {res:?}"
+        );
     }
 }

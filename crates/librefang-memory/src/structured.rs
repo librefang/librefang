@@ -5,6 +5,7 @@ use librefang_types::agent::{AgentEntry, AgentId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use tracing::error;
 
 /// Hard ceiling on a single serialized KV value, enforced inside
 /// [`StructuredStore::set`] / [`StructuredStore::modify`] /
@@ -258,12 +259,26 @@ impl StructuredStore {
         let mut pairs = Vec::new();
         for row in rows {
             let (key, blob) = row.map_err(LibreFangError::memory)?;
-            let value: serde_json::Value = serde_json::from_slice(&blob).unwrap_or_else(|_| {
-                // Fallback: try as UTF-8 string
-                String::from_utf8(blob)
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null)
-            });
+            // Audit: json-text-silent-parse-fallback. The previous code
+            // fell back to a `Value::String` reconstructed from the raw
+            // bytes when JSON decode failed, laundering corrupted blobs
+            // into the agent's LLM context as plausible-looking strings.
+            // Skip the row with a loud log so the operator can audit /
+            // repair it; under no circumstance fabricate a value here.
+            let value: serde_json::Value = match serde_json::from_slice(&blob) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        agent_id = %agent_id.0,
+                        key = %key,
+                        table = "kv_store",
+                        column = "value",
+                        error = %e,
+                        "corrupt JSON blob in kv_store; skipping row in list_kv"
+                    );
+                    continue;
+                }
+            };
             pairs.push((key, value));
         }
         Ok(pairs)
@@ -1304,5 +1319,53 @@ mod tests {
                 "cascade over-deleted: control agent's row vanished from '{table}'",
             );
         }
+    }
+
+    /// Regression for the audit item `json-text-silent-parse-fallback`.
+    ///
+    /// Pre-fix, `list_kv` decoded a row whose `value` BLOB was not valid
+    /// JSON by **fabricating** a `Value::String` out of the raw bytes
+    /// (falling all the way to `Value::Null` only on a non-UTF-8 blob).
+    /// That laundered corrupted blobs into the agent's LLM context as
+    /// plausible-looking strings. After the fix, the corrupted row is
+    /// skipped with a loud `error!` log and the healthy row beside it
+    /// still surfaces — under no circumstance does a fabricated string
+    /// appear in the result set.
+    #[test]
+    fn list_kv_skips_corrupt_blob_instead_of_fabricating_string() {
+        let store = setup();
+        let agent = AgentId::new();
+        // Healthy row written through the normal API.
+        store
+            .set(agent, "healthy", serde_json::json!({"ok": true}))
+            .unwrap();
+        // Corrupt row written directly under the API, simulating a
+        // manual SQL edit or upstream serde drift that left the blob
+        // un-decodable as JSON but still valid UTF-8 (the worst case
+        // for the old code — it would have fabricated `Value::String`).
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO kv_store (agent_id, key, value, version, updated_at)
+                 VALUES (?1, ?2, ?3, 1, ?4)",
+                rusqlite::params![
+                    agent.0.to_string(),
+                    "corrupt",
+                    b"this is not json".as_slice(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let pairs = store.list_kv(agent).unwrap();
+        // Healthy row survives; corrupt row is dropped, never fabricated.
+        assert_eq!(pairs.len(), 1, "corrupt row must be skipped, not coerced");
+        assert_eq!(pairs[0].0, "healthy");
+        assert!(
+            !pairs.iter().any(|(k, v)| k == "corrupt"
+                || matches!(v, serde_json::Value::String(s) if s == "this is not json")),
+            "list_kv must never fabricate a Value::String from undecodable bytes"
+        );
     }
 }

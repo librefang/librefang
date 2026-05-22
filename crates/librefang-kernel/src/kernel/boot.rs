@@ -1515,6 +1515,7 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
+            oauth_cache_invalidator: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
