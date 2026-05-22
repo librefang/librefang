@@ -222,3 +222,25 @@ body {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* ── Hide browser-default number-input spinner buttons (#5293) ────
+   Every <input type="number"> on the dashboard (config page, agent
+   manifest form, agent schedule panel, slider input, schema form,
+   …) is used for typed numeric entry — port numbers, timeouts,
+   token caps, intervals. The up/down stepper that browsers attach
+   by default offers no value (the user is not incrementing
+   anything), and Linux/KDE renders them prominently enough that
+   #5293 's reporter called them out as "arrow up and down for
+   scrolling appears in below ... useless and no need for them".
+   Hide them across Webkit (Chrome / Safari / Edge) and Gecko
+   (Firefox). Up / Down arrow keys still step the value, so
+   keyboard affordance is preserved. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+

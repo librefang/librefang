@@ -22,12 +22,12 @@
 //!   prompt-resolution half (object-shaped `input` → `{{var}}` binding)
 //!   *is* covered: it computes `resolved_prompt` without an agent. See
 //!   `dry_run_binds_object_input_keys_to_template_vars`.
-//! - `POST /api/triggers` — requires a registered `AgentId` plus a
+//! - `POST /api/triggers` creation requires a registered `AgentId` plus a
 //!   `register_trigger_with_target` call into a fully-wired kernel; the
-//!   creation path is exercised indirectly via the negative-validation tests.
-//!
-//! These slots become testable once a fixture lands that registers a fake
-//! agent + a no-op LLM driver. Tracked under #3571 follow-up.
+//!   negative-validation paths (missing agent_id / pattern, bad ids) are
+//!   covered here, while the agent-backed success path and the per-agent
+//!   cap → 400 path live in `trigger_workflow_test.rs` (which seeds a real
+//!   agent via `spawn_agent`).
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};

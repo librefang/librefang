@@ -438,3 +438,66 @@ async fn comms_send_rejects_oversize_message() {
         "{body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_send_refuses_impersonation_of_owned_from_agent() {
+    // SECURITY (audit: comms-send-impersonation). An agent carrying a
+    // non-empty `manifest.author` is owned by a named human. This bare
+    // router has no auth middleware, so `comms_send` sees no
+    // `AuthenticatedApiUser` — the loopback / `require_auth = false`
+    // path. On that path the handler must still refuse to mint a message
+    // FROM an owned agent (the `None => author.is_empty()` branch),
+    // otherwise any caller could forge inter-agent traffic from someone
+    // else's agent. The companion happy path (empty author → allowed on
+    // loopback) is exercised by `comms_send_rejects_oversize_message`.
+    let h = boot();
+
+    let owned = librefang_types::agent::AgentEntry {
+        id: librefang_types::agent::AgentId::new(),
+        name: "alice".into(),
+        state: librefang_types::agent::AgentState::Running,
+        manifest: librefang_types::agent::AgentManifest {
+            author: "alice-the-human".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let target = librefang_types::agent::AgentEntry {
+        id: librefang_types::agent::AgentId::new(),
+        name: "bob".into(),
+        state: librefang_types::agent::AgentState::Running,
+        ..Default::default()
+    };
+    h.state
+        .kernel
+        .agent_registry()
+        .register(owned.clone())
+        .expect("register owned");
+    h.state
+        .kernel
+        .agent_registry()
+        .register(target.clone())
+        .expect("register target");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/comms/send",
+        Some(serde_json::json!({
+            "from_agent_id": owned.id.to_string(),
+            "to_agent_id": target.id.to_string(),
+            "message": "forged inter-agent message",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("own from_agent_id"),
+        "{body}"
+    );
+}

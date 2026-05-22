@@ -14,6 +14,7 @@
 
 use crate::skill_workshop::heuristic::HeuristicHit;
 use librefang_llm_driver::{CompletionRequest, LlmDriver};
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -123,7 +124,15 @@ pub async fn review_candidate(
         prompt_caching: false,
         cache_ttl: None,
         prompt_cache_strategy: None,
-        response_format: None,
+        // SYSTEM_PROMPT requires `{"accept": bool, "reason": "..."}` JSON
+        // verbatim. Without pinning the response_format, providers free to
+        // append a prose preamble (DeepSeek / Qwen / older Mistral) make
+        // `parse_review_response` fall through to `ReviewDecision::Indeterminate`,
+        // which under the default `approval_policy = "pending"` silently
+        // stalls every workshop candidate behind a parse error nobody
+        // triages. Same defect class as `history_fold` / `web_augment` in
+        // this PR — fixed inline to keep the audit claim accurate.
+        response_format: Some(ResponseFormat::Json),
         timeout_secs: Some(30),
         extra_body: None,
         agent_id: Some(attribution.agent_id.to_string()),
@@ -301,6 +310,77 @@ mod tests {
             reply: String::new(),
             fail: true,
         })
+    }
+
+    /// Records the `response_format` field of every request it sees so
+    /// tests can assert the call site pins it. Same shape as
+    /// `history_fold::tests::ResponseFormatRecordingDriver` and
+    /// `web_augment::tests::ResponseFormatRecordingDriver` — the three
+    /// duplicates should eventually move to `librefang-testing`.
+    struct ResponseFormatRecordingDriver {
+        observed: Arc<std::sync::Mutex<Vec<Option<ResponseFormat>>>>,
+    }
+
+    impl ResponseFormatRecordingDriver {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<Option<ResponseFormat>>>>) {
+            let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                ResponseFormatRecordingDriver {
+                    observed: Arc::clone(&observed),
+                },
+                observed,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmDriver for ResponseFormatRecordingDriver {
+        async fn complete(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.observed.lock().unwrap().push(req.response_format.clone());
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: r#"{"accept": true, "reason": "ok"}"#.to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    /// Regression guard: the LLM-review aux call must pin
+    /// `response_format = Some(ResponseFormat::Json)` so DeepSeek /
+    /// Qwen / older Mistral can't append a prose preamble and silently
+    /// stall every workshop candidate as `Indeterminate` behind a
+    /// parse error nobody triages. Same defect class as #5287's
+    /// history_fold / web_augment fix; surfaced as a third site by
+    /// the second-pass audit of that PR.
+    #[tokio::test]
+    async fn pins_response_format_json() {
+        let (rec, observed) = ResponseFormatRecordingDriver::new();
+        let driver: Arc<dyn LlmDriver> = Arc::new(rec);
+
+        let _ = review_candidate(
+            driver,
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        let seen = observed.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one driver call expected");
+        assert_eq!(
+            seen[0],
+            Some(ResponseFormat::Json),
+            "skill_workshop LLM review must request JSON-shaped output to match its SYSTEM_PROMPT contract",
+        );
     }
 
     #[tokio::test]

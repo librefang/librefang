@@ -498,13 +498,35 @@ impl SessionStore {
     }
 
     /// Extract concatenated text content from a list of messages.
+    ///
+    /// Streams each message's text into a single pre-sized `String` instead of
+    /// allocating an intermediate `Vec<String>` followed by `.join("\n")` on
+    /// every save (this runs in the FTS save hot path — see `save_session`).
+    /// The output is byte-identical to the previous
+    /// `iter().map(text_content).filter(non-empty).collect::<Vec<_>>().join("\n")`
+    /// implementation; the regression test
+    /// `extract_text_content_matches_legacy_join_shape` pins that contract.
     fn extract_text_content(messages: &[Message]) -> String {
-        messages
-            .iter()
-            .map(|m| m.content.text_content())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
+        // Capacity estimate: sum of every message's text length, plus one
+        // separator byte per message (an upper bound — empties will be
+        // skipped, and the final separator is never written, so we may
+        // over-allocate by a handful of bytes in exchange for never
+        // re-growing in the common case).
+        let estimated: usize = messages.iter().map(|m| m.content.text_length() + 1).sum();
+        let mut out = String::with_capacity(estimated);
+        let mut first = true;
+        for m in messages {
+            let text = m.content.text_content();
+            if text.is_empty() {
+                continue;
+            }
+            if !first {
+                out.push('\n');
+            }
+            out.push_str(&text);
+            first = false;
+        }
+        out
     }
 
     /// Delete a session from the database and its FTS5 index entry.
@@ -3358,5 +3380,75 @@ mod tests {
         );
         let kept = store.list_agent_sessions(aid).unwrap();
         assert_eq!(kept.len(), 1, "row must survive an empty cleanup call");
+    }
+
+    /// Regression guard for the perf rewrite of `extract_text_content`
+    /// (`Vec<String> + join("\n")` → streamed `String::with_capacity` +
+    /// `push_str`). The streamed implementation MUST be byte-identical
+    /// to the legacy join shape, because the result is hashed into the
+    /// FTS index — any change in separators, trimming, or empty-handling
+    /// would silently invalidate every existing search snippet.
+    ///
+    /// Covers the four shapes the production code actually sees:
+    ///   - all-text messages → newline-joined
+    ///   - empty-text messages interleaved → skipped, no double newline
+    ///   - non-text blocks (ToolUse / Thinking) → contribute "" → skipped
+    ///   - empty input slice → empty string
+    #[test]
+    fn extract_text_content_matches_legacy_join_shape() {
+        fn legacy(messages: &[Message]) -> String {
+            messages
+                .iter()
+                .map(|m| m.content.text_content())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Shape 1: all-text — exercises the inter-message separator.
+        let s1 = vec![
+            Message::user("hello"),
+            Message::assistant("hi there"),
+            Message::user("how are you?"),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s1), legacy(&s1));
+
+        // Shape 2: empties interleaved — `MessageContent::Text("")` must
+        // be filtered, no leading/trailing/double newline.
+        let s2 = vec![
+            Message::user(""),
+            Message::assistant("only-real-line"),
+            Message::user(""),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s2), legacy(&s2));
+        assert_eq!(SessionStore::extract_text_content(&s2), "only-real-line");
+
+        // Shape 3: non-text blocks (tool calls, thinking) yield empty
+        // `text_content()` and must therefore be skipped too.
+        let s3 = vec![
+            Message::user("first"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "noop".into(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::user("third"),
+        ];
+        assert_eq!(SessionStore::extract_text_content(&s3), legacy(&s3));
+        assert_eq!(SessionStore::extract_text_content(&s3), "first\nthird");
+
+        // Shape 4: empty input — must produce an empty string, not "\n"
+        // or any other artefact (the v33 backfill placeholder relies on
+        // this exact value — see
+        // `test_fts_v33_backfill_placeholder_survives_empty_content_save`).
+        let s4: Vec<Message> = Vec::new();
+        assert_eq!(SessionStore::extract_text_content(&s4), legacy(&s4));
+        assert_eq!(SessionStore::extract_text_content(&s4), "");
     }
 }

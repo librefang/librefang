@@ -355,6 +355,20 @@ pub async fn auth_rate_limit_layer(
         || path == "/api/v1/auth/introspect"
         || path == "/api/auth/refresh"
         || path == "/api/v1/auth/refresh"
+        // OAuth callback (audit: auth-callback-no-rate-limit).
+        // /api/auth/callback MUST be public (the IdP redirect lands
+        // here), but every successful HMAC verify eagerly consumes
+        // the `oauth_nonce_used` slot BEFORE the actual code
+        // exchange (`oauth.rs:744-758`). A captured `state` token
+        // (referer leak, proxy log, browser history) can be
+        // replayed from the open internet 50 ms before the
+        // legitimate redirect arrives — the real user then sees
+        // "OAuth callback already redeemed" with no remediation.
+        // Free login DoS. Rate-limiting the callback gives a
+        // per-IP brake on the replay window without breaking the
+        // legitimate IdP redirect (which arrives once per login).
+        || path == "/api/auth/callback"
+        || path == "/api/v1/auth/callback"
         || (path.starts_with("/api/approvals/") && path.ends_with("/approve"))
         || (path.starts_with("/api/v1/approvals/") && path.ends_with("/approve"))
         || path == "/api/approvals/totp/confirm"
@@ -923,6 +937,102 @@ mod tests {
                 "loopback attempt {i} must be exempt from the auth rate limiter"
             );
         }
+    }
+
+    /// Regression for audit `auth-callback-no-rate-limit`. The OAuth
+    /// callback is public (the IdP redirects to it) but each
+    /// successful HMAC verify consumes the `oauth_nonce_used` slot
+    /// before the code exchange. A captured `state` token can be
+    /// replayed from the open internet to lock the legitimate user
+    /// out of completing their login. The path must be in the
+    /// `is_auth_path` allowlist so per-IP rate limiting applies.
+    #[tokio::test]
+    async fn auth_rate_limit_middleware_blocks_oauth_callback_replay() {
+        use axum::routing::{get, post};
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let app = Router::new()
+            .route("/api/auth/callback", get(|| async { "ok" }))
+            .route("/api/auth/callback", post(|| async { "ok" }))
+            .route("/api/v1/auth/callback", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let attacker_ip: IpAddr = "203.0.113.42".parse().unwrap();
+
+        let make_req = |uri: &str, method: axum::http::Method| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    attacker_ip,
+                    55050,
+                ))));
+            req
+        };
+
+        // First 2 GET callbacks pass (legitimate IdP redirect timing).
+        for i in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(make_req("/api/auth/callback", axum::http::Method::GET))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "GET /api/auth/callback attempt {i} must pass under the limit"
+            );
+        }
+        // 3rd attempt — replay floor — must be rejected.
+        let resp = app
+            .clone()
+            .oneshot(make_req("/api/auth/callback", axum::http::Method::GET))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "3rd /api/auth/callback hit from the same IP must 429"
+        );
+
+        // /api/v1/auth/callback also counts (shares the limiter
+        // bucket because it's the same handler under the alias).
+        let resp = app
+            .clone()
+            .oneshot(make_req("/api/v1/auth/callback", axum::http::Method::GET))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "/api/v1/auth/callback must share the limiter bucket with /api/auth/callback",
+        );
+
+        // POST form of the callback also rate-limited (some IdPs
+        // do form-POST instead of GET-with-query).
+        let resp = app
+            .oneshot(make_req("/api/auth/callback", axum::http::Method::POST))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "POST callback path also counts",
+        );
     }
 
     #[tokio::test]
