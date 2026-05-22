@@ -2258,15 +2258,6 @@ pub async fn create_trigger(
     }
 }
 
-/// GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).
-#[utoipa::path(
-    get,
-    path = "/api/triggers",
-    tag = "workflows",
-    responses(
-        (status = 200, description = "List triggers", body = crate::types::JsonObject)
-    )
-)]
 /// Serialize a `Trigger` to a JSON value (shared by list and get endpoints).
 fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     let mut v = serde_json::json!({
