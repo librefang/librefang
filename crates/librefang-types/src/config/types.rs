@@ -6534,7 +6534,6 @@ impl ChannelsConfig {
 // block were removed in this migration. See SIDECAR_CATALOG in
 // librefang-api/src/routes/channels.rs.
 
-
 // qq migrated to a sidecar (librefang.sidecar.adapters.qq); the
 // in-process `QqConfig` + `[channels.qq]` block were removed in this
 // migration. See SIDECAR_CATALOG in librefang-api/src/routes/channels.rs.
