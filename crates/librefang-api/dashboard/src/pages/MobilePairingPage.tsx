@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
@@ -59,17 +59,6 @@ export function MobilePairingPage() {
   const removeDevice = useRemovePairedDevice();
 
   const expired = req ? new Date(req.expires_at).getTime() < Date.now() : false;
-  // Translator-supplied markup only (`<strong>`); no user input is interpolated
-  // into these strings, so dangerouslySetInnerHTML is safe here.
-  const subtitleHtml = { __html: t("mobile_pairing.subtitle") };
-  const disabledBodyHtml = {
-    // i18next <link> pseudo-tag → real <a>. Source is translator-only markup;
-    // no user input flows through these strings, so innerHTML is safe.
-    __html: t("mobile_pairing.error_disabled_body").replace(
-      /<link>(.*?)<\/link>/s,
-      '<a href="/dashboard/config/security" class="text-brand underline">$1</a>',
-    ),
-  };
 
   const refresh = () => {
     qc.removeQueries({ queryKey: pairingKeys.request() });
@@ -87,7 +76,22 @@ export function MobilePairingPage() {
             : t("mobile_pairing.error_generic_title")}
         </p>
         {isDisabled ? (
-          <p className="text-sm text-text-dim" dangerouslySetInnerHTML={disabledBodyHtml} />
+          <p className="text-sm text-text-dim">
+            {/*
+              Translator strings may contain only the tags listed in
+              `components`. i18next maps <link>…</link> → <a>, <code>…</code>
+              → <code>; any other tag in a translation is rendered as text,
+              so a malicious translator cannot inject <script> or new
+              attributes.
+            */}
+            <Trans
+              i18nKey="mobile_pairing.error_disabled_body"
+              components={{
+                a: <a href="/dashboard/config/security" className="text-brand underline" />,
+                code: <code />,
+              }}
+            />
+          </p>
         ) : (
           <button
             onClick={refresh}
@@ -108,7 +112,12 @@ export function MobilePairingPage() {
           <Smartphone className="w-6 h-6 text-brand" />
           {t("mobile_pairing.title")}
         </h1>
-        <p className="text-sm text-text-dim" dangerouslySetInnerHTML={subtitleHtml} />
+        <p className="text-sm text-text-dim">
+          <Trans
+            i18nKey="mobile_pairing.subtitle"
+            components={{ strong: <strong /> }}
+          />
+        </p>
       </div>
 
       {/* QR Card */}

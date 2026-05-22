@@ -332,7 +332,10 @@ impl LibreFangKernel {
                 // the dispatch target. For agent-dispatch triggers, look up the
                 // manifest session_mode and skip if the agent has been deleted.
                 let (session_id_override, agent_sem) = if workflow_id.is_some() {
-                    // Workflow path: no per-agent semaphore or session needed.
+                    // Workflow path: per-agent semaphore is acquired per step
+                    // inside the `run_workflow::send_message` closure (keyed on
+                    // the resolved step target), not here on the trigger owner.
+                    // Session is materialized per step by the resolver too.
                     (None, None)
                 } else {
                     // Agent path: resolve effective session mode.
@@ -737,10 +740,30 @@ impl LibreFangKernel {
         // Threaded into `send_message_full`'s existing `session_mode_override`
         // slot so workflow-step-driven dispatch reuses the same session-id
         // resolution path as cron and trigger fires.
+        //
+        // Per-agent semaphore (audit fix for `triggers_and_workflow.rs:334-336`):
+        // The trigger-dispatcher path intentionally skips the per-agent
+        // semaphore for workflow-id triggers because the actual per-agent
+        // LLM call happens here — one acquire per workflow step, keyed on
+        // the *step target* (which may differ from the workflow owner). A
+        // fan-out layer that targets the same agent N times now serializes
+        // through `agent_concurrency_for(agent_id)` instead of bypassing
+        // `max_concurrent_invocations`. The permit is held across
+        // `send_message_full` and released on drop at the end of this
+        // future, exactly as the trigger and cron paths do.
         let send_message =
             |agent_id: AgentId,
              message: String,
              session_mode_override: Option<librefang_types::agent::SessionMode>| async move {
+                let sem = self.agent_concurrency_for(agent_id);
+                let _agent_permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        return Err(format!(
+                            "agent {agent_id} concurrency semaphore closed during workflow step"
+                        ))
+                    }
+                };
                 self.send_message_full(
                     agent_id,
                     &message,
@@ -928,6 +951,20 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                   session_mode_override: Option<librefang_types::agent::SessionMode>| {
                 let k = send_kernel.clone();
                 async move {
+                    // Mirror the per-agent semaphore acquire from
+                    // `run_workflow::send_message`: the timeout-driven
+                    // resume path also invokes step LLM calls that must
+                    // honour `max_concurrent_invocations` keyed on the
+                    // resolved target agent.
+                    let sem = k.agent_concurrency_for(agent_id);
+                    let _agent_permit = match sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            return Err(format!(
+                            "agent {agent_id} concurrency semaphore closed during workflow resume"
+                        ))
+                        }
+                    };
                     k.send_message_full(
                         agent_id,
                         &message,

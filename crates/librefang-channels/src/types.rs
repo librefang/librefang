@@ -24,6 +24,40 @@ pub fn is_reserved_system_channel(name: &str) -> bool {
     RESERVED_SYSTEM_CHANNEL_NAMES.iter().any(|r| *r == lower)
 }
 
+/// Sanitize a raw channel name before it reaches `SessionId`
+/// derivation. If `name` would collide with a kernel-internal system
+/// channel (`cron`, `autonomous`, `webui` — see
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`]), prefix it with `ext-` so it
+/// derives a disjoint `SessionId` via
+/// `SessionId::for_channel(agent, name)` instead of writing into the
+/// kernel's cron/autonomous/webui session history. Matching is
+/// case-insensitive — `for_channel` lowercases internally before
+/// hashing.
+///
+/// Audit: cron-channel-name-not-reserved. External callers that
+/// construct a `SenderContext` (HTTP request body, channel bridge
+/// adapter `ChannelType::Custom("cron")`, stored deferred-tool
+/// metadata) used to be able to drive `channel = "cron"` (or case
+/// variants) into `SessionId::for_channel` and collide with the
+/// internal cron-fire path — two independent write streams
+/// interleaving into one history. Every external `SenderContext`
+/// construction site must funnel through this helper.
+pub fn sanitize_channel_name(name: &str) -> String {
+    if is_reserved_system_channel(name) {
+        let renamed = format!("ext-{}", name.trim().to_ascii_lowercase());
+        tracing::warn!(
+            requested = %name,
+            renamed_to = %renamed,
+            "channel name collides with reserved kernel system channel; \
+             renaming to keep session history disjoint \
+             (audit: cron-channel-name-not-reserved)"
+        );
+        renamed
+    } else {
+        name.to_string()
+    }
+}
+
 /// Truncate `s` to at most `max_bytes`, respecting UTF-8 char boundaries.
 pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -388,6 +422,26 @@ pub struct SenderContext {
     /// inject `"is_internal_cron": true` through a JSON payload.
     #[serde(skip)]
     pub is_internal_cron: bool,
+    /// Set by the kernel's trusted internal system constructors (cron,
+    /// autonomous background tick, web UI) — never by external API callers.
+    ///
+    /// Marks a `SenderContext` whose `channel` deliberately equals a reserved
+    /// system name (`cron` / `autonomous` / `webui`). The kernel's
+    /// channel-derived session resolver uses this flag to skip the
+    /// reserved-name re-sanitization it applies to external callers, so the
+    /// internal paths keep deriving their legacy `for_channel(agent, "<name>")`
+    /// SessionIds and existing persistent history stays continuous. External
+    /// callers reach the resolver with this flag `false` and a reserved name
+    /// is rewritten to `ext-<name>`, keeping the two namespaces disjoint.
+    ///
+    /// Separate from [`Self::is_internal_cron`] on purpose:
+    /// `is_internal_cron` additionally gates `[SILENT]` marker stripping, which
+    /// must stay cron-only — the autonomous path must NOT strip `[SILENT]`.
+    ///
+    /// Intentionally excluded from serialization so external callers cannot
+    /// inject `"is_internal_system": true` through a JSON payload.
+    #[serde(skip)]
+    pub is_internal_system: bool,
 }
 
 /// Reference to a participant in a group chat.

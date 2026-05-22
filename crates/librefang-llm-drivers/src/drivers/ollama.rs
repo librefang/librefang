@@ -210,21 +210,24 @@ impl OllamaDriver {
                             ContentBlock::Image { data, .. } => {
                                 images.push(data.clone());
                             }
-                            ContentBlock::ImageFile { path, .. } => match std::fs::read(path) {
-                                Ok(bytes) => {
-                                    use base64::Engine;
-                                    images.push(
-                                        base64::engine::general_purpose::STANDARD.encode(&bytes),
-                                    );
+                            ContentBlock::ImageFile { path, .. } => {
+                                match tokio::task::block_in_place(|| std::fs::read(path)) {
+                                    Ok(bytes) => {
+                                        use base64::Engine;
+                                        images.push(
+                                            base64::engine::general_purpose::STANDARD
+                                                .encode(&bytes),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            path = %path,
+                                            error = %e,
+                                            "ImageFile missing, skipping"
+                                        );
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!(
-                                        path = %path,
-                                        error = %e,
-                                        "ImageFile missing, skipping"
-                                    );
-                                }
-                            },
+                            }
                             ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {
                                 // Thinking and ToolUse on a User role are nonsensical —
                                 // session_repair shouldn't produce them, and the
@@ -1399,5 +1402,53 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Regression: `ContentBlock::ImageFile` paths must be read via
+    /// `tokio::task::block_in_place` so a multi-MB image read does not
+    /// stall the tokio worker pool. The base64-encoded bytes attached
+    /// to the resulting `OllamaMessage.images` must match the bytes on
+    /// disk.
+    ///
+    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
+    /// panic on a single-threaded runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_request_imagefile_reads_bytes_without_blocking_worker() {
+        use base64::Engine;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("img.png");
+        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 42, 43, 44];
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&bytes))
+            .expect("write png");
+
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("m");
+        r.messages = std::sync::Arc::new(vec![Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "what's this?".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ImageFile {
+                    media_type: "image/png".to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        }]);
+        let wire = driver.build_request(&r).expect("build");
+        let user = wire
+            .messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message");
+        let images = user.images.as_ref().expect("images present");
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(images, &vec![expected], "encoded bytes must round-trip");
     }
 }

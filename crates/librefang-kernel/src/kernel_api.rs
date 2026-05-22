@@ -233,6 +233,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
     async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
+    /// Delete a single session by id and any process-local side-state keyed
+    /// on it (currently the per-session `file_read_tracker` bucket — see
+    /// `librefang_runtime::file_read_tracker::forget_session`). Use this in
+    /// preference to calling `memory_substrate().delete_session(...)`
+    /// directly so the side-state map does not leak across the daemon's
+    /// lifetime.
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -913,6 +920,9 @@ impl KernelApi for LibreFangKernel {
     }
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
+    }
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+        Self::delete_session(self, session_id)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)

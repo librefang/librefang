@@ -42,12 +42,37 @@ impl CostReservationLedger {
         *self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn add(&self, usd: f64) {
-        if usd <= 0.0 {
-            return;
-        }
+    /// Atomically check that adding `usd` to the current pending total
+    /// keeps it within all of `caps` (each entry is `(limit, already_spent)`,
+    /// limits of `0.0` or below are skipped). On success the amount is
+    /// committed under the same lock acquisition; on failure nothing is
+    /// mutated. Returns `Ok(())` if added, or `Err(index)` of the first
+    /// cap that would be exceeded — the caller turns that into the
+    /// matching `QuotaExceeded` message with its own context strings.
+    ///
+    /// Single critical section: this closes the check-then-add race in
+    /// `reserve_global_budget`. Two concurrent callers cannot both
+    /// observe the pre-add `current()` and both commit, because the
+    /// second waits on the mutex until the first has either added or
+    /// returned.
+    fn check_and_add(&self, usd: f64, caps: &[(f64, f64)]) -> Result<(f64, f64), CapBreach> {
         let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
-        *g += usd;
+        let add = usd.max(0.0);
+        for (idx, (limit, already_spent)) in caps.iter().enumerate() {
+            if *limit <= 0.0 {
+                continue;
+            }
+            let projected = already_spent + *g + add;
+            if projected > *limit {
+                return Err(CapBreach {
+                    index: idx,
+                    pending: *g,
+                });
+            }
+        }
+        let pending_before = *g;
+        *g += add;
+        Ok((pending_before, add))
     }
 
     /// Subtract a previously-reserved amount. Clamped at 0 to defend
@@ -59,6 +84,15 @@ impl CostReservationLedger {
         let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
         *g = (*g - usd).max(0.0);
     }
+}
+
+/// Which cap (by index in the slice handed to `check_and_add`) tripped,
+/// and the pending value that was observed under the lock — used by the
+/// caller to build the matching error message.
+#[derive(Debug)]
+struct CapBreach {
+    index: usize,
+    pending: f64,
 }
 
 /// Token returned by [`MeteringEngine::reserve_global_budget`]; on drop /
@@ -184,50 +218,62 @@ impl MeteringEngine {
         budget: &librefang_types::config::BudgetConfig,
         estimated_usd: f64,
     ) -> LibreFangResult<MeteringReservation> {
-        let pending = self.pending.current();
+        // Read settled spend from SQLite up front, outside the in-memory
+        // ledger lock — these queries can be slow and may fail, and the
+        // ledger lock guards an in-process f64 only. Settled spend is
+        // monotonic within a time window and adding the just-observed
+        // value (rather than a re-read after the lock) cannot under-count
+        // the gate.
+        let hourly_spent = if budget.max_hourly_usd > 0.0 {
+            self.store.query_global_hourly()?
+        } else {
+            0.0
+        };
+        let daily_spent = if budget.max_daily_usd > 0.0 {
+            self.store.query_today_cost()?
+        } else {
+            0.0
+        };
+        let monthly_spent = if budget.max_monthly_usd > 0.0 {
+            self.store.query_global_monthly()?
+        } else {
+            0.0
+        };
 
-        // Use ">" not ">=" so a fresh kernel with a single call exactly
-        // at the limit isn't rejected before it's ever recorded.
-        if budget.max_hourly_usd > 0.0 {
-            let spent = self.store.query_global_hourly()?;
-            let projected = spent + pending + estimated_usd.max(0.0);
-            if projected > budget.max_hourly_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Global hourly budget would be exceeded: \
-                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
-                    spent, pending, estimated_usd, budget.max_hourly_usd
-                )));
-            }
-        }
-        if budget.max_daily_usd > 0.0 {
-            let spent = self.store.query_today_cost()?;
-            let projected = spent + pending + estimated_usd.max(0.0);
-            if projected > budget.max_daily_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Global daily budget would be exceeded: \
-                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
-                    spent, pending, estimated_usd, budget.max_daily_usd
-                )));
-            }
-        }
-        if budget.max_monthly_usd > 0.0 {
-            let spent = self.store.query_global_monthly()?;
-            let projected = spent + pending + estimated_usd.max(0.0);
-            if projected > budget.max_monthly_usd {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Global monthly budget would be exceeded: \
-                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
-                    spent, pending, estimated_usd, budget.max_monthly_usd
-                )));
-            }
-        }
+        // Single critical section across check + add. The lock is held
+        // for the full ">" check and the matching `+=`, so two concurrent
+        // callers cannot both observe the pre-add pending total and both
+        // commit (#3616). Use ">" not ">=" so a fresh kernel with a
+        // single call exactly at the limit isn't rejected before it's
+        // ever recorded.
+        //
+        // Order matches the previous sequential gate so error messages
+        // pick the same cap as before: hourly → daily → monthly.
+        let caps: [(f64, f64); 3] = [
+            (budget.max_hourly_usd, hourly_spent),
+            (budget.max_daily_usd, daily_spent),
+            (budget.max_monthly_usd, monthly_spent),
+        ];
 
-        self.pending.add(estimated_usd.max(0.0));
-        Ok(MeteringReservation {
-            ledger: Arc::clone(&self.pending),
-            estimated_usd: estimated_usd.max(0.0),
-            settled: false,
-        })
+        match self.pending.check_and_add(estimated_usd, &caps) {
+            Ok((_pending_before, reserved)) => Ok(MeteringReservation {
+                ledger: Arc::clone(&self.pending),
+                estimated_usd: reserved,
+                settled: false,
+            }),
+            Err(CapBreach { index, pending }) => {
+                let (limit, spent, label) = match index {
+                    0 => (budget.max_hourly_usd, hourly_spent, "hourly"),
+                    1 => (budget.max_daily_usd, daily_spent, "daily"),
+                    _ => (budget.max_monthly_usd, monthly_spent, "monthly"),
+                };
+                Err(LibreFangError::QuotaExceeded(format!(
+                    "Global {label} budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, limit
+                )))
+            }
+        }
     }
 
     /// Currently-pending (reserved-but-not-settled) USD across all callers.
@@ -710,8 +756,7 @@ fn estimate_cost_from_rates(
     // absurd budget rows that fed straight into spend-cap
     // enforcement. The outer saturating_sub was already correct;
     // only the inner sum needed the same protection.
-    let cache_total =
-        cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
+    let cache_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
     let regular_input = input_tokens.saturating_sub(cache_total);
     let regular_input_cost = (regular_input as f64 / 1_000_000.0) * input_per_m;
 
@@ -1356,6 +1401,117 @@ mod tests {
         r2.settle();
     }
 
+    /// Audit: cost-reservation-not-atomic. The original
+    /// `reserve_global_budget` acquired the in-memory ledger mutex for
+    /// `current()`, dropped it, ran the SQLite reads, then re-acquired
+    /// the mutex for `add()`. Under concurrency two callers could both
+    /// pass the gate and both commit, exceeding `max_hourly_usd`. The
+    /// fix folds check + add into a single critical section
+    /// (`CostReservationLedger::check_and_add`). This test spawns many
+    /// concurrent reservations whose collective ask greatly exceeds the
+    /// cap and asserts the ledger never lets in-flight reservations
+    /// cross it.
+    ///
+    /// Uses `std::thread` rather than `tokio::test` so the metering
+    /// crate doesn't pick up a tokio dev-dependency just for this
+    /// regression — `reserve_global_budget` is a sync function and OS
+    /// threads exercise the std `Mutex` race directly.
+    #[test]
+    fn concurrent_reservations_never_exceed_cap() {
+        let engine = std::sync::Arc::new(setup());
+        let budget = std::sync::Arc::new(librefang_types::config::BudgetConfig {
+            max_hourly_usd: 100.0,
+            ..Default::default()
+        });
+
+        // A barrier holds every thread at the gate until all 20 are
+        // ready to race — without it the first thread can finish
+        // before the second is even spawned and we never observe the
+        // contended path.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(20));
+
+        let mut handles = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let engine = engine.clone();
+            let budget = budget.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                engine.reserve_global_budget(&budget, 10.0)
+            }));
+        }
+
+        let mut reservations = Vec::new();
+        let mut rejections = 0usize;
+        for h in handles {
+            match h.join().expect("thread panicked") {
+                Ok(r) => reservations.push(r),
+                Err(_) => rejections += 1,
+            }
+        }
+
+        // Total committed pending must stay within the cap. If the
+        // bug were still present, 20 * 10 = 200 USD might all sneak
+        // through and `pending_reserved_usd()` would land at 200.
+        let pending = engine.pending_reserved_usd();
+        assert!(
+            pending <= 100.0 + 1e-9,
+            "committed pending {pending} exceeds cap 100.0 — \
+             concurrent reservations leaked past the gate"
+        );
+        // Exactly 10 reservations of $10 fit under a $100 cap (the
+        // gate uses `>` not `>=`, so the 10th call at the cap is
+        // allowed; the 11th would project to $110 > $100).
+        assert_eq!(
+            reservations.len(),
+            10,
+            "expected 10 successful reservations under the cap; got {}",
+            reservations.len()
+        );
+        assert_eq!(
+            rejections, 10,
+            "expected 10 rejections beyond the cap; got {rejections}"
+        );
+        assert!(
+            (pending - 100.0).abs() < 1e-9,
+            "committed pending {pending} should equal cap 100.0 \
+             after exactly 10 reservations of $10"
+        );
+
+        // Releasing every reservation must restore the ledger to zero —
+        // sanity check that the atomic path didn't drop any release.
+        for r in reservations {
+            r.release();
+        }
+        assert!(
+            engine.pending_reserved_usd().abs() < 1e-9,
+            "ledger should return to zero after all reservations release"
+        );
+    }
+
+    /// Edge case for the audit fix: a single reservation that exactly
+    /// fills the cap succeeds (`>` not `>=`), and the very next $1 ask
+    /// is rejected.
+    #[test]
+    fn reservation_at_exact_cap_succeeds_then_next_rejects() {
+        let engine = setup();
+        let budget = librefang_types::config::BudgetConfig {
+            max_hourly_usd: 100.0,
+            ..Default::default()
+        };
+        let r1 = engine
+            .reserve_global_budget(&budget, 100.0)
+            .expect("reservation at exact cap must succeed");
+        let err = engine
+            .reserve_global_budget(&budget, 1.0)
+            .expect_err("a further $1 must be refused");
+        assert!(
+            err.to_string().contains("hourly budget would be exceeded"),
+            "unexpected error: {err}"
+        );
+        r1.release();
+    }
+
     /// Reservations must release on drop so a panic between reserve and
     /// settle doesn't permanently lock the budget down.
     #[test]
@@ -1544,8 +1700,8 @@ mod tests {
         // if the inner add weren't saturating.
         let half_max = u64::MAX / 2;
         let cost = estimate_cost_from_rates(
-            10,          // input_tokens — tiny
-            5,           // output_tokens
+            10,           // input_tokens — tiny
+            5,            // output_tokens
             half_max + 1, // cache_read_input_tokens
             half_max + 1, // cache_creation_input_tokens → overflow with regular `+`
             1.0,
@@ -1555,7 +1711,10 @@ mod tests {
         // Exact value is dominated by the cache costs (each scaled
         // by the price-per-million), but its finiteness + non-NaN
         // is the contract this test pins.
-        assert!(cost.is_finite(), "cost must be finite under overflow inputs: {cost}");
+        assert!(
+            cost.is_finite(),
+            "cost must be finite under overflow inputs: {cost}"
+        );
         assert!(!cost.is_nan(), "cost must not be NaN: {cost}");
         assert!(cost >= 0.0, "cost must be non-negative: {cost}");
     }
@@ -1567,9 +1726,9 @@ mod tests {
         // the historical behaviour, just now also safe under the
         // intermediate add overflow.
         let cost = estimate_cost_from_rates(
-            100,            // input_tokens
-            0,              // output_tokens
-            1_000_000_000,  // cache_read >> input
+            100,           // input_tokens
+            0,             // output_tokens
+            1_000_000_000, // cache_read >> input
             0,
             1.0,
             1.0,

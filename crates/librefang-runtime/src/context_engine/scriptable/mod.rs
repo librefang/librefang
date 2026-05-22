@@ -702,15 +702,21 @@ impl ScriptableContextEngine {
     /// traces across daemon restarts for post-mortem analysis.  Both writes are
     /// best-effort — errors are silently swallowed so a telemetry failure never
     /// propagates to the caller.
-    fn push_trace(
+    async fn push_trace(
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         trace: HookTrace,
         trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
         plugin_name: &str,
     ) {
-        // Persist to SQLite first (borrows trace by ref).
+        // Persist to SQLite first. The async `insert` offloads the actual
+        // SQL work to `tokio::task::spawn_blocking` so the calling tokio
+        // worker is never held during disk I/O or the (amortised) prune
+        // scan. Cloning the `Arc<TraceStore>` is cheap (one atomic bump).
         if let Some(store) = trace_store {
-            store.insert(plugin_name, &trace);
+            store
+                .clone()
+                .insert(plugin_name.to_string(), trace.clone())
+                .await;
         }
         // Then push into the bounded in-memory ring buffer.
         if let Ok(mut buf) = traces.lock() {
@@ -1342,7 +1348,8 @@ impl ScriptableContextEngine {
                                         },
                                         trace_store,
                                         plugin_name,
-                                    );
+                                    )
+                                    .await;
                                     return Err(err_msg);
                                 }
                                 for e in &errs {
@@ -1367,7 +1374,8 @@ impl ScriptableContextEngine {
                         },
                         trace_store,
                         plugin_name,
-                    );
+                    )
+                    .await;
                     return Ok((v, elapsed_ms));
                 }
                 Err(e) => last_err = e.to_string(),
@@ -1391,7 +1399,8 @@ impl ScriptableContextEngine {
             },
             trace_store,
             plugin_name,
-        );
+        )
+        .await;
         Err(err_msg)
     }
 
@@ -1560,7 +1569,8 @@ impl ScriptableContextEngine {
                                         },
                                         self.trace_store.as_ref(),
                                         &self.plugin_name,
-                                    );
+                                    )
+                                    .await;
                                     return Err(err_msg);
                                 }
                                 for e in &errs {
@@ -1585,7 +1595,8 @@ impl ScriptableContextEngine {
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
-                    );
+                    )
+                    .await;
                     Ok((output, elapsed_ms))
                 }
                 Err(e) => {
@@ -1606,7 +1617,8 @@ impl ScriptableContextEngine {
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
-                    );
+                    )
+                    .await;
                     Err(err_msg)
                 }
             }

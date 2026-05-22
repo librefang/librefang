@@ -3674,7 +3674,7 @@
     "remove_failed": "移除设备失败：{{reason}}",
     "remove_unknown_error": "未知错误",
     "error_disabled_title": "设备配对已禁用",
-    "error_disabled_body": "请在 <link>配置 → 安全</link> 中启用配对（<code>pairing.enabled = true</code>）。",
+    "error_disabled_body": "请在 <a>配置 → 安全</a> 中启用配对（<code>pairing.enabled = true</code>）。",
     "error_generic_title": "无法生成配对码",
     "qr_aria_label": "用于与移动设备配对的二维码",
     "btn_try_again": "重试"
