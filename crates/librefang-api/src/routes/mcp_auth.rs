@@ -789,14 +789,30 @@ pub async fn auth_callback(
 
     if !token_resp.status().is_success() {
         let status = token_resp.status();
+        // Read Content-Type BEFORE consuming the response with `.text()`.
+        let content_type = token_resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body_raw = token_resp.text().await.unwrap_or_default();
-        // Truncate operator-visible body for tracing; user gets generic msg.
-        let body_preview: String = body_raw.chars().take(500).collect();
+        // Audit: `oauth-refresh-error-body-token-leak`. Token-endpoint
+        // error bodies can include token-shaped values (provider error
+        // payloads that echo session state, or adversarial bodies
+        // designed to plant secrets in operator logs). Never emit the
+        // body verbatim — log a sanitized sha256 digest only. User
+        // gets the generic message; the digest lets the operator
+        // correlate two log lines that saw the same body without
+        // revealing it.
+        let redacted = librefang_kernel::mcp_oauth_provider::redact_token_endpoint_response(
+            status.as_u16(),
+            content_type.as_deref(),
+            body_raw.as_bytes(),
+        );
         tracing::error!(
             server = %name,
             token_endpoint = %token_endpoint,
-            status = %status,
-            body_preview = %body_preview,
+            redacted_response = %redacted,
             "OAuth token exchange returned non-success status"
         );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
@@ -832,12 +848,24 @@ pub async fn auth_callback(
     let tokens: OAuthTokens = match serde_json::from_str(&body) {
         Ok(t) => t,
         Err(e) => {
-            let body_preview: String = body.chars().take(500).collect();
+            // Audit: `oauth-refresh-error-body-token-leak`. Even on a 2xx
+            // response, the body may contain `access_token` /
+            // `refresh_token` / `id_token` / `client_secret`; a malformed
+            // JSON shape (or an adversarial response that intentionally
+            // fails parsing) must not leak those token fields into the
+            // logs. Status is 2xx by construction here; we don't have the
+            // response headers anymore (the body was consumed upstream),
+            // so Content-Type is reported as <none>.
+            let redacted = librefang_kernel::mcp_oauth_provider::redact_token_endpoint_response(
+                200,
+                None,
+                body.as_bytes(),
+            );
             tracing::error!(
                 server = %name,
                 token_endpoint = %token_endpoint,
                 error = %e,
-                body_preview = %body_preview,
+                redacted_response = %redacted,
                 "Failed to parse OAuth token response"
             );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
@@ -1539,5 +1567,88 @@ mod tests {
             Some("auth.example.com".to_string())
         );
         assert_eq!(url_host_lower("not a url"), None);
+    }
+
+    /// Audit: `oauth-refresh-error-body-token-leak`. The
+    /// `body_preview` field in the 2xx-parse-failure and non-success
+    /// branches of the OAuth callback handler is now sanitized via
+    /// `librefang_kernel::mcp_oauth_provider::redact_token_endpoint_response`.
+    /// This test pumps a body containing token-shaped fields through
+    /// that helper using the exact call shape the callback uses, and
+    /// asserts that a `tracing::error!` capture across that path does
+    /// NOT contain the raw secret.
+    #[tokio::test]
+    async fn callback_body_preview_redaction_strips_token_fields() {
+        use std::io;
+        use std::sync::Mutex;
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let body = br#"{"error":"invalid_grant","access_token":"super-secret-12345","refresh_token":"rt-9999","id_token":"id-eyJ","client_secret":"cs-abcdef"}"#;
+        // Mirror the 2xx-parse-failure call shape (status reported as 200,
+        // headers already consumed by the upstream `.text()` call).
+        let redacted =
+            librefang_kernel::mcp_oauth_provider::redact_token_endpoint_response(200, None, body);
+        tracing::error!(
+            server = "test-server",
+            redacted_response = %redacted,
+            "Failed to parse OAuth token response"
+        );
+
+        // And mirror the non-success call shape (status + content_type
+        // are preserved from the response).
+        let redacted_err = librefang_kernel::mcp_oauth_provider::redact_token_endpoint_response(
+            400,
+            Some("application/json"),
+            body,
+        );
+        tracing::error!(
+            server = "test-server",
+            redacted_response = %redacted_err,
+            "OAuth token exchange returned non-success status"
+        );
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        for secret in ["super-secret-12345", "rt-9999", "id-eyJ", "cs-abcdef"] {
+            assert!(
+                !captured.contains(secret),
+                "log line leaked '{secret}'; captured: {captured:?}"
+            );
+        }
+        assert!(
+            captured.contains("body_sha256_prefix="),
+            "log line missing sanitized digest; captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("status=400"),
+            "non-success branch should report status; captured: {captured:?}"
+        );
     }
 }
