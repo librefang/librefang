@@ -3,16 +3,40 @@
 //! Measures throughput under concurrent access: agent spawning, API endpoint
 //! latency, session management, and memory usage.
 //!
+//! These tests drive the **full production router** (`server::build_router`)
+//! over a real TCP socket, so every request crosses the same middleware stack
+//! the daemon serves: auth, GCRA + auth-login rate-limiting, idempotency,
+//! JSON-depth / body-size guards, security headers, and API-version headers.
+//! Previously they used a hand-rolled mock router that bypassed all of those
+//! layers (refs `docs/issues/integration-tests-mock-router.md`).
+//!
+//! ### Rate-limiting under load
+//!
+//! The full router applies real per-IP rate limiting. These tests bind the
+//! server to `127.0.0.1` and inject the peer `SocketAddr` via
+//! `into_make_service_with_connect_info`, exactly as the daemon does. Both the
+//! GCRA limiter and the auth-login limiter exempt loopback callers that send no
+//! forwarding header (`rate_limiter.rs`: "Loopback (127.0.0.0/8 + ::1) bypasses
+//! the limiter"), which is the documented production behavior for a same-host
+//! caller (the dashboard, the CLI, a local agent). The load clients here are
+//! exactly that — plain reqwest calls from loopback with no `X-Forwarded-For` —
+//! so the limiter *runs and evaluates the loopback-bypass branch on every
+//! request* without 429'ing the burst. This preserves each test's
+//! throughput / concurrency intent while still exercising the real middleware
+//! wiring; we deliberately do NOT disable any layer or weaken any assertion.
+//!
+//! Auth is configured open (empty `api_key`); combined with the genuine
+//! loopback peer the auth middleware lets requests through without a bearer
+//! token (`middleware.rs`: empty key + loopback ConnectInfo => pass).
+//!
 //! Run: cargo test -p librefang-api --test load_test -- --nocapture
 
-use axum::Router;
-use librefang_api::middleware;
-use librefang_api::routes;
-use librefang_testing::TestAppState;
+use librefang_kernel::LibreFangKernel;
+use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 // ---------------------------------------------------------------------------
 // Race-hardening helpers (#3817)
@@ -65,7 +89,7 @@ where
 
 struct TestServer {
     base_url: String,
-    state: std::sync::Arc<librefang_api::routes::AppState>,
+    state: Arc<librefang_api::routes::AppState>,
     _tmp: tempfile::TempDir,
 }
 
@@ -75,76 +99,75 @@ impl Drop for TestServer {
     }
 }
 
+/// Boot a real kernel, build the **full production router**, and serve it over
+/// a real TCP socket on `127.0.0.1`.
+///
+/// Mirrors `start_full_router` in `api_integration_test.rs` for kernel/config
+/// setup, but unlike that helper (which drives `app.oneshot(...)` in-process)
+/// this one serves the router on an ephemeral port via
+/// `into_make_service_with_connect_info::<SocketAddr>()` — the same call the
+/// daemon uses in `server::serve`. The load tests need a real socket so their
+/// `reqwest` + `tokio::spawn` concurrency exercises genuine HTTP throughput,
+/// and the injected loopback `SocketAddr` is what lets the auth and rate-limit
+/// middleware apply their documented same-host policy (open auth on loopback
+/// with an empty `api_key`; rate-limit bypass for loopback callers that send no
+/// forwarding header). See the module-level doc for the rate-limit rationale.
 async fn start_test_server() -> TestServer {
-    let test = TestAppState::new();
-    test.state.kernel.clone().set_self_handle();
-    let state = test.state.clone();
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    let app = Router::new()
-        .route("/api/health", axum::routing::get(routes::health))
-        .route("/api/status", axum::routing::get(routes::status))
-        .route("/api/version", axum::routing::get(routes::version))
-        .route(
-            "/api/metrics",
-            axum::routing::get(routes::prometheus_metrics),
-        )
-        .route(
-            "/api/agents",
-            axum::routing::get(routes::list_agents).post(routes::spawn_agent),
-        )
-        .route(
-            "/api/agents/{id}",
-            axum::routing::get(routes::get_agent).delete(routes::kill_agent),
-        )
-        .route(
-            "/api/agents/{id}/session",
-            axum::routing::get(routes::get_agent_session),
-        )
-        .route(
-            "/api/agents/{id}/session/reset",
-            axum::routing::post(routes::reset_session),
-        )
-        .route(
-            "/api/agents/{id}/session/reboot",
-            axum::routing::post(routes::reboot_session),
-        )
-        .route(
-            "/api/agents/{id}/sessions",
-            axum::routing::get(routes::list_agent_sessions).post(routes::create_agent_session),
-        )
-        .route("/api/tools", axum::routing::get(routes::list_tools))
-        .route("/api/models", axum::routing::get(routes::list_models))
-        .route("/api/providers", axum::routing::get(routes::list_providers))
-        .route("/api/usage", axum::routing::get(routes::usage_stats))
-        .route(
-            "/api/workflows",
-            axum::routing::get(routes::list_workflows).post(routes::create_workflow),
-        )
-        .route(
-            "/api/workflows/{id}/run",
-            axum::routing::post(routes::run_workflow),
-        )
-        .route("/api/config", axum::routing::get(routes::get_config))
-        .layer(axum::middleware::from_fn(middleware::request_logging))
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
-        .with_state(state.clone());
+    // Populate the model catalog in the temp home so the kernel boots with a
+    // real registry (matches start_full_router in api_integration_test.rs).
+    librefang_kernel::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        // Empty api_key => auth is open; combined with the genuine loopback
+        // peer (below) the auth middleware passes requests without a token.
+        api_key: String::new(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("Failed to bind test server");
     let addr = listener.local_addr().unwrap();
 
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let (app, state) = librefang_api::server::build_router(kernel, addr).await;
 
-    let (_state, _tmp, _) = test.into_parts();
+    tokio::spawn(async move {
+        // SECURITY: `into_make_service_with_connect_info` injects the peer
+        // SocketAddr so the auth + rate-limit middleware can recognize the
+        // loopback caller — exactly as `server::serve` does for the daemon.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
 
     TestServer {
         base_url: format!("http://{}", addr),
         state,
-        _tmp,
+        _tmp: tmp,
     }
 }
 
