@@ -981,6 +981,11 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("data").join("sessions.json")
 }
 
+/// Prefix that marks a `sessions.json` map key as already hashed (the new
+/// post-#5494 on-disk format). Matches the `$sha256$` tag emitted by
+/// `password_hash::hash_device_token`.
+const SESSIONS_HASH_PREFIX: &str = "$sha256$";
+
 /// Load persisted sessions from disk, dropping any that have already expired.
 ///
 /// SECURITY (#3725): An older daemon revision wrote `sessions.json` at the
@@ -990,6 +995,23 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 /// permissive mode until something rewrites it. Tighten on load so a daemon
 /// upgraded onto a multi-user host stops leaking bearer tokens immediately
 /// instead of waiting for the next session mutation.
+///
+/// SECURITY (#5494): the on-disk map key is hashed by `save_sessions` so
+/// `sessions.json` lifted out of a backup snapshot (Time Machine, restic,
+/// BorgBackup pipelines often do NOT honor source 0600 perms) does not
+/// yield a usable set of bearer tokens. Entries whose key carries the
+/// `$sha256$` prefix are dropped on load — there is no cleartext to re-key
+/// the in-memory auth map with, so they cannot authenticate any presented
+/// token. The daemon trades cross-restart session continuity for
+/// backup-snapshot replay resistance; operators get one re-login per
+/// restart, an attacker with a month-old `sessions.json` gets nothing.
+///
+/// Entries whose key does NOT carry the `$sha256$` prefix are treated as
+/// legacy cleartext from a pre-#5494 daemon. They authenticate normally
+/// for one session lifetime and are rewritten in the new hashed form by
+/// the very next `save_sessions` call (every login, every logout, the
+/// periodic GC sweep), so the migration window is at most one mutation
+/// deep.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
@@ -1025,6 +1047,14 @@ fn load_sessions(
         serde_json::from_str(&content).unwrap_or_default();
     sessions
         .into_iter()
+        .filter(|(key, _)| {
+            // New-format hashed entries (post-#5494) cannot be reversed
+            // into the cleartext key the auth middleware looks up against
+            // — keeping them would just bloat the map with rows that
+            // match no presented token. Drop them; operator must
+            // re-authenticate after restart.
+            !key.starts_with(SESSIONS_HASH_PREFIX)
+        })
         .filter(|(_, st)| {
             !crate::password_hash::is_token_expired(
                 st,
@@ -1034,16 +1064,53 @@ fn load_sessions(
         .collect()
 }
 
+/// Build the on-disk view of the in-memory session map: each key is
+/// replaced with `hash_device_token(key)` and the duplicate copy of the
+/// token carried inside `SessionToken.token` is cleared. The resulting
+/// map serialises into a `sessions.json` that contains no usable bearer
+/// token in either map position — only opaque hashes and session
+/// metadata (created_at / user_name / user_role) the daemon needs for
+/// GC.
+///
+/// SECURITY (#5494): exposed at module scope so the
+/// `sessions_for_disk_redacts_token_field` regression test in this
+/// crate can assert the redaction directly without booting a daemon.
+fn sessions_for_disk(
+    sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
+) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
+    sessions
+        .iter()
+        .map(|(token, st)| {
+            let mut redacted = st.clone();
+            // Wipe the inner copy of the token so a backup snapshot
+            // doesn't hand the attacker the same secret via the value
+            // payload that the key already hid.
+            redacted.token.clear();
+            (crate::password_hash::hash_device_token(token), redacted)
+        })
+        .collect()
+}
+
 /// Persist active sessions to disk so they survive daemon restarts.
 ///
 /// SECURITY: The file is written with owner-only permissions (0600) so that
 /// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
+///
+/// SECURITY (#5494): each map key is hashed via `hash_device_token` (and
+/// the duplicate `SessionToken.token` field is cleared) before
+/// serialization, so `sessions.json` cannot be replayed even if leaked
+/// through a backup pipeline that did not honor the source 0600 perms
+/// (Time Machine, restic, BorgBackup snapshots). The in-memory
+/// `active_sessions` map keeps the cleartext token as the key, so live
+/// auth lookups in `middleware.rs` (`sessions.get(token_str)`) are
+/// unchanged.
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
 ) {
     let path = sessions_path(home_dir);
-    match serde_json::to_string(sessions) {
+    let on_disk = sessions_for_disk(sessions);
+    match serde_json::to_string(&on_disk) {
         Ok(content) => {
             // Atomic save with mode(0o600) at create-time to close the
             // TOCTOU window left by #3939: std::fs::write opened the
@@ -2453,14 +2520,26 @@ mod observability_tests {
         sessions.insert("live-token".to_string(), live);
         sessions.insert("expired-token".to_string(), expired);
 
-        // Initial persist — both tokens on disk. Read raw bytes
-        // because `load_sessions` filters expired tokens at load,
-        // hiding the on-disk state from the in-memory caller.
+        // Per #5494, the on-disk form is keyed by the SHA-256 hash of
+        // the cleartext token (and the inner token field is wiped), so
+        // the assertion shape changed from "raw file contains the
+        // cleartext literal" to "raw file contains the token's hash
+        // AND never the cleartext".
+        let live_hash = crate::password_hash::hash_device_token("live-token");
+        let expired_hash = crate::password_hash::hash_device_token("expired-token");
+
+        // Initial persist — both tokens on disk (in hashed form). Read
+        // raw bytes because `load_sessions` filters expired tokens at
+        // load, hiding the on-disk state from the in-memory caller.
         save_sessions(home, &sessions);
         let raw_before = std::fs::read_to_string(sessions_path(home)).unwrap();
         assert!(
-            raw_before.contains("live-token") && raw_before.contains("expired-token"),
-            "baseline: both tokens must be on disk before the GC step: {raw_before}"
+            raw_before.contains(&live_hash) && raw_before.contains(&expired_hash),
+            "baseline: both token HASHES must be on disk before the GC step: {raw_before}"
+        );
+        assert!(
+            !raw_before.contains("live-token") && !raw_before.contains("expired-token"),
+            "baseline: NEITHER cleartext bearer must appear on disk (#5494): {raw_before}"
         );
 
         // Simulate the GC retain step — same shape as the
@@ -2480,14 +2559,18 @@ mod observability_tests {
 
         let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();
         assert!(
-            raw_after.contains("live-token"),
-            "live token must still be on disk after the GC sweep: {raw_after}"
+            raw_after.contains(&live_hash),
+            "live token's hash must still be on disk after the GC sweep: {raw_after}"
         );
         assert!(
-            !raw_after.contains("expired-token"),
+            !raw_after.contains(&expired_hash),
             "expired token MUST NOT be on disk after the GC sweep — \
              the audit-flagged disk-bloat lever was that expired tokens \
              survived restart in the file: {raw_after}"
+        );
+        assert!(
+            !raw_after.contains("live-token"),
+            "live cleartext bearer must NEVER leak to disk (#5494): {raw_after}"
         );
     }
 
@@ -2545,6 +2628,122 @@ mod observability_tests {
         assert!(
             leftover.is_empty(),
             "temp file must be renamed away, not left behind"
+        );
+    }
+
+    // ---- #5494: sessions.json must never contain a usable bearer token ----
+
+    fn make_session_5494(token: &str) -> crate::password_hash::SessionToken {
+        crate::password_hash::SessionToken {
+            token: token.to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            user_name: Some("admin".to_string()),
+            user_role: Some("owner".to_string()),
+        }
+    }
+
+    /// `sessions_for_disk` must replace the map key with a `$sha256$`
+    /// hash AND wipe the inner duplicate of the token, so the on-disk
+    /// `SessionToken.token` field carries no cleartext either. Without
+    /// the second wipe the hash on the key would be theatre — the
+    /// value payload still holds the same secret in a recoverable form.
+    #[test]
+    fn sessions_for_disk_redacts_token_field() {
+        let cleartext = "f0e1d2c3b4a596878695a4b3c2d1e0f0e1d2c3b4a596878695a4b3c2d1e0f0e1";
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(cleartext.to_string(), make_session_5494(cleartext));
+
+        let on_disk = sessions_for_disk(&sessions);
+
+        assert_eq!(on_disk.len(), 1, "must preserve all rows");
+        for (key, value) in &on_disk {
+            assert!(
+                key.starts_with(SESSIONS_HASH_PREFIX),
+                "on-disk key must be hashed, got {key}"
+            );
+            assert_ne!(
+                key, cleartext,
+                "on-disk key must NOT equal the cleartext bearer"
+            );
+            assert!(
+                value.token.is_empty(),
+                "inner SessionToken.token must be wiped so the file holds no replayable bearer"
+            );
+        }
+    }
+
+    /// End-to-end audit threat model: a daemon writes a session to
+    /// `sessions.json`, the file is later restored from a backup
+    /// snapshot (Time Machine, restic, BorgBackup), and the original
+    /// cleartext token must NOT authenticate against the re-loaded
+    /// map. Asserts both that the raw file holds no cleartext AND that
+    /// `load_sessions` does not produce a row keyed by it.
+    #[test]
+    fn save_then_load_does_not_resurrect_cleartext_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        // 64-hex, matching the real generate_session_token CSPRNG output shape.
+        let cleartext = "deadbeef".repeat(8);
+        let mut live = std::collections::HashMap::new();
+        live.insert(cleartext.clone(), make_session_5494(&cleartext));
+        save_sessions(home, &live);
+
+        let raw = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            !raw.contains(&cleartext),
+            "sessions.json must not contain the cleartext bearer: {raw}"
+        );
+
+        // `load_sessions` simulates both the boot path and what a
+        // forensic reader would derive from a backup. The middleware's
+        // auth lookup is `sessions.get(presented_token_cleartext)`, so
+        // absence of the cleartext key here means a presented
+        // `Bearer <cleartext>` returns None ⇒ 401.
+        let reloaded = load_sessions(home);
+        assert!(
+            !reloaded.contains_key(&cleartext),
+            "disk-recovered map must not authenticate the original cleartext token"
+        );
+    }
+
+    /// Legacy `sessions.json` (written by a pre-#5494 daemon, cleartext
+    /// keys) must continue to authenticate so that upgrading the
+    /// daemon does not log every active user out instantly. On the
+    /// next mutation the file is migrated to the hashed form.
+    #[test]
+    fn load_sessions_accepts_legacy_cleartext_keys_for_one_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let cleartext = "a".repeat(64);
+        let legacy: std::collections::HashMap<String, crate::password_hash::SessionToken> =
+            std::iter::once((cleartext.clone(), make_session_5494(&cleartext))).collect();
+        // Simulate the pre-#5494 on-disk layout by writing the
+        // in-memory form directly (no hashing).
+        std::fs::write(sessions_path(home), serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let reloaded = load_sessions(home);
+        assert!(
+            reloaded.contains_key(&cleartext),
+            "legacy cleartext sessions.json entries must continue to auth across one upgrade cycle"
+        );
+
+        // Next save_sessions migrates the file in place.
+        save_sessions(home, &reloaded);
+        let migrated_raw = std::fs::read_to_string(sessions_path(home)).unwrap();
+        assert!(
+            !migrated_raw.contains(&cleartext),
+            "save_sessions after legacy load must rewrite the file in the hashed form"
+        );
+        assert!(
+            migrated_raw.contains(SESSIONS_HASH_PREFIX),
+            "migrated file must carry the $sha256$ marker for the rewritten entry: {migrated_raw}"
         );
     }
 }
