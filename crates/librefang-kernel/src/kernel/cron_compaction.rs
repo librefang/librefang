@@ -117,10 +117,14 @@ pub(super) fn apply_cron_prune(
 /// keep_recent window consumed everything), `None` is returned immediately so the
 /// caller can decide whether to prune or skip.
 ///
-/// Note: the caller holds the per-session mutex (`_prune_guard`) across this
-/// await, which spans the entire LLM summary call. This is intentional — it
-/// serialises `SummarizeTrim` runs on the same session so two concurrent fires
-/// cannot each start a summary against the same un-compacted snapshot.
+/// Concurrency note: the caller in `cron_tick.rs::cron_prune_session`
+/// releases the per-session mutex (`session_msg_locks[cron_sid]`) **before**
+/// awaiting this function and re-acquires it for the write-back, gated by a
+/// `Session.messages_generation` CAS. Holding the mutex across the LLM call
+/// stalled every sibling cron fire for the same `(agent, "cron")` session
+/// for the duration of a (potentially tens-of-seconds) provider round-trip;
+/// the generation CAS preserves the original serialization guarantee — two
+/// concurrent fires still cannot both write — without the head-of-line block.
 pub(super) async fn try_summarize_trim(
     messages: &[librefang_types::message::Message],
     keep_recent: usize,
@@ -159,14 +163,15 @@ pub(super) async fn try_summarize_trim(
     // We've already split off the kept tail above; tell `compact_messages` to
     // summarise the entire input it receives by setting `keep_recent = 0`.
     //
-    // `max_retries = 1` (cron-only override): the per-session mutex and one
-    // cron_lane slot are held across this LLM call. The default of 3 retries
-    // inside stage-1 single-pass + the additional stage-2 chunked attempt can
-    // stretch to tens of seconds on a flaky provider, blocking sibling fires
-    // for the same `(agent, "cron")` session. Cron's failure mode is "fall
-    // back to plain prune", so a single attempt is sufficient — operators who
-    // want more aggressive retries should configure them in the aux driver
-    // itself, not amplify them here.
+    // `max_retries = 1` (cron-only override): one `cron_lane` slot is held
+    // across this LLM call (the per-session mutex is released by the caller
+    // — see the concurrency note on this function). The default of 3 retries
+    // inside stage-1 single-pass + the additional stage-2 chunked attempt
+    // can stretch to tens of seconds on a flaky provider, holding the lane
+    // slot longer than necessary and delaying the fall-back-to-prune path.
+    // Cron's failure mode is "fall back to plain prune", so a single attempt
+    // is sufficient — operators who want more aggressive retries should
+    // configure them in the aux driver itself, not amplify them here.
     let compact_cfg = CompactionConfig {
         threshold: 0,
         keep_recent: 0,
