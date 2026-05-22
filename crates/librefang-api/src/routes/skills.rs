@@ -3659,12 +3659,12 @@ pub async fn hand_send_message(
         Err(e) => return e,
     };
 
-    // Reject oversized messages
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Reject oversized messages — see check_message_size for the
+    // byte/char split. Audit: message-byte-vs-char-cap.
+    if let Err(e) = crate::validation::check_message_size(&req.message) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": e.message})),
         );
     }
 
@@ -5470,18 +5470,25 @@ pub(crate) fn write_secret_env(
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
-
-    // SECURITY: Restrict file permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!("Failed to set file permissions: {e}");
-        }
-    }
-
-    Ok(())
+    // Atomic mode-0600 write (audit: write-secret-env-toctou).
+    //
+    // Pre-fix the path was `fs::write` (opens at the process umask,
+    // typically `0644`) followed by `chmod 0600`. Between the
+    // write-syscall completion and the chmod-syscall completion any
+    // local user on the same host could `cat ~/.librefang/secrets.env`
+    // and read every provider API key the daemon has stored — the
+    // exact race `save_sessions` was hardened against in #3939 /
+    // #3725 (`server.rs:948-987` uses `OpenOptions::mode(0o600)` on a
+    // temp file then atomic-renames). The secrets-write path missed
+    // that rewrite; the TOCTOU window re-opened on every "save key"
+    // dashboard action.
+    //
+    // Pattern: create a sibling `.tmp` file with `0600` from the
+    // start, write the content, fsync, then atomic-rename onto the
+    // canonical path. `rename(2)` is atomic within a filesystem; the
+    // destination inode appears with `0600` already set, never at
+    // umask defaults.
+    atomic_write_secret_file(path, lines.join("\n") + "\n")
 }
 
 /// Remove a key from the secrets.env file.
@@ -5498,9 +5505,63 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
         .map(|l| l.to_string())
         .collect();
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
+    // Same mode-0600 atomic-rename pattern as `write_secret_env`.
+    // `remove_secret_env` has the same TOCTOU window the audit
+    // calls out — a key removal still rewrites the whole file with
+    // every remaining key in plaintext.
+    atomic_write_secret_file(path, lines.join("\n") + "\n")
+}
 
-    Ok(())
+/// Atomically replace `path` with `content`, ensuring the resulting
+/// inode is mode `0600` (Unix) from creation — never observable at
+/// the process umask. Writes to a sibling `.tmp` file first to keep
+/// the rename within the same filesystem (so `rename(2)` is
+/// atomic). On non-Unix targets the helper still uses the temp +
+/// rename shape so partial writes can't tear the file; the
+/// per-permissions bit is a no-op (Windows ACLs are inherited from
+/// the parent directory, which lives under the daemon-UID user
+/// profile).
+fn atomic_write_secret_file(
+    path: &std::path::Path,
+    content: String,
+) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_owned())
+        .unwrap_or_else(|| std::ffi::OsString::from("secrets.env"));
+    let mut tmp_name = file_name;
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(tmp_name);
+
+    // Open with mode 0600 from the start on Unix. The temp file is
+    // discarded on any error path below so we don't leak a partial
+    // write on disk.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp_path)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+
+    // `rename(2)` is atomic — the destination either contains the
+    // old bytes (pre-rename) or the new bytes (post-rename); a
+    // concurrent reader never observes a half-written file.
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Clean up the temp file so we don't accrete `*.tmp`
+            // litter on partial-failure paths.
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
 }
 
 // ── Config.toml channel management helpers ──────────────────────────
@@ -6201,6 +6262,134 @@ mod tests {
     // promotion) retired alongside the helper functions they
     // exercised — every channel runs as a sidecar so the `[channels.<x>]`
     // TOML write path has zero callers.
+
+    // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
+
+    #[test]
+    fn escape_env_value_plain_value_unchanged() {
+        assert_eq!(escape_env_value("hello"), "hello");
+        assert_eq!(escape_env_value("sk-abc123"), "sk-abc123");
+    }
+
+    #[test]
+    fn escape_env_value_newline_becomes_backslash_n() {
+        let raw = "line1\nline2";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "line1\\nline2");
+        // Must not contain a literal newline character.
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_carriage_return_becomes_backslash_r() {
+        let raw = "val\r\nend";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "val\\r\\nend");
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_backslash_is_doubled() {
+        let raw = r"C:\Users\secret";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, r"C:\\Users\\secret");
+    }
+
+    #[test]
+    fn escape_env_value_backslash_before_newline_double_escapes_correctly() {
+        // "\\\n" → the backslash must be doubled before the newline is escaped,
+        // producing "\\\\n" (a literal backslash-backslash-n), not "\\n".
+        let raw = "\\\n";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "\\\\\\n");
+        assert!(!escaped.contains('\n'));
+    }
+
+    /// Regression for audit `write-secret-env-toctou`. After a
+    /// successful `write_secret_env`, the resulting file must be
+    /// mode `0o600` from the moment it appears on disk — the
+    /// atomic-rename pattern guarantees the file never exists
+    /// readable-to-other-UIDs even for one syscall.
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_env_yields_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "ANTHROPIC_API_KEY", "sk-secret-123").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "secrets.env must be 0o600 immediately after write; got {mode:o}",
+        );
+    }
+
+    /// `remove_secret_env` rewrites the whole file with every
+    /// remaining key — the audit's TOCTOU window applies equally
+    /// to this path, so the post-condition mode must also be 0600.
+    #[cfg(unix)]
+    #[test]
+    fn remove_secret_env_yields_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "A", "1").unwrap();
+        write_secret_env(&path, "B", "2").unwrap();
+        // Deliberately clobber the mode to 0644 (the umask default
+        // the pre-fix code left in the window) so the assertion
+        // below proves the post-condition is restored, not just
+        // inherited from the prior write.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        remove_secret_env(&path, "A").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "remove_secret_env must restore 0o600 on rewrite; got {mode:o}",
+        );
+    }
+
+    /// The atomic-rename `*.tmp` sibling must not survive a
+    /// successful write. Leaving the temp file would (a) accrete
+    /// litter under `~/.librefang/` and (b) leave the previous
+    /// secret value readable from the `.tmp` inode until the next
+    /// write overwrites it.
+    #[test]
+    fn write_secret_env_cleans_up_tmp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "OPENAI_API_KEY", "sk-1").unwrap();
+        let tmp_path = path.with_file_name("secrets.env.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp sibling must be gone after atomic rename completes",
+        );
+    }
+
+    #[test]
+    fn write_secret_env_value_with_newline_is_rejected() {
+        // Implementation tightened to reject newlines in the value rather
+        // than escape them — escape-into-single-line was the old behaviour
+        // (see this test's previous name) but it left a real injection
+        // surface for callers that didn't expect dotenv parsers to honour
+        // backslash sequences.  Now we fail-closed: caller must sanitise
+        // before passing. (`write_service_account_env` was folded into the
+        // generic `write_secret_env` when google_chat/webhook moved out.)
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("newline"),
+            "error should mention newlines, got: {err}"
+        );
+        // No file should have been written.
+        assert!(
+            !path.exists(),
+            "secrets.env must not be created on validation error"
+        );
+    }
+
 }
 
 #[cfg(test)]

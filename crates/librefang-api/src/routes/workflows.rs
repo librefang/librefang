@@ -2211,8 +2211,22 @@ pub async fn create_trigger(
         }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
-            ApiErrorResponse::not_found("Trigger registration failed (agent not found?)")
-                .into_json_tuple()
+            // The per-agent cap (audit: trigger-engine-no-per-agent-cap)
+            // and other client-side rejections surface as `InvalidInput`
+            // — those are 400, not "agent not found". Only a genuine
+            // missing-owner/target maps to 404. Mirrors the parallel
+            // branch in `update_schedule` above.
+            use crate::error::KernelError;
+            use librefang_types::error::LibreFangError;
+            match e {
+                KernelError::LibreFang(LibreFangError::InvalidInput(msg)) => {
+                    ApiErrorResponse::bad_request(msg).into_json_tuple()
+                }
+                other => {
+                    ApiErrorResponse::not_found(format!("Trigger registration failed: {other}"))
+                        .into_json_tuple()
+                }
+            }
         }
     }
 }
