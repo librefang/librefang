@@ -1643,6 +1643,13 @@ pub async fn run_daemon(
     // moves the Arc; clone first so subsequent uses on this scope
     // (`start_background_agents` etc.) keep their handle.
     kernel.clone().set_self_handle();
+    // Install the OAuth cache invalidator so `apply_hot_actions_inner`
+    // can flush the OIDC discovery + JWKS `LazyLock` caches owned by
+    // `crate::oauth` when `[external_auth]` IdP identity changes via
+    // hot-reload (refs `docs/issues/jwks-cache-no-reload-evict.md`).
+    // Idempotent; safe to call once per process.
+    kernel
+        .set_oauth_cache_invalidator(std::sync::Arc::new(crate::oauth::OauthCacheInvalidatorImpl));
     kernel.start_background_agents().await;
 
     // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
@@ -2414,8 +2421,7 @@ mod observability_tests {
         };
         let expired = crate::password_hash::SessionToken {
             token: "expired-token".to_string(),
-            created_at: now
-                .saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
+            created_at: now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS * 2),
             user_name: None,
             user_role: None,
         };
@@ -2442,7 +2448,11 @@ mod observability_tests {
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        assert_eq!(sessions.len(), 1, "retain dropped the expired entry in memory");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "retain dropped the expired entry in memory"
+        );
         save_sessions(home, &sessions);
 
         let raw_after = std::fs::read_to_string(sessions_path(home)).unwrap();

@@ -24,6 +24,21 @@ impl LibreFangKernel {
         let _ = self.log_reloader.set(reloader);
     }
 
+    /// Install an [`crate::oauth_cache_invalidator::OauthCacheInvalidator`].
+    ///
+    /// Idempotent: subsequent calls are silently ignored (the slot is a
+    /// `OnceLock`). The injected invalidator is invoked when
+    /// [`crate::config_reload::HotAction::ReloadExternalAuth`] fires
+    /// during hot-reload — see `apply_hot_actions_inner`. Owned by the
+    /// API layer because the OIDC discovery + JWKS caches live as
+    /// module-level `LazyLock`s in `librefang-api::oauth`.
+    pub fn set_oauth_cache_invalidator(
+        &self,
+        invalidator: crate::oauth_cache_invalidator::OauthCacheInvalidatorArc,
+    ) {
+        let _ = self.oauth_cache_invalidator.set(invalidator);
+    }
+
     /// Set the weak self-reference for trigger dispatch.
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.

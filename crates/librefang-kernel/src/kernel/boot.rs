@@ -228,10 +228,9 @@ impl LibreFangKernel {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = std::fs::set_permissions(
-                &config.data_dir,
-                std::fs::Permissions::from_mode(0o700),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700))
+            {
                 tracing::warn!(
                     path = %config.data_dir.display(),
                     error = %e,
@@ -1487,6 +1486,7 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
+            oauth_cache_invalidator: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
