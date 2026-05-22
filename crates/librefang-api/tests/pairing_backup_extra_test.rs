@@ -274,6 +274,58 @@ async fn create_backup_writes_archive_and_list_returns_it() {
     assert!(entry["librefang_version"].as_str().is_some());
 }
 
+/// Refs `docs/issues/blocking-fs-on-executor.md` — `create_backup`
+/// must dispatch its `walkdir` / `std::fs::read` work onto
+/// `tokio::task::spawn_blocking` so a large backup walk doesn't
+/// stall the axum worker. We can't directly probe for
+/// "did spawn_blocking get called" without poking internals, but we
+/// can assert the behavioural invariant: while a backup is in
+/// flight, another request submitted to the same router must make
+/// progress and complete. Pre-fix, the in-flight handler held the
+/// worker, so on a 2-worker runtime two concurrent backups would
+/// serialise (and on a 1-worker runtime the test would deadlock).
+/// With `spawn_blocking` the second request hops off onto a fresh
+/// worker thread immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_backup_does_not_block_other_handlers() {
+    let h = boot(true).await;
+    let app1 = h.app.clone();
+    let app2 = h.app.clone();
+
+    // Kick off a backup. Don't await it yet — we want a second
+    // request to overlap.
+    let backup_task = tokio::spawn(async move {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/backup")
+            .header("content-type", "application/json")
+            .header("host", "test.local")
+            .body(Body::from("{}"))
+            .unwrap();
+        app1.oneshot(req).await.unwrap()
+    });
+
+    // Concurrent listing must complete, with a generous-but-still-
+    // bounded timeout. If the backup ever migrates back onto the
+    // executor synchronously, this race tightens against the worker
+    // budget and starts flaking under load.
+    let list_req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/backups")
+        .header("host", "test.local")
+        .body(Body::empty())
+        .unwrap();
+    let list_resp = tokio::time::timeout(std::time::Duration::from_secs(5), app2.oneshot(list_req))
+        .await
+        .expect("GET /api/backups must complete while a backup is in flight")
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+
+    // Backup itself eventually completes.
+    let backup_resp = backup_task.await.unwrap();
+    assert_eq!(backup_resp.status(), StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_backup_rejects_path_traversal() {
     let h = boot(true).await;

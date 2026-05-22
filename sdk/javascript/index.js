@@ -37,12 +37,15 @@ class LibreFang {
     this.budget = new BudgetResource(this);
     this.channels = new ChannelsResource(this);
     this.extensions = new ExtensionsResource(this);
+    this.goals = new GoalsResource(this);
     this.hands = new HandsResource(this);
+    this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
     this.pairing = new PairingResource(this);
+    this.plugins = new PluginsResource(this);
     this.proactive_memory = new ProactiveMemoryResource(this);
     this.sessions = new SessionsResource(this);
     this.skills = new SkillsResource(this);
@@ -117,6 +120,10 @@ class A2AResource {
 
   async a2aGetExternalAgent(id) {
     return this._c._request("GET", `/api/a2a/agents/${id}`);
+  }
+
+  async a2aApproveExternal(id) {
+    return this._c._request("POST", `/api/a2a/agents/${id}/approve`);
   }
 
   async a2aDiscoverExternal(data) {
@@ -383,12 +390,40 @@ class ApprovalsResource {
     return this._c._request("POST", "/api/approvals", data, undefined);
   }
 
+  async auditLog(query) {
+    return this._c._request("GET", "/api/approvals/audit", undefined, query);
+  }
+
+  async batchResolve(data) {
+    return this._c._request("POST", "/api/approvals/batch", data, undefined);
+  }
+
+  async approvalCount() {
+    return this._c._request("GET", "/api/approvals/count");
+  }
+
+  async listApprovalsForSession(session_id) {
+    return this._c._request("GET", `/api/approvals/session/${session_id}`);
+  }
+
+  async approveAllForSession(session_id, data) {
+    return this._c._request("POST", `/api/approvals/session/${session_id}/approve_all`, data, undefined);
+  }
+
+  async rejectAllForSession(session_id) {
+    return this._c._request("POST", `/api/approvals/session/${session_id}/reject_all`);
+  }
+
   async getApproval(id) {
     return this._c._request("GET", `/api/approvals/${id}`);
   }
 
   async approveRequest(id, data) {
     return this._c._request("POST", `/api/approvals/${id}/approve`, data, undefined);
+  }
+
+  async modifyRequest(id, data) {
+    return this._c._request("POST", `/api/approvals/${id}/modify`, data, undefined);
   }
 
   async rejectRequest(id) {
@@ -505,12 +540,24 @@ class BudgetResource {
     return this._c._request("GET", `/api/budget/users/${user_id}`);
   }
 
+  async updateUserBudget(user_id, data) {
+    return this._c._request("PUT", `/api/budget/users/${user_id}`, data, undefined);
+  }
+
+  async deleteUserBudget(user_id) {
+    return this._c._request("DELETE", `/api/budget/users/${user_id}`);
+  }
+
   async usageStats() {
     return this._c._request("GET", "/api/usage");
   }
 
   async usageByModel() {
     return this._c._request("GET", "/api/usage/by-model");
+  }
+
+  async usageByModelPerformance() {
+    return this._c._request("GET", "/api/usage/by-model/performance");
   }
 
   async usageDaily() {
@@ -570,6 +617,16 @@ class ExtensionsResource {
   }
 }
 
+// ── Goals Resource
+
+class GoalsResource {
+  constructor(client) { this._c = client; }
+
+  async listGoalTemplates() {
+    return this._c._request("GET", "/api/goals/templates");
+  }
+}
+
 // ── Hands Resource
 
 class HandsResource {
@@ -615,6 +672,10 @@ class HandsResource {
     return this._c._request("GET", `/api/hands/${hand_id}`);
   }
 
+  async uninstallHand(hand_id) {
+    return this._c._request("DELETE", `/api/hands/${hand_id}`);
+  }
+
   async activateHand(hand_id, data) {
     return this._c._request("POST", `/api/hands/${hand_id}/activate`, data, undefined);
   }
@@ -627,12 +688,30 @@ class HandsResource {
     return this._c._request("POST", `/api/hands/${hand_id}/install-deps`);
   }
 
+  async getHandManifest(hand_id) {
+    return this._c._request("GET", `/api/hands/${hand_id}/manifest`);
+  }
+
+  async setHandSecret(hand_id, data) {
+    return this._c._request("POST", `/api/hands/${hand_id}/secret`, data, undefined);
+  }
+
   async getHandSettings(hand_id) {
     return this._c._request("GET", `/api/hands/${hand_id}/settings`);
   }
 
   async updateHandSettings(hand_id, data) {
     return this._c._request("PUT", `/api/hands/${hand_id}/settings`, data, undefined);
+  }
+}
+
+// ── Inbox Resource
+
+class InboxResource {
+  constructor(client) { this._c = client; }
+
+  async inboxStatus() {
+    return this._c._request("GET", "/api/inbox/status");
   }
 }
 
@@ -677,8 +756,24 @@ class McpResource {
     return this._c._request("DELETE", `/api/mcp/servers/${name}`);
   }
 
+  async authRevoke(name) {
+    return this._c._request("DELETE", `/api/mcp/servers/${name}/auth/revoke`);
+  }
+
+  async authStart(name) {
+    return this._c._request("POST", `/api/mcp/servers/${name}/auth/start`);
+  }
+
+  async authStatus(name) {
+    return this._c._request("GET", `/api/mcp/servers/${name}/auth/status`);
+  }
+
   async reconnectMcpServerHandler(name) {
     return this._c._request("POST", `/api/mcp/servers/${name}/reconnect`);
+  }
+
+  async patchMcpServerTaint(name, data) {
+    return this._c._request("PATCH", `/api/mcp/servers/${name}/taint`, data, undefined);
   }
 
   async listMcpTaintRules() {
@@ -713,6 +808,14 @@ class MemoryResource {
 
   async deleteAgentKvKey(id, key) {
     return this._c._request("DELETE", `/api/memory/agents/${id}/kv/${key}`);
+  }
+
+  async memoryConfigGet() {
+    return this._c._request("GET", "/api/memory/config");
+  }
+
+  async memoryConfigPatch(data) {
+    return this._c._request("PATCH", "/api/memory/config", data, undefined);
   }
 }
 
@@ -831,6 +934,10 @@ class NetworkResource {
     return this._c._request("GET", "/api/network/status");
   }
 
+  async networkTrustedPeers() {
+    return this._c._request("GET", "/api/network/trusted-peers");
+  }
+
   async listPeers(query) {
     return this._c._request("GET", "/api/peers", undefined, query);
   }
@@ -866,6 +973,112 @@ class PairingResource {
   }
 }
 
+// ── Plugins Resource
+
+class PluginsResource {
+  constructor(client) { this._c = client; }
+
+  async contextEngineChain() {
+    return this._c._request("GET", "/api/context-engine/chain");
+  }
+
+  async contextEngineConfig() {
+    return this._c._request("GET", "/api/context-engine/config");
+  }
+
+  async contextEngineHealth() {
+    return this._c._request("GET", "/api/context-engine/health");
+  }
+
+  async contextEngineMetrics() {
+    return this._c._request("GET", "/api/context-engine/metrics");
+  }
+
+  async contextEngineSandboxPolicy() {
+    return this._c._request("GET", "/api/context-engine/sandbox-policy");
+  }
+
+  async contextEngineTraces() {
+    return this._c._request("GET", "/api/context-engine/traces");
+  }
+
+  async listPlugins() {
+    return this._c._request("GET", "/api/plugins");
+  }
+
+  async pluginDoctor() {
+    return this._c._request("GET", "/api/plugins/doctor");
+  }
+
+  async installPlugin(data) {
+    return this._c._request("POST", "/api/plugins/install", data, undefined);
+  }
+
+  async listPluginRegistries() {
+    return this._c._request("GET", "/api/plugins/registries");
+  }
+
+  async scaffoldPlugin(data) {
+    return this._c._request("POST", "/api/plugins/scaffold", data, undefined);
+  }
+
+  async uninstallPlugin(data) {
+    return this._c._request("POST", "/api/plugins/uninstall", data, undefined);
+  }
+
+  async getPlugin(name) {
+    return this._c._request("GET", `/api/plugins/${name}`);
+  }
+
+  async pluginAdvancedConfig(name) {
+    return this._c._request("GET", `/api/plugins/${name}/advanced-config`);
+  }
+
+  async disablePlugin(name) {
+    return this._c._request("POST", `/api/plugins/${name}/disable`);
+  }
+
+  async enablePlugin(name) {
+    return this._c._request("POST", `/api/plugins/${name}/enable`);
+  }
+
+  async pluginEnv(name) {
+    return this._c._request("GET", `/api/plugins/${name}/env`);
+  }
+
+  async installPluginDeps(name) {
+    return this._c._request("POST", `/api/plugins/${name}/install-deps`);
+  }
+
+  async lintPlugin(name) {
+    return this._c._request("GET", `/api/plugins/${name}/lint`);
+  }
+
+  async prewarmPlugin(name) {
+    return this._c._request("POST", `/api/plugins/${name}/prewarm`);
+  }
+
+  async reloadPlugin(name) {
+    return this._c._request("POST", `/api/plugins/${name}/reload`);
+  }
+
+  async signPlugin(name) {
+    return this._c._request("POST", `/api/plugins/${name}/sign`);
+  }
+
+  async pluginStatus(name) {
+    return this._c._request("GET", `/api/plugins/${name}/status`);
+  }
+
+  async testPluginHook(name, data) {
+    return this._c._request("POST", `/api/plugins/${name}/test-hook`, data, undefined);
+  }
+
+  async upgradePlugin(name, data) {
+    return this._c._request("POST", `/api/plugins/${name}/upgrade`, data, undefined);
+  }
+}
+
 // ── ProactiveMemory Resource
 
 class ProactiveMemoryResource {
@@ -891,6 +1104,10 @@ class ProactiveMemoryResource {
     return this._c._request("POST", `/api/memory/agents/${id}/consolidate`);
   }
 
+  async memoryCountAgent(id, query) {
+    return this._c._request("GET", `/api/memory/agents/${id}/count`, undefined, query);
+  }
+
   async memoryDuplicates(id) {
     return this._c._request("GET", `/api/memory/agents/${id}/duplicates`);
   }
@@ -907,6 +1124,14 @@ class ProactiveMemoryResource {
     return this._c._request("DELETE", `/api/memory/agents/${id}/level/${level}`);
   }
 
+  async memoryQueryRelations(id, query) {
+    return this._c._request("GET", `/api/memory/agents/${id}/relations`, undefined, query);
+  }
+
+  async memoryStoreRelations(id, data) {
+    return this._c._request("POST", `/api/memory/agents/${id}/relations`, data, undefined);
+  }
+
   async memorySearchAgent(id, query) {
     return this._c._request("GET", `/api/memory/agents/${id}/search`, undefined, query);
   }
@@ -915,8 +1140,16 @@ class ProactiveMemoryResource {
     return this._c._request("GET", `/api/memory/agents/${id}/stats`);
   }
 
+  async memoryBulkDelete(data) {
+    return this._c._request("POST", "/api/memory/bulk-delete", data, undefined);
+  }
+
   async memoryCleanup() {
     return this._c._request("POST", "/api/memory/cleanup");
+  }
+
+  async memoryDecay() {
+    return this._c._request("POST", "/api/memory/decay");
   }
 
   async memoryUpdate(memory_id, data) {
@@ -959,6 +1192,10 @@ class SessionsResource {
 
   async sessionCleanup() {
     return this._c._request("POST", "/api/sessions/cleanup");
+  }
+
+  async searchSessions(query) {
+    return this._c._request("GET", "/api/sessions/search", undefined, query);
   }
 
   async getSession(id) {
@@ -1035,8 +1272,48 @@ class SkillsResource {
     return this._c._request("POST", `/api/skills/pending/${id}/reject`);
   }
 
+  async listSkillRegistry() {
+    return this._c._request("GET", "/api/skills/registry");
+  }
+
+  async reloadSkills() {
+    return this._c._request("POST", "/api/skills/reload");
+  }
+
   async uninstallSkill(data) {
     return this._c._request("POST", "/api/skills/uninstall", data, undefined);
+  }
+
+  async getSkillDetail(name) {
+    return this._c._request("GET", `/api/skills/${name}`);
+  }
+
+  async evolveDeleteSkill(name) {
+    return this._c._request("POST", `/api/skills/${name}/evolve/delete`);
+  }
+
+  async evolveWriteFile(name, data) {
+    return this._c._request("POST", `/api/skills/${name}/evolve/file`, data, undefined);
+  }
+
+  async evolveRemoveFile(name, query) {
+    return this._c._request("DELETE", `/api/skills/${name}/evolve/file`, undefined, query);
+  }
+
+  async evolvePatchSkill(name, data) {
+    return this._c._request("POST", `/api/skills/${name}/evolve/patch`, data, undefined);
+  }
+
+  async evolveRollbackSkill(name) {
+    return this._c._request("POST", `/api/skills/${name}/evolve/rollback`);
+  }
+
+  async evolveUpdateSkill(name, data) {
+    return this._c._request("POST", `/api/skills/${name}/evolve/update`, data, undefined);
+  }
+
+  async getSupportingFile(name, query) {
+    return this._c._request("GET", `/api/skills/${name}/file`, undefined, query);
   }
 
   async listTools() {
@@ -1067,6 +1344,14 @@ class SystemResource {
 
   async auditVerify() {
     return this._c._request("GET", "/api/audit/verify");
+  }
+
+  async check(query) {
+    return this._c._request("GET", "/api/authz/check", undefined, query);
+  }
+
+  async effectivePermissions(user_id) {
+    return this._c._request("GET", `/api/authz/effective/${user_id}`);
   }
 
   async createBackup() {
@@ -1103,6 +1388,10 @@ class SystemResource {
 
   async getConfig() {
     return this._c._request("GET", "/api/config");
+  }
+
+  async exportConfig() {
+    return this._c._request("GET", "/api/config/export");
   }
 
   async configReload() {
@@ -1185,6 +1474,10 @@ class SystemResource {
     return this._c._request("GET", `/api/templates/${name}`);
   }
 
+  async getAgentTemplateToml(name) {
+    return this._c._request("GET", `/api/templates/${name}/toml`);
+  }
+
   async version() {
     return this._c._request("GET", "/api/version");
   }
@@ -1233,6 +1526,14 @@ class UsersResource {
     return this._c._request("DELETE", `/api/users/${name}`);
   }
 
+  async getUserPolicy(name) {
+    return this._c._request("GET", `/api/users/${name}/policy`);
+  }
+
+  async updateUserPolicy(name, data) {
+    return this._c._request("PUT", `/api/users/${name}/policy`, data, undefined);
+  }
+
   async rotateUserKey(name) {
     return this._c._request("POST", `/api/users/${name}/rotate-key`);
   }
@@ -1263,6 +1564,10 @@ class WorkflowsResource {
 
   async createCronJob(data) {
     return this._c._request("POST", "/api/cron/jobs", data, undefined);
+  }
+
+  async getCronJob(id) {
+    return this._c._request("GET", `/api/cron/jobs/${id}`);
   }
 
   async updateCronJob(id, data) {
@@ -1325,6 +1630,18 @@ class WorkflowsResource {
     return this._c._request("PATCH", `/api/triggers/${id}`, data, undefined);
   }
 
+  async listWorkflowTemplates(query) {
+    return this._c._request("GET", "/api/workflow-templates", undefined, query);
+  }
+
+  async getWorkflowTemplate(id) {
+    return this._c._request("GET", `/api/workflow-templates/${id}`);
+  }
+
+  async instantiateTemplate(id, data) {
+    return this._c._request("POST", `/api/workflow-templates/${id}/instantiate`, data, undefined);
+  }
+
   async listWorkflows() {
     return this._c._request("GET", "/api/workflows");
   }
@@ -1333,12 +1650,40 @@ class WorkflowsResource {
     return this._c._request("POST", "/api/workflows", data, undefined);
   }
 
+  async getWorkflowRun(run_id) {
+    return this._c._request("GET", `/api/workflows/runs/${run_id}`);
+  }
+
+  async cancelWorkflowRun(run_id) {
+    return this._c._request("POST", `/api/workflows/runs/${run_id}/cancel`);
+  }
+
+  async operatorActionWorkflowRun(run_id, data) {
+    return this._c._request("POST", `/api/workflows/runs/${run_id}/operator`, data, undefined);
+  }
+
+  async pauseWorkflowRun(run_id, data) {
+    return this._c._request("POST", `/api/workflows/runs/${run_id}/pause`, data, undefined);
+  }
+
+  async resumeWorkflowRun(run_id, data) {
+    return this._c._request("POST", `/api/workflows/runs/${run_id}/resume`, data, undefined);
+  }
+
+  async getWorkflow(id) {
+    return this._c._request("GET", `/api/workflows/${id}`);
+  }
+
   async updateWorkflow(id, data) {
     return this._c._request("PUT", `/api/workflows/${id}`, data, undefined);
   }
 
   async deleteWorkflow(id) {
     return this._c._request("DELETE", `/api/workflows/${id}`);
+  }
+
+  async dryRunWorkflow(id, data) {
+    return this._c._request("POST", `/api/workflows/${id}/dry-run`, data, undefined);
   }
 
   async runWorkflow(id, data) {

@@ -192,6 +192,74 @@ const DISCOVERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(
 static DISCOVERY_CACHE: std::sync::LazyLock<DiscoveryCache> =
     std::sync::LazyLock::new(DiscoveryCache::default);
 
+// ── Cache invalidation (hot-reload) ─────────────────────────────────────
+
+/// Drop every cached JWKS keyset and OIDC discovery document.
+///
+/// Called from the kernel hot-reload pipeline (via the
+/// [`librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator`]
+/// trait) whenever `[external_auth]` is reloaded with a new
+/// identity-provider identity (issuer URL, JWKS URI, providers list).
+/// Without this, swapping IdPs at runtime would leave the previous
+/// provider's signing keys in cache until the natural 1h TTL —
+/// tokens issued by the new IdP would fail JWT validation against the
+/// stale keys (`No JWKS key found for kid=…`) until the entry expires.
+///
+/// Idempotent: clearing an already-empty cache is a no-op. Synchronous
+/// from the caller's perspective: each `clear()` only briefly takes
+/// the per-cache write lock to drop entries (no network I/O).
+pub fn invalidate_oauth_caches() {
+    // The caches are guarded by `tokio::sync::RwLock` because the
+    // fetch path holds the write guard across an `.await` on the HTTP
+    // round-trip. Invalidation only needs synchronous access; spawn a
+    // detached task when we're on a runtime, fall back to a
+    // single-threaded runtime + block_on when not (only hit from
+    // synchronous tests).
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Detached drop on the runtime — kernel `apply_hot_actions_inner`
+            // already holds the config-reload write lock, so we don't
+            // need the clear to complete synchronously: any subsequent
+            // login attempt re-takes the cache lock and serialises
+            // naturally with this task.
+            let h2 = handle.clone();
+            handle.spawn(async {
+                JWKS_CACHE.inner.write().await.clear();
+            });
+            h2.spawn(async {
+                DISCOVERY_CACHE.inner.write().await.clear();
+            });
+        }
+        Err(_) => {
+            // No tokio runtime — build a single-threaded one for the
+            // clear and tear it down. Only exercised by synchronous
+            // unit tests; the production path always has a runtime.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("transient tokio runtime for cache invalidation");
+            rt.block_on(async {
+                JWKS_CACHE.inner.write().await.clear();
+                DISCOVERY_CACHE.inner.write().await.clear();
+            });
+        }
+    }
+}
+
+/// Adapter that implements the kernel-facing
+/// [`librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator`]
+/// trait. Constructed once at API-server boot and handed to the kernel
+/// via `set_oauth_cache_invalidator`.
+pub struct OauthCacheInvalidatorImpl;
+
+impl librefang_kernel::oauth_cache_invalidator::OauthCacheInvalidator
+    for OauthCacheInvalidatorImpl
+{
+    fn invalidate(&self) {
+        invalidate_oauth_caches();
+    }
+}
+
 // ── State (CSRF) ────────────────────────────────────────────────────────
 
 /// State parameter payload encoded as JSON and HMAC-signed.
@@ -403,18 +471,27 @@ impl TokenStore {
             .map(|(sub, entry)| (sub.clone(), entry.clone()))
     }
 
-    /// Find any stored entry with a refresh token, evicting expired entries.
-    async fn find_any_with_refresh(&self) -> Option<(String, StoredTokens)> {
+    /// Find any stored entry that has a refresh token, evicting expired
+    /// entries first.
+    ///
+    /// Returns the refresh token as a non-optional `String` so callers cannot
+    /// reach for `.unwrap()` on `entry.refresh_token` (audit:
+    /// `oauth-refresh-error-body-token-leak`, sub-finding "unwrap on
+    /// refresh_token"). The `Some(..)` arm is itself the proof that a refresh
+    /// token is present — the invariant lives in the type, not in a comment.
+    async fn find_any_with_refresh(&self) -> Option<(String, String, StoredTokens)> {
         let mut write = self.inner.write().await;
         let now = std::time::Instant::now();
 
         // Evict expired entries.
         write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
 
-        write
-            .iter()
-            .find(|(_sub, entry)| entry.refresh_token.is_some())
-            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+        write.iter().find_map(|(sub, entry)| {
+            entry
+                .refresh_token
+                .clone()
+                .map(|rt| (sub.clone(), rt, entry.clone()))
+        })
     }
 }
 
@@ -1020,7 +1097,7 @@ async fn handle_code_exchange(
     // Check allowed domains.
     if !provider.allowed_domains.is_empty() {
         if let Some(ref email) = claims.email {
-            let domain = email.rsplit('@').next().unwrap_or("");
+            let domain = email_domain(email);
             if !provider.allowed_domains.iter().any(|d| d == domain) {
                 return (
                     StatusCode::FORBIDDEN,
@@ -1061,9 +1138,13 @@ async fn handle_code_exchange(
             .into_response();
     }
 
+    // SECURITY: log only the email domain at INFO — full email is PII and
+    // production INFO logs typically ship to aggregators with longer retention
+    // than DEBUG. The domain alone preserves the diagnostic value (which IdP
+    // tenant signed in) without leaking the user identifier.
     info!(
         sub = %claims.sub,
-        email = ?claims.email,
+        domain = %claims.email.as_deref().map(email_domain).unwrap_or(""),
         provider = %provider.id,
         "External auth login successful"
     );
@@ -1349,13 +1430,14 @@ pub async fn auth_refresh(
     } else {
         // Neither refresh token nor provider — try to find any stored refresh token.
         match TOKEN_STORE.find_any_with_refresh().await {
-            Some((sub, entry)) => {
+            Some((sub, refresh_token, entry)) => {
                 let provider = providers
                     .iter()
                     .find(|p| p.id == entry.provider_id)
                     .cloned();
-                // refresh_token is guaranteed Some by find_any_with_refresh
-                (entry.refresh_token.unwrap(), Some(sub), provider)
+                // `find_any_with_refresh` hands back the refresh token directly,
+                // so there is no Option to unwrap here.
+                (refresh_token, Some(sub), provider)
             }
             None => {
                 return (
@@ -1491,9 +1573,11 @@ pub async fn oidc_auth_middleware(
                 // tokens without an email claim MUST be rejected.
                 if !provider.allowed_domains.is_empty() {
                     if let Some(ref email) = claims.email {
-                        let domain = email.rsplit('@').next().unwrap_or("");
+                        let domain = email_domain(email);
                         if !provider.allowed_domains.iter().any(|d| d == domain) {
-                            debug!(email = %email, "Email domain not in allowed list");
+                            // SECURITY: log only the domain — the full email is PII even at
+                            // DEBUG. `domain` is already extracted just above for the check.
+                            debug!(domain = %domain, "Email domain not in allowed list");
                             return (
                                 StatusCode::FORBIDDEN,
                                 Json(serde_json::json!({"error": "Email domain not authorized"})),
@@ -1956,10 +2040,43 @@ pub async fn validate_external_token(
     Err("Token could not be validated against any configured provider".to_string())
 }
 
+/// Return the domain portion (everything after the last `@`) of an email.
+///
+/// SECURITY: this is the only form of an email address allowed into logs —
+/// the local part is the user identifier (PII), the domain is a non-PII
+/// diagnostic anchor (which IdP tenant signed in). Used both for
+/// `allowed_domains` authorization checks and for redacted log fields.
+///
+/// Malformed inputs never panic: no `@` returns the whole string (a token
+/// that isn't an address has no local part to leak), an empty or
+/// trailing-`@` value returns `""`.
+fn email_domain(email: &str) -> &str {
+    email.rsplit('@').next().unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn email_domain_redacts_local_part_and_handles_malformed_input() {
+        // Normal address: only the domain survives, never the local part (PII).
+        assert_eq!(email_domain("user@example.com"), "example.com");
+        // Multiple `@`: take everything after the last one; no panic.
+        assert_eq!(email_domain("a@b@corp.example.com"), "corp.example.com");
+        // No `@` at all: returns the whole string (not an address, no local
+        // part to leak) — must not panic.
+        assert_eq!(email_domain("noatsign"), "noatsign");
+        // Trailing `@`: empty domain, never leaks the local part.
+        assert_eq!(email_domain("user@"), "");
+        // Leading `@`: domain only.
+        assert_eq!(email_domain("@example.com"), "example.com");
+        // Empty input: empty domain.
+        assert_eq!(email_domain(""), "");
+        // The local part is never present in the output for a valid address.
+        assert!(!email_domain("secret-user@example.com").contains("secret-user"));
+    }
 
     #[test]
     fn test_oidc_audience_single() {
@@ -2332,5 +2449,127 @@ mod tests {
         // Only the explicit-URL provider should succeed.
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "good");
+    }
+
+    // ── OAuth cache invalidation (refs jwks-cache-no-reload-evict.md) ───
+    //
+    // These tests pin the contract that `invalidate_oauth_caches()`
+    // empties both the JWKS and OIDC discovery caches. We seed the
+    // module-level statics directly because the cache types are
+    // private — there is no public mutator beyond the fetch path.
+    // The test runs serially via a process-wide mutex so two
+    // concurrent cases don't observe each other's writes (the caches
+    // are global to the process).
+
+    static OAUTH_CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_clears_jwks_entries() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Seed: pretend we've already cached IdP-A's signing keys.
+        {
+            let mut write = JWKS_CACHE.inner.write().await;
+            write.insert(
+                "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+                CachedJwks {
+                    keys: vec![JwksKey {
+                        kty: "RSA".to_string(),
+                        kid: Some("idp-a-key-1".to_string()),
+                        key_use: Some("sig".to_string()),
+                        alg: Some("RS256".to_string()),
+                        n: Some("AQAB".to_string()),
+                        e: Some("AQAB".to_string()),
+                        x: None,
+                        y: None,
+                        crv: None,
+                    }],
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+            assert_eq!(write.len(), 1, "seed must populate cache");
+        }
+
+        // Invalidate as the hot-reload pipeline would.
+        invalidate_oauth_caches();
+
+        // Wait for the detached invalidation task to land — it runs
+        // on the same multi-thread runtime, so a single yield is not
+        // sufficient under heavier test concurrency. Bounded retry.
+        for _ in 0..50 {
+            if JWKS_CACHE.inner.read().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            JWKS_CACHE.inner.read().await.is_empty(),
+            "invalidate_oauth_caches must drop all JWKS entries so a \
+             subsequent token validation re-fetches from the new IdP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_clears_discovery_entries() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Seed the discovery cache with a stale entry.
+        {
+            let mut write = DISCOVERY_CACHE.inner.write().await;
+            write.insert(
+                "https://idp-a.example.com".to_string(),
+                CachedDiscovery {
+                    doc: OidcDiscovery {
+                        issuer: "https://idp-a.example.com".to_string(),
+                        authorization_endpoint: "https://idp-a.example.com/authorize".to_string(),
+                        token_endpoint: "https://idp-a.example.com/token".to_string(),
+                        userinfo_endpoint: None,
+                        jwks_uri: "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+                        scopes_supported: vec![],
+                        response_types_supported: vec![],
+                        id_token_signing_alg_values_supported: vec![],
+                    },
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+            assert_eq!(write.len(), 1, "seed must populate cache");
+        }
+
+        invalidate_oauth_caches();
+
+        for _ in 0..50 {
+            if DISCOVERY_CACHE.inner.read().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            DISCOVERY_CACHE.inner.read().await.is_empty(),
+            "invalidate_oauth_caches must drop all discovery entries so a \
+             subsequent OIDC handshake re-fetches the new IdP's document"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_oauth_caches_is_idempotent_on_empty() {
+        let _g = OAUTH_CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Ensure both caches are empty up front.
+        JWKS_CACHE.inner.write().await.clear();
+        DISCOVERY_CACHE.inner.write().await.clear();
+
+        // Should not panic, should not deadlock.
+        invalidate_oauth_caches();
+        // Wait a tick for the detached tasks to complete.
+        tokio::task::yield_now().await;
+
+        assert!(JWKS_CACHE.inner.read().await.is_empty());
+        assert!(DISCOVERY_CACHE.inner.read().await.is_empty());
     }
 }

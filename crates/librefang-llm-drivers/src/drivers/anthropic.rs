@@ -1273,24 +1273,26 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         cache_control: None,
                     }),
                     ContentBlock::Thinking { .. } => None,
-                    ContentBlock::ImageFile { media_type, path } => match std::fs::read(path) {
-                        Ok(bytes) => {
-                            use base64::Engine;
-                            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                            Some(ApiContentBlock::Image {
-                                source: ApiImageSource {
-                                    source_type: "base64".to_string(),
-                                    media_type: media_type.clone(),
-                                    data,
-                                },
-                                cache_control: None,
-                            })
+                    ContentBlock::ImageFile { media_type, path } => {
+                        match tokio::task::block_in_place(|| std::fs::read(path)) {
+                            Ok(bytes) => {
+                                use base64::Engine;
+                                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                Some(ApiContentBlock::Image {
+                                    source: ApiImageSource {
+                                        source_type: "base64".to_string(),
+                                        media_type: media_type.clone(),
+                                        data,
+                                    },
+                                    cache_control: None,
+                                })
+                            }
+                            Err(e) => {
+                                warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                                None
+                            }
                         }
-                        Err(e) => {
-                            warn!(path = %path, error = %e, "ImageFile missing, skipping");
-                            None
-                        }
-                    },
+                    }
                     ContentBlock::Unknown => None,
                 })
                 .collect();
@@ -1379,6 +1381,54 @@ mod tests {
         let msg = Message::user("Hello");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
+    }
+
+    /// Regression: `ContentBlock::ImageFile` paths must be read via
+    /// `tokio::task::block_in_place` so a multi-MB image read does not
+    /// stall the tokio worker pool. The base64-encoded bytes in the
+    /// resulting `ApiContentBlock::Image` must match the bytes on disk.
+    ///
+    /// Wrap with `flavor = "multi_thread"` so `block_in_place` does not
+    /// panic on a single-threaded runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn convert_message_imagefile_reads_bytes_without_blocking_worker() {
+        use base64::Engine;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("img.png");
+        // Minimal PNG magic + a few payload bytes — drivers do not
+        // validate format, they only base64-encode the file contents.
+        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&bytes))
+            .expect("write png");
+
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
+                media_type: "image/png".to_string(),
+                path: path.to_string_lossy().into_owned(),
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let api_msg = convert_message(&msg);
+        let blocks = match api_msg.content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => panic!("expected Blocks content"),
+        };
+        let img = blocks
+            .into_iter()
+            .find_map(|b| match b {
+                ApiContentBlock::Image { source, .. } => Some(source),
+                _ => None,
+            })
+            .expect("ApiContentBlock::Image present");
+        assert_eq!(img.source_type, "base64");
+        assert_eq!(img.media_type, "image/png");
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(img.data, expected, "encoded bytes must round-trip");
     }
 
     #[test]

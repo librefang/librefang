@@ -1440,3 +1440,49 @@ async fn users_rotate_key_snapshot_consistent_with_disk_post_return() {
          user_api_keys snapshot immediately after rotate-key returned 200"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bulk-size guard regression (issue: bulk-with-capacity-no-validate)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/users/import` must reject a `rows` array over the documented
+/// cap BEFORE allocating any per-row buffer. Without the guard, an attacker
+/// can craft an array of empty-ish rows that fits under the 8 MiB body
+/// limit but causes `Vec::with_capacity(req.rows.len())` to pre-allocate
+/// millions of entries. The shared `validate_bulk_size` helper is the fix.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_oversize_is_bad_request() {
+    let h = boot().await;
+    // Cap is 1000; send 1001 minimal rows.
+    let rows: Vec<serde_json::Value> = (0..1001)
+        .map(|i| serde_json::json!({"name": format!("u{i}"), "role": "user"}))
+        .collect();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({"dry_run": true, "rows": rows})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("exceeds maximum"),
+        "expected size-limit error, got: {err}",
+    );
+}
+
+/// Empty `rows` array is rejected by the guard — keeps callers honest
+/// (a no-op import is almost certainly a client bug).
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_empty_rows_is_bad_request() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({"dry_run": true, "rows": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}

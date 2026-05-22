@@ -87,6 +87,20 @@ pub enum HotAction {
     /// in-memory `BudgetConfig` is constructed once from `KernelConfig.budget`
     /// at boot time and never re-read.
     UpdateBudget,
+    /// `[external_auth]` (or any `[[external_auth.providers]]` entry)
+    /// changed in a way that affects IdP identity — flush the OIDC
+    /// discovery + JWKS caches owned by `librefang-api::oauth`.
+    ///
+    /// Without this action, swapping IdPs at runtime leaves the
+    /// previous provider's JWKS in cache for up to 1h (the cache TTL).
+    /// Tokens issued by the new IdP fail JWT signature validation
+    /// against the stale keys → 401 until the natural eviction.
+    /// Caches are keyed by `issuer_url` / `jwks_uri`; a new IdP means
+    /// a new key, so the stale entries would never be hit anyway,
+    /// but they bloat memory until TTL. The fast eviction also
+    /// matters when an operator rotates `issuer_url` back to a value
+    /// the cache already holds with stale keys.
+    ReloadExternalAuth,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +166,59 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
     let old_json = serde_json::to_string(old).ok();
     let new_json = serde_json::to_string(new).ok();
     old_json != new_json
+}
+
+/// Decide whether two `[external_auth]` snapshots disagree on a field
+/// that affects which OIDC discovery document / JWKS keyset is
+/// canonical — i.e. whether the existing API-side caches should be
+/// flushed.
+///
+/// The full `ExternalAuthConfig` carries operator-facing knobs
+/// (`session_ttl_secs`, `allowed_domains`, `require_email_verified`,
+/// `redirect_url`, scopes, audience) that are read directly from the
+/// live config at each request and never cached by the OIDC layer.
+/// Triggering cache eviction on those edits would force a network
+/// round-trip on the next login for no behavioural change, so we
+/// narrow the trigger set to the fields that actually key into the
+/// caches.
+///
+/// IdP-identity fields:
+///   - top-level `enabled` (toggling auth off then on should rebuild
+///     fresh — a quiesced provider may have rotated keys),
+///   - top-level `issuer_url` (discovery cache key in single-provider
+///     mode),
+///   - per-provider `id` set (a renamed provider effectively rebinds
+///     a different IdP under the same handle),
+///   - per-provider `issuer_url` and `jwks_uri` (cache keys in
+///     multi-provider mode).
+fn external_auth_idp_changed(
+    old: &librefang_types::config::ExternalAuthConfig,
+    new: &librefang_types::config::ExternalAuthConfig,
+) -> bool {
+    if old.enabled != new.enabled || old.issuer_url != new.issuer_url {
+        return true;
+    }
+    // Multi-provider: compare the (id, issuer_url, jwks_uri) tuples.
+    // Length difference alone is conclusive; otherwise zip-compare so
+    // a reordering of the providers list — which can legitimately
+    // change route precedence — does not trigger eviction unless an
+    // IdP-identity field also moved.
+    if old.providers.len() != new.providers.len() {
+        return true;
+    }
+    // Build a `(id -> (issuer_url, jwks_uri))` map for each side and
+    // diff; order-insensitive so a pure reordering doesn't churn the
+    // cache. A renamed `id` shows up as a removed entry + an added
+    // entry under the new name → diff returns `true`, which is the
+    // correct behaviour (the route handle now points at a different
+    // logical IdP slot).
+    let to_map = |cfg: &librefang_types::config::ExternalAuthConfig| {
+        cfg.providers
+            .iter()
+            .map(|p| (p.id.clone(), (p.issuer_url.clone(), p.jwks_uri.clone())))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    to_map(old) != to_map(new)
 }
 
 /// Runtime capabilities the planner needs to know about so it can correctly
@@ -420,6 +487,24 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateBudget);
     }
 
+    // `[external_auth]` IdP identity changed — flush the OIDC discovery
+    // + JWKS caches that `librefang-api::oauth` keeps as module-level
+    // `LazyLock`s, keyed by `issuer_url` / `jwks_uri`. Without this, a
+    // hot-reload that swaps in a different identity provider would
+    // leave the previous IdP's JWKS in cache for up to 1h, and any
+    // re-binding of an issuer URL to a new keyset (key rotation +
+    // reconfigure in one step) would 401 every token until the
+    // natural cache TTL expires.
+    //
+    // Only fields that actually affect the cached entries should
+    // trigger eviction: changing `session_ttl_secs` or `allowed_domains`
+    // doesn't invalidate any cached key, and firing the action on
+    // every edit would waste a network round-trip on the next login.
+    // See the helper for the exact field set.
+    if external_auth_idp_changed(&old.external_auth, &new.external_auth) {
+        plan.hot_actions.push(HotAction::ReloadExternalAuth);
+    }
+
     if field_changed(&old.sanitize, &new.sanitize) {
         plan.noop_changes.push(
             "sanitize config changed (effective on next message via config swap)".to_string(),
@@ -467,7 +552,446 @@ pub fn build_reload_plan_with_caps(
         ));
     }
 
+    // ----- Backfilled field coverage (#config-reload-coverage) -----
+    //
+    // Every `KernelConfig` field reaches one of the three branches below or
+    // one of the hand-tuned branches above. The
+    // `every_config_field_is_reload_classified` test enumerates the struct
+    // via `KernelConfig::known_top_level_fields()` and fails if a field is
+    // missing from BOTH this function's coverage and
+    // [`classified_reload_fields`]. Keep the two in sync.
+    //
+    // Classification rules used here (see the doc that drove this backfill):
+    //   * RESTART  — the value is captured once at boot / server
+    //                construction (into a kernel field, the axum router, a
+    //                background task, or a cached LLM driver) and there is no
+    //                hot action wired to rebuild that consumer. A bare config
+    //                swap would silently no-op, so we demand a restart.
+    //   * NOOP     — the value is read live from `config_ref()` /
+    //                `self.config.load()` on every message / request, so the
+    //                ArcSwap config swap performed by `reload_config` makes
+    //                the change effective on the next use with no extra work.
+    // When the live-read path could not be verified, the field is classed
+    // RESTART (the safe default) rather than guessed into NOOP/HotReload.
+
+    // Helper: record a restart-required change for `field` when it differs.
+    // Scoped in its own block so the mutable borrow of `plan` ends at the
+    // closing brace — the `noop` closure below can then re-borrow `plan`
+    // without a `drop()` (clippy flags `drop()` on a non-`Drop` closure).
+    {
+        let mut restart_if_changed = |changed: bool, field: &str| {
+            if changed {
+                plan.restart_required = true;
+                plan.restart_reasons
+                    .push(format!("{field} changed (restart required)"));
+            }
+        };
+
+        // -- RESTART: boot- / server-captured, no hot action wired --
+        restart_if_changed(old.config_version != new.config_version, "config_version");
+        restart_if_changed(old.cors_origin != new.cors_origin, "cors_origin");
+        restart_if_changed(old.trusted_hosts != new.trusted_hosts, "trusted_hosts");
+        restart_if_changed(
+            old.trusted_proxies != new.trusted_proxies,
+            "trusted_proxies",
+        );
+        restart_if_changed(
+            old.trust_forwarded_for != new.trust_forwarded_for,
+            "trust_forwarded_for",
+        );
+        restart_if_changed(
+            old.allowed_mount_roots != new.allowed_mount_roots,
+            "allowed_mount_roots",
+        );
+        restart_if_changed(
+            old.require_auth_for_reads != new.require_auth_for_reads,
+            "require_auth_for_reads",
+        );
+        restart_if_changed(
+            old.external_auth_proxy != new.external_auth_proxy,
+            "external_auth_proxy",
+        );
+        restart_if_changed(
+            field_changed(&old.channel_role_mapping, &new.channel_role_mapping),
+            "channel_role_mapping",
+        );
+        restart_if_changed(old.include != new.include, "include");
+        restart_if_changed(
+            field_changed(&old.exec_policy, &new.exec_policy),
+            "exec_policy",
+        );
+        restart_if_changed(field_changed(&old.bindings, &new.bindings), "bindings");
+        restart_if_changed(field_changed(&old.tool_exec, &new.tool_exec), "tool_exec");
+        restart_if_changed(
+            field_changed(&old.auth_profiles, &new.auth_profiles),
+            "auth_profiles",
+        );
+        restart_if_changed(field_changed(&old.vertex_ai, &new.vertex_ai), "vertex_ai");
+        restart_if_changed(
+            field_changed(&old.azure_openai, &new.azure_openai),
+            "azure_openai",
+        );
+        restart_if_changed(field_changed(&old.oauth, &new.oauth), "oauth");
+        restart_if_changed(
+            field_changed(
+                &old.provider_request_timeout_secs,
+                &new.provider_request_timeout_secs,
+            ),
+            "provider_request_timeout_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.provider_proxy_urls, &new.provider_proxy_urls),
+            "provider_proxy_urls",
+        );
+        restart_if_changed(
+            old.local_probe_interval_secs != new.local_probe_interval_secs,
+            "local_probe_interval_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.health_check, &new.health_check),
+            "health_check",
+        );
+        restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
+        restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
+        restart_if_changed(field_changed(&old.registry, &new.registry), "registry");
+        restart_if_changed(
+            field_changed(&old.rate_limit, &new.rate_limit),
+            "rate_limit",
+        );
+        restart_if_changed(old.strict_config != new.strict_config, "strict_config");
+        restart_if_changed(
+            field_changed(&old.parallel_tools, &new.parallel_tools),
+            "parallel_tools",
+        );
+        restart_if_changed(
+            old.workflow_stale_timeout_minutes != new.workflow_stale_timeout_minutes,
+            "workflow_stale_timeout_minutes",
+        );
+        restart_if_changed(
+            old.workflow_default_total_timeout_secs != new.workflow_default_total_timeout_secs,
+            "workflow_default_total_timeout_secs",
+        );
+        restart_if_changed(
+            field_changed(&old.background, &new.background),
+            "background",
+        );
+        restart_if_changed(old.log_dir != new.log_dir, "log_dir");
+        restart_if_changed(old.workspaces_dir != new.workspaces_dir, "workspaces_dir");
+        restart_if_changed(field_changed(&old.llm, &new.llm), "llm");
+        restart_if_changed(field_changed(&old.reload, &new.reload), "reload");
+        restart_if_changed(
+            old.max_request_body_bytes != new.max_request_body_bytes,
+            "max_request_body_bytes",
+        );
+        restart_if_changed(
+            old.max_upload_size_bytes != new.max_upload_size_bytes,
+            "max_upload_size_bytes",
+        );
+        restart_if_changed(
+            old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
+            "max_concurrent_bg_llm",
+        );
+        restart_if_changed(
+            field_changed(&old.external_auth, &new.external_auth),
+            "external_auth",
+        );
+        restart_if_changed(
+            field_changed(&old.auto_dream, &new.auto_dream),
+            "auto_dream",
+        );
+        restart_if_changed(field_changed(&old.audit, &new.audit), "audit");
+        restart_if_changed(field_changed(&old.telemetry, &new.telemetry), "telemetry");
+        restart_if_changed(
+            field_changed(&old.context_engine, &new.context_engine),
+            "context_engine",
+        );
+        restart_if_changed(field_changed(&old.session, &new.session), "session");
+        restart_if_changed(
+            field_changed(&old.task_board, &new.task_board),
+            "task_board",
+        );
+        restart_if_changed(field_changed(&old.broadcast, &new.broadcast), "broadcast");
+        restart_if_changed(
+            field_changed(&old.auto_reply, &new.auto_reply),
+            "auto_reply",
+        );
+        restart_if_changed(field_changed(&old.canvas, &new.canvas), "canvas");
+        restart_if_changed(old.update_channel != new.update_channel, "update_channel");
+        restart_if_changed(field_changed(&old.inbox, &new.inbox), "inbox");
+        restart_if_changed(
+            field_changed(&old.prompt_intelligence, &new.prompt_intelligence),
+            "prompt_intelligence",
+        );
+        restart_if_changed(field_changed(&old.docker, &new.docker), "docker");
+        restart_if_changed(
+            field_changed(&old.trusted_manifest_signers, &new.trusted_manifest_signers),
+            "trusted_manifest_signers",
+        );
+        // `terminal` is read live per-request for `max_windows`, but the tmux
+        // wiring (`tmux_enabled` / `tmux_binary_path`) is captured once at
+        // server construction (server.rs). Conservative: restart-required.
+        restart_if_changed(field_changed(&old.terminal, &new.terminal), "terminal");
+    }
+
+    // -- NOOP: read live from `config_ref()` / `self.config.load()` per
+    //    message or per request; the ArcSwap config swap makes the change
+    //    effective on the next use with no explicit reapply action. --
+    {
+        let mut noop_if_changed = |changed: bool, field: &str| {
+            if changed {
+                plan.noop_changes.push(format!(
+                    "{field} changed (effective on next message/request)"
+                ));
+            }
+        };
+
+        noop_if_changed(
+            old.agent_max_iterations != new.agent_max_iterations,
+            "agent_max_iterations",
+        );
+        noop_if_changed(
+            old.max_history_messages != new.max_history_messages,
+            "max_history_messages",
+        );
+        noop_if_changed(
+            old.max_agent_call_depth != new.max_agent_call_depth,
+            "max_agent_call_depth",
+        );
+        noop_if_changed(
+            old.tool_timeout_secs != new.tool_timeout_secs,
+            "tool_timeout_secs",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_timeouts, &new.tool_timeouts),
+            "tool_timeouts",
+        );
+        noop_if_changed(field_changed(&old.thinking, &new.thinking), "thinking");
+        noop_if_changed(field_changed(&old.triggers, &new.triggers), "triggers");
+        noop_if_changed(
+            field_changed(&old.notification, &new.notification),
+            "notification",
+        );
+        noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
+        noop_if_changed(field_changed(&old.media, &new.media), "media");
+        noop_if_changed(field_changed(&old.links, &new.links), "links");
+        noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
+        noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
+        noop_if_changed(
+            field_changed(&old.gateway_compression, &new.gateway_compression),
+            "gateway_compression",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_results, &new.tool_results),
+            "tool_results",
+        );
+        noop_if_changed(
+            field_changed(&old.tool_invoke, &new.tool_invoke),
+            "tool_invoke",
+        );
+        noop_if_changed(
+            field_changed(&old.default_routing, &new.default_routing),
+            "default_routing",
+        );
+        noop_if_changed(old.prompt_caching != new.prompt_caching, "prompt_caching");
+        noop_if_changed(
+            field_changed(&old.prompt_cache, &new.prompt_cache),
+            "prompt_cache",
+        );
+        noop_if_changed(
+            field_changed(&old.compaction, &new.compaction),
+            "compaction",
+        );
+        noop_if_changed(old.qwen_code_path != new.qwen_code_path, "qwen_code_path");
+        noop_if_changed(
+            old.cron_session_max_tokens != new.cron_session_max_tokens,
+            "cron_session_max_tokens",
+        );
+        noop_if_changed(
+            old.cron_session_max_messages != new.cron_session_max_messages,
+            "cron_session_max_messages",
+        );
+        noop_if_changed(
+            old.cron_session_warn_fraction != new.cron_session_warn_fraction,
+            "cron_session_warn_fraction",
+        );
+        noop_if_changed(
+            old.cron_session_warn_total_tokens != new.cron_session_warn_total_tokens,
+            "cron_session_warn_total_tokens",
+        );
+        noop_if_changed(
+            old.cron_session_compaction_mode != new.cron_session_compaction_mode,
+            "cron_session_compaction_mode",
+        );
+        noop_if_changed(
+            old.cron_session_compaction_keep_recent != new.cron_session_compaction_keep_recent,
+            "cron_session_compaction_keep_recent",
+        );
+    }
+
     plan
+}
+
+// ---------------------------------------------------------------------------
+// Reload-classification coverage (drift guard)
+// ---------------------------------------------------------------------------
+
+/// `#[serde(alias = …)]` names on `KernelConfig` top-level fields.
+///
+/// `KernelConfig::known_top_level_fields()` derives its list from the
+/// schemars schema and folds in these aliases (see
+/// `librefang_types::config::validation`). The aliases are NOT real struct
+/// fields, so the coverage test must exclude them before comparing against
+/// the set of fields `build_reload_plan` classifies. Keep in sync with the
+/// `alias = "…"` attributes on the `KernelConfig` struct.
+pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
+    "listen_addr",     // alias for api_listen
+    "approval_policy", // alias for approval
+];
+
+/// The exhaustive set of `KernelConfig` field names that
+/// [`build_reload_plan`] inspects and classifies (RequiresRestart /
+/// HotReload / Ignore).
+///
+/// This is a literal mirror of every field touched in
+/// `build_reload_plan_with_caps`. The
+/// `every_config_field_is_reload_classified` test asserts that this set is a
+/// superset of every real `KernelConfig` field, so a newly-added field that
+/// is not also wired into `build_reload_plan` fails the build instead of
+/// silently no-op-ing on `POST /api/config/reload`.
+///
+/// **When you add a field to `KernelConfig`:** add a branch to
+/// `build_reload_plan_with_caps` AND its name here. The test will remind you
+/// if you forget.
+pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
+    [
+        // -- hand-tuned branches at the top of build_reload_plan --
+        "api_listen",
+        "api_key",
+        "dashboard_user",
+        "dashboard_pass",
+        "dashboard_pass_hash",
+        "network_enabled",
+        "network",
+        "memory",
+        "memory_wiki",
+        "proxy",
+        "default_model",
+        "home_dir",
+        "data_dir",
+        "stable_prefix_mode",
+        "vault",
+        "channels",
+        "sidecar_channels",
+        "skills",
+        "usage_footer",
+        "web",
+        "browser",
+        "approval",
+        "max_cron_jobs",
+        "webhook_triggers",
+        "extensions",
+        "mcp_servers",
+        "taint_rules",
+        "a2a",
+        "fallback_providers",
+        "credential_pools",
+        "provider_urls",
+        "provider_regions",
+        "tool_policy",
+        "users",
+        "proactive_memory",
+        "queue",
+        "budget",
+        "sanitize",
+        "provider_api_keys",
+        "log_level",
+        "language",
+        "mode",
+        // -- backfilled RESTART branches --
+        "config_version",
+        "cors_origin",
+        "trusted_hosts",
+        "trusted_proxies",
+        "trust_forwarded_for",
+        "allowed_mount_roots",
+        "require_auth_for_reads",
+        "external_auth_proxy",
+        "channel_role_mapping",
+        "include",
+        "exec_policy",
+        "bindings",
+        "tool_exec",
+        "auth_profiles",
+        "vertex_ai",
+        "azure_openai",
+        "oauth",
+        "provider_request_timeout_secs",
+        "provider_proxy_urls",
+        "local_probe_interval_secs",
+        "health_check",
+        "heartbeat",
+        "plugins",
+        "registry",
+        "rate_limit",
+        "strict_config",
+        "parallel_tools",
+        "workflow_stale_timeout_minutes",
+        "workflow_default_total_timeout_secs",
+        "background",
+        "log_dir",
+        "workspaces_dir",
+        "llm",
+        "reload",
+        "max_request_body_bytes",
+        "max_upload_size_bytes",
+        "max_concurrent_bg_llm",
+        "external_auth",
+        "auto_dream",
+        "audit",
+        "telemetry",
+        "context_engine",
+        "session",
+        "task_board",
+        "broadcast",
+        "auto_reply",
+        "canvas",
+        "update_channel",
+        "inbox",
+        "prompt_intelligence",
+        "docker",
+        "trusted_manifest_signers",
+        "terminal",
+        // -- backfilled NOOP branches --
+        "agent_max_iterations",
+        "max_history_messages",
+        "max_agent_call_depth",
+        "tool_timeout_secs",
+        "tool_timeouts",
+        "thinking",
+        "triggers",
+        "notification",
+        "tts",
+        "media",
+        "links",
+        "privacy",
+        "pairing",
+        "gateway_compression",
+        "tool_results",
+        "tool_invoke",
+        "default_routing",
+        "prompt_caching",
+        "prompt_cache",
+        "compaction",
+        "qwen_code_path",
+        "cron_session_max_tokens",
+        "cron_session_max_messages",
+        "cron_session_warn_fraction",
+        "cron_session_warn_total_tokens",
+        "cron_session_compaction_mode",
+        "cron_session_compaction_keep_recent",
+    ]
+    .into_iter()
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +1374,173 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // External auth — IdP-identity changes must evict OAuth caches (refs
+    // `docs/issues/jwks-cache-no-reload-evict.md`). The positive and
+    // negative tests together pin the "only on real IdP swap" contract.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_external_auth_issuer_url_change_evicts_oauth_caches() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.external_auth.enabled = true;
+        b.external_auth.issuer_url = "https://idp-b.example.com".to_string();
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "external_auth is hot-reloadable; restart should not be required"
+        );
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "issuer_url change must queue ReloadExternalAuth so stale JWKS \
+             from the previous IdP is evicted before the next token \
+             validation: actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_provider_jwks_uri_change_evicts_oauth_caches() {
+        use librefang_types::config::OidcProvider;
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.providers.push(OidcProvider {
+            id: "corp".to_string(),
+            display_name: "Corp SSO".to_string(),
+            issuer_url: "https://idp-a.example.com".to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: "https://idp-a.example.com/.well-known/jwks.json".to_string(),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        });
+        b.external_auth.providers.push(OidcProvider {
+            id: "corp".to_string(),
+            display_name: "Corp SSO".to_string(),
+            // Same id, but rebound to a different IdP — the most
+            // dangerous shape because the route handle is stable but
+            // the cached keyset is now stale.
+            issuer_url: "https://idp-b.example.com".to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: "https://idp-b.example.com/.well-known/jwks.json".to_string(),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        });
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "per-provider issuer/jwks rebind must queue ReloadExternalAuth: \
+             actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_unrelated_field_does_not_evict_caches() {
+        // session_ttl_secs, allowed_domains, require_email_verified,
+        // scopes — none of these change which OIDC document or JWKS
+        // is canonical, so they must NOT churn the cache.
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.issuer_url = "https://idp.example.com".to_string();
+        b.external_auth.issuer_url = "https://idp.example.com".to_string();
+        a.external_auth.session_ttl_secs = 3_600;
+        b.external_auth.session_ttl_secs = 7_200;
+        a.external_auth.allowed_domains = vec!["a.example.com".to_string()];
+        b.external_auth.allowed_domains =
+            vec!["a.example.com".to_string(), "b.example.com".to_string()];
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "non-IdP-identity edits must NOT trigger cache eviction \
+             (would force a needless OIDC round-trip on next login): \
+             actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_provider_reorder_does_not_evict_caches() {
+        // The providers list controls route precedence. Reordering it
+        // is a legitimate operator action (e.g. promote SSO over
+        // GitHub) that does not change any IdP's signing keys.
+        use librefang_types::config::OidcProvider;
+        let p = |id: &str, issuer: &str| OidcProvider {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            issuer_url: issuer.to_string(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: format!("{issuer}/.well-known/jwks.json"),
+            client_id: "client".to_string(),
+            client_secret_env: "LIBREFANG_OAUTH_CLIENT_SECRET".to_string(),
+            redirect_url: "http://127.0.0.1:4545/api/auth/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        };
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        b.external_auth.enabled = true;
+        a.external_auth.providers = vec![
+            p("google", "https://accounts.google.com"),
+            p("corp", "https://idp.example.com"),
+        ];
+        b.external_auth.providers = vec![
+            p("corp", "https://idp.example.com"),
+            p("google", "https://accounts.google.com"),
+        ];
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "pure provider reorder must not evict caches: actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    #[test]
+    fn test_external_auth_disable_evicts_caches() {
+        // Disabling auth then re-enabling later is a legitimate
+        // hot-reload sequence. We treat the disable as IdP-identity
+        // change so that when the operator re-enables it, the first
+        // login fetches fresh keys (the original IdP may have rotated
+        // its signing keys while auth was off).
+        let mut a = default_cfg();
+        let mut b = default_cfg();
+        a.external_auth.enabled = true;
+        a.external_auth.issuer_url = "https://idp.example.com".to_string();
+        b.external_auth.enabled = false;
+        b.external_auth.issuer_url = "https://idp.example.com".to_string();
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadExternalAuth),
+            "toggling external_auth.enabled must queue cache eviction: \
+             actions={:?}",
+            plan.hot_actions
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Mixed changes
     // -----------------------------------------------------------------------
 
@@ -1090,5 +1781,64 @@ mod tests {
             noop_changes: vec![],
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
+    }
+
+    // -----------------------------------------------------------------------
+    // Reload-classification coverage (drift guard)
+    // -----------------------------------------------------------------------
+
+    /// Every real `KernelConfig` field must be classified by
+    /// `build_reload_plan`. Without this, a contributor who adds a config
+    /// field but forgets to wire it into the reload planner ships a silent
+    /// no-op on `POST /api/config/reload` — the documented default failure
+    /// mode (see `docs/issues/config-reload-coverage.md`).
+    ///
+    /// The struct field set is enumerated via
+    /// `KernelConfig::known_top_level_fields()`, which is derived at runtime
+    /// from the schemars JSON Schema and therefore sees every field
+    /// regardless of `#[serde(skip_serializing_if = …)]` — the
+    /// `serde_json::to_value(&default)` approach would miss the ~20 fields
+    /// that serialize-skip at their default value (e.g. `trusted_hosts`,
+    /// `agent_max_iterations`). Serde aliases that the schema folds in
+    /// (`listen_addr`, `approval_policy`) are not real fields and are
+    /// excluded.
+    #[test]
+    fn every_config_field_is_reload_classified() {
+        let aliases: std::collections::BTreeSet<&str> =
+            super::KERNEL_CONFIG_FIELD_ALIASES.iter().copied().collect();
+        let fields: std::collections::BTreeSet<&str> = KernelConfig::known_top_level_fields()
+            .iter()
+            .copied()
+            .filter(|f| !aliases.contains(f))
+            .collect();
+
+        let covered = super::classified_reload_fields();
+
+        let missing: Vec<&str> = fields.difference(&covered).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "KernelConfig fields not classified in build_reload_plan: {missing:?}\n\
+             Add a branch to `build_reload_plan_with_caps` (RequiresRestart / \
+             HotReload / Ignore) AND the field name to `classified_reload_fields()`."
+        );
+
+        // Catch the inverse drift too: a name in `classified_reload_fields()`
+        // that no longer exists on the struct (renamed / removed field) would
+        // otherwise rot silently. The alias-folded schema list is the source
+        // of truth for what's real.
+        let known: std::collections::BTreeSet<&str> = KernelConfig::known_top_level_fields()
+            .iter()
+            .copied()
+            .collect();
+        let stale: Vec<&str> = covered
+            .iter()
+            .copied()
+            .filter(|f| !known.contains(f) && !aliases.contains(f))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "`classified_reload_fields()` lists names that are not \
+             KernelConfig fields (renamed/removed?): {stale:?}"
+        );
     }
 }

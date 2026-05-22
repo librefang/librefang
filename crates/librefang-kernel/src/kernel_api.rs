@@ -174,13 +174,25 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // unlock-time Argon2id KDF on every install request (#3598). The trait
     // exposes the high-level installer; the underlying `vault_handle` stays
     // an inherent method to keep the trait surface small.
+    //
+    // The error half is `librefang_types::integration::IntegrationError` (not
+    // the extensions-crate `ExtensionResult`) so a mock / alternate kernel can
+    // implement this trait without depending on `librefang-extensions`. The
+    // real kernel impl converts via the `From<ExtensionError>` bridge defined
+    // in that crate. The success type still references
+    // `librefang_extensions::installer::InstallResult` — eliminating that
+    // remaining leak is part of the broader kernel-depends-on-extensions
+    // refactor, tracked separately.
     // ====================================================================
 
     fn install_integration(
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult>;
+    ) -> Result<
+        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationError,
+    >;
 
     // ====================================================================
     // Inbox / auto-dream observability
@@ -233,6 +245,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
     async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
+    /// Delete a single session by id and any process-local side-state keyed
+    /// on it (currently the per-session `file_read_tracker` bucket — see
+    /// `librefang_runtime::file_read_tracker::forget_session`). Use this in
+    /// preference to calling `memory_substrate().delete_session(...)`
+    /// directly so the side-state map does not leak across the daemon's
+    /// lifetime.
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -854,8 +873,15 @@ impl KernelApi for LibreFangKernel {
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
-        Self::install_integration(self, template_id, provided_keys)
+    ) -> Result<
+        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationError,
+    > {
+        // The inherent method keeps returning `ExtensionResult`; convert its
+        // error into the dependency-free `IntegrationError` at the trait
+        // boundary via the `From<ExtensionError>` bridge in
+        // `librefang-extensions`.
+        Self::install_integration(self, template_id, provided_keys).map_err(Into::into)
     }
 
     // -- Inbox / auto-dream --
@@ -913,6 +939,9 @@ impl KernelApi for LibreFangKernel {
     }
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
+    }
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+        Self::delete_session(self, session_id)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)
