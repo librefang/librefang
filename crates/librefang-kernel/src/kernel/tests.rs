@@ -4878,6 +4878,88 @@ fn workflow_send_message_closure_contains_per_agent_semaphore_acquire() {
     );
 }
 
+/// Regression for the audit item
+/// `docs/issues/workflow-path-drops-lane-permit.md`: the workflow-dispatch
+/// path in `triggers_and_workflow.rs` MUST move the `Lane::Trigger` permit
+/// (`_lane_permit`, acquired once per dispatch iteration) into the
+/// `tokio::spawn` future for `kernel.run_workflow(...)`. Otherwise the permit
+/// drops as soon as the iteration yields and the run inside the spawn escapes
+/// the `queue.concurrency.trigger_lane` cap — N bursty workflow triggers
+/// produce N concurrent workflow runs, breaking the kernel-wide invariant.
+///
+/// This is a source-shape lint (matches the style of
+/// `workflow_send_message_closure_contains_per_agent_semaphore_acquire`
+/// above): we strip comments so a leftover doc reference can't satisfy the
+/// assertion, then require a non-comment binding that re-anchors the permit
+/// inside the spawn block. Behavioral coverage of the lane cap itself lives
+/// in `trigger_lane_global_semaphore_limits_total_concurrency`; this test
+/// pins the wiring that connects the cap to the workflow path.
+#[test]
+fn workflow_spawn_holds_lane_permit_across_run() {
+    let src = include_str!("triggers_and_workflow.rs");
+    // Strip line + block comments (same approach as the per-agent-semaphore
+    // lint test above) so the assertion is grounded in executable code.
+    let stripped: String = {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = s.split_at(end + 2).1.to_string();
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            while let Some(start) = s.find("/*") {
+                if let Some(end_rel) = s[start..].find("*/") {
+                    let end = start + end_rel + 2;
+                    s.replace_range(start..end, "");
+                } else {
+                    s.truncate(start);
+                    in_block = true;
+                    break;
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+
+    // (1) The capture must exist: the workflow branch rebinds `_lane_permit`
+    // so it can be moved INTO the spawn. Without this binding the permit
+    // would drop at the end of the for-loop iteration (i.e. as soon as
+    // `tokio::spawn` returned), exactly the pre-fix behaviour.
+    assert!(
+        stripped.contains("let lane_permit_for_spawn = _lane_permit"),
+        "expected `let lane_permit_for_spawn = _lane_permit` in the workflow \
+         branch of triggers_and_workflow.rs — without it, the Lane::Trigger \
+         permit drops at iteration end and concurrent workflow runs escape \
+         `queue.concurrency.trigger_lane`. See \
+         docs/issues/workflow-path-drops-lane-permit.md."
+    );
+
+    // (2) The spawned future must actually reference the rebound permit so
+    // Rust's move-capture keeps it alive for the workflow run. The explicit
+    // `drop(lane_permit_for_spawn)` at the tail of the async block serves
+    // both as the capture and as documentation of intent (an unused
+    // `_`-prefixed binding would otherwise let the compiler drop it
+    // immediately).
+    assert!(
+        stripped.contains("drop(lane_permit_for_spawn)"),
+        "expected `drop(lane_permit_for_spawn)` inside the workflow spawn \
+         block so the Lane::Trigger permit is held until the workflow run \
+         ends. Removing the drop allows Rust to release the permit early — \
+         the bug that \
+         docs/issues/workflow-path-drops-lane-permit.md describes."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // push_notification routing — locks the global-fallback match arm.
 //

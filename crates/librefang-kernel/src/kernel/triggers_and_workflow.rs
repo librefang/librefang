@@ -454,12 +454,22 @@ impl LibreFangKernel {
                                             workflow_id = %wid_str,
                                             "Trigger fired workflow (async)"
                                         );
-                                        // Spawn the run so the Lane::Trigger permit drops as
-                                        // soon as this iteration yields. A slow workflow must
-                                        // not pin Lane::Trigger kernel-wide (default lane cap
-                                        // is 8 per CLAUDE.md), starving agent-path triggers.
-                                        // Mirrors the fire-and-forget shape of
-                                        // WorkflowRunner::start_workflow_async (#4910).
+                                        // Hold the Lane::Trigger permit for the full
+                                        // duration of the workflow run, NOT just the
+                                        // resolution above. Earlier code released the
+                                        // permit as soon as this iteration yielded
+                                        // (the permit lived on the loop stack, not in
+                                        // the spawn), so N bursty workflow triggers
+                                        // produced N concurrent workflow runs that
+                                        // escaped the `queue.concurrency.trigger_lane`
+                                        // invariant (default 8). The audit doc
+                                        // `docs/issues/workflow-path-drops-lane-permit.md`
+                                        // calls this out; fix is option 1 (move the
+                                        // permit into the spawn). Per-fire
+                                        // `fire_timeout` still bounds permit-hold
+                                        // duration, so a stuck workflow cannot pin
+                                        // Lane::Trigger kernel-wide.
+                                        let lane_permit_for_spawn = _lane_permit;
                                         let kernel_for_spawn = std::sync::Arc::clone(&kernel);
                                         let wid_for_spawn = wid_str.clone();
                                         let trigger_id_for_spawn = trigger_id;
@@ -495,6 +505,14 @@ impl LibreFangKernel {
                                                     );
                                                 }
                                             }
+                                            // Lane::Trigger permit is dropped here,
+                                            // when the spawned future ends — held for
+                                            // the full workflow run, not just for
+                                            // resolution. Explicit drop documents
+                                            // intent (the `_`-prefixed binding hint
+                                            // would otherwise allow Rust to drop it
+                                            // immediately).
+                                            drop(lane_permit_for_spawn);
                                         });
                                     }
                                     None => {
