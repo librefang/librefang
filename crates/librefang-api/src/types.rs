@@ -259,6 +259,47 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 500 Internal Server Error with **server-side full-error
+    /// log + client-side scrubbed body** (audit:
+    /// rusqlite-errors-leak).
+    ///
+    /// `librefang-memory` wraps every rusqlite error in
+    /// `LibreFangError::Internal(e.to_string())` (`substrate.rs:
+    /// 368, 625, 664, 677, 839, 872, 906, 921`). Routes that
+    /// echo `e.to_string()` into the response body leak SQL
+    /// internals — column names, constraint identifiers, "database
+    /// is locked", "UNIQUE constraint failed: agents.id" — to any
+    /// caller able to trigger an internal error. That's a free
+    /// schema-disclosure oracle that helps craft follow-up attacks
+    /// (e.g. via known constraint names) and exposes admin-only
+    /// implementation detail to lower-privilege roles.
+    ///
+    /// `internal_scrub` logs the full error chain at `error!`
+    /// (operators retain forensics via journald / Sentry / log
+    /// aggregator) and returns the static `"Internal server
+    /// error"` to the client. This is the inverse of
+    /// [`Self::internal`], which echoes the raw text — kept around
+    /// for the legacy and tracing-only call sites still in the
+    /// codebase, but new code (and audited rewrites) should use
+    /// `internal_scrub`.
+    ///
+    /// Reference pattern: `MemoryRouteError::Internal` in
+    /// `routes/memory.rs:198-215` already follows this shape; this
+    /// helper lifts it into a workspace-wide accessor so every
+    /// route can adopt it without copy-paste.
+    pub fn internal_scrub(e: impl std::fmt::Display) -> Self {
+        let full = e.to_string();
+        tracing::error!(error = %full, "internal error scrubbed before response");
+        Self {
+            error: "Internal server error".to_string(),
+            code: None,
+            r#type: None,
+            details: None,
+            request_id: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         let code = code.into();
@@ -701,11 +742,14 @@ impl PaginationQuery {
     /// server actually applied, so clients can tell from the response
     /// envelope whether the cap kicked in.
     pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
+        // Audit: agent-list-limit-none-unbounded. Previously `offset =
+        // None && limit = None` meant "return the entire collection
+        // unpaginated", which turns into a memory + JSON-serialisation
+        // DoS on multi-thousand-row deployments. Now an unset `limit`
+        // always falls through to `PAGINATION_MAX_LIMIT`, and an
+        // explicit oversized `limit` still clamps. Callers that need
+        // larger pages must walk the offset cursor.
         let total = items.len();
-        // Both unset → full collection, preserve old behaviour.
-        if self.offset.is_none() && self.limit.is_none() {
-            return (items, total, 0, None);
-        }
         let offset = self.offset.unwrap_or(0).min(total);
         let limit = self
             .limit
@@ -735,6 +779,23 @@ pub struct PushMessageRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_scrub_returns_generic_message_not_source_error() {
+        // Audit: rusqlite-errors-leak. Verifies that the helper hides
+        // SQL- and kernel-internal error chains from clients while still
+        // emitting the full message to tracing (visible in the test
+        // logs, not asserted here — log capture is environment-specific).
+        let leaked = "no such column: agent_workspaces.invalid_field (code 1)";
+        let scrubbed = ApiErrorResponse::internal_scrub(leaked);
+        assert_eq!(scrubbed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(scrubbed.error, "Internal server error");
+        assert!(
+            !scrubbed.error.contains("agent_workspaces"),
+            "scrubbed body must not echo column/table identifiers"
+        );
+        assert!(scrubbed.code.is_none() && scrubbed.details.is_none());
+    }
 
     #[test]
     fn extension_install_request_deserialize() {
@@ -927,13 +988,37 @@ mod tests {
     }
 
     #[test]
-    fn pagination_unspecified_returns_full_collection() {
+    fn pagination_unspecified_falls_back_to_max_limit_not_full_collection() {
+        // Audit: agent-list-limit-none-unbounded. With no params the
+        // server still applies `PAGINATION_MAX_LIMIT` so that a
+        // multi-thousand-row deployment cannot DoS the listing
+        // endpoint via the absence of `?limit=`. Small collections (≤
+        // PAGINATION_MAX_LIMIT) still come back in full because the
+        // cap is a ceiling, not a floor.
         let q = PaginationQuery::default();
         let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
-        assert_eq!(items.len(), 10);
+        assert_eq!(items.len(), 10, "small collection still returned in full");
         assert_eq!(total, 10);
         assert_eq!(offset, 0);
-        assert_eq!(limit, None, "no params → no server cap reported");
+        assert_eq!(
+            limit,
+            Some(PAGINATION_MAX_LIMIT),
+            "the server cap is now always reported, never None"
+        );
+    }
+
+    #[test]
+    fn pagination_unspecified_truncates_large_collection_at_max_limit() {
+        // Companion to `..._not_full_collection`: the cap actually
+        // kicks in for collections > PAGINATION_MAX_LIMIT. This is the
+        // DoS scenario the audit closed (multi-thousand agents → a
+        // single unprotected GET would serialise the whole vec).
+        let q = PaginationQuery::default();
+        let big = (0..(PAGINATION_MAX_LIMIT + 50)).collect::<Vec<_>>();
+        let (items, total, _, limit) = q.paginate(big);
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(total, PAGINATION_MAX_LIMIT + 50, "total reflects the unclipped row count");
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
     }
 
     #[test]
