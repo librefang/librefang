@@ -83,6 +83,35 @@ async fn registry_schema_by_type(
 // Registry Content Creation
 // ---------------------------------------------------------------------------
 
+/// Maximum identifier length. Bounds the generated filename so an over-long
+/// identifier cannot overflow a path-component limit on any target filesystem.
+const MAX_REGISTRY_IDENTIFIER_LEN: usize = 128;
+
+/// Validate a registry content identifier against `^[a-zA-Z0-9._-]+$` with a
+/// length cap of [`MAX_REGISTRY_IDENTIFIER_LEN`].
+///
+/// The identifier is interpolated into a filesystem path, so the allowlist is
+/// strict: only ASCII alphanumerics plus `.`, `_`, `-`. This rejects path
+/// separators, `..`, whitespace, control characters, and shell/glob
+/// metacharacters in one pass. Note `.` is permitted (provider files are
+/// written as `{identifier}.toml`, and dotted ids like `my.provider` are
+/// legitimate), but a bare `..` cannot pass because every character must be in
+/// the class AND length ≥ 1 — and `Path::join` of a `.`/`..`-only component is
+/// additionally blocked because such a string is all dots: `.` is in the
+/// class, so guard the two traversal tokens explicitly.
+fn is_valid_registry_identifier(id: &str) -> bool {
+    if id.is_empty() || id.len() > MAX_REGISTRY_IDENTIFIER_LEN {
+        return false;
+    }
+    // `.` is in the character class, so a `.`-only identifier (`.` / `..`)
+    // would otherwise pass and resolve to the current/parent directory.
+    if id == "." || id == ".." {
+        return false;
+    }
+    id.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
 /// POST /api/registry/content/:content_type — Create or update a registry content file.
 ///
 /// Accepts JSON form values, converts to TOML, and writes to the appropriate
@@ -136,11 +165,19 @@ async fn create_registry_content(
         }
     };
 
-    // Validate identifier (prevent path traversal)
-    if identifier.contains('/') || identifier.contains('\\') || identifier.contains("..") {
-        return ApiErrorResponse::bad_request("Invalid identifier")
-            .into_json_tuple()
-            .into_response();
+    // Validate identifier with a strict allowlist. The identifier is joined
+    // into a filesystem path (`{home}/<type>/<identifier>...`), so anything
+    // outside `[a-zA-Z0-9._-]` — separators, `..`, whitespace, control bytes,
+    // shell metacharacters — must be refused rather than merely the three
+    // path-traversal tokens the old check caught. A length cap bounds the
+    // resulting filename so an over-long identifier cannot overflow a path
+    // limit on any target filesystem.
+    if !is_valid_registry_identifier(&identifier) {
+        return ApiErrorResponse::bad_request(
+            "Invalid identifier: must be 1-128 characters of [a-zA-Z0-9._-]",
+        )
+        .into_json_tuple()
+        .into_response();
     }
 
     // Determine target file path
@@ -464,5 +501,72 @@ mod provider_body_tests {
         let body = serde_json::json!("not an object");
         let normalized = normalize_provider_body(&body);
         assert_eq!(normalized, body);
+    }
+}
+
+#[cfg(test)]
+mod identifier_validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_well_formed_identifiers() {
+        for id in [
+            "deepinfra",
+            "my-provider",
+            "my_provider",
+            "my.provider",
+            "Provider123",
+            "a",
+            "a.b-c_d.1",
+        ] {
+            assert!(
+                is_valid_registry_identifier(id),
+                "expected {id:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_separators() {
+        for id in [
+            "../etc",
+            "..",
+            ".",
+            "a/b",
+            "a\\b",
+            "..\\..\\windows",
+            "/abs/path",
+            "\\\\server\\share",
+        ] {
+            assert!(
+                !is_valid_registry_identifier(id),
+                "expected {id:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_metacharacters_whitespace_and_control() {
+        for id in [
+            "a b", "a;b", "a|b", "a&b", "a$b", "a*b", "a?b", "a(b)", "a\tb", "a\nb", "a\0b", "a:b",
+            "naïve", // non-ASCII
+        ] {
+            assert!(
+                !is_valid_registry_identifier(id),
+                "expected {id:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_overlong() {
+        assert!(!is_valid_registry_identifier(""));
+        let max = "a".repeat(MAX_REGISTRY_IDENTIFIER_LEN);
+        assert!(is_valid_registry_identifier(&max), "exactly 128 must pass");
+        let over = "a".repeat(MAX_REGISTRY_IDENTIFIER_LEN + 1);
+        assert!(
+            !is_valid_registry_identifier(&over),
+            "129 chars must be rejected"
+        );
     }
 }

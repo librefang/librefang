@@ -161,6 +161,9 @@ async fn providers_disabled_reports_empty_list() {
 #[tokio::test(flavor = "multi_thread")]
 async fn providers_enabled_lists_configured_provider() {
     let h = boot_with_external_auth(enabled_with_one_provider()).await;
+    // This minimal harness mounts the handler WITHOUT the auth middleware, so
+    // no `AuthenticatedApiUser` extension is present — the request is treated
+    // as the public (open-mode, unauthenticated) path.
     let (status, body) = send(&h, Method::GET, "/api/auth/providers", None, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["enabled"], true);
@@ -169,6 +172,68 @@ async fn providers_enabled_lists_configured_provider() {
         arr.iter().any(|p| p["id"] == "test"),
         "expected configured provider 'test' in {body:?}"
     );
+    // Names-only in public mode: the IdP scope configuration must NOT leak to
+    // an anonymous caller.
+    let p = arr
+        .iter()
+        .find(|p| p["id"] == "test")
+        .expect("provider 'test'");
+    assert!(
+        p.get("scopes").is_none(),
+        "unauthenticated caller must NOT receive `scopes`; got {p:?}"
+    );
+    assert_eq!(p["display_name"], "Test");
+}
+
+/// Authenticated callers (an `AuthenticatedApiUser` extension is present, which
+/// the auth middleware inserts for a valid token) get the full detail including
+/// `scopes`. Mounted with an injected extension since this harness skips the
+/// real middleware.
+#[tokio::test(flavor = "multi_thread")]
+async fn providers_authenticated_caller_sees_scopes() {
+    use librefang_api::middleware::{AuthenticatedApiUser, UserRole};
+    use librefang_types::agent::UserId;
+
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.external_auth = enabled_with_one_provider();
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .route(
+            "/api/auth/providers",
+            axum::routing::get(librefang_api::oauth::auth_providers),
+        )
+        .layer(axum::Extension(AuthenticatedApiUser {
+            name: "admin".into(),
+            role: UserRole::Admin,
+            user_id: UserId::from_name("admin"),
+        }))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/auth/providers")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = body["providers"].as_array().expect("providers array");
+    let p = arr
+        .iter()
+        .find(|p| p["id"] == "test")
+        .expect("provider 'test'");
+    assert_eq!(
+        p["scopes"],
+        serde_json::json!(["openid"]),
+        "authenticated caller must receive `scopes`; got {p:?}"
+    );
+
+    // Keep the kernel from leaking across tests.
+    drop(test);
 }
 
 // ─── /auth/login (legacy single-provider) ────────────────────────────────
