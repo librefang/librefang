@@ -2561,6 +2561,11 @@ fn build_sender_context(
         // Channel-originated traffic is never internal cron — [SILENT] markers
         // coming from real users must be treated as literal message content.
         is_internal_cron: false,
+        // Channel bridges are external ingress, not a trusted kernel system
+        // path — a reserved channel name here (e.g. a `Custom("cron")` adapter)
+        // is already rewritten to `ext-cron` by `sanitize_channel_name` above,
+        // and the kernel resolver must keep treating it as external.
+        is_internal_system: false,
     }
 }
 

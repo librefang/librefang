@@ -9396,3 +9396,74 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
 
     kernel.shutdown();
 }
+
+// ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
+// Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
+// resolver re-sanitizes reserved channel names from UNtrusted callers, but
+// must leave the kernel's own trusted internal system constructors (cron,
+// autonomous, webui) untouched so their persistent SessionIds stay continuous
+// (the issue mandated zero migration).
+
+#[test]
+fn resolve_scope_channel_sanitizes_reserved_names_from_external_callers() {
+    // is_internal_system = false (external / channel-bridge ingress):
+    // every reserved name must be rewritten to `ext-<name>` so it cannot
+    // derive the same SessionId as the internal system path.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {reserved:?} must be rewritten to ext-<name>"
+        );
+        // Case-insensitively too — `for_channel` lowercases internally.
+        let upper = reserved.to_ascii_uppercase();
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(&upper, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {upper:?} must be rewritten case-insensitively"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_preserves_reserved_names_for_internal_system_paths() {
+    // is_internal_system = true (cron tick / autonomous tick / web UI):
+    // the reserved name passes through verbatim so the legacy
+    // for_channel(agent, "<name>") SessionId is preserved. This is the
+    // regression guard for the autonomous internal path, which sets a
+    // reserved "autonomous" channel WITHOUT is_internal_cron.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, true),
+            reserved,
+            "trusted internal reserved channel {reserved:?} must pass through unchanged \
+             so existing persistent history is not orphaned"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_leaves_legitimate_channels_untouched() {
+    // Non-reserved channels pass through regardless of the trust flag, so
+    // ordinary channel traffic (telegram, slack, …) is never disturbed.
+    for channel in ["telegram", "slack", "discord", "api", "ext-cron"] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, false),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (external)"
+        );
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, true),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (internal)"
+        );
+    }
+}

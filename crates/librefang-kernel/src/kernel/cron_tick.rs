@@ -222,6 +222,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                         thread_id: None,
                         account_id: None,
                         is_internal_cron: true,
+                        is_internal_system: true,
                         ..Default::default()
                     };
                     let sender_ctx_owned = Some(cron_sender);

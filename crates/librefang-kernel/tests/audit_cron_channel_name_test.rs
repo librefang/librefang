@@ -15,7 +15,14 @@
 //! The kernel's `send_message_full` channel-derived branch re-applies the
 //! sanitizer as defense-in-depth: even if a future construction site is
 //! added that forgets the helper, the kernel ingress will still rewrite the
-//! collision unless the trusted `is_internal_cron` flag is set.
+//! collision unless the trusted `is_internal_system` flag is set. That flag is
+//! set by the kernel's own system constructors (cron tick, autonomous
+//! background tick, web UI) so their reserved channel names derive the legacy
+//! `for_channel(agent, "<name>")` SessionId and existing persistent history
+//! stays continuous. (`is_internal_cron` is deliberately NOT reused for this:
+//! it is cron-only because it also gates `[SILENT]` marker stripping, so the
+//! autonomous internal path — a reserved channel without `is_internal_cron` —
+//! would otherwise be wrongly rewritten to `ext-autonomous`.)
 //!
 //! This file pins the contract at the public types-crate boundary so the
 //! fix cannot silently regress.

@@ -755,6 +755,35 @@ impl LibreFangKernel {
         Ok(result)
     }
 
+    /// Decide the channel scope used to derive the per-channel `SessionId`,
+    /// applying the reserved-name defense-in-depth (audit:
+    /// cron-channel-name-not-reserved).
+    ///
+    /// Even if a construction-site sanitizer was skipped, an external
+    /// `SenderContext` whose `channel` matches a reserved kernel system channel
+    /// (`cron`, `autonomous`, `webui` — case-insensitive) must NOT share a
+    /// `SessionId` with the internal cron / autonomous / webui paths.
+    /// `is_internal_system` is the `#[serde(skip)]` trust flag the kernel's own
+    /// system constructors (cron tick, autonomous background tick, web UI) set;
+    /// when it is false and the channel collides, the name is rewritten to
+    /// `ext-<name>` so derivation lands on a disjoint session. Trusted internal
+    /// paths return the channel verbatim and keep deriving the legacy
+    /// `for_channel(agent, "<name>")` SessionId, so existing persistent history
+    /// stays continuous.
+    ///
+    /// This is deliberately keyed on `is_internal_system`, not
+    /// `is_internal_cron`: the latter is cron-only (it also gates `[SILENT]`
+    /// marker stripping), so reusing it would leave the autonomous internal
+    /// path — which sets a reserved `"autonomous"` channel without
+    /// `is_internal_cron` — to be wrongly rewritten to `ext-autonomous`.
+    fn resolve_scope_channel(channel: &str, is_internal_system: bool) -> String {
+        if is_internal_system || !librefang_channels::types::is_reserved_system_channel(channel) {
+            channel.to_string()
+        } else {
+            librefang_channels::types::sanitize_channel_name(channel)
+        }
+    }
+
     /// Internal: send a message with all optional parameters (content blocks + sender context).
     ///
     /// This is the unified entry point for all message dispatch. When `sender_context`
@@ -1971,25 +2000,9 @@ impl LibreFangKernel {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                     // Audit: cron-channel-name-not-reserved. Defense-in-depth
-                    // at the kernel boundary: even if a construction-site
-                    // sanitizer was skipped, an external SenderContext whose
-                    // `channel` matches a reserved kernel system channel
-                    // (`cron`, `autonomous`, `webui` — case-insensitive)
-                    // must NOT share a SessionId with the internal cron /
-                    // autonomous / webui paths. `is_internal_cron` is the
-                    // `#[serde(skip)]` trust flag the cron dispatcher sets;
-                    // when it is false and the channel collides, rename to
-                    // `ext-<name>` so derivation lands on a disjoint
-                    // session. Internal cron continues to derive the legacy
-                    // `for_channel(agent, "cron")` SessionId so existing
-                    // persistent cron-session history is preserved.
-                    let scope_channel = if ctx.is_internal_cron
-                        || !librefang_channels::types::is_reserved_system_channel(&ctx.channel)
-                    {
-                        ctx.channel.clone()
-                    } else {
-                        librefang_channels::types::sanitize_channel_name(&ctx.channel)
-                    };
+                    // at the kernel boundary — see `resolve_scope_channel`.
+                    let scope_channel =
+                        Self::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
                     let derived = SessionId::for_sender_scope(
                         agent_id,
                         &scope_channel,

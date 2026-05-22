@@ -422,6 +422,26 @@ pub struct SenderContext {
     /// inject `"is_internal_cron": true` through a JSON payload.
     #[serde(skip)]
     pub is_internal_cron: bool,
+    /// Set by the kernel's trusted internal system constructors (cron,
+    /// autonomous background tick, web UI) — never by external API callers.
+    ///
+    /// Marks a `SenderContext` whose `channel` deliberately equals a reserved
+    /// system name (`cron` / `autonomous` / `webui`). The kernel's
+    /// channel-derived session resolver uses this flag to skip the
+    /// reserved-name re-sanitization it applies to external callers, so the
+    /// internal paths keep deriving their legacy `for_channel(agent, "<name>")`
+    /// SessionIds and existing persistent history stays continuous. External
+    /// callers reach the resolver with this flag `false` and a reserved name
+    /// is rewritten to `ext-<name>`, keeping the two namespaces disjoint.
+    ///
+    /// Separate from [`Self::is_internal_cron`] on purpose:
+    /// `is_internal_cron` additionally gates `[SILENT]` marker stripping, which
+    /// must stay cron-only — the autonomous path must NOT strip `[SILENT]`.
+    ///
+    /// Intentionally excluded from serialization so external callers cannot
+    /// inject `"is_internal_system": true` through a JSON payload.
+    #[serde(skip)]
+    pub is_internal_system: bool,
 }
 
 /// Reference to a participant in a group chat.
