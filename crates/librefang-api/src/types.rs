@@ -1017,7 +1017,11 @@ mod tests {
         let big = (0..(PAGINATION_MAX_LIMIT + 50)).collect::<Vec<_>>();
         let (items, total, _, limit) = q.paginate(big);
         assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
-        assert_eq!(total, PAGINATION_MAX_LIMIT + 50, "total reflects the unclipped row count");
+        assert_eq!(
+            total,
+            PAGINATION_MAX_LIMIT + 50,
+            "total reflects the unclipped row count"
+        );
         assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
     }
 
