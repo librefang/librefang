@@ -27,6 +27,64 @@ pub const MAX_STRING_FIELD_LEN: usize = 10_000;
 /// Maximum nesting depth allowed in arbitrary JSON values.
 pub const MAX_JSON_DEPTH: usize = 20;
 
+/// Maximum chat-message body size in UTF-8 bytes.
+///
+/// Memory-safety cap: prevents a single oversized request from
+/// allocating an arbitrarily-large `String` inside the handler.
+/// Tuned to 256 KiB (4× the historical 64 KiB) so the
+/// complementary character cap (see [`MAX_MESSAGE_CHARS`]) governs
+/// LLM-cost protection without unfairly clipping CJK users, who
+/// pay ~3 bytes per glyph.
+///
+/// Audit: message-byte-vs-char-cap. Historical `MAX_MESSAGE_SIZE
+/// = 64 * 1024` was 64 KiB regardless of script; CJK users hit
+/// the cap at ~21 K characters while ASCII users got 64 K.
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+
+/// Maximum chat-message body size in unicode scalar values
+/// (`str::chars().count()`).
+///
+/// LLM-cost protection: each character roughly maps to a token (or
+/// a small multiple in CJK / emoji), so this cap stops a single
+/// request from dominating an agent's token budget regardless of
+/// the encoding. 100 K characters sits well above any realistic
+/// human-typed prompt and below LLM context windows.
+///
+/// Used alongside [`MAX_MESSAGE_BYTES`]: both must be satisfied.
+pub const MAX_MESSAGE_CHARS: usize = 100_000;
+
+/// Validate that a chat-message body fits inside both
+/// [`MAX_MESSAGE_BYTES`] and [`MAX_MESSAGE_CHARS`]. Returns a
+/// `ValidationError` whose body includes both counts plus the
+/// configured caps so operators can diagnose which limit triggered.
+/// Returns `Ok(())` when both checks pass.
+///
+/// Audit: message-byte-vs-char-cap.
+pub fn check_message_size(message: &str) -> Result<(), ValidationError> {
+    let bytes = message.len();
+    if bytes > MAX_MESSAGE_BYTES {
+        let chars = message.chars().count();
+        return Err(ValidationError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "message body too large: {bytes} bytes / {chars} chars exceeds byte cap \
+                 of {MAX_MESSAGE_BYTES} bytes"
+            ),
+        });
+    }
+    let chars = message.chars().count();
+    if chars > MAX_MESSAGE_CHARS {
+        return Err(ValidationError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "message body too long: {chars} chars / {bytes} bytes exceeds character cap \
+                 of {MAX_MESSAGE_CHARS} chars"
+            ),
+        });
+    }
+    Ok(())
+}
+
 // ── Error type ──────────────────────────────────────────────────────
 
 /// A validation error returned as a consistent JSON body.
@@ -331,5 +389,64 @@ mod tests {
         const { assert!(MAX_REQUEST_BODY_BYTES >= 1024) };
         const { assert!(MAX_STRING_FIELD_LEN >= 1000) };
         const { assert!(MAX_JSON_DEPTH >= 10) };
+        const { assert!(MAX_MESSAGE_BYTES >= 64 * 1024) };
+        const { assert!(MAX_MESSAGE_CHARS >= 10_000) };
+    }
+
+    /// Audit: message-byte-vs-char-cap. The byte cap is the
+    /// memory-safety limit; the char cap is the LLM-cost protection.
+    /// Both must apply. These tests pin the fairness contract.
+    #[test]
+    fn check_message_size_accepts_ascii_under_caps() {
+        let msg = "a".repeat(1000);
+        assert!(check_message_size(&msg).is_ok());
+    }
+
+    #[test]
+    fn check_message_size_accepts_cjk_text_that_byte_only_cap_would_have_rejected() {
+        // Pre-fix MAX_MESSAGE_SIZE = 64 KiB rejected ~21K CJK chars
+        // because each glyph encodes to 3 bytes in UTF-8. A 30K-char
+        // CJK message is 90 KiB — over the historical 64 KiB limit
+        // but well under the new 256 KiB byte cap AND 100 K char
+        // cap. Must accept now.
+        let msg: String = std::iter::repeat_n('文', 30_000).collect();
+        assert!(msg.len() > 64 * 1024, "test fixture must exceed historical 64 KiB cap");
+        assert!(
+            check_message_size(&msg).is_ok(),
+            "CJK message at 30K chars / ~90 KiB must pass under the new fair caps"
+        );
+    }
+
+    #[test]
+    fn check_message_size_rejects_oversize_byte_payload_with_both_counts_in_error() {
+        // Pure ASCII payload past the byte cap. Error must report
+        // both byte count and char count so operators can diagnose.
+        let msg = "a".repeat(MAX_MESSAGE_BYTES + 1);
+        let err = check_message_size(&msg).expect_err("must reject past byte cap");
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            err.message.contains("bytes") && err.message.contains("chars"),
+            "error must include both byte and char counts: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn check_message_size_rejects_oversize_char_payload() {
+        // A multi-byte char payload that satisfies the byte cap but
+        // exceeds the char cap — synthetic but pins the
+        // independent-cap contract. Use a 2-byte char (Cyrillic) so
+        // we hit the char cap before the byte cap.
+        // 100_001 × 2 bytes = ~200 KiB (under MAX_MESSAGE_BYTES);
+        // 100_001 chars (over MAX_MESSAGE_CHARS).
+        let msg: String = std::iter::repeat_n('а', MAX_MESSAGE_CHARS + 1).collect();
+        assert!(msg.len() < MAX_MESSAGE_BYTES, "fixture must respect byte cap");
+        let err = check_message_size(&msg).expect_err("must reject past char cap");
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            err.message.contains("character cap"),
+            "error must distinguish char-cap from byte-cap path: {}",
+            err.message
+        );
     }
 }
