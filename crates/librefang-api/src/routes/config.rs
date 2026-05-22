@@ -3023,7 +3023,83 @@ pub async fn dashboard_snapshot(
     axum::Json(dashboard_snapshot_inner(&state).await)
 }
 
+/// TTL for the [`dashboard_snapshot_inner`] memoization cache.
+///
+/// 900 ms is well below the dashboard's 5 s poll interval (so a polling tab
+/// rebuilds on every tick and the data still feels "live"), but enough to
+/// fold the burst of back-to-back polls that arrive when a user opens
+/// multiple dashboard tabs, switches windows, or the page rapidly remounts
+/// during a route change.
+const DASHBOARD_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_millis(900);
+
+/// Cached aggregated payload for `/api/dashboard/snapshot`.
+///
+/// The payload is wrapped in an `Arc` so cache lookups clone the pointer,
+/// not the (possibly large) JSON tree. The final return type of
+/// [`dashboard_snapshot_inner`] is still `serde_json::Value`, so we pay one
+/// `(*payload).clone()` per cache hit — still 10–100× cheaper than
+/// re-running per-agent manifest enrichment + provider/channel probes +
+/// memory queries.
+struct CachedDashboardSnapshot {
+    generated_at: std::time::Instant,
+    payload: Arc<serde_json::Value>,
+}
+
+/// Process-wide cache for [`dashboard_snapshot_inner`], keyed by
+/// `AppState` pointer identity.
+///
+/// We deliberately do **not** store the cache on `AppState` itself —
+/// adding a field there ripples into `librefang-testing` and every
+/// inline test that constructs an `AppState` literal (5+ call sites).
+/// Keying by `Arc::as_ptr(state) as usize` instead gives every test its
+/// own cache slot for free, while production (one long-lived `AppState`)
+/// gets exactly one slot.
+///
+/// Entries are evicted opportunistically: on each lookup we discard the
+/// caller's expired entry; on each insert we drop any entries older than
+/// 60× the TTL, which is enough to prevent the test process from
+/// accumulating slots over time without paying a global scan on the hot
+/// path.
+static DASHBOARD_SNAPSHOT_CACHE: std::sync::OnceLock<
+    dashmap::DashMap<usize, CachedDashboardSnapshot>,
+> = std::sync::OnceLock::new();
+
+fn dashboard_snapshot_cache() -> &'static dashmap::DashMap<usize, CachedDashboardSnapshot> {
+    DASHBOARD_SNAPSHOT_CACHE.get_or_init(dashmap::DashMap::new)
+}
+
 async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
+    // Fast path: serve the memoized payload if it's still within TTL.
+    // Keyed by the `AppState` Arc pointer so concurrent tests with
+    // distinct kernels don't poison each other's cache.
+    let cache_key = Arc::as_ptr(state) as usize;
+    let cache = dashboard_snapshot_cache();
+    if let Some(entry) = cache.get(&cache_key) {
+        if entry.generated_at.elapsed() < DASHBOARD_SNAPSHOT_TTL {
+            return (*entry.payload).clone();
+        }
+    }
+
+    let payload = dashboard_snapshot_compute(state).await;
+    let payload = Arc::new(payload);
+    cache.insert(
+        cache_key,
+        CachedDashboardSnapshot {
+            generated_at: std::time::Instant::now(),
+            payload: Arc::clone(&payload),
+        },
+    );
+    // Opportunistic prune so test processes that construct many
+    // short-lived `AppState`s don't accumulate dead cache slots
+    // indefinitely. The threshold is 60× TTL so production's single
+    // long-lived state is never pruned, and we only walk the (tiny)
+    // table when we're already taking the write path.
+    let prune_threshold = DASHBOARD_SNAPSHOT_TTL * 60;
+    cache.retain(|_, v| v.generated_at.elapsed() < prune_threshold);
+    (*payload).clone()
+}
+
+async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value {
     // Health (same logic as /api/health)
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
