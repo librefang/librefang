@@ -7955,15 +7955,10 @@ fn cmd_skill_pending(sub: PendingCommands) {
 // Channel commands
 // ---------------------------------------------------------------------------
 
-
-
 // maybe_write_channel_config / notify_daemon_restart removed — they
 // supported the interactive in-process channel onboarding flow whose
 // callers were dropped when channels moved to sidecars, leaving both
 // helpers orphaned.
-
-
-
 
 // ---------------------------------------------------------------------------
 // Hand commands
@@ -8126,9 +8121,7 @@ fn cmd_channel_setup(name: Option<&str>) {
             }
             let candidates: Vec<&serde_json::Value> = all
                 .iter()
-                .filter(|c| {
-                    c.get("configured").and_then(|v| v.as_bool()) != Some(true)
-                })
+                .filter(|c| c.get("configured").and_then(|v| v.as_bool()) != Some(true))
                 .collect();
             if candidates.is_empty() {
                 println!("Every available channel is already configured.");
@@ -8139,10 +8132,7 @@ fn cmd_channel_setup(name: Option<&str>) {
             println!("Pick a channel to set up:");
             for (i, ch) in candidates.iter().enumerate() {
                 let n = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let d = ch
-                    .get("display_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(n);
+                let d = ch.get("display_name").and_then(|v| v.as_str()).unwrap_or(n);
                 println!("  {:>2}. {:<14} {}", i + 1, n, d);
             }
             let choice = prompt_input("Choice [1]: ");
@@ -8194,7 +8184,10 @@ fn cmd_channel_setup(name: Option<&str>) {
         let label = f.get("label").and_then(|v| v.as_str()).unwrap_or(key);
         let required = f.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
         let ftype = f.get("type").and_then(|v| v.as_str()).unwrap_or("text");
-        let has_value = f.get("has_value").and_then(|v| v.as_bool()).unwrap_or(false);
+        let has_value = f
+            .get("has_value")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let current = f.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
         // Secret-typed + has_value=true: blank means "keep existing".
@@ -13409,12 +13402,11 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_release_tag, daemon_log_path_for_config,
-        daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
-        is_valid_env_var_name, normalize_daemon_addr, normalize_release_tag, parse_toml_integer,
-        parse_version_core, pool_strategy_canon, resolve_device_auth_start, resolve_hand_instance,
-        AuthCommands, ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands,
-        MemoryCommands, ReleaseComparison,
+        compare_release_tag, daemon_log_path_for_config, daemon_log_path_for_home,
+        detached_daemon_args, find_daemon_with_probe, is_valid_env_var_name, normalize_daemon_addr,
+        normalize_release_tag, parse_toml_integer, parse_version_core, pool_strategy_canon,
+        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
+        Commands, DeviceAuthNextStep, GatewayCommands, MemoryCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -13559,7 +13551,6 @@ mod tests {
             _ => panic!("unexpected command"),
         }
     }
-
 
     #[test]
     fn test_auth_chatgpt_accepts_device_auth_flag() {

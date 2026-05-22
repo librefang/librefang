@@ -984,9 +984,16 @@ export function ConfigPage({ category }: { category: string }) {
         })}
       </div>
 
-      {/* Row 2: section tabs (within current category) — always visible when >1 section; grayed/disabled during search */}
+      {/* Row 2: section tabs (within current category) — always visible
+          when >1 section; grayed/disabled during search. The tab list
+          wraps to multiple rows on narrow viewports (general has 14
+          sections, infra has 15) so the trailing tabs never get clipped
+          off-screen at default zoom — closes #5293. The shared bottom
+          border lives on each tab via `border-b-2`, not on this
+          container, so wrapping doesn't draw stray separator lines
+          between rows. */}
       {sectionKeys.length > 1 && (
-        <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
+        <div className="flex flex-wrap items-center gap-y-1 border-b border-border-subtle -mx-6 px-6">
           {sectionKeys.map((sKey) => {
             const isActive = !isSearching && effectiveTab === sKey;
             const hasDot = sectionsWithPending.has(sKey);

@@ -200,6 +200,15 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/auth/dashboard-check", Expect::AlwaysPublic),
     re("/api/auth/providers", Expect::AlwaysPublic),
     re("/api/auth/login", Expect::AlwaysPublic),
+    re("/api/auth/login/google", Expect::AlwaysPublic),
+    // Regression for audit: login-prefix-match. A bare
+    // `prefix_get("/api/auth/login")` matched arbitrary siblings
+    // sharing the prefix; the split into exact + slash-terminated
+    // prefix keeps both `/api/auth/login` and
+    // `/api/auth/login/{provider}` public while requiring auth on
+    // `/api/auth/login-status`, `/api/auth/loginhack`, etc.
+    re("/api/auth/login-status", Expect::Authed),
+    re("/api/auth/loginhack", Expect::Authed),
     re("/api/config/schema", Expect::AlwaysPublic),
     re("/api/pairing/complete", Expect::AlwaysPublic),
     re("/a2a/agents", Expect::AlwaysPublic),
@@ -214,9 +223,18 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/dashboard/manifest.json", Expect::AlwaysPublic),
     re("/dashboard/sw.js", Expect::AlwaysPublic),
     re("/locales/en.json", Expect::AlwaysPublic),
+    // GitHub Copilot OAuth must now require auth — pre-fix it was
+    // an unauthenticated POST + GET prefix that allowed a hostile
+    // pop-under to hijack GITHUB_TOKEN via localhost (audit:
+    // github-copilot-oauth-unauthenticated). The dashboard already
+    // authenticates before initiating the device flow.
     re(
         "/api/providers/github-copilot/oauth/start",
-        Expect::AlwaysPublic,
+        Expect::Authed,
+    ),
+    re(
+        "/api/providers/github-copilot/oauth/poll/abc123",
+        Expect::Authed,
     ),
     re(
         "/api/mcp/servers/myserver/auth/callback",

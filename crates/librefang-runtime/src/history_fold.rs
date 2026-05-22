@@ -69,7 +69,7 @@
 
 use crate::aux_client::AuxClient;
 use crate::llm_driver::{CompletionRequest, LlmDriver};
-use librefang_types::config::AuxTask;
+use librefang_types::config::{AuxTask, ResponseFormat};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -600,7 +600,18 @@ async fn summarise_batch(
         prompt_caching: false,
         cache_ttl: None,
         prompt_cache_strategy: None,
-        response_format: None,
+        // Request structured JSON output (`{"type": "json_object"}` on
+        // OpenAI-compat drivers). Without this, DeepSeek / OpenAI /
+        // Mistral / Gemini are free to emit natural-language numbered
+        // lists, `parse_labeled_summaries` fails, and the fold falls
+        // back to "applying raw response as bulk summary" — losing the
+        // per-tool_use_id granularity (tool_use_id / tool_name /
+        // is_error / status) we just spent the aux-LLM call building.
+        // Providers that don't honour the flag ignore it without
+        // error; the system prompt above already contains the word
+        // "JSON" (DeepSeek's requirement for json_object mode).
+        // Same pattern as proactive_memory.rs (#5287).
+        response_format: Some(ResponseFormat::Json),
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
@@ -1871,6 +1882,104 @@ mod tests {
             "large-batch max_tokens={} must be >= 8 * FOLD_TOKENS_PER_BLOCK ({})",
             large_observed[0],
             8 * FOLD_TOKENS_PER_BLOCK
+        );
+    }
+
+    /// Driver that records the `response_format` flag on every request,
+    /// then returns a benign per-id JSON (same shape as
+    /// [`MaxTokensRecordingDriver`], parameterised on the field we
+    /// care about for #5287).
+    struct ResponseFormatRecordingDriver {
+        observed: Arc<std::sync::Mutex<Vec<Option<ResponseFormat>>>>,
+    }
+
+    impl ResponseFormatRecordingDriver {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<Option<ResponseFormat>>>>) {
+            let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                ResponseFormatRecordingDriver {
+                    observed: Arc::clone(&observed),
+                },
+                observed,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for ResponseFormatRecordingDriver {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.observed.lock().unwrap().push(req.response_format.clone());
+            // Echo back per-id JSON so the fold proceeds end-to-end —
+            // we only care about the recorded `response_format` here.
+            let prompt = match &req.messages[0].content {
+                MessageContent::Blocks(blocks) => match &blocks[0] {
+                    ContentBlock::Text { text, .. } => text.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            let mut entries: Vec<String> = Vec::new();
+            for line in prompt.lines() {
+                if let Some(rest) = line.strip_prefix('[') {
+                    if let Some(end) = rest.find(']') {
+                        let id = &rest[..end];
+                        entries.push(format!("{{\"id\":\"{id}\",\"summary\":\"ok\"}}"));
+                    }
+                }
+            }
+            let body = format!("[{}]", entries.join(","));
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: body,
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: librefang_types::message::StopReason::EndTurn,
+                usage: librefang_types::message::TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    /// Regression guard for #5287 — `batch_summarise` must pin
+    /// `response_format = Some(ResponseFormat::Json)` on the aux-LLM
+    /// request. Without it, DeepSeek / OpenAI / Mistral / Gemini are
+    /// free to emit natural-language numbered lists,
+    /// `parse_labeled_summaries` fails, and the fold silently
+    /// degrades to "applying raw response as bulk summary" — losing
+    /// per-tool_use_id granularity on every long session.
+    #[tokio::test]
+    async fn fold_request_pins_response_format_json_for_aux_llm() {
+        let msgs = build_history(3);
+
+        let (rec, observed) = ResponseFormatRecordingDriver::new();
+        let driver: Arc<dyn LlmDriver> = Arc::new(rec);
+
+        let _ = fold_stale_tool_results(
+            msgs,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        let observed = observed.lock().unwrap().clone();
+        assert_eq!(
+            observed.len(),
+            1,
+            "expected exactly one batched call for this fold pass"
+        );
+        assert_eq!(
+            observed[0],
+            Some(ResponseFormat::Json),
+            "fold aux-LLM request must pin response_format = Json so \
+             strict-output providers (DeepSeek / OpenAI / Mistral / \
+             Gemini) emit a JSON array instead of free-form prose"
         );
     }
 }
