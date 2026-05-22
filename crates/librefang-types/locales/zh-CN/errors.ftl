@@ -74,3 +74,9 @@ api-error-not-found = 未找到资源
 api-error-internal = 内部服务器错误
 api-error-bad-request = 请求无效：{ $reason }
 api-error-rate-limited = 请求频率超限，请稍后重试。
+
+# Generic catch-all — interpolates the underlying error string verbatim.
+# Used by 41+ HTTP 500 handlers as a stopgap until each route is moved to a
+# typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
+# call returns the literal key as the response body and `$error` interpolation never runs.
+api-error-generic = 错误: { $error }
