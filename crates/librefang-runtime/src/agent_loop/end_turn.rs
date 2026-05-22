@@ -260,6 +260,7 @@ pub(super) async fn finalize_successful_end_turn(
                 ctx.session.agent_id,
                 &interaction_text,
                 ctx.streaming,
+                ctx.sender_user_id,
             )
             .await;
         }

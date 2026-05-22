@@ -66,6 +66,7 @@ async fn test_ingest_recalls_memories() {
             librefang_types::memory::MemorySource::Conversation,
             "episodic",
             std::collections::HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -78,6 +79,7 @@ async fn test_ingest_recalls_memories() {
             librefang_types::memory::MemorySource::Conversation,
             "episodic",
             std::collections::HashMap::new(),
+            None,
         )
         .await
         .unwrap();

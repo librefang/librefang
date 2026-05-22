@@ -69,6 +69,7 @@ pub(super) async fn remember_interaction_best_effort(
     agent_id: librefang_types::agent::AgentId,
     interaction_text: &str,
     streaming: bool,
+    peer_id: Option<&str>,
 ) {
     if let Some(emb) = embedding_driver {
         match emb.embed_one(interaction_text).await {
@@ -81,6 +82,7 @@ pub(super) async fn remember_interaction_best_effort(
                         "episodic",
                         HashMap::new(),
                         Some(&vec),
+                        peer_id,
                     )
                     .await
                 {
@@ -104,6 +106,7 @@ pub(super) async fn remember_interaction_best_effort(
                         MemorySource::Conversation,
                         "episodic",
                         HashMap::new(),
+                        peer_id,
                     )
                     .await
                 {
@@ -122,6 +125,7 @@ pub(super) async fn remember_interaction_best_effort(
             MemorySource::Conversation,
             "episodic",
             HashMap::new(),
+            peer_id,
         )
         .await
     {
@@ -833,6 +837,7 @@ mod tests {
                     MemorySource::Conversation,
                     librefang_types::memory::MemoryLevel::Session.scope_str(),
                     meta,
+                    None,
                     None,
                 )
                 .unwrap();

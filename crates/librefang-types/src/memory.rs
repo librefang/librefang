@@ -1192,6 +1192,7 @@ pub trait Memory: Send + Sync {
         source: MemorySource,
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
+        peer_id: Option<&str>,
     ) -> crate::error::LibreFangResult<MemoryId>;
 
     /// Semantic search for relevant memories.

@@ -1122,6 +1122,7 @@ impl ScriptableContextEngine {
                                 librefang_types::memory::MemorySource::System,
                                 &scope,
                                 std::collections::HashMap::new(),
+                                None,
                             )
                             .await
                         {
