@@ -33,6 +33,11 @@ export function NotificationCenter() {
   // (Enter / Space / ArrowDown on the trigger). If so, we auto-focus the
   // first item; mouse clicks leave focus on the trigger per WAI-ARIA APG.
   const openedByKeyboardRef = useRef(false);
+  // When the menu was opened via ArrowUp on the trigger, focus the LAST
+  // menuitem instead of the first (WAI-ARIA APG optional Up Arrow behavior).
+  // Read once by the open effect, which is the only place that can move focus
+  // after the menu has actually committed to the DOM.
+  const openToLastRef = useRef(false);
 
   // Close the menu when focus leaves both the trigger and the menu — this
   // covers Tab-out, click-out (mousedown on a sibling moves activeElement),
@@ -110,6 +115,7 @@ export function NotificationCenter() {
     setOpen(false);
     setActiveIndex(-1);
     openedByKeyboardRef.current = false;
+    openToLastRef.current = false;
     // requestAnimationFrame because the menu unmounts on `open=false`; if we
     // call .focus() synchronously the trigger may not yet own the layout
     // pass that lets it scroll into view correctly.
@@ -126,17 +132,20 @@ export function NotificationCenter() {
     );
   }, []);
 
-  // After the menu opens via keyboard, move focus to the first menuitem.
-  // Runs whenever `open` flips and items become available; gated on the
-  // ref so we don't steal focus from a mouse interaction.
+  // After the menu opens via keyboard, move focus to a menuitem. Runs
+  // whenever `open` flips and items become available; gated on the ref so we
+  // don't steal focus from a mouse interaction. `openToLastRef` selects the
+  // last item (ArrowUp on trigger) vs the first (ArrowDown / Enter / Space).
   useEffect(() => {
     if (!open) return;
     if (!openedByKeyboardRef.current) return;
     const items = getMenuItems();
     if (items.length === 0) return;
-    setActiveIndex(0);
-    items[0].focus();
+    const target = openToLastRef.current ? items.length - 1 : 0;
+    setActiveIndex(target);
+    items[target].focus();
     openedByKeyboardRef.current = false;
+    openToLastRef.current = false;
   }, [open, getMenuItems, pendingItems, pendingSkillsCount]);
 
   // Keep DOM focus in sync with activeIndex (e.g. ArrowDown updates the
@@ -164,19 +173,11 @@ export function NotificationCenter() {
       if (e.key === "ArrowUp") {
         e.preventDefault();
         openedByKeyboardRef.current = true;
+        openToLastRef.current = true;
         setOpen(true);
-        // Defer focus-last to the open effect via a queued microtask so the
-        // menu has rendered. The open effect focuses index 0 first; we then
-        // jump to last.
-        queueMicrotask(() => {
-          const items = getMenuItems();
-          if (items.length > 0) {
-            setActiveIndex(items.length - 1);
-          }
-        });
       }
     },
-    [getMenuItems],
+    [],
   );
 
   const onMenuKeyDown = useCallback(
@@ -263,6 +264,7 @@ export function NotificationCenter() {
               setOpen(false);
               setActiveIndex(-1);
               openedByKeyboardRef.current = false;
+              openToLastRef.current = false;
             }}
           />
           {/* position:fixed — the topbar's parent flex column has

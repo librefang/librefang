@@ -98,6 +98,19 @@ describe("NotificationCenter keyboard navigation", () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  it("ArrowUp on the trigger opens the menu and focuses the last menuitem", async () => {
+    const user = userEvent.setup();
+    render(<NotificationCenter />);
+    const trigger = getTrigger();
+    trigger.focus();
+    await user.keyboard("{ArrowUp}");
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const items = getMenuItems();
+    expect(items.length).toBeGreaterThan(0);
+    expect(document.activeElement).toBe(items[items.length - 1]);
+  });
+
   it("ArrowDown and ArrowUp inside the menu move focus with wrap-around", async () => {
     const user = userEvent.setup();
     render(<NotificationCenter />);
