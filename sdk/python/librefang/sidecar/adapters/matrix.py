@@ -762,8 +762,14 @@ class MatrixAdapter(SidecarAdapter):
         else:
             self.max_upload_bytes = DEFAULT_MAX_UPLOAD_BYTES
 
-        # /sync resume cursor.
-        self.since_token: Optional[str] = None
+        # /sync resume cursor — persisted across adapter restarts so
+        # the supervisor's respawn doesn't replay the bot's recent
+        # timeline as fresh inbound (the in-memory ``_seen`` dedupe
+        # set is also lost on restart, so it can't catch the replay).
+        # State file under ``$LIBREFANG_HOME/sidecar-state/`` keyed by
+        # bot user_id (multi-bot setups don't collide).
+        self._since_state_path: Optional[str] = self._compute_since_state_path()
+        self.since_token: Optional[str] = self._load_since_token()
         # Reaction lifecycle: ordered (room, target_event) → reaction_id.
         # Python 3.7+ dict is ordered, used as an OrderedDict.
         self._phase_reactions: dict[tuple, str] = {}
@@ -995,6 +1001,49 @@ class MatrixAdapter(SidecarAdapter):
                 del self._phase_reactions[first]
             self._phase_reactions[key] = reaction_id
 
+    # ---- since-cursor persistence ----
+
+    def _compute_since_state_path(self) -> Optional[str]:
+        home = os.environ.get("LIBREFANG_HOME") or os.path.expanduser("~")
+        if not home:
+            return None
+        safe_user = "".join(
+            c if c.isalnum() or c in "-_.@" else "_"
+            for c in (self.user_id or "default")
+        )
+        return os.path.join(home, "sidecar-state", f"matrix-{safe_user}-since.txt")
+
+    def _load_since_token(self) -> Optional[str]:
+        if not self._since_state_path:
+            return None
+        try:
+            with open(self._since_state_path, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+                return token or None
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            log.warn(
+                "matrix since-token load failed; starting fresh",
+                path=self._since_state_path, error=str(exc),
+            )
+            return None
+
+    def _persist_since_token(self) -> None:
+        if not self._since_state_path or self.since_token is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._since_state_path), exist_ok=True)
+            tmp = self._since_state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(self.since_token)
+            os.replace(tmp, self._since_state_path)
+        except OSError as exc:
+            log.warn(
+                "matrix since-token persist failed; will retry next /sync",
+                path=self._since_state_path, error=str(exc),
+            )
+
     def _check_e2ee_warn(self, room_id: str) -> bool:
         """Return True iff this is the first time we've seen the
         room as E2EE — caller emits a WARN on True only."""
@@ -1027,6 +1076,7 @@ class MatrixAdapter(SidecarAdapter):
         next_batch = body.get("next_batch")
         if isinstance(next_batch, str):
             self.since_token = next_batch
+            self._persist_since_token()
         rooms = (
             body.get("rooms", {}).get("join", {})
             if isinstance(body.get("rooms"), dict) else {}
