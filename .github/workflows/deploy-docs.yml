@@ -50,7 +50,13 @@ jobs:
       - run: cd docs && pnpm build
 
       - name: Deploy to Cloudflare Pages
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        # Dependabot PRs come from in-repo `dependabot/...` branches, so
+        # they match the same-repo guard below, but they run with the
+        # restricted Dependabot token which cannot read Actions secrets.
+        # Without the actor check, wrangler errors with "Not logged in"
+        # because CLOUDFLARE_API_TOKEN expands to an empty string. The
+        # post-merge push to main still triggers a real deploy.
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -118,8 +118,8 @@ fn embedded_dashboard_available() -> bool {
 fn embedded_only_mode() -> bool {
     // BossFang default: embedded-only=true unless explicitly opted out.
     // Check BOSSFANG_* first, fall back to LIBREFANG_* for back-compat.
-    let val = std::env::var(EMBEDDED_ONLY_ENV_BOSSFANG)
-        .or_else(|_| std::env::var(EMBEDDED_ONLY_ENV));
+    let val =
+        std::env::var(EMBEDDED_ONLY_ENV_BOSSFANG).or_else(|_| std::env::var(EMBEDDED_ONLY_ENV));
     match val.ok().as_deref() {
         Some(v) => {
             let n = v.trim().to_ascii_lowercase();
@@ -295,12 +295,122 @@ pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> 
     }
 }
 
+/// Validate a dashboard asset sub-path.
+///
+/// Returns `true` if every segment (split on both `/` and `\`) is a benign,
+/// non-empty filename — i.e. not `.`, not `..`, contains no null byte. This
+/// is the path-traversal guard for [`react_asset`]; the previous substring
+/// check `path.contains("..")` was bypassable on Windows via `\..\` segments
+/// and, in principle, by URL-encoded `%2e%2e` if the decode order ever
+/// changed. Splitting on both separators and rejecting `..` per-segment
+/// closes both bypasses without depending on filesystem canonicalization
+/// (which would require the asset to already exist).
+fn is_safe_asset_path(path: &str) -> bool {
+    // Reject embedded null bytes anywhere — defense in depth against C
+    // string truncation in any downstream consumer.
+    if path.contains('\0') {
+        return false;
+    }
+    // Reject Windows UNC / authority-style prefixes outright. `\\server\share`
+    // and `//server/share` carry no `..` segment, so the per-segment check
+    // below passes them — but `Path::join` REPLACES the base with an absolute
+    // or UNC path on Windows, so `home/dashboard`.join("\\server\share")
+    // resolves to `\\server\share`, escaping the dashboard directory entirely.
+    // A legitimate dashboard asset is always a relative sub-path, never an
+    // authority reference, so refuse the prefix on every platform.
+    if path.starts_with("\\\\") || path.starts_with("//") {
+        return false;
+    }
+    // Split on BOTH forward slash and backslash. Backslash is a path
+    // separator on Windows; on Unix it's a legal filename character but
+    // a dashboard asset would never legitimately contain one.
+    let mut saw_segment = false;
+    for seg in path.split(['/', '\\']) {
+        if seg.is_empty() {
+            // Empty segments come from leading/trailing/repeated separators;
+            // they're benign in URLs ("/a//b" canonicalizes to "/a/b") but
+            // we tolerate them only between real segments — the resolver
+            // path-joins on each, and double-separators don't traverse.
+            continue;
+        }
+        if seg == "." || seg == ".." {
+            return false;
+        }
+        saw_segment = true;
+    }
+    saw_segment
+}
+
+/// First path segments the React SPA owns under `/dashboard/`.
+///
+/// `react_asset` only serves `index.html` for an extensionless path whose
+/// first segment is in this set; every other extensionless miss returns 404.
+/// Without the allowlist, *any* `/dashboard/<word>` resolved to the dashboard
+/// shell, so an attacker could craft `…/dashboard/security-alert` (or any
+/// plausible-looking slug) and have it render the trusted UI chrome — a
+/// ready-made phishing surface on the operator's own origin.
+///
+/// Source of truth: the top-level route paths in
+/// `crates/librefang-api/dashboard/src/router.tsx` (the router uses
+/// `basepath: "/dashboard"`, so a router `path: "/agents"` arrives here as the
+/// asset path `agents`). Matching the FIRST segment also covers nested dynamic
+/// routes such as `/dashboard/agents/<id>` and `/dashboard/config/general`.
+/// Keep this list in sync when adding a new top-level dashboard route.
+///
+/// Sorted for readability / deterministic review diffs; lookup is a linear
+/// scan over a handful of entries.
+const SPA_ROUTES: &[&str] = &[
+    "a2a",
+    "agents",
+    "analytics",
+    "approvals",
+    "audit",
+    "canvas",
+    "channels",
+    "chat",
+    "comms",
+    "config",
+    "connect",
+    "goals",
+    "hands",
+    "logs",
+    "mcp-servers",
+    "media",
+    "memory",
+    "models",
+    "network",
+    "overview",
+    "plugins",
+    "providers",
+    "runtime",
+    "scheduler",
+    "sessions",
+    "settings",
+    "skills",
+    "telemetry",
+    "terminal",
+    "users",
+    "wizard",
+    "workflows",
+];
+
+/// True when `asset_path`'s first segment is a route the React SPA owns, so an
+/// extensionless miss should fall back to `index.html` rather than 404.
+fn is_spa_route(asset_path: &str) -> bool {
+    let first = asset_path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("");
+    SPA_ROUTES.contains(&first)
+}
+
 /// GET /dashboard/{*path} — Serve React build assets.
 pub async fn react_asset(
     State(state): State<Arc<crate::routes::AppState>>,
     Path(path): Path<String>,
 ) -> Response {
-    if path.contains("..") {
+    if !is_safe_asset_path(&path) {
         return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
     }
 
@@ -316,13 +426,17 @@ pub async fn react_asset(
         )
             .into_response(),
         None => {
-            // SPA fallback: if the path has no file extension, serve index.html
-            // so that browser-history routing works (e.g. /dashboard/config/general).
+            // SPA fallback: serve index.html so browser-history routing works
+            // (e.g. /dashboard/config/general) — but ONLY for extensionless
+            // paths whose first segment is a known SPA route. An extensionless
+            // path that isn't an SPA route (e.g. /dashboard/security-alert)
+            // returns 404 rather than rendering the trusted dashboard chrome,
+            // closing the phishing-surface amplification.
             let has_ext = asset_path
                 .rsplit('/')
                 .next()
                 .is_some_and(|s| s.contains('.'));
-            if !has_ext {
+            if !has_ext && is_spa_route(asset_path) {
                 if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
                     return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
                         .into_response();
@@ -587,5 +701,166 @@ mod tests {
             got.is_none(),
             "embedded-only mode must not consult runtime dir"
         );
+    }
+
+    #[test]
+    fn safe_asset_path_accepts_legit_paths() {
+        for p in [
+            "index.html",
+            "assets/app.js",
+            "assets/img/logo.png",
+            "sub/dir/file.css",
+            "deep/nested/path/asset.svg",
+        ] {
+            assert!(is_safe_asset_path(p), "expected {p:?} to be accepted");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_dotdot_segment() {
+        // ASCII traversal — what the old `path.contains("..")` check caught.
+        for p in [
+            "..",
+            "../etc/passwd",
+            "assets/../secret.toml",
+            "sub/../../etc/passwd",
+        ] {
+            assert!(!is_safe_asset_path(p), "expected {p:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_backslash_dotdot_windows_bypass() {
+        // The Windows-bypass class: substring `path.contains("..")` happens
+        // to catch literal `..\\`, but it does NOT prevent the segment from
+        // being treated as parent-of by Windows path resolution. The
+        // segment-level validator rejects it explicitly regardless of host
+        // OS, so the audit fix holds on every platform.
+        for p in [
+            "..\\etc\\passwd",
+            "assets\\..\\secret.toml",
+            "sub\\..\\..\\etc\\passwd",
+            "..\\..\\Windows\\System32\\config\\SAM",
+        ] {
+            assert!(!is_safe_asset_path(p), "expected {p:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_url_decoded_dotdot() {
+        // Axum's `Path<String>` extractor URL-decodes capture segments
+        // before the handler sees them, so `%2e%2e` arrives as `..`. This
+        // test pins the post-decode behaviour explicitly so a future
+        // extractor change can't reopen the bypass silently.
+        let decoded = percent_decode("..%2Fetc%2Fpasswd");
+        assert_eq!(decoded, "../etc/passwd");
+        assert!(!is_safe_asset_path(&decoded));
+
+        let decoded = percent_decode("%2e%2e%2fetc%2fpasswd");
+        assert_eq!(decoded, "../etc/passwd");
+        assert!(!is_safe_asset_path(&decoded));
+
+        let decoded = percent_decode("..%5Cetc%5Cpasswd");
+        assert_eq!(decoded, "..\\etc\\passwd");
+        assert!(!is_safe_asset_path(&decoded));
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_single_dot_and_null_byte() {
+        assert!(!is_safe_asset_path("."));
+        assert!(!is_safe_asset_path("assets/./app.js"));
+        assert!(!is_safe_asset_path("assets/app.js\0.png"));
+        // Pure-empty path has no real segment — refuse rather than
+        // ambiguously resolving to dashboard root.
+        assert!(!is_safe_asset_path(""));
+        assert!(!is_safe_asset_path("/"));
+    }
+
+    #[test]
+    fn safe_asset_path_rejects_unc_and_authority_prefix() {
+        // Windows UNC (`\\server\share`) and protocol-relative authority
+        // (`//server/share`) carry no `..` segment, so the per-segment guard
+        // alone lets them through — but `Path::join` REPLACES the dashboard
+        // base with the UNC/absolute path on Windows, escaping the directory.
+        // The explicit leading-prefix reject closes that on every platform.
+        for p in [
+            "\\\\server\\share",
+            "\\\\server\\share\\file.js",
+            "//server/share",
+            "//server/share/file.js",
+            "\\\\?\\C:\\Windows\\System32",
+        ] {
+            assert!(!is_safe_asset_path(p), "expected {p:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn spa_route_matches_known_first_segments() {
+        // Exact top-level routes.
+        for p in ["agents", "config", "skills", "mcp-servers"] {
+            assert!(is_spa_route(p), "expected {p:?} to be an SPA route");
+        }
+        // Nested dynamic / child routes match on the first segment.
+        for p in [
+            "agents/some-agent-id",
+            "config/general",
+            "config/security",
+            "users/alice/budget",
+            "/agents", // tolerate a leading slash defensively
+        ] {
+            assert!(is_spa_route(p), "expected {p:?} to be an SPA route");
+        }
+    }
+
+    #[test]
+    fn spa_route_rejects_unknown_first_segments() {
+        // Phishing-style slugs and non-routes must NOT fall back to the shell.
+        for p in [
+            "security-alert",
+            "login-here",
+            "totally-made-up",
+            "agentss", // near-miss, not an exact first-segment match
+            "assetx",
+        ] {
+            assert!(!is_spa_route(p), "expected {p:?} to NOT be an SPA route");
+        }
+    }
+
+    #[test]
+    fn spa_routes_list_is_sorted_and_deduped() {
+        // Keep the allowlist sorted + unique so review diffs stay clean and a
+        // duplicate entry can't mask a typo.
+        let mut sorted = SPA_ROUTES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            SPA_ROUTES,
+            &sorted[..],
+            "SPA_ROUTES must be sorted and free of duplicates"
+        );
+    }
+
+    /// Minimal percent-decoder for the URL-decode regression tests. We
+    /// don't want to pull `percent-encoding` into the test build just for
+    /// `%XX` -> byte; this covers exactly what axum's extractor does for
+    /// path captures (`%2e` -> `.`, `%2f` -> `/`, `%5c` -> `\`).
+    fn percent_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).expect("decoded UTF-8")
     }
 }

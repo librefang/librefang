@@ -1096,6 +1096,14 @@ async fn handle_text_message(
                 // so GET /session, list_agent_sessions, switch_agent_session,
                 // and agent_send all see the same conversation history.
                 use_canonical_session: true,
+                // Trusted internal system path. The reserved `"webui"` channel
+                // here is the kernel's own, not external input; flag it so the
+                // session resolver never rewrites it to `ext-webui` (audit:
+                // cron-channel-name-not-reserved). Currently the
+                // `use_canonical_session` flag above already bypasses the
+                // channel-derived branch, but this keeps the trust signal
+                // explicit and correct if that bypass is ever removed.
+                is_internal_system: true,
                 ..Default::default()
             };
             match state

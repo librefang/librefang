@@ -1,15 +1,23 @@
-//! Channel Bridge Layer for the LibreFang Agent OS.
+//! Channel infrastructure for the LibreFang Agent OS.
 //!
-//! Provides 40+ pluggable messaging integrations that convert platform messages
-//! into unified `ChannelMessage` events for the kernel.
+//! Every channel adapter is out-of-process — see `librefang.sidecar.adapters.*`
+//! in the SDK at `sdk/python/`. This crate owns the **trampoline** that
+//! connects the kernel to those sidecars (`sidecar.rs`), the shared bridge
+//! types every adapter speaks (`types`, `bridge`, `router`, `commands`,
+//! `formatter`, `sanitizer`, `roster`, `rate_limiter`, `thread_ownership`,
+//! `group_history`, `message_journal`, `message_truncator`,
+//! `attachment_enrich`), and the shared HTTP client (`http_client`).
 //!
-//! Channels are gated behind cargo feature flags (`channel-xxx`).
-//! The `default` feature enables popular channels; use `all-channels` for everything.
+//! No in-process channel adapters live here. Re-introducing one requires
+//! editing `crates/librefang-channels/src/channels-allowlist.txt` — see
+//! the file header and `xtask::ci::check_channel_policy`. New channels
+//! ship as sidecars; the policy ratchet enforces it.
 
 // Core infrastructure — always compiled
 pub mod attachment_enrich;
 pub mod bridge;
 pub mod commands;
+mod embedded_sdk;
 pub mod formatter;
 pub mod group_history;
 pub mod http_client;
@@ -27,51 +35,3 @@ pub use message_truncator::{
     split_to_utf16_chunks, truncate_to_utf16_limit, utf16_len, DISCORD_MESSAGE_LIMIT,
     TELEGRAM_CAPTION_LIMIT, TELEGRAM_MESSAGE_LIMIT,
 };
-
-// Individual channel adapters — feature-gated (alphabetical order)
-#[cfg(feature = "channel-bluesky")]
-pub mod bluesky;
-#[cfg(feature = "channel-dingtalk")]
-pub mod dingtalk;
-#[cfg(feature = "channel-discord")]
-pub mod discord;
-#[cfg(feature = "channel-email")]
-pub mod email;
-#[cfg(feature = "channel-feishu")]
-pub mod feishu;
-#[cfg(feature = "channel-google-chat")]
-pub mod google_chat;
-#[cfg(feature = "channel-line")]
-pub mod line;
-#[cfg(feature = "channel-matrix")]
-pub mod matrix;
-#[cfg(feature = "channel-mattermost")]
-pub mod mattermost;
-#[cfg(feature = "channel-nextcloud")]
-pub mod nextcloud;
-#[cfg(feature = "channel-qq")]
-pub mod qq;
-#[cfg(feature = "channel-reddit")]
-pub mod reddit;
-#[cfg(feature = "channel-rocketchat")]
-pub mod rocketchat;
-#[cfg(feature = "channel-signal")]
-pub mod signal;
-#[cfg(feature = "channel-slack")]
-pub mod slack;
-#[cfg(feature = "channel-teams")]
-pub mod teams;
-#[cfg(feature = "channel-twitch")]
-pub mod twitch;
-#[cfg(feature = "channel-webex")]
-pub mod webex;
-#[cfg(feature = "channel-webhook")]
-pub mod webhook;
-#[cfg(feature = "channel-wechat")]
-pub mod wechat;
-#[cfg(feature = "channel-wecom")]
-pub mod wecom;
-#[cfg(feature = "channel-whatsapp")]
-pub mod whatsapp;
-#[cfg(feature = "channel-zulip")]
-pub mod zulip;

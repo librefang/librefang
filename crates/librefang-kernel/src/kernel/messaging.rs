@@ -380,35 +380,24 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id)?;
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
-        let channels = &cfg.channels;
 
-        // Scan each channel type for the first instance whose default_agent
-        // names this agent. The `first` semantics match `channel_overrides`
-        // in channel_bridge.rs when multiple instances share a default_agent.
-        //
-        // `for_each_channel_field!` expands the exhaustive field list shared
-        // with `resolve_channel_owner` in channel_sender.rs — one edit point
-        // for all 40+ channel types keeps the two functions in sync.
-        macro_rules! check {
-            ($field:ident, $channel_name:literal) => {{
-                if let Some(entry) = channels
-                    .$field
-                    .iter()
-                    .find(|c| c.default_agent.as_deref() == Some(agent_name.as_str()))
-                {
-                    return Some(SenderContext {
-                        channel: $channel_name.to_string(),
-                        account_id: entry.account_id.clone(),
-                        use_canonical_session: true,
-                        ..Default::default()
-                    });
-                }
-            }};
-        }
-
-        crate::for_each_channel_field!(check);
-
-        None
+        // Every channel is a sidecar; scan `cfg.sidecar_channels` for the
+        // first entry whose `default_agent` names this agent. The effective
+        // channel key is `channel_type` when set, else the entry `name` —
+        // same mapping `sidecar_default_agent` in channel_sender.rs uses
+        // for the inverted lookup.
+        cfg.sidecar_channels.iter().find_map(|sc| {
+            if sc.default_agent.as_deref() != Some(agent_name.as_str()) {
+                return None;
+            }
+            let channel = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());
+            Some(SenderContext {
+                channel,
+                account_id: None,
+                use_canonical_session: true,
+                ..Default::default()
+            })
+        })
     }
 
     /// Send an ephemeral "side question" to an agent (`/btw` command).
@@ -764,6 +753,35 @@ impl LibreFangKernel {
         result.latency_ms = latency_ms;
 
         Ok(result)
+    }
+
+    /// Decide the channel scope used to derive the per-channel `SessionId`,
+    /// applying the reserved-name defense-in-depth (audit:
+    /// cron-channel-name-not-reserved).
+    ///
+    /// Even if a construction-site sanitizer was skipped, an external
+    /// `SenderContext` whose `channel` matches a reserved kernel system channel
+    /// (`cron`, `autonomous`, `webui` — case-insensitive) must NOT share a
+    /// `SessionId` with the internal cron / autonomous / webui paths.
+    /// `is_internal_system` is the `#[serde(skip)]` trust flag the kernel's own
+    /// system constructors (cron tick, autonomous background tick, web UI) set;
+    /// when it is false and the channel collides, the name is rewritten to
+    /// `ext-<name>` so derivation lands on a disjoint session. Trusted internal
+    /// paths return the channel verbatim and keep deriving the legacy
+    /// `for_channel(agent, "<name>")` SessionId, so existing persistent history
+    /// stays continuous.
+    ///
+    /// This is deliberately keyed on `is_internal_system`, not
+    /// `is_internal_cron`: the latter is cron-only (it also gates `[SILENT]`
+    /// marker stripping), so reusing it would leave the autonomous internal
+    /// path — which sets a reserved `"autonomous"` channel without
+    /// `is_internal_cron` — to be wrongly rewritten to `ext-autonomous`.
+    pub(super) fn resolve_scope_channel(channel: &str, is_internal_system: bool) -> String {
+        if is_internal_system || !librefang_channels::types::is_reserved_system_channel(channel) {
+            channel.to_string()
+        } else {
+            librefang_channels::types::sanitize_channel_name(channel)
+        }
     }
 
     /// Internal: send a message with all optional parameters (content blocks + sender context).
@@ -1511,11 +1529,21 @@ impl LibreFangKernel {
     /// Runs a normal streaming agent turn but with `incognito: true` in
     /// `LoopOptions` so session messages and proactive-memory writes are
     /// suppressed while memory reads remain full-access.
+    ///
+    /// `sender_context` is forwarded to the session resolver so per-chat
+    /// scoping (`SessionId::for_sender_scope`) fires when the caller is a
+    /// channel bridge. Passing `None` falls back to the per-agent
+    /// `Persistent` session pointer — appropriate for raw `api` callers
+    /// that don't identify a sender, but a silent privacy leak for channel
+    /// traffic. The HTTP `/message/stream` handler must build this from
+    /// the request body (see `request_sender_context` in
+    /// `crates/librefang-api/src/routes/agents.rs`).
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -1524,7 +1552,7 @@ impl LibreFangKernel {
     )> {
         let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         let effective_id = self
-            .resolve_assistant_target(agent_id, message, None)
+            .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
@@ -1547,7 +1575,7 @@ impl LibreFangKernel {
             effective_id,
             message,
             handle,
-            None,
+            sender_context,
             None,
             session_id_override,
             loop_opts,
@@ -1981,8 +2009,15 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    let derived =
-                        SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref());
+                    // Audit: cron-channel-name-not-reserved. Defense-in-depth
+                    // at the kernel boundary — see `resolve_scope_channel`.
+                    let scope_channel =
+                        Self::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
+                    let derived = SessionId::for_sender_scope(
+                        agent_id,
+                        &scope_channel,
+                        ctx.chat_id.as_deref(),
+                    );
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.
                     // Operators previously had no way to tell from logs
@@ -2407,6 +2442,40 @@ impl LibreFangKernel {
                 manifest.metadata.insert(
                     "sender_channel".to_string(),
                     serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+            // Approval-flow group-chat support: stamp the raw chat_id
+            // alongside sender_channel + sender_user_id so the
+            // runtime's tool dispatch can thread it into
+            // `DeferredToolExecution.chat_id` for the bridge's
+            // approval listener to route `[Approve] [Deny]` keyboards
+            // back to the originating conversation (group or DM)
+            // instead of always to the human's DM with the bot.
+            if let Some(ref cid) = ctx.chat_id {
+                if !cid.is_empty() {
+                    manifest.metadata.insert(
+                        "sender_chat_id".to_string(),
+                        serde_json::Value::String(cid.clone()),
+                    );
+                }
+            }
+            // #5227: stamp the chat-qualified scope derived via the same
+            // formula as `SessionId::for_sender_scope`. Adapters whose
+            // `channel` string already embeds the chat (WhatsApp gateway:
+            // `"whatsapp:<jid>"`) collapse to the bare channel; adapters
+            // that split the two across `channel = "telegram"` +
+            // `chat_id = "<chatId>"` (Telegram sidecar, Slack, Discord, …)
+            // gain a distinct scope per chat — required by the cross-chat
+            // memory-bleed filter in `auto_memorize` / `auto_retrieve` /
+            // `setup_recalled_memories`. Without this stamp those channels
+            // would share `sender_channel = "telegram"` across DM and
+            // group and the filter would be a no-op.
+            if let Some(scope) =
+                librefang_types::agent::compose_sender_scope(&ctx.channel, ctx.chat_id.as_deref())
+            {
+                manifest.metadata.insert(
+                    "sender_chat_scope".to_string(),
+                    serde_json::Value::String(scope),
                 );
             }
             if !ctx.display_name.is_empty() {

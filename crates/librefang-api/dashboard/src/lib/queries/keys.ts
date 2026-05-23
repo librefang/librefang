@@ -69,15 +69,26 @@ export const providerKeys = {
   lists: () => [...providerKeys.all, "list"] as const,
 };
 
+// Credential pools (#4965) — per-provider multi-key rotation status. Kept
+// hierarchical so an invalidate on `credentialPoolKeys.all` clears every
+// pool query after a mutation (future `auth pool add` / `strategy` HTTP
+// endpoint will live alongside `useCredentialPools`).
+export const credentialPoolKeys = {
+  all: ["credentialPools"] as const,
+  lists: () => [...credentialPoolKeys.all, "list"] as const,
+};
+
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
-  // Per-instance keys (#4837). Hierarchical so
-  // `invalidateQueries({ queryKey: channelKeys.all })` from any
-  // instance mutation also clears the channel list/snapshot
-  // (`instance_count` changes on every CRUD).
-  instances: (name: string) =>
-    [...channelKeys.all, "instances", name] as const,
+  // QR-login state polling (replaces the pre-migration wechatQrStart /
+  // wechatQrStatus / whatsappQrStart / whatsappQrStatus quadruple).
+  // Anchored under `channelKeys.all` so `invalidateQueries({ queryKey:
+  // channelKeys.all })` after a channel configure mutation also
+  // refreshes any open QR section — e.g. after the dashboard
+  // auto-persists the captured bot_token, the next QR poll surfaces
+  // any sidecar-restart-triggered state change.
+  qr: (name: string) => [...channelKeys.all, "qr", name] as const,
 };
 
 export const commsKeys = {
@@ -177,6 +188,16 @@ export const workflowKeys = {
     [...workflowKeys.runDetails(), runId] as const,
   templates: (filters: { q?: string; category?: string } = {}) =>
     [...workflowKeys.all, "templates", filters] as const,
+  // HITL operator-step pauses (#4977). Two surfaces:
+  //   - `operatorPause(runId)` — single-run inspector behind the
+  //     workflow-run detail panel; returns the artifact + allowed
+  //     actions.
+  //   - `pendingOperator()` — worklist across all currently-paused
+  //     operator runs.
+  operatorAll: () => [...workflowKeys.all, "operator"] as const,
+  operatorPause: (runId: string) =>
+    [...workflowKeys.operatorAll(), "pause", runId] as const,
+  pendingOperator: () => [...workflowKeys.operatorAll(), "pending"] as const,
 };
 
 export const scheduleKeys = {

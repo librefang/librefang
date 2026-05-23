@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 40;
+const SCHEMA_VERSION: u32 = 41;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -25,6 +25,75 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 current_version, SCHEMA_VERSION
             )),
         ));
+    }
+
+    // Boot-time ladder invariant: `MAX(migrations.version)` must not
+    // exceed `pragma user_version`. Each `migrate_vN` runs in its own
+    // transaction that bundles the DDL, the `INSERT INTO migrations`
+    // audit row, and the `set_schema_version` pragma bump — so under
+    // normal operation a mid-ladder crash rolls everything back atomically
+    // and the two stay in sync. Drift in the *opposite* direction
+    // (audit row present, pragma stuck behind) can still happen via:
+    //   * a refactor that moves `INSERT INTO migrations` or the pragma
+    //     update outside the per-step tx,
+    //   * manual operator surgery on one and not the other,
+    //   * two binaries racing on the same DB file.
+    // When that drift exists, the run_step! loop below would start from
+    // the wrong base (`current_version = user_version`) and silently
+    // re-apply DDL whose audit row already exists, corrupting subsequent
+    // ALTER TABLEs. Detect it here, before any per-step DDL runs.
+    //
+    // The opposite direction (`MAX(migrations) < user_version`) is the
+    // pre-#3538 audit-drift case, and is healed by the backfill at the
+    // end of this function — do not fail on it here.
+    //
+    // Skip this check on a fresh DB (`user_version == 0`): the
+    // `migrations` table itself is created by `migrate_v1`, so it does
+    // not yet exist on the very first boot.
+    //
+    // Operator recovery on `InconsistentLadder`: pick one side as
+    // canonical, then realign the other.
+    //   * If the live schema matches `table_max`:
+    //       `PRAGMA user_version = <table_max>;`
+    //   * If the live schema matches `pragma_user_version`:
+    //       `DELETE FROM migrations WHERE version > <pragma_user_version>;`
+    // Take a backup first; an incorrect choice will mis-route subsequent
+    // ALTER TABLEs.
+    if current_version > 0 {
+        let migrations_table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='migrations'",
+                [],
+                |row| row.get::<_, i64>(0).map(|n| n > 0),
+            )
+            .unwrap_or(false);
+        if migrations_table_exists {
+            let table_max: u32 = conn
+                .query_row(
+                    "SELECT IFNULL(MAX(version), 0) FROM migrations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if table_max > current_version {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                        extended_code: 0,
+                    },
+                    Some(format!(
+                        "InconsistentLadder: migrations audit table reports \
+                         MAX(version)={table_max} but pragma user_version={current_version}. \
+                         Refusing to apply migrations from an inconsistent base. \
+                         Recovery: if live schema matches version {table_max}, run \
+                         `PRAGMA user_version = {table_max};`. If it matches version \
+                         {current_version}, run `DELETE FROM migrations WHERE version > {current_version};`. \
+                         Back up the database first."
+                    )),
+                ));
+            }
+        }
     }
 
     macro_rules! run_step {
@@ -118,6 +187,22 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // `sessions.messages_generation` so the repair-skip optimisation
     // survives a reload instead of paying a full repair pass every boot.
     run_step!(40, migrate_v40);
+    // v41 (audit: sessions-missing-index): the hot path
+    // `count_agent_sessions_touched_since` (`SELECT COUNT(*) FROM
+    // sessions WHERE agent_id = ?1 AND updated_at > ?2`) and the
+    // per-agent cascade `DELETE FROM sessions WHERE agent_id = ?1`
+    // had no usable index — the closest was `idx_sessions_peer ON
+    // sessions(agent_id, peer_id)` from v16, which works only as a
+    // prefix scan and is named in a way that discourages future
+    // hinting. On any deployment with > a few thousand sessions
+    // both queries degraded to a full-table scan. Add a composite
+    // index that the planner picks unambiguously for both
+    // `WHERE agent_id = ?` and the `agent_id + updated_at`
+    // combined predicate. Also add a composite
+    // `audit_entries(agent_id, timestamp)` mirror so the same
+    // recency-by-agent shape is fast against the audit trail (v8
+    // only created two separate single-column indexes).
+    run_step!(41, migrate_v41);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1484,6 +1569,42 @@ fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// `column_exists` keeps every `ADD COLUMN` idempotent: fresh installs
 /// (whose v1 CREATE TABLE never carried these) and any DB already carrying
 /// the column from the legacy per-save ALTER both no-op cleanly.
+/// v41 (audit: sessions-missing-index): composite indexes on
+/// `sessions(agent_id, updated_at)` and `audit_entries(agent_id,
+/// timestamp)` to keep the per-agent recency hot paths off the
+/// full-table-scan plan. Both `CREATE INDEX IF NOT EXISTS` so a
+/// fresh boot is idempotent.
+fn migrate_v41(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- Composite index used by:
+        --   - count_agent_sessions_touched_since
+        --     (`WHERE agent_id = ?1 AND updated_at > ?2` — concurrent-
+        --      trigger admission check, runs on every fire)
+        --   - per-agent cascade DELETE on agent removal
+        --   - any future ORDER BY updated_at DESC LIMIT N scoped to
+        --     one agent (session timeline rendering)
+        -- v16 created `idx_sessions_peer ON sessions(agent_id, peer_id)`
+        -- which CAN serve `agent_id`-only scans as a prefix but is named
+        -- in a way that discourages future hinting; this index is the
+        -- explicit, intention-revealing one.
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated
+            ON sessions(agent_id, updated_at);
+
+        -- Companion composite for the audit trail: v8 created
+        -- single-column indexes on agent_id and timestamp, so
+        -- per-agent recency queries pick one or the other and pay
+        -- a sort. The composite lets the planner stream rows in
+        -- (agent_id, timestamp) order without a sort step.
+        CREATE INDEX IF NOT EXISTS idx_audit_agent_timestamp
+            ON audit_entries(agent_id, timestamp);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (41, datetime('now'), 'sessions(agent_id, updated_at) + audit_entries(agent_id, timestamp) composite indexes (audit: sessions-missing-index)');
+        ",
+    )
+}
+
 fn migrate_v40(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !column_exists(conn, "agents", "session_id") {
         conn.execute(
@@ -1591,6 +1712,104 @@ mod tests {
         }
     }
 
+    /// Boot-time ladder invariant: a DB whose `migrations` audit table
+    /// claims a higher MAX(version) than `pragma user_version` is in an
+    /// inconsistent state — `run_migrations` would otherwise restart
+    /// from the wrong base and re-apply DDL whose audit row already
+    /// exists, silently corrupting later ALTER TABLEs. Simulate the
+    /// drift, then assert `run_migrations` refuses to proceed and the
+    /// error message names both sides so the operator can recover.
+    #[test]
+    fn test_run_migrations_rejects_audit_ahead_of_pragma() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Simulate "audit row present, pragma stuck behind": insert a
+        // phantom future audit row without bumping user_version. This is
+        // what an out-of-tx INSERT (refactor regression) or manual
+        // operator surgery on one side would leave behind.
+        let phantom_version = SCHEMA_VERSION + 1;
+        conn.execute(
+            "INSERT INTO migrations (version, applied_at, description) \
+             VALUES (?1, datetime('now'), 'phantom test row')",
+            [phantom_version],
+        )
+        .unwrap();
+
+        let err = run_migrations(&conn).expect_err(
+            "run_migrations must refuse to proceed when MAX(migrations) > user_version",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("InconsistentLadder"),
+            "error must name the InconsistentLadder condition, got: {msg}"
+        );
+        assert!(
+            msg.contains(&phantom_version.to_string()),
+            "error must surface the table_max ({phantom_version}) for operator recovery, got: {msg}"
+        );
+        assert!(
+            msg.contains(&SCHEMA_VERSION.to_string()),
+            "error must surface the pragma user_version ({SCHEMA_VERSION}) for operator recovery, got: {msg}"
+        );
+    }
+
+    /// Happy path: a freshly migrated DB has `MAX(migrations.version) ==
+    /// pragma user_version` and re-running `run_migrations` is a no-op.
+    /// Guards against the invariant check itself spuriously tripping on
+    /// the common path.
+    #[test]
+    fn test_run_migrations_accepts_consistent_ladder() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let table_max: u32 = conn
+            .query_row("SELECT MAX(version) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        let user_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            table_max, user_version,
+            "fresh migrate must leave MAX(migrations)==user_version"
+        );
+
+        // Re-running on a consistent ladder must succeed.
+        run_migrations(&conn).expect("idempotent re-run on consistent ladder must succeed");
+    }
+
+    /// The pre-#3538 drift direction (`MAX(migrations) < user_version`)
+    /// is the legacy audit-trail drift that the backfill at the end of
+    /// `run_migrations` self-heals. The new invariant must NOT fail on
+    /// this direction or it would block every pre-#3538 prod DB from
+    /// upgrading. Guards against an over-eager equality check.
+    #[test]
+    fn test_run_migrations_tolerates_audit_behind_pragma() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Drop the last audit row to simulate the legacy drift.
+        conn.execute(
+            "DELETE FROM migrations WHERE version = ?1",
+            [SCHEMA_VERSION],
+        )
+        .unwrap();
+
+        // Must NOT error — the backfill heals this direction.
+        run_migrations(&conn)
+            .expect("MAX(migrations) < user_version is the #3538 self-heal path, not a fatal");
+
+        // Confirm the heal happened.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                [SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "backfill must restore the deleted audit row");
+    }
+
     /// Regression for #3538 follow-up: a DB whose migrations table is
     /// already drifted (some audit rows missing) must self-heal on the
     /// next `run_migrations` call instead of warning forever. Simulates
@@ -1678,7 +1897,11 @@ mod tests {
         )
         .unwrap();
         conn.pragma_update(None, "user_version", 37_i32).unwrap();
-        conn.execute("DELETE FROM migrations WHERE version = 38", [])
+        // Drop every audit row past v37 — a real DB at user_version=37
+        // would never have rows for v38+, and the boot-time ladder
+        // invariant (MAX(migrations) <= user_version) refuses to start
+        // otherwise.
+        conn.execute("DELETE FROM migrations WHERE version > 37", [])
             .unwrap();
 
         // Sanity: the legacy column is missing before the upgrade runs.
@@ -2486,5 +2709,92 @@ mod tests {
             )
             .unwrap();
         assert!(cleared.is_none(), "clearing model_override to NULL failed");
+    }
+
+    /// Audit: sessions-missing-index. After v41 both
+    /// `idx_sessions_agent_updated` (composite on sessions) and
+    /// `idx_audit_agent_timestamp` (composite on audit_entries) must
+    /// exist, and the planner must pick the new sessions index for
+    /// the `agent_id + updated_at` hot path that
+    /// `count_agent_sessions_touched_since` runs.
+    #[test]
+    fn migrate_v41_creates_composite_indexes_used_by_hot_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sessions_idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='index' AND name='idx_sessions_agent_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(
+            sessions_idx.as_deref(),
+            Some("idx_sessions_agent_updated"),
+            "v41 must create idx_sessions_agent_updated on sessions(agent_id, updated_at)"
+        );
+
+        let audit_idx: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='index' AND name='idx_audit_agent_timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(
+            audit_idx.as_deref(),
+            Some("idx_audit_agent_timestamp"),
+            "v41 must create idx_audit_agent_timestamp on audit_entries(agent_id, timestamp)"
+        );
+
+        // Verify the planner actually picks the new index for the
+        // canonical hot-path query. `EXPLAIN QUERY PLAN` returns
+        // a row whose `detail` column (index 3) names the chosen
+        // strategy. The audit doc's regression is "degrades to
+        // full-table scan" — we assert against that by requiring
+        // the new index name appears in the plan.
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
+            )
+            .unwrap()
+            .query_map(["a", "2000-01-01"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let plan_text = plan.join("\n");
+        assert!(
+            plan_text.contains("idx_sessions_agent_updated"),
+            "count_agent_sessions_touched_since must use the new composite index, \
+             planner picked: {plan_text}"
+        );
+    }
+
+    #[test]
+    fn migrate_v41_is_idempotent() {
+        // Re-running migrations must not fail or change anything. The
+        // ladder runner exits at user_version = SCHEMA_VERSION and the
+        // index DDL itself uses IF NOT EXISTS as a second safety net.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_sessions_agent_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "v41 sessions index must exist exactly once after repeated boots"
+        );
     }
 }

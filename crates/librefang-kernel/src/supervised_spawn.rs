@@ -92,6 +92,71 @@ mod tests {
         assert!(result.is_ok(), "supervised handle must not propagate panic");
     }
 
+    /// Regression for the MCP-reconnect detached spawn (#5598): when the
+    /// future passed to `spawn_supervised` panics, the wrapper MUST emit
+    /// an `error!`-level log line carrying both the task name and the
+    /// panic payload. The `routes::skills::add/update/patch_mcp_server`
+    /// handlers spawn `connect_mcp_servers` fire-and-forget; without this
+    /// log the operator has no signal that the connection task died.
+    // Same `current_thread` constraint as `supervised_task_inherits_caller_span`.
+    #[tokio::test]
+    async fn panic_emits_error_log_with_task_name_and_payload() {
+        use std::io;
+        use std::sync::Mutex;
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let h = spawn_supervised("connect_mcp_servers_after_add", async {
+            panic!("simulated mcp connect failure");
+        });
+        h.await.expect("supervised handle must resolve cleanly");
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            captured.contains("ERROR"),
+            "expected ERROR-level log, captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("supervised task panicked"),
+            "expected supervisor message, captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("connect_mcp_servers_after_add"),
+            "expected task name in log, captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("simulated mcp connect failure"),
+            "expected panic payload in log, captured: {captured:?}"
+        );
+    }
+
     /// Regression: spawned future must inherit the calling task's tracing
     /// span so events emitted inside it carry `agent.id` / `session.id` set
     /// by `#[instrument]` on `run_agent_loop`. Without `.in_current_span()`

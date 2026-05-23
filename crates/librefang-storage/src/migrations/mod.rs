@@ -173,4 +173,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "sessions_model_override_v1",
         sql: include_str!("sql/029_sessions_model_override.surql"),
     },
+    Migration {
+        version: 30,
+        name: "composite_indexes_v1",
+        sql: include_str!("sql/030_composite_indexes.surql"),
+    },
 ];

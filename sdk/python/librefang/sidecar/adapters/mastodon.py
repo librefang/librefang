@@ -64,36 +64,20 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 # Mastodon's default per-status length limit. Some instances configure
 # higher limits (1000–4000); override via MASTODON_MAX_MESSAGE_LEN.
 DEFAULT_MAX_MESSAGE_LEN = 500
 SSE_RECONNECT_DELAY_SECS = 5
 POLL_INTERVAL_SECS = 5
-MAX_BACKOFF_SECS = 60.0
 SEND_TIMEOUT_SECS = 15
 DEFAULT_VISIBILITY = "unlisted"
 _ALLOWED_VISIBILITIES = {"public", "unlisted", "private", "direct"}
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Matches the Rust ``split_message`` helper used across channels."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 
 def _strip_html_tags(value: str) -> str:
     """Strip HTML tags from a Mastodon status body and decode entities.
@@ -201,20 +185,72 @@ class MastodonAdapter(SidecarAdapter):
             h.update(extra)
         return h
 
+    @staticmethod
+    def _response_headers(resp_or_err) -> dict:
+        """Pull headers off either a successful response or an HTTPError
+        and normalise keys to lowercase so callers can do
+        case-insensitive lookups (notably for ``Retry-After`` on 429)."""
+        hdrs = getattr(resp_or_err, "headers", None)
+        if hdrs is None:
+            return {}
+        try:
+            return {k.lower(): v for k, v in hdrs.items()}
+        except Exception:  # noqa: BLE001 — defensive against odd shims
+            return {}
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the producer for more than a minute. We don't
+        decode the HTTP-date form — Mastodon's rate-limit replies use
+        seconds in practice, and the fallback covers any divergence."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
+
+    def _sleep_on_429_then_raise(self, resp_hdrs: dict, where: str) -> None:
+        """Common 429 handler: honour ``Retry-After`` then raise so the
+        producer's outer backoff pauses before its next pass. Without
+        the sleep the 1 s → 60 s exponential backoff would keep probing
+        inside the server-side rate-limit window and extend it."""
+        wait = self._retry_after_secs(resp_hdrs)
+        log.warn(
+            f"mastodon 429 on {where}; sleeping",
+            retry_after_secs=wait,
+        )
+        time.sleep(wait)
+        raise RuntimeError("mastodon 429 — rate-limited")
+
     def _verify_credentials(self) -> str:
         """Validate the token and discover the bot's own account id.
         Returns the username for logging. Raises on auth failure."""
         url = f"{self.instance_url}/api/v1/accounts/verify_credentials"
         req = urllib.request.Request(url, headers=self._auth_headers())
-        with urllib.request.urlopen(  # noqa: S310 — configured URL
-            req, timeout=SEND_TIMEOUT_SECS,
-        ) as resp:
-            status = getattr(resp, "status", 200)
-            if status != 200:
-                raise RuntimeError(
-                    f"verify_credentials HTTP {status}"
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status != 200:
+                    raise RuntimeError(
+                        f"verify_credentials HTTP {status}"
+                    )
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Mastodon rate-limits unauthenticated / failed-auth
+                # probes; the verify retry loop would otherwise compound
+                # with the server-side window.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "verify_credentials",
                 )
-            body = json.loads(resp.read().decode("utf-8"))
+            raise
         self.own_account_id = body.get("id") or ""
         return body.get("username") or "unknown"
 
@@ -258,13 +294,25 @@ class MastodonAdapter(SidecarAdapter):
         if in_reply_to:
             metadata["in_reply_to_id"] = in_reply_to
 
+        # `status_id` is the id of the mention itself — i.e. the status
+        # we want to reply TO when the bot answers. The pre-fix
+        # behaviour surfaced `in_reply_to` here (the PARENT the mention
+        # was responding to), which had two bugs at once: (1) the wrong
+        # target — the bot would reply to whoever the user was
+        # responding to, not the user; (2) the daemon's bridge only
+        # round-trips `thread_id` under
+        # `[channels.mastodon.overrides] threading = true` AND `thread`
+        # capability, neither of which mastodon has, so the field was
+        # always `None` in `on_send` regardless. Both fixed by using
+        # `librefang_user` (always round-tripped) as the carrier.
         return protocol.message(
             user_id=account_id,
             user_name=display_name,
             content=content,
             message_id=status_id,
             is_group=False,
-            thread_id=in_reply_to,
+            librefang_user=status_id or None,
+            thread_id=status_id or None,
             metadata=metadata,
         )
 
@@ -276,7 +324,17 @@ class MastodonAdapter(SidecarAdapter):
         headers = self._auth_headers({"Accept": "text/event-stream"})
         req = urllib.request.Request(url, headers=headers)
         # No read timeout: SSE is a long-lived stream.
-        with urllib.request.urlopen(req) as resp:  # noqa: S310 — configured URL
+        try:
+            resp_cm = urllib.request.urlopen(req)  # noqa: S310 — configured URL
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Initial SSE subscribe rate-limited; honour Retry-After
+                # before the producer's reconnect path retries.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "SSE subscribe",
+                )
+            raise
+        with resp_cm as resp:
             status = getattr(resp, "status", 200)
             if status != 200:
                 raise RuntimeError(f"SSE HTTP {status}")
@@ -315,13 +373,22 @@ class MastodonAdapter(SidecarAdapter):
         if since_id:
             url += f"&since_id={urllib.parse.quote(since_id)}"
         req = urllib.request.Request(url, headers=self._auth_headers())
-        with urllib.request.urlopen(  # noqa: S310 — configured URL
-            req, timeout=SEND_TIMEOUT_SECS,
-        ) as resp:
-            status = getattr(resp, "status", 200)
-            if status != 200:
-                raise RuntimeError(f"poll HTTP {status}")
-            notifs = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — configured URL
+                req, timeout=SEND_TIMEOUT_SECS,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status != 200:
+                    raise RuntimeError(f"poll HTTP {status}")
+                notifs = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Polling rate-limited; honour Retry-After then raise so
+                # the outer backoff pauses before the next poll pass.
+                self._sleep_on_429_then_raise(
+                    self._response_headers(e), "notifications poll",
+                )
+            raise
         if not isinstance(notifs, list):
             return since_id
         # Mastodon returns newest-first. Capture the first ID as the
@@ -330,7 +397,12 @@ class MastodonAdapter(SidecarAdapter):
         newest = None
         if notifs and isinstance(notifs[0], dict):
             newest = str(notifs[0].get("id") or "") or None
-        for notif in notifs:
+        # Emit oldest-first so a burst of mentions caught in one poll
+        # reaches the agent in conversation order. The list is
+        # newest-first off the wire (and the high-water mark above is
+        # taken from notifs[0] accordingly); the Rust adapter iterated it
+        # as-is and delivered multi-mention bursts backwards.
+        for notif in reversed(notifs):
             if not isinstance(notif, dict):
                 continue
             ev = self._parse_notification(notif)
@@ -446,6 +518,14 @@ class MastodonAdapter(SidecarAdapter):
                         raise RuntimeError(f"post HTTP {status}")
                     resp_body = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    # POST /statuses is rate-limited independently of
+                    # auth. Honour Retry-After and raise;
+                    # `suppress_error_responses=True` keeps the raise
+                    # from echoing as a public toot.
+                    self._sleep_on_429_then_raise(
+                        self._response_headers(e), "status POST",
+                    )
                 err_body = e.read().decode("utf-8", "replace")
                 raise RuntimeError(
                     f"mastodon post {e.code}: {err_body}"
@@ -463,14 +543,35 @@ class MastodonAdapter(SidecarAdapter):
             text = "(Unsupported content type)"
         else:
             text = cmd.text or ""
-        # `cmd.thread_id` carries the in_reply_to_id from the inbound
-        # mention (we surfaced it as the metadata.in_reply_to_id and
-        # the SDK forwards it on send). When set, post as a reply.
-        thread_id = getattr(cmd, "thread_id", None)
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id) if thread_id else None
+        # Primary recovery: cmd.user["librefang_user"] carries the
+        # status_id of the mention the bot is replying TO (set in
+        # _parse_notification — librefang_user round-trips bytewise
+        # through the bridge regardless of capabilities/overrides).
+        # Fallback to cmd.thread_id for the forward-compat
+        # threading=true path (would also require a future
+        # `thread` capability declaration).
+        in_reply_to: "Optional[str]" = None
+        user = getattr(cmd, "user", None) or {}
+        if isinstance(user, dict):
+            candidate = user.get("librefang_user")
+            # Guard: librefang_user is shared across channels (dingtalk
+            # puts a sessionWebhook URL, telegram puts @username, …).
+            # Mastodon status ids are typically pure-digit strings on
+            # mastodon.social but opaque alphanumerics on some forks —
+            # keep the guard generic (no URL, no whitespace, no @).
+            if (isinstance(candidate, str) and candidate
+                    and not candidate.startswith(("http://", "https://", "@"))
+                    and " " not in candidate
+                    and "\t" not in candidate):
+                in_reply_to = candidate
+        if in_reply_to is None:
+            thread_id = getattr(cmd, "thread_id", None)
+            if thread_id is not None and not isinstance(thread_id, str):
+                thread_id = str(thread_id) if thread_id else None
+            in_reply_to = thread_id
+
         await asyncio.get_event_loop().run_in_executor(
-            None, self._post_status, text, thread_id,
+            None, self._post_status, text, in_reply_to,
         )
 
 

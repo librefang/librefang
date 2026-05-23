@@ -2161,7 +2161,7 @@ function CanvasPageInner() {
               <span className="hidden sm:inline">{t("canvas.save_as_template")}</span>
             </Button>
             <Button variant="ghost" onClick={() => setShowScheduleModal(true)} disabled={!selectedWorkflow?.id}
-              title={t("nav.scheduler")}>
+              title={selectedWorkflow?.id ? t("nav.scheduler") : t("canvas.save_before_schedule", { defaultValue: "Save the workflow before scheduling" })}>
               <Calendar className="w-4 h-4 mr-1" />
               <span className="hidden sm:inline">{t("nav.scheduler")}</span>
             </Button>

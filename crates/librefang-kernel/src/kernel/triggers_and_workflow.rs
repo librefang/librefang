@@ -263,6 +263,11 @@ impl LibreFangKernel {
             }
         }
 
+        // Capture event.timestamp before the bus move — the trigger
+        // dispatcher below uses it as the deterministic fire instant for
+        // `SessionId::for_trigger_fire`. audit: trigger-new-session-non-deterministic.
+        let event_timestamp = event.timestamp;
+
         // Publish to the event bus
         self.events.event_bus.publish(event).await;
 
@@ -285,8 +290,9 @@ impl LibreFangKernel {
         //
         // Resolution order for effective session mode:
         //   trigger_match.session_mode_override → manifest.session_mode.
-        // We materialize `SessionId::new()` only when the resolved mode is
-        // `New`; persistent fires reuse the canonical session and must
+        // We materialize a deterministic `SessionId::for_trigger_fire`
+        // override only when the resolved mode is `New`; persistent fires
+        // reuse the canonical session and must
         // serialize at the per-agent mutex, so we leave session_id_override
         // = None for them.
         // Bug #3841: burst events fire triggers out-of-order via independent
@@ -332,7 +338,10 @@ impl LibreFangKernel {
                 // the dispatch target. For agent-dispatch triggers, look up the
                 // manifest session_mode and skip if the agent has been deleted.
                 let (session_id_override, agent_sem) = if workflow_id.is_some() {
-                    // Workflow path: no per-agent semaphore or session needed.
+                    // Workflow path: per-agent semaphore is acquired per step
+                    // inside the `run_workflow::send_message` closure (keyed on
+                    // the resolved step target), not here on the trigger owner.
+                    // Session is materialized per step by the resolver too.
                     (None, None)
                 } else {
                     // Agent path: resolve effective session mode.
@@ -341,8 +350,21 @@ impl LibreFangKernel {
                         None => continue,
                     };
                     let effective_mode = mode_override.unwrap_or(manifest_mode);
+                    // audit: trigger-new-session-non-deterministic
+                    // `SessionId::new()` here was a random v4 UUID, which
+                    // made "trigger X fired at T" log lines impossible to
+                    // correlate to the actual SessionId for diagnostics.
+                    // Mirror cron's `for_cron_run` shape: derive a
+                    // deterministic v5 UUID from
+                    // `(agent, trigger_id, event_timestamp)` so the SessionId
+                    // is reproducible from logs after the fact. `event_timestamp`
+                    // is the canonical fire instant — the same value the
+                    // trigger registry stamps into `last_fired_at` (captured
+                    // before the event was moved into the bus publish).
                     let sid_override = match effective_mode {
-                        librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                        librefang_types::agent::SessionMode::New => Some(
+                            SessionId::for_trigger_fire(aid, trigger_id.0, event_timestamp),
+                        ),
                         librefang_types::agent::SessionMode::Persistent => None,
                     };
                     let agent_sem = kernel.agent_concurrency_for(aid);
@@ -451,12 +473,22 @@ impl LibreFangKernel {
                                             workflow_id = %wid_str,
                                             "Trigger fired workflow (async)"
                                         );
-                                        // Spawn the run so the Lane::Trigger permit drops as
-                                        // soon as this iteration yields. A slow workflow must
-                                        // not pin Lane::Trigger kernel-wide (default lane cap
-                                        // is 8 per CLAUDE.md), starving agent-path triggers.
-                                        // Mirrors the fire-and-forget shape of
-                                        // WorkflowRunner::start_workflow_async (#4910).
+                                        // Hold the Lane::Trigger permit for the full
+                                        // duration of the workflow run, NOT just the
+                                        // resolution above. Earlier code released the
+                                        // permit as soon as this iteration yielded
+                                        // (the permit lived on the loop stack, not in
+                                        // the spawn), so N bursty workflow triggers
+                                        // produced N concurrent workflow runs that
+                                        // escaped the `queue.concurrency.trigger_lane`
+                                        // invariant (default 8). The audit doc
+                                        // `docs/issues/workflow-path-drops-lane-permit.md`
+                                        // calls this out; fix is option 1 (move the
+                                        // permit into the spawn). Per-fire
+                                        // `fire_timeout` still bounds permit-hold
+                                        // duration, so a stuck workflow cannot pin
+                                        // Lane::Trigger kernel-wide.
+                                        let lane_permit_for_spawn = _lane_permit;
                                         let kernel_for_spawn = std::sync::Arc::clone(&kernel);
                                         let wid_for_spawn = wid_str.clone();
                                         let trigger_id_for_spawn = trigger_id;
@@ -492,6 +524,14 @@ impl LibreFangKernel {
                                                     );
                                                 }
                                             }
+                                            // Lane::Trigger permit is dropped here,
+                                            // when the spawned future ends — held for
+                                            // the full workflow run, not just for
+                                            // resolution. Explicit drop documents
+                                            // intent (the `_`-prefixed binding hint
+                                            // would otherwise allow Rust to drop it
+                                            // immediately).
+                                            drop(lane_permit_for_spawn);
                                         });
                                     }
                                     None => {
@@ -606,16 +646,25 @@ impl LibreFangKernel {
                 )));
             }
         }
-        let id = self.workflows.triggers.register_with_target(
-            agent_id,
-            pattern,
-            prompt_template,
-            max_fires,
-            target_agent,
-            cooldown_secs,
-            session_mode,
-            workflow_id,
-        );
+        // Propagate the per-agent cap as InvalidInput rather than
+        // silently dropping (audit: trigger-engine-no-per-agent-cap).
+        // The route handler will return 400 so the operator sees
+        // exactly why the registration failed — same envelope as
+        // every other client-error path through this endpoint.
+        let id = self
+            .workflows
+            .triggers
+            .register_with_target(
+                agent_id,
+                pattern,
+                prompt_template,
+                max_fires,
+                target_agent,
+                cooldown_secs,
+                session_mode,
+                workflow_id,
+            )
+            .map_err(|e| KernelError::LibreFang(LibreFangError::InvalidInput(e.to_string())))?;
         if let Err(e) = self.workflows.triggers.persist() {
             warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
         }
@@ -728,10 +777,30 @@ impl LibreFangKernel {
         // Threaded into `send_message_full`'s existing `session_mode_override`
         // slot so workflow-step-driven dispatch reuses the same session-id
         // resolution path as cron and trigger fires.
+        //
+        // Per-agent semaphore (audit fix for `triggers_and_workflow.rs:334-336`):
+        // The trigger-dispatcher path intentionally skips the per-agent
+        // semaphore for workflow-id triggers because the actual per-agent
+        // LLM call happens here — one acquire per workflow step, keyed on
+        // the *step target* (which may differ from the workflow owner). A
+        // fan-out layer that targets the same agent N times now serializes
+        // through `agent_concurrency_for(agent_id)` instead of bypassing
+        // `max_concurrent_invocations`. The permit is held across
+        // `send_message_full` and released on drop at the end of this
+        // future, exactly as the trigger and cron paths do.
         let send_message =
             |agent_id: AgentId,
              message: String,
              session_mode_override: Option<librefang_types::agent::SessionMode>| async move {
+                let sem = self.agent_concurrency_for(agent_id);
+                let _agent_permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        return Err(format!(
+                            "agent {agent_id} concurrency semaphore closed during workflow step"
+                        ))
+                    }
+                };
                 self.send_message_full(
                     agent_id,
                     &message,
@@ -919,6 +988,20 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
                   session_mode_override: Option<librefang_types::agent::SessionMode>| {
                 let k = send_kernel.clone();
                 async move {
+                    // Mirror the per-agent semaphore acquire from
+                    // `run_workflow::send_message`: the timeout-driven
+                    // resume path also invokes step LLM calls that must
+                    // honour `max_concurrent_invocations` keyed on the
+                    // resolved target agent.
+                    let sem = k.agent_concurrency_for(agent_id);
+                    let _agent_permit = match sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            return Err(format!(
+                            "agent {agent_id} concurrency semaphore closed during workflow resume"
+                        ))
+                        }
+                    };
                     k.send_message_full(
                         agent_id,
                         &message,
@@ -975,5 +1058,62 @@ impl LibreFangKernel {
                 kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod trigger_dispatch_session_id_tests {
+    //! audit: trigger-new-session-non-deterministic
+    //!
+    //! Contract tests pinning the SessionId materialized for `SessionMode::New`
+    //! trigger fires. Mirrors `fire_session_override_new_matches_for_cron_run_contract_3657`
+    //! in `crates/librefang-kernel/src/cron.rs` so both audit paths fail loudly
+    //! if anyone changes the derivation shape (timestamp precision, separator,
+    //! ordering, namespace) without updating the corresponding helper.
+    //!
+    //! These are unit tests on the helper rather than full publish_event paths
+    //! because spinning a real LibreFangKernel inside this file would pull in
+    //! the full integration harness — the integration suite already covers
+    //! the dispatcher end-to-end (`crates/librefang-api/tests/`).
+    use chrono::TimeZone;
+    use librefang_types::agent::{AgentId, SessionId};
+
+    /// Regression for the audit item: pin the exact session id a `New`-mode
+    /// trigger fire receives. If anyone changes the derivation shape without
+    /// updating `SessionId::for_trigger_fire`, this test fails loudly. This
+    /// pins the helper contract the dispatcher's `New` arm relies on; that the
+    /// dispatcher actually calls `for_trigger_fire` (and not the original
+    /// random `SessionId::new()`) is exercised end-to-end in
+    /// `crates/librefang-api/tests/`.
+    #[test]
+    fn fire_session_override_new_matches_for_trigger_fire_contract() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let fire_time = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+
+        let sid = SessionId::for_trigger_fire(agent, trigger_id, fire_time);
+
+        // Determinism: a second call with identical inputs must produce the
+        // same SessionId. Random `SessionId::new()` would fail this.
+        assert_eq!(
+            sid,
+            SessionId::for_trigger_fire(agent, trigger_id, fire_time),
+            "for_trigger_fire must be deterministic over (agent, trigger_id, fire_time); \
+             see docs/issues/trigger-new-session-non-deterministic.md"
+        );
+
+        // A different fire_time on the same agent/trigger must NOT collide,
+        // even at sub-second resolution — log correlation requires that two
+        // burst fires of the same event-triggered job land on distinct ids.
+        let later = fire_time + chrono::Duration::nanoseconds(1);
+        assert_ne!(
+            sid,
+            SessionId::for_trigger_fire(agent, trigger_id, later),
+            "consecutive fires must yield distinct SessionIds"
+        );
     }
 }

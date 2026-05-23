@@ -8,21 +8,18 @@ name: Coverage
 #
 # See issue #3819 for context.
 
+# Runs on push to main only. Coverage is a report-only trend metric: the
+# full instrumented `cargo llvm-cov nextest --workspace` (~20-30 min) used
+# to run on every PR, where it duplicated the per-PR test lane to produce
+# a number that gates no merge. The main-branch series is all the trend
+# needs; per-PR runs were pure waste. Use `workflow_dispatch` for an
+# ad-hoc run (e.g. to refresh the LCOV artifact).
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    # Skip coverage on PRs whose entire diff is non-runtime files. The
-    # workflow runs `cargo llvm-cov nextest --workspace` (~20-30 min) and
-    # is report-only, so spending the time on a PR that can't shift the
-    # number is pure waste. `paths-ignore` skips the workflow only when
-    # *every* changed path matches — a PR that touches a real crate plus
-    # one of these still runs.
-    #
-    # Companion to ci.yml's `full_test` gating (#4533): same intent, but
-    # this workflow has no `Detect Changes` step of its own, so we filter
-    # at the trigger layer rather than per-job.
+    # Skip coverage when a main push's entire diff is non-runtime files —
+    # it cannot shift the number, so the ~20-30 min run is pure waste.
+    # `paths-ignore` skips only when *every* changed path matches.
     paths-ignore:
       - 'docs/**'
       - '**.md'
@@ -41,13 +38,16 @@ on:
       - '.gitignore'
       - '.editorconfig'
       - '.secrets.baseline'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
+  # Each main commit's coverage is its own data point — never cancel an
+  # in-progress run when a newer commit lands.
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always

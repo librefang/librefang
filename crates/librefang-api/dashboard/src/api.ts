@@ -135,55 +135,24 @@ export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
-  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
-   *  `0` means no instances; `1` matches the legacy single-instance shape. */
-  instance_count?: number;
+  /** True iff every required secret env var on the sidecar manifest
+   *  is present and non-empty. The backend computes this per row. */
   has_token?: boolean;
   category?: string;
   description?: string;
   icon?: string;
-  difficulty?: string;
-  setup_time?: string;
-  quick_setup?: string;
-  setup_type?: string;
-  setup_steps?: string[];
+  /** Schema-driven configure form for a sidecar adapter (returned by
+   *  `python -m <module> --describe` and cached daemon-side). */
   fields?: ChannelField[];
-  /** TOML snippet shown for read-only sidecar discovery rows so operators
-   *  can copy it into config.toml. Backend always emits this; the UI only
-   *  renders it for `category === "sidecar"` to avoid noise on regular
-   *  CHANNEL_REGISTRY rows that already have a setup form. */
+  /** Read-only TOML snippet the operator can copy into config.toml
+   *  if they prefer hand-editing over the configure drawer. Emitted
+   *  by the backend on every row. */
   config_template?: string;
-  /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
-  webhook_endpoint?: string;
   /** Messages exchanged through this channel in the last 24 hours.
    *  Computed via a single grouped query on `usage_events` keyed by
    *  the `channel` column. Surfaced as the `kind · N msgs/24h`
    *  meta-line on the Channels page card. */
   msgs_24h?: number;
-}
-
-/** One configured `[[channels.<name>]]` instance. (#4837) */
-export interface ChannelInstance {
-  /** Array index — stable within a session, may shift after a delete.
-   *  Always re-fetch the list after a mutation. */
-  index: number;
-  /** Field schema with per-instance `value` and `has_value` populated. */
-  fields: ChannelField[];
-  /** Raw per-instance config map keyed by field. */
-  config: Record<string, unknown>;
-  /** True iff every required secret env var (the env var the instance's
-   *  field points at) is present and non-empty. */
-  has_token: boolean;
-  /** Compare-and-swap token. Send back unchanged on PUT/DELETE so the
-   *  server can reject the write if a concurrent edit shifted indices
-   *  or modified this instance after the list was read (#4865). */
-  signature: string;
-}
-
-export interface ChannelInstancesResponse {
-  channel: string;
-  items: ChannelInstance[];
-  total: number;
 }
 
 export interface SkillItem {
@@ -526,6 +495,15 @@ export interface AgentMessageResponse {
   memories_saved?: string[];
   memories_used?: string[];
   thinking?: string;
+  /**
+   * Issue #5199 — session id the server actually used for this turn.
+   * Populated only when the request omitted `session_id`, so the
+   * dashboard's HTTP fallback path can auto-pin `?sessionId=` in the
+   * URL exactly like the WS `response` path does. Mirrors the WS
+   * handler's `explicit_session.is_none()` branch in `ws.rs`. Absent
+   * when the caller pinned an explicit session in the request.
+   */
+  session_id?: string;
 }
 
 export interface SendAgentMessageOptions {
@@ -708,7 +686,15 @@ export interface CronJobItem {
   id?: string;
   enabled?: boolean;
   name?: string;
-  schedule?: string;
+  /**
+   * Cron schedule descriptor. The backend serializes
+   * `librefang_types::scheduler::CronSchedule` as a tagged object
+   * (`{ kind: "cron" | "every" | "at", … }`), so consumers must narrow
+   * before reading fields. Older code paths sometimes received a
+   * pre-rendered string; keep the union for back-compat (see
+   * `HandsPage.tsx::resolveCronSchedule` for an example consumer).
+   */
+  schedule?: string | CronScheduleSpec;
   [key: string]: unknown;
 }
 
@@ -1427,10 +1413,24 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
   }
 }
 
+/**
+ * Schedule-mode payload accepted by `PATCH /api/agents/{id}`.
+ *
+ * Mirrors the Rust `librefang_types::agent::ScheduleMode` enum which is
+ * `#[serde(rename_all = "snake_case")]` (externally tagged). The unit
+ * variant (`reactive`) is the bare string `"reactive"`; the
+ * fielded variants are wrapped objects (`{ continuous: { … } }`).
+ */
+export type AgentSchedulePatch =
+  | "reactive"
+  | { periodic: { cron: string } }
+  | { proactive: { conditions: string[] } }
+  | { continuous: { check_interval_secs: number } };
+
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
- * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
+ * system_prompt, mcp_servers, model, schedule). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
@@ -1539,6 +1539,33 @@ export async function sendAgentMessage(
 export async function listProviders(): Promise<ProviderItem[]> {
   const data = await get<ProvidersResponse>("/api/providers");
   return data.providers ?? [];
+}
+
+// ── Credential pools (#4965) ────────────────────────────────────────────────
+
+/// Per-credential redacted snapshot returned by `GET /api/credential-pools`.
+/// `cooldown_remaining_secs` is either a number (seconds until cooldown
+/// expires) or the literal string `"permanent"` for keys marked invalid by
+/// a 401/403 response.
+export interface CredentialPoolKeySnapshot {
+  label: string;
+  key_hint: string;
+  priority: number;
+  request_count: number;
+  is_exhausted: boolean;
+  cooldown_remaining_secs: number | "permanent" | null;
+}
+
+export interface CredentialPoolStatus {
+  provider: string;
+  strategy: "fill_first" | "round_robin" | "random" | "least_used";
+  available_count: number;
+  total_count: number;
+  credentials: CredentialPoolKeySnapshot[];
+}
+
+export async function listCredentialPools(): Promise<CredentialPoolStatus[]> {
+  return get<CredentialPoolStatus[]>("/api/credential-pools");
 }
 
 export async function testProvider(providerId: string): Promise<ApiActionResponse> {
@@ -1740,14 +1767,6 @@ export async function listChannels(): Promise<ChannelItem[]> {
   return data.items ?? [];
 }
 
-export async function testChannel(channelName: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/test`, {});
-}
-
-export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
-}
-
 export interface SidecarSaveResult {
   status: "saved";
   restart_required: boolean;
@@ -1780,82 +1799,72 @@ export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
 
-// Per-instance channel management (#4837).
-//
-// The legacy `configureChannel` overwrites the single `[channels.<name>]`
-// section. The four functions below let the dashboard manage individual
-// `[[channels.<name>]]` array entries — supporting multiple Telegram bots,
-// Slack workspaces, etc. on the same channel type.
+/** One QR-login lifecycle state, mirrors `QrStatusKind` in the
+ * `librefang-channels` crate. Wire form is snake_case per the
+ * `#[serde(rename_all = "snake_case")]` on the Rust enum. */
+export type QrStatusKind =
+  | "pending"
+  | "scanning"
+  | "confirmed"
+  | "expired"
+  | "failed";
 
-export async function listChannelInstances(channelName: string): Promise<ChannelInstancesResponse> {
-  return get<ChannelInstancesResponse>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-  );
-}
-
-export async function createChannelInstance(
-  channelName: string,
-  fields: Record<string, unknown>,
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  return post<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances`,
-    { fields },
-  );
-}
-
-export async function updateChannelInstance(
-  channelName: string,
-  index: number,
-  fields: Record<string, unknown>,
-  signature: string,
-  clearSecrets?: string[],
-): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
-  const body: Record<string, unknown> = { fields, signature };
-  if (clearSecrets && clearSecrets.length > 0) body.clear_secrets = clearSecrets;
-  return put<{ index: number; activated: boolean; started_channels: string[] }>(
-    `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
-    body,
-  );
-}
-
-export async function deleteChannelInstance(
-  channelName: string,
-  index: number,
-  signature: string,
-): Promise<void> {
-  const qs = `?signature=${encodeURIComponent(signature)}`;
-  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}${qs}`);
-}
-
-export interface QrStartResponse {
-  available: boolean;
-  qr_code?: string;
+/** Projection of `ChannelStatus.qr` returned by
+ * `GET /api/channels/{name}/qr`. Lifecycle:
+ * - `pending` — sidecar fetched a QR; render and wait.
+ * - `scanning` — user scanned, platform is finalising.
+ * - `confirmed` — login succeeded; the sidecar's in-memory session
+ *    continues with the captured credential. The operator follows
+ *    the `message` ("set WECHAT_BOT_TOKEN in secrets.env to skip QR
+ *    next time") to persist; auto-persist was dropped because the
+ *    only available endpoint is a full-form upsert that would wipe
+ *    other schema-managed env keys on a partial save.
+ * - `expired` / `failed` — terminal failure; show `message`.
+ *
+ * `updated_at` advances on every state transition so consumers can
+ * use it as a cheap diff signal between polls. */
+export interface QrState {
+  status: QrStatusKind;
+  qr_code: string;
   qr_url?: string;
   message?: string;
+  expires_at?: string;
+  updated_at: string;
 }
 
-export interface QrStatusResponse {
-  connected: boolean;
-  expired: boolean;
-  message?: string;
-  bot_token?: string;
+/** Fetch the current QR-login state for a channel.
+ *
+ * Returns `null` when the sidecar is running but has not published a
+ * QR session yet (HTTP 204 — e.g. WeChat sidecar still authenticating
+ * from a cached `WECHAT_BOT_TOKEN`). 404 is surfaced as a thrown
+ * `ApiError` like every other route — the caller distinguishes
+ * "unknown channel" (impossible if the dashboard listed it) from
+ * "sidecar not running" via the message.
+ *
+ * The pre-migration `wechatQrStart` / `wechatQrStatus` /
+ * `whatsappQrStart` / `whatsappQrStatus` quadruple was removed when
+ * those adapters migrated to sidecars — the sidecar now drives the
+ * QR lifecycle itself and emits `qr_ready` / `qr_status` events, the
+ * daemon caches `ChannelStatus.qr`, and this single endpoint reads it. */
+export async function getChannelQr(channelName: string): Promise<QrState | null> {
+  // The route returns 204 No Content when the sidecar is running but
+  // has not published a QR session — e.g. WeChat already authenticated
+  // from a cached `WECHAT_BOT_TOKEN`, no scan needed. The shared
+  // `get<T>` helper doesn't model that branch (it always parses JSON),
+  // so this endpoint uses `fetch` directly.
+  const response = await fetch(
+    `/api/channels/${encodeURIComponent(channelName)}/qr`,
+    { headers: buildHeaders() },
+  );
+  if (response.status === 204) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as QrState;
 }
 
-export async function wechatQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/wechat/qr/start", {});
-}
-
-export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
-}
-
-export async function whatsappQrStart(): Promise<QrStartResponse> {
-  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
-}
-
-export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
-  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
-}
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
@@ -2315,6 +2324,83 @@ export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> 
   return get<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(runId)}`);
 }
 
+// ---------------------------------------------------------------------------
+// HITL operator-step pause inspection + resolution (#4977).
+//
+// Wire shape mirrors `OperatorAction` on the Rust side. Verbs are
+// snake_case (`approve` / `reject` / `edit` / `freeform_input` /
+// `provide_input`); `provide_input` carries the additional `field`
+// name. `edit` / `freeform_input` / `provide_input` require a non-empty
+// `payload`; the rest ignore it.
+// ---------------------------------------------------------------------------
+
+/** Discriminator for the action verbs the operator may invoke at a paused
+ *  operator step. Matches `OperatorAction` serde shape exactly. */
+export type OperatorActionVerb =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | "provide_input";
+
+/** One element of the `actions` array returned by the inspect endpoint. */
+export type OperatorActionDescriptor =
+  | "approve"
+  | "reject"
+  | "edit"
+  | "freeform_input"
+  | { provide_input: { field: string } };
+
+/** Snapshot of a single paused operator-step pause — what the dashboard
+ *  renders to drive the action-button UI. */
+export interface OperatorPause {
+  /** Workflow run id (string-encoded `WorkflowRunId`). */
+  run_id: string;
+  /** Workflow definition id. */
+  workflow_id: string;
+  /** Workflow name (denormalised for the worklist row). */
+  workflow_name: string;
+  /** Name of the operator step holding the run paused. */
+  step_name: string;
+  /** Index of the operator step inside the workflow's step list. */
+  operator_step_index: number;
+  /** Output of the step that ran immediately before the operator step —
+   *  the thing the operator must review. */
+  artifact: string;
+  /** Actions the workflow author authorised at this step. */
+  actions: OperatorActionDescriptor[];
+  /** ISO-8601 run start time. */
+  started_at: string;
+  /** ISO-8601 pause time. Null only in the race window between pause and
+   *  state-write — treat as "just now" if missing. */
+  paused_at: string | null;
+}
+
+/** Fetch the operator pause for a single run. 404 if the run doesn't
+ *  exist, 409 (`{error: "not_operator_pause"}`) if the run is not paused
+ *  at an operator step — the HTTP layer's `request()` helper surfaces
+ *  both as thrown errors the caller can branch on. */
+export async function inspectOperatorPause(runId: string): Promise<OperatorPause> {
+  return get<OperatorPause>(`/api/workflows/runs/${encodeURIComponent(runId)}/operator`);
+}
+
+/** List every run currently paused at an operator step (oldest first). */
+export async function listPendingOperatorRuns(): Promise<OperatorPause[]> {
+  return get<OperatorPause[]>(`/api/workflows/operator/pending`);
+}
+
+/** Resolve a paused operator step with an action + optional payload.
+ *  Returns 200 immediately; the workflow continues asynchronously. */
+export async function resolveOperatorStep(
+  runId: string,
+  body: { action: OperatorActionVerb; payload?: string; field?: string },
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/workflows/runs/${encodeURIComponent(runId)}/operator`,
+    body,
+  );
+}
+
 export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
 }
@@ -2399,6 +2485,90 @@ export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
   const url = agentId ? `/api/cron/jobs?agent_id=${encodeURIComponent(agentId)}` : "/api/cron/jobs";
   const data = await get<{ jobs?: CronJobItem[]; total?: number }>(url);
   return data.jobs ?? [];
+}
+
+/**
+ * Cron schedule discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronSchedule` enum which is
+ * `#[serde(tag = "kind", rename_all = "snake_case")]`.
+ */
+export type CronScheduleSpec =
+  | { kind: "at"; at: string }
+  | { kind: "every"; every_secs: number }
+  | { kind: "cron"; expr: string; tz?: string | null };
+
+/**
+ * Cron action discriminated union — mirrors the Rust
+ * `librefang_types::scheduler::CronAction` enum.
+ *
+ * The dashboard exposes only `agent_turn` for the agent-detail Schedule
+ * tab (the most common case). `system_event` / `workflow` exist on the
+ * backend; consumers needing those should extend this type.
+ */
+export type CronActionSpec =
+  | { kind: "agent_turn"; message: string; model_override?: string | null; timeout_secs?: number | null }
+  | { kind: "system_event"; text: string }
+  | { kind: "workflow"; workflow_id: string; input?: string | null; timeout_secs?: number | null };
+
+/**
+ * Cron delivery (single legacy destination) — mirrors the Rust
+ * `librefang_types::scheduler::CronDelivery` enum.
+ */
+export type CronDeliverySpec =
+  | { kind: "none" }
+  | { kind: "last_channel" }
+  | { kind: "channel"; channel: string; to: string }
+  | { kind: "webhook"; url: string };
+
+export interface CreateCronJobPayload {
+  agent_id: string;
+  name: string;
+  schedule: CronScheduleSpec;
+  action: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  /** Multi-destination fan-out. Optional; omit for single-target delivery. */
+  delivery_targets?: CronDeliveryTarget[];
+  /** Per-job session-mode override. `undefined` → use agent default. */
+  session_mode?: "persistent" | "new";
+  /** Optional peer/user ID used as SenderContext.user_id when the job fires. */
+  peer_id?: string;
+  /** Auto-delete after first fire; defaults to true for `at` schedules. */
+  one_shot?: boolean;
+}
+
+export interface UpdateCronJobPayload {
+  name?: string;
+  enabled?: boolean;
+  schedule?: CronScheduleSpec;
+  action?: CronActionSpec;
+  delivery?: CronDeliverySpec;
+  delivery_targets?: CronDeliveryTarget[];
+  session_mode?: "persistent" | "new" | null;
+  peer_id?: string | null;
+}
+
+export async function createCronJob(
+  payload: CreateCronJobPayload,
+): Promise<{ job_id?: string; status?: string }> {
+  return post<{ job_id?: string; status?: string }>("/api/cron/jobs", payload);
+}
+
+export async function updateCronJob(
+  jobId: string,
+  payload: UpdateCronJobPayload,
+): Promise<CronJobItem> {
+  return put<CronJobItem>(`/api/cron/jobs/${encodeURIComponent(jobId)}`, payload);
+}
+
+export async function deleteCronJob(jobId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/cron/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function toggleCronJob(jobId: string, enabled: boolean): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/cron/jobs/${encodeURIComponent(jobId)}/enable`,
+    { enabled },
+  );
 }
 
 export async function getVersionInfo(): Promise<VersionResponse> {

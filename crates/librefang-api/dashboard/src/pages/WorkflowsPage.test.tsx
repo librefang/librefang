@@ -8,12 +8,15 @@ import {
   useWorkflowRuns,
   useWorkflowRunDetail,
   useWorkflowTemplates,
+  usePendingOperatorRuns,
+  useWorkflowOperatorPause,
 } from "../lib/queries/workflows";
 import {
   useRunWorkflow,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useInstantiateTemplate,
+  useResolveOperatorStep,
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 
@@ -23,6 +26,11 @@ vi.mock("../lib/queries/workflows", () => ({
   useWorkflowRuns: vi.fn(),
   useWorkflowRunDetail: vi.fn(),
   useWorkflowTemplates: vi.fn(),
+  // HITL operator-step hooks (#4977) — the banner + action bar mounted
+  // from WorkflowsPage import them, so the mock must expose every
+  // symbol or the page crashes at module load.
+  usePendingOperatorRuns: vi.fn(),
+  useWorkflowOperatorPause: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/workflows", () => ({
@@ -30,6 +38,9 @@ vi.mock("../lib/mutations/workflows", () => ({
   useDryRunWorkflow: vi.fn(),
   useDeleteWorkflow: vi.fn(),
   useInstantiateTemplate: vi.fn(),
+  // Resolution mutation pulled in by the OperatorActionBar — same
+  // reason as above.
+  useResolveOperatorStep: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/schedules", () => ({
@@ -66,10 +77,16 @@ const useWorkflowDetailMock = useWorkflowDetail as unknown as ReturnType<typeof 
 const useWorkflowRunsMock = useWorkflowRuns as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowRunDetailMock = useWorkflowRunDetail as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowTemplatesMock = useWorkflowTemplates as unknown as ReturnType<typeof vi.fn>;
+const usePendingOperatorRunsMock =
+  usePendingOperatorRuns as unknown as ReturnType<typeof vi.fn>;
+const useWorkflowOperatorPauseMock =
+  useWorkflowOperatorPause as unknown as ReturnType<typeof vi.fn>;
 const useRunWorkflowMock = useRunWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useDryRunWorkflowMock = useDryRunWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useDeleteWorkflowMock = useDeleteWorkflow as unknown as ReturnType<typeof vi.fn>;
 const useInstantiateTemplateMock = useInstantiateTemplate as unknown as ReturnType<typeof vi.fn>;
+const useResolveOperatorStepMock =
+  useResolveOperatorStep as unknown as ReturnType<typeof vi.fn>;
 const useCreateScheduleMock = useCreateSchedule as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
@@ -159,6 +176,12 @@ describe("WorkflowsPage", () => {
     useWorkflowRunsMock.mockReturnValue(makeQuery([]));
     useWorkflowRunDetailMock.mockReturnValue(makeQuery(undefined));
     useWorkflowTemplatesMock.mockReturnValue(makeQuery([]));
+    // #4977: default the operator banner to an empty worklist so the
+    // existing assertions ("no banner rendered") still hold. Individual
+    // tests can override to surface pending rows.
+    usePendingOperatorRunsMock.mockReturnValue(makeQuery([]));
+    useWorkflowOperatorPauseMock.mockReturnValue(makeQuery(undefined));
+    useResolveOperatorStepMock.mockReturnValue(makeMutation());
   });
 
   it("renders loading skeleton while workflows query is loading", () => {
@@ -429,5 +452,198 @@ describe("WorkflowsPage", () => {
 
     expect(screen.queryByText("AlphaTpl")).not.toBeInTheDocument();
     expect(screen.getByText("BetaTpl")).toBeInTheDocument();
+  });
+
+  // ----- HITL operator-step banner (#4977) -----
+
+  it("does not render the pending-operator banner when the worklist is empty", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    usePendingOperatorRunsMock.mockReturnValue(makeQuery([]));
+    renderPage();
+    expect(
+      screen.queryByText(/awaiting operator review/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the pending-operator banner with row counts when the worklist has entries", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    usePendingOperatorRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          run_id: "11111111-1111-1111-1111-111111111111",
+          workflow_id: "wf-1",
+          workflow_name: "alpha-flow",
+          step_name: "review_draft",
+          operator_step_index: 1,
+          artifact: "draft body",
+          actions: ["approve", "reject"],
+          started_at: "2026-05-01T12:00:00Z",
+          paused_at: "2026-05-01T12:00:30Z",
+        },
+      ]),
+    );
+    renderPage();
+    // The banner header reflects the row count.
+    expect(
+      screen.getByText(/1 workflow run awaiting operator review/i),
+    ).toBeInTheDocument();
+    // The row surfaces the step name + action count badge.
+    expect(screen.getByText("review_draft")).toBeInTheDocument();
+    expect(screen.getByText(/2 actions/i)).toBeInTheDocument();
+  });
+
+  // #5257 round-2 (Codex P2): clicking a banner row for a paused run that
+  // lives OUTSIDE the first 10 entries of the run history must still
+  // mount the OperatorActionBar — the previous slice(0, 10) map silently
+  // dropped the resolution UI for any workflow with > 10 runs. Construct
+  // 11 runs, place the paused one last, then fire the banner click and
+  // assert the bar's hallmark copy renders.
+  it("mounts the operator action bar for a banner-selected run that lives outside the first 10", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    // Eleven runs: the first ten are completed, the last (index 10) is
+    // the paused one the banner will select. The dashboard slice was
+    // hard-coded at 10 — without the fix, the paused row never enters
+    // the render path even though the operator clicked it.
+    const completedRuns = Array.from({ length: 10 }).map((_, i) => ({
+      id: `run-completed-${i}`,
+      workflow_name: "alpha-flow",
+      state: "completed",
+      steps_completed: 3,
+      started_at: `2026-05-01T11:${String(i).padStart(2, "0")}:00Z`,
+    }));
+    const pausedRunId = "run-paused-deep-11";
+    const deepPausedRun = {
+      id: pausedRunId,
+      workflow_name: "alpha-flow",
+      state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:30:00Z" } },
+      steps_completed: 1,
+      started_at: "2026-05-01T12:00:00Z",
+    };
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([...completedRuns, deepPausedRun]),
+    );
+    useWorkflowRunDetailMock.mockReturnValue(
+      makeQuery({
+        id: pausedRunId,
+        workflow_id: "wf-1",
+        workflow_name: "alpha-flow",
+        input: "seed",
+        state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:30:00Z" } },
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [],
+      }),
+    );
+    useWorkflowOperatorPauseMock.mockReturnValue(
+      makeQuery({
+        run_id: pausedRunId,
+        workflow_id: "wf-1",
+        workflow_name: "alpha-flow",
+        step_name: "deep_review",
+        operator_step_index: 0,
+        artifact: "deep artifact",
+        actions: ["approve"],
+        started_at: "2026-05-01T12:00:00Z",
+        paused_at: "2026-05-01T12:30:00Z",
+      }),
+    );
+    // Banner row surfaces the paused run so the click handler maps to
+    // (runId, workflowId) → setSelectedRunId + setSelectedWorkflowId.
+    usePendingOperatorRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          run_id: pausedRunId,
+          workflow_id: "wf-1",
+          workflow_name: "alpha-flow",
+          step_name: "deep_review",
+          operator_step_index: 0,
+          artifact: "deep artifact",
+          actions: ["approve"],
+          started_at: "2026-05-01T12:00:00Z",
+          paused_at: "2026-05-01T12:30:00Z",
+        },
+      ]),
+    );
+    renderPage();
+
+    // The banner header confirms the worklist surfaced the row.
+    expect(
+      screen.getByText(/1 workflow run awaiting operator review/i),
+    ).toBeInTheDocument();
+    // Click the banner's row. The banner row label uses the step name —
+    // unique on the page, so it's an unambiguous click target.
+    fireEvent.click(screen.getByText("deep_review"));
+
+    // The OperatorActionBar's hallmark copy renders only when the bar
+    // actually mounted. Before the round-2 fix this assertion failed —
+    // the row was outside `slice(0, 10)` so the inline mount path was
+    // unreachable from the banner click.
+    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    // The "Approve" action button is unique to the action bar (the
+    // banner row only renders an "N actions" count badge, not the
+    // buttons themselves), so finding it proves the bar actually
+    // rendered its action list, not just the wrapper.
+    expect(screen.getByRole("button", { name: /Approve/i })).toBeInTheDocument();
+    // The artifact text appears in BOTH the banner row preview and the
+    // bar's artifact panel — assert both render so the inline mount
+    // path is exercised end-to-end.
+    expect(screen.getAllByText("deep artifact").length).toBeGreaterThanOrEqual(2);
+  });
+
+  // Regression for #4977 review: the Rust `WorkflowRunState::Paused {…}`
+  // variant serialises to `{paused: {…}}` (externally-tagged struct
+  // variant) — not the bare string `"paused"`. The OperatorActionBar
+  // mount guard must accept the object form, or every real paused run
+  // silently fails to surface the resolution UI.
+  it("mounts the operator action bar when the run detail state is a tagged Paused object", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    // Run-list row labelled distinctly from the workflow row so the
+    // click target is unambiguous.
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-paused-1",
+          workflow_name: "paused-run-row",
+          state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:00:30Z" } },
+          steps_completed: 1,
+          started_at: "2026-05-01T12:00:00Z",
+        },
+      ]),
+    );
+    useWorkflowRunDetailMock.mockReturnValue(
+      makeQuery({
+        id: "run-paused-1",
+        workflow_id: "wf-1",
+        workflow_name: "paused-run-row",
+        input: "seed",
+        // Real wire shape from `serde_json::to_value(&run.state)` for the
+        // `WorkflowRunState::Paused` struct variant.
+        state: { paused: { resume_token_hash: "h", reason: "operator step", paused_at: "2026-05-01T12:00:30Z" } },
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [],
+      }),
+    );
+    // Stub the inspect query so the bar resolves to a renderable pause —
+    // confirms the *mount* happened and the data flowed through.
+    useWorkflowOperatorPauseMock.mockReturnValue(
+      makeQuery({
+        run_id: "run-paused-1",
+        workflow_id: "wf-1",
+        workflow_name: "paused-run-row",
+        step_name: "review_draft",
+        operator_step_index: 0,
+        artifact: "the draft",
+        actions: ["approve"],
+        started_at: "2026-05-01T12:00:00Z",
+        paused_at: "2026-05-01T12:00:30Z",
+      }),
+    );
+    renderPage();
+    // Select the paused run in the Run History list to reveal the
+    // OperatorActionBar inside the inline run detail panel.
+    fireEvent.click(screen.getByText("paused-run-row"));
+    // The bar's hallmark copy renders only when the mount guard passed
+    // AND the inspect query produced a pause.
+    expect(screen.getByText(/Operator review required/i)).toBeInTheDocument();
+    expect(screen.getByText("the draft")).toBeInTheDocument();
   });
 });

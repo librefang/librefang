@@ -7,34 +7,49 @@
   "assessment_completed_at": "2026-05-23T00:00:00Z",
   "plan_complete": true,
   "plan_completed_at": "2026-05-23T00:00:00Z",
+  "execution_complete": true,
+  "execution_completed_at": "2026-05-23T12:00:00Z",
   "changes_total": 2,
-  "changes_completed": 0,
+  "changes_completed": 2,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 2,
+  "changes_pending": 0,
   "changes": [
     {
       "id": "m1-m3-ci-fix-and-gitattributes",
       "milestones": ["M1", "M3"],
-      "status": "PENDING",
+      "status": "COMPLETED",
+      "branch": "feat/m1-m3-ci-fix-and-gitattributes",
+      "pr": "https://github.com/GQAdonis/librefang/pull/25",
+      "commit": "65eaf8943",
       "scope": [
-        ".cargo/config.toml — add kreuzberg SSH→HTTPS insteadOf rewrite",
-        "Cargo.lock — regenerate kreuzberg entry to HTTPS",
-        ".gitattributes — add merge=ours for .kbd-orchestrator/**",
-        "CLAUDE.md — add git config merge.ours.driver true to setup note"
+        ".cargo/config.toml — Cargo source replacement kreuzberg SSH→HTTPS",
+        ".gitattributes — merge=ours for .kbd-orchestrator/**",
+        "CLAUDE.md — git config merge.ours.driver true setup note"
       ]
     },
     {
       "id": "m2-upstream-merge-224-commits",
       "milestones": ["M2"],
-      "status": "PENDING",
+      "status": "COMPLETED",
+      "branch": "chore/m2-upstream-merge",
+      "pr": "https://github.com/GQAdonis/librefang/pull/26",
+      "commit": "51c47f1b2",
       "scope": [
-        "git merge upstream/main --no-edit (224 commits, proper merge commit)",
-        "crates/librefang-storage/src/migrations/sql/030_composite_indexes.surql — new",
-        "crates/librefang-storage/src/migrations/mod.rs — register v30",
-        "crates/librefang-api/tests/fixtures/kernel_config_schema.golden.json — regenerate",
-        "crates/librefang-api/dashboard/src/index.css — take ours + append spinner CSS",
-        "scripts/enforce-branding.py pass — verify clean after merge"
+        "git merge upstream/main --no-edit (224 commits, debb315, proper merge commit)",
+        "crates/librefang-storage/src/migrations/sql/030_composite_indexes.surql — new (v30)",
+        "crates/librefang-storage/src/migrations/mod.rs — registered v30",
+        "crates/librefang-api/tests/fixtures/kernel_config_schema.golden.json — regenerated (296176 bytes)",
+        "crates/librefang-uar-spec/src/translator.rs — fallback_models Option fix",
+        "crates/librefang-runtime/src/context_engine/scriptable/mod.rs — with_trace_backend() + cfg gate + UFCS",
+        "crates/librefang-kernel/src/approval.rs — session_approvals in new_with_surreal()",
+        "enforce-branding.py fix-pass — 12 MDX files; --check exits 0"
+      ],
+      "type_drift_fixes": [
+        "librefang-uar-spec: fallback_models Vec→Option<Vec>",
+        "librefang-runtime: with_trace_backend builder; open_trace_store cfg gate; Memory::remember UFCS",
+        "librefang-kernel: session_approvals in new_with_surreal()",
+        "librefang-api: librefang-uar-spec dep missing from Cargo.toml"
       ]
     }
   ],

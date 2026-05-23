@@ -94,7 +94,22 @@ export function PushDrawer() {
       if (e.key !== "Escape") return;
       const target = e.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest("[role='dialog']") && !target.closest("[role='dialog'][data-drawer-root]")) return;
+      // Only handle Esc when the *nearest* `[role='dialog']` ancestor IS
+      // this drawer's own mobile overlay (`data-drawer-root`). If a nested
+      // dialog (Modal, ConfirmDialog, …) sits between the focus target and
+      // the drawer-root, defer to that dialog's own Esc handler — closing
+      // the drawer here would tear the surrounding form down before the
+      // nested picker could dismiss itself (#5254 / Codex P2).
+      //
+      // The previous check `target.closest('[role=dialog]') &&
+      // !target.closest('[role=dialog][data-drawer-root]')` was wrong: on
+      // <lg viewports the drawer-root IS a `[role='dialog']`, so a nested
+      // Modal would still see the drawer-root via the outer `.closest()`
+      // call, the second clause would return true, and the guard would
+      // not fire — leaking the Esc into `triggerClose()` and collapsing
+      // the parent drawer along with the nested picker.
+      const nearestDialog = target.closest("[role='dialog']");
+      if (nearestDialog && !nearestDialog.hasAttribute("data-drawer-root")) return;
       e.stopImmediatePropagation();
       triggerClose();
     };

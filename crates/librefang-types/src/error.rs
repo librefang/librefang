@@ -63,12 +63,26 @@ pub enum LibreFangError {
     },
 
     /// A tool execution failed.
+    ///
+    /// `source` carries the underlying typed error when one is available
+    /// (e.g. an `std::io::Error` from a filesystem tool, a `reqwest::Error`
+    /// from a web tool, or any other foreign-typed error a tool surfaced
+    /// via `ToolError::upstream`). Preserving it on the `source()` chain
+    /// keeps the retry / circuit-break contract established by #3745: callers
+    /// walking the chain can still downcast to the concrete underlying type
+    /// even after the boxed source has crossed the `From<ToolError>` bridge.
+    ///
+    /// `source` is `None` for the legacy free-form case where the failure
+    /// was originally synthesised from a string (no typed error to preserve).
     #[error("Tool execution failed: {tool_id} — {reason}")]
     ToolExecution {
         /// The tool that failed.
         tool_id: String,
         /// Why it failed.
         reason: String,
+        /// Underlying error preserved on the `source()` chain.
+        #[source]
+        source: Option<BoxedSource>,
     },
 
     /// An LLM driver error occurred.
@@ -314,6 +328,33 @@ impl LibreFangError {
             source: None,
         }
     }
+
+    /// Build a [`Self::ToolExecution`] from a typed error, preserving it on
+    /// the `source()` chain. Mirrors the
+    /// `Memory` / `Network` / `LlmDriver` / `Serialization` shape so the
+    /// `From<ToolError> for LibreFangError` bridge can keep a foreign typed
+    /// source (`std::io::Error`, `reqwest::Error`, …) walkable instead of
+    /// stringifying it into `reason`. (#3576)
+    pub fn tool_execution<E>(tool_id: impl Into<String>, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::ToolExecution {
+            tool_id: tool_id.into(),
+            reason: source.to_string(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Build a [`Self::ToolExecution`] from a free-form reason (no underlying
+    /// typed error). Use only when the failure was originally string-typed.
+    pub fn tool_execution_msg(tool_id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::ToolExecution {
+            tool_id: tool_id.into(),
+            reason: reason.into(),
+            source: None,
+        }
+    }
 }
 
 impl From<serde_json::Error> for LibreFangError {
@@ -442,5 +483,41 @@ mod tests {
     fn boot_failed_display_matches_dropped_kernel_variant() {
         let err = LibreFangError::BootFailed("vault unlock failed".to_string());
         assert_eq!(err.to_string(), "Boot failed: vault unlock failed");
+    }
+
+    /// Regression for #3576 (Codex P2): `ToolExecution` now carries a typed
+    /// `source` so the `From<ToolError> for LibreFangError` bridge can
+    /// preserve foreign typed sources (`std::io::Error`, `reqwest::Error`,
+    /// …) instead of stringifying them. Retry / circuit-break logic walking
+    /// `Error::source()` must still be able to downcast to the original
+    /// underlying type.
+    #[test]
+    fn tool_execution_preserves_typed_source_chain() {
+        let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "tool timed out");
+        let err = LibreFangError::tool_execution("write_file", inner);
+        let src = err.source().expect("ToolExecution should carry source");
+        let downcast = src
+            .downcast_ref::<std::io::Error>()
+            .expect("source should downcast to std::io::Error");
+        assert_eq!(downcast.kind(), std::io::ErrorKind::TimedOut);
+        match &err {
+            LibreFangError::ToolExecution {
+                tool_id, reason, ..
+            } => {
+                assert_eq!(tool_id, "write_file");
+                assert_eq!(reason, "tool timed out");
+            }
+            other => panic!("expected ToolExecution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_execution_msg_has_no_source() {
+        let err = LibreFangError::tool_execution_msg("noop", "no typed cause");
+        assert!(err.source().is_none());
+        assert_eq!(
+            err.to_string(),
+            "Tool execution failed: noop — no typed cause"
+        );
     }
 }

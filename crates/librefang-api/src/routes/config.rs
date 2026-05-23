@@ -229,11 +229,17 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
+    // Use the indexed `SELECT COUNT(*)` projection — `list_sessions()`
+    // here would return a `Vec<serde_json::Value>` with each session's
+    // full rmp-encoded message history decoded just to call `.len()`.
+    // The dashboard hammers this route on its 5 s status poll, so on
+    // a workspace with 100 sessions × 200 KB history apiece the daemon
+    // decoded ~20 MB (≈ 4 MB/s) of message bodies every poll for what
+    // is morphologically a `SELECT COUNT(*)`.
     let session_count = state
         .kernel
         .memory_substrate()
-        .list_sessions()
-        .map(|s| s.len())
+        .count_sessions()
         .unwrap_or(0);
 
     let memory_used_mb = current_process_rss_mb();
@@ -785,43 +791,28 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let config = state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
-    let channels = {
-        let c = &config.channels;
-        let mut map = serde_json::Map::new();
-        macro_rules! ch {
-            ($name:ident) => {
-                if !c.$name.is_empty() {
-                    map.insert(
-                        stringify!($name).to_string(),
-                        serde_json::json!({ "instances": c.$name.len() }),
-                    );
-                }
-            };
-        }
-        ch!(discord);
-        ch!(slack);
-        ch!(whatsapp);
-        ch!(signal);
-        ch!(matrix);
-        ch!(email);
-        ch!(teams);
-        ch!(mattermost);
-        ch!(google_chat);
-        ch!(twitch);
-        ch!(rocketchat);
-        ch!(zulip);
-        ch!(line);
-        ch!(reddit);
-        ch!(bluesky);
-        ch!(feishu);
-        ch!(nextcloud);
-        ch!(webex);
-        ch!(dingtalk);
-        ch!(qq);
-        ch!(webhook);
-        ch!(wecom);
-        serde_json::Value::Object(map)
-    };
+    // All previously in-process channels (whatsapp, teams,
+    // google_chat, webhook, …) migrated to sidecars; their fields no
+    // longer exist on `ChannelsConfig` so there's nothing to
+    // enumerate here. The macro shape + lookup are preserved as a
+    // comment block so a future in-process channel can rebuild this
+    // block by uncommenting + appending one `ch!()` line per field.
+    //
+    //   let c = &config.channels;
+    //   let mut map = serde_json::Map::new();
+    //   macro_rules! ch {
+    //       ($name:ident) => {{
+    //           if !c.$name.is_empty() {
+    //               map.insert(
+    //                   stringify!($name).to_string(),
+    //                   serde_json::json!({ "instances": c.$name.len() }),
+    //               );
+    //           }
+    //       }};
+    //   }
+    //   ch!(<future_in_process_channel>);
+    //   serde_json::Value::Object(map)
+    let channels = serde_json::Value::Object(serde_json::Map::new());
 
     // -- mcp_servers: list names/commands, redact env secrets --
     let mcp_servers: Vec<serde_json::Value> = config
@@ -1747,6 +1738,47 @@ pub async fn migrate_detect() -> impl IntoResponse {
     )
 }
 
+/// Known framework source directories under the user's OS home, used as the
+/// migration source allow-list. Legacy OpenClaw aliases are included so the
+/// existing `~/.clawdbot` / `~/.moldbot` / `~/.moltbot` layouts still import.
+const MIGRATE_SOURCE_DIR_NAMES: &[&str] = &[
+    ".openclaw",
+    ".clawdbot",
+    ".moldbot",
+    ".moltbot",
+    ".openfang",
+    ".langchain",
+    ".autogpt",
+];
+
+/// Build the containment allow-list for a migration *source* path: the
+/// librefang home plus any known framework source directory that actually
+/// exists under the OS home.
+///
+/// #5577 confined both source and target to the librefang home, which
+/// regressed the documented "migrate from `~/.openclaw`" flow — the source
+/// dirs are siblings of `~/.librefang`, not descendants, so a real
+/// `source_dir: "~/.openclaw"` was rejected. Only *existing* directories are
+/// added: `validate_path_containment` rejects a non-canonicalizable root with
+/// a 500, so a missing `~/.autogpt` must never enter the list. Migration
+/// targets are deliberately NOT widened by this list — writes stay confined
+/// to the librefang home.
+fn migrate_source_roots(
+    librefang_home: &std::path::Path,
+    os_home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![librefang_home.to_path_buf()];
+    if let Some(home) = os_home {
+        for name in MIGRATE_SOURCE_DIR_NAMES {
+            let dir = home.join(name);
+            if dir.is_dir() {
+                roots.push(dir);
+            }
+        }
+    }
+    roots
+}
+
 /// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
 #[utoipa::path(
     post,
@@ -1756,11 +1788,32 @@ pub async fn migrate_detect() -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
-    let path = std::path::PathBuf::from(&req.path);
-    if !path.exists() {
-        return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
-    }
+pub async fn migrate_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateScanRequest>,
+) -> impl IntoResponse {
+    // SECURITY: same containment policy as `run_migrate` below. Without it,
+    // the 200-vs-400 `Directory not found` branch is a `.exists()` oracle
+    // for any path readable as the daemon UID — see
+    // `docs/issues/migrate-arbitrary-paths.md`. The probe path is the
+    // sibling of the write primitive `run_migrate` patches; both endpoints
+    // share the same audit-cited threat model and must share the same
+    // allowlist: the librefang home plus the known framework source dirs
+    // that exist under the OS home (see `migrate_source_roots`).
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
+    let allowed_roots: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
+
+    let path = match crate::validation::validate_path_containment(
+        "path",
+        std::path::Path::new(req.path.trim()),
+        &allowed_roots,
+        true, // scan target must already exist
+    ) {
+        Ok(p) => p,
+        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+    };
+
     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
 }
@@ -1791,15 +1844,52 @@ pub async fn run_migrate(
         }
     };
 
+    // SECURITY: source_dir and target_dir must canonicalize to a descendant
+    // of an allowed root. Without this check, Admin can probe arbitrary
+    // filesystem paths via the 200-vs-400 oracle and write under
+    // attacker-chosen target directories — see
+    // `docs/issues/migrate-arbitrary-paths.md`. Admin is dev/ops, not the
+    // trust ceiling; a leaked Admin token MUST NOT become a daemon-UID
+    // write primitive.
+    //
+    // The source allow-list is the librefang home plus the known framework
+    // source dirs under the OS home (the documented `~/.openclaw` etc. are
+    // siblings of `~/.librefang`, not descendants — #5577 confined both to
+    // the librefang home and regressed migrate-from-OpenClaw). The target
+    // allow-list stays the librefang home only: reads may come from a source
+    // dir, but writes never leave the librefang home.
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    let source_roots = migrate_source_roots(&home_dir, dirs::home_dir().as_deref());
+    let source_allowed: Vec<&std::path::Path> = source_roots.iter().map(|p| p.as_path()).collect();
+    let target_allowed: Vec<&std::path::Path> = vec![home_dir.as_path()];
+
+    let source_dir = match crate::validation::validate_path_containment(
+        "source_dir",
+        std::path::Path::new(req.source_dir.trim()),
+        &source_allowed,
+        true, // source must already exist
+    ) {
+        Ok(p) => p,
+        Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+    };
+
     let target_dir = if req.target_dir.trim().is_empty() {
-        state.kernel.home_dir().to_path_buf()
+        home_dir.clone()
     } else {
-        std::path::PathBuf::from(req.target_dir.trim())
+        match crate::validation::validate_path_containment(
+            "target_dir",
+            std::path::Path::new(req.target_dir.trim()),
+            &target_allowed,
+            false, // target may not exist yet — migration creates it
+        ) {
+            Ok(p) => p,
+            Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
+        }
     };
 
     let options = librefang_migrate::MigrateOptions {
         source,
-        source_dir: std::path::PathBuf::from(req.source_dir.trim()),
+        source_dir,
         target_dir,
         dry_run: req.dry_run,
     };
@@ -1852,7 +1942,7 @@ pub async fn run_migrate(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::internal(format!("Migration failed: {e}")).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -2081,6 +2171,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
                 "tool_timeout_secs",
                 "local_probe_interval_secs", "require_auth_for_reads",
+                "external_auth_proxy",
                 "dashboard_user", "log_dir", "data_dir", "home_dir",
                 "cors_origin", "trust_forwarded_for",
                 "cron_session_max_tokens", "cron_session_max_messages",
@@ -2985,7 +3076,83 @@ pub async fn dashboard_snapshot(
     axum::Json(dashboard_snapshot_inner(&state).await)
 }
 
+/// TTL for the [`dashboard_snapshot_inner`] memoization cache.
+///
+/// 900 ms is well below the dashboard's 5 s poll interval (so a polling tab
+/// rebuilds on every tick and the data still feels "live"), but enough to
+/// fold the burst of back-to-back polls that arrive when a user opens
+/// multiple dashboard tabs, switches windows, or the page rapidly remounts
+/// during a route change.
+const DASHBOARD_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_millis(900);
+
+/// Cached aggregated payload for `/api/dashboard/snapshot`.
+///
+/// The payload is wrapped in an `Arc` so cache lookups clone the pointer,
+/// not the (possibly large) JSON tree. The final return type of
+/// [`dashboard_snapshot_inner`] is still `serde_json::Value`, so we pay one
+/// `(*payload).clone()` per cache hit — still 10–100× cheaper than
+/// re-running per-agent manifest enrichment + provider/channel probes +
+/// memory queries.
+struct CachedDashboardSnapshot {
+    generated_at: std::time::Instant,
+    payload: Arc<serde_json::Value>,
+}
+
+/// Process-wide cache for [`dashboard_snapshot_inner`], keyed by
+/// `AppState` pointer identity.
+///
+/// We deliberately do **not** store the cache on `AppState` itself —
+/// adding a field there ripples into `librefang-testing` and every
+/// inline test that constructs an `AppState` literal (5+ call sites).
+/// Keying by `Arc::as_ptr(state) as usize` instead gives every test its
+/// own cache slot for free, while production (one long-lived `AppState`)
+/// gets exactly one slot.
+///
+/// Entries are evicted opportunistically: on each lookup we discard the
+/// caller's expired entry; on each insert we drop any entries older than
+/// 60× the TTL, which is enough to prevent the test process from
+/// accumulating slots over time without paying a global scan on the hot
+/// path.
+static DASHBOARD_SNAPSHOT_CACHE: std::sync::OnceLock<
+    dashmap::DashMap<usize, CachedDashboardSnapshot>,
+> = std::sync::OnceLock::new();
+
+fn dashboard_snapshot_cache() -> &'static dashmap::DashMap<usize, CachedDashboardSnapshot> {
+    DASHBOARD_SNAPSHOT_CACHE.get_or_init(dashmap::DashMap::new)
+}
+
 async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
+    // Fast path: serve the memoized payload if it's still within TTL.
+    // Keyed by the `AppState` Arc pointer so concurrent tests with
+    // distinct kernels don't poison each other's cache.
+    let cache_key = Arc::as_ptr(state) as usize;
+    let cache = dashboard_snapshot_cache();
+    if let Some(entry) = cache.get(&cache_key) {
+        if entry.generated_at.elapsed() < DASHBOARD_SNAPSHOT_TTL {
+            return (*entry.payload).clone();
+        }
+    }
+
+    let payload = dashboard_snapshot_compute(state).await;
+    let payload = Arc::new(payload);
+    cache.insert(
+        cache_key,
+        CachedDashboardSnapshot {
+            generated_at: std::time::Instant::now(),
+            payload: Arc::clone(&payload),
+        },
+    );
+    // Opportunistic prune so test processes that construct many
+    // short-lived `AppState`s don't accumulate dead cache slots
+    // indefinitely. The threshold is 60× TTL so production's single
+    // long-lived state is never pruned, and we only walk the (tiny)
+    // table when we're already taking the write path.
+    let prune_threshold = DASHBOARD_SNAPSHOT_TTL * 60;
+    cache.retain(|_, v| v.generated_at.elapsed() < prune_threshold);
+    (*payload).clone()
+}
+
+async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value {
     // Health (same logic as /api/health)
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -3015,11 +3182,14 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .iter()
         .filter(|e| !e.is_hand && matches!(e.state, librefang_types::agent::AgentState::Running))
         .count();
+    // Same fix as `/api/status` above — indexed COUNT instead of
+    // decoding every session blob just to call `.len()`. This is the
+    // dashboard snapshot path (`/api/dashboard/snapshot`), hit on
+    // every 5 s poll, so the cost compounded.
     let session_count = state
         .kernel
         .memory_substrate()
-        .list_sessions()
-        .map(|s| s.len())
+        .count_sessions()
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
     // Runtime stats shared with `/api/status` — the dashboard RuntimePage
@@ -3426,7 +3596,7 @@ url = "https://search.example.com"
         ));
         assert!(!super::is_writable_config_path("default_model.api_key_env"));
         assert!(!super::is_writable_config_path(
-            "channels.slack.access_token_env"
+            "channels.whatsapp.access_token_env"
         ));
         assert!(!super::is_writable_config_path("default_model.client_id"));
         assert!(!super::is_writable_config_path(
@@ -3458,13 +3628,10 @@ url = "https://search.example.com"
         // depth-2 leaves under the same vendor stay open (per-field
         // toggles via the dashboard).
         assert!(!super::is_writable_config_path("channels.telegram"));
-        assert!(!super::is_writable_config_path("channels.discord"));
-        assert!(!super::is_writable_config_path("channels.slack"));
         assert!(!super::is_writable_config_path("channels.whatsapp"));
-        assert!(!super::is_writable_config_path("channels.matrix"));
         assert!(!super::is_writable_config_path("channels.email"));
         assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.discord.enabled"));
+        assert!(super::is_writable_config_path("channels.whatsapp.enabled"));
 
         // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
         // peer redirect, threat model parallel to the round-4 removal
@@ -3488,5 +3655,92 @@ searxng = { url = "https://search.example.com" }
         let cfg: KernelConfig = toml::from_str(toml_src)
             .expect("inline-table shape produced by /api/config/set must parse (issue #4016)");
         assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+}
+
+#[cfg(test)]
+mod migrate_roots_tests {
+    use super::migrate_source_roots;
+    use std::path::Path;
+
+    #[test]
+    fn includes_only_existing_known_source_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let os_home = tmp.path();
+        std::fs::create_dir_all(os_home.join(".openclaw")).unwrap();
+        std::fs::create_dir_all(os_home.join(".langchain")).unwrap();
+        let lf_home = os_home.join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+
+        let roots = migrate_source_roots(&lf_home, Some(os_home));
+
+        assert!(roots.contains(&lf_home), "librefang home is always a root");
+        assert!(
+            roots.contains(&os_home.join(".openclaw")),
+            "existing source dir must be included"
+        );
+        assert!(
+            roots.contains(&os_home.join(".langchain")),
+            "existing source dir must be included"
+        );
+        // A non-existent root must NOT be added: validate_path_containment
+        // returns a 500 on a root it cannot canonicalize.
+        assert!(!roots.contains(&os_home.join(".autogpt")));
+        assert!(!roots.contains(&os_home.join(".openfang")));
+    }
+
+    #[test]
+    fn no_os_home_yields_librefang_home_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lf_home = tmp.path().join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+        assert_eq!(migrate_source_roots(&lf_home, None), vec![lf_home]);
+    }
+
+    #[test]
+    fn source_under_known_root_passes_but_target_stays_confined() {
+        // Reproduces the #5577 regression: a source under `~/.openclaw` must be
+        // accepted again, while writes (target) stay confined to the librefang
+        // home.
+        let tmp = tempfile::tempdir().unwrap();
+        let os_home = tmp.path();
+        let openclaw = os_home.join(".openclaw");
+        std::fs::create_dir_all(&openclaw).unwrap();
+        let lf_home = os_home.join(".librefang");
+        std::fs::create_dir_all(&lf_home).unwrap();
+
+        let source_roots = migrate_source_roots(&lf_home, Some(os_home));
+        let source_allowed: Vec<&Path> = source_roots.iter().map(|p| p.as_path()).collect();
+
+        // source_dir under ~/.openclaw is accepted (the regression case).
+        assert!(crate::validation::validate_path_containment(
+            "source_dir",
+            &openclaw,
+            &source_allowed,
+            true,
+        )
+        .is_ok());
+
+        // A sibling dir NOT on the allow-list is still rejected (containment held).
+        let outside = os_home.join(".evil");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(crate::validation::validate_path_containment(
+            "source_dir",
+            &outside,
+            &source_allowed,
+            true,
+        )
+        .is_err());
+
+        // Target writes stay confined to the librefang home: `~/.openclaw` is a
+        // valid *source* root but must NOT be a valid *target* root.
+        let target_allowed: Vec<&Path> = vec![lf_home.as_path()];
+        assert!(crate::validation::validate_path_containment(
+            "target_dir",
+            &openclaw,
+            &target_allowed,
+            false,
+        )
+        .is_err());
     }
 }

@@ -114,18 +114,29 @@ impl PromptStore {
         db_path: P,
         pool_size: u32,
     ) -> LibreFangResult<Self> {
-        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref()).with_init(|c| {
-            c.execute_batch(
-                "PRAGMA journal_mode=WAL; \
-                     PRAGMA busy_timeout=5000; \
-                     PRAGMA cache_size=-2000; \
-                     PRAGMA mmap_size=0;",
-            )
-        });
+        // Audit: prompt-store-second-pool-no-fk. The previous PRAGMA
+        // set on this second-pool path was missing
+        // `foreign_keys=ON` and `synchronous=NORMAL`, so writes
+        // through PromptStore's connections silently bypassed every
+        // FK declared by `migrate_v13` on `prompt_experiments` /
+        // `experiment_variants` / `experiment_metrics`. SQLite's
+        // `foreign_keys` is per-connection, not per-database — the
+        // substrate pool's `foreign_keys=ON` does NOT cover this
+        // second pool. Reusing the shared canonical const fixes
+        // both the immediate FK-bypass bug and any future drift
+        // between the two pools' connection settings.
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref())
+            .with_init(|c| c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS));
         let pool = r2d2::Pool::builder()
             .max_size(pool_size.max(1))
             .build(manager)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // Audit: sqlite-file-permissions — same rationale as in
+        // `librefang_memory::substrate::open_with_pool_size`. The
+        // PromptStore DB persists agent system prompts which can
+        // contain credentials/secrets baked into instructions; it
+        // must not be world-readable.
+        crate::substrate::restrict_db_file_permissions(db_path.as_ref());
         Ok(Self { pool })
     }
 
@@ -824,5 +835,56 @@ mod tests {
         let running = store.get_running_experiment(agent_id).unwrap();
         assert!(running.is_some());
         assert_eq!(running.unwrap().name, "Running Experiment");
+    }
+
+    /// Audit: prompt-store-second-pool-no-fk. SQLite's `foreign_keys`
+    /// is per-connection, not per-database. Without `PRAGMA
+    /// foreign_keys=ON` set on the PromptStore pool's connections,
+    /// writes through this pool used to silently bypass every FK
+    /// declared by the migrations (`prompt_experiments` →
+    /// `experiments`, etc.). This test asserts the contract directly:
+    /// query `PRAGMA foreign_keys` on a pooled connection and require
+    /// `1`. A regression that swaps the shared
+    /// `DEFAULT_CONNECTION_PRAGMAS` for a custom pragma string
+    /// missing `foreign_keys=ON` would flip this from 1 → 0 and
+    /// fail.
+    #[test]
+    fn pool_connections_have_foreign_keys_pragma_on() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("prompt.db");
+        let store = PromptStore::new_with_path(&db_path, 2).expect("open prompt store");
+        let conn = store.pool.get().expect("checkout pooled connection");
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .expect("query foreign_keys pragma");
+        assert_eq!(
+            fk, 1,
+            "PromptStore pool connections must enable foreign_keys to honour \
+             the FKs declared by migrate_v13 (prompt_experiments, \
+             experiment_variants, experiment_metrics); got {fk}"
+        );
+    }
+
+    /// Companion: assert WAL journal mode is also active so the
+    /// second pool inherits the same multi-reader concurrency model
+    /// as the main substrate pool. Drift here would surface as
+    /// unexpected writer-blocks-reader behaviour under load.
+    #[test]
+    fn pool_connections_use_wal_journal_mode() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("prompt.db");
+        let store = PromptStore::new_with_path(&db_path, 2).expect("open prompt store");
+        let conn = store.pool.get().expect("checkout pooled connection");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("query journal_mode pragma");
+        assert_eq!(
+            mode.to_lowercase(),
+            "wal",
+            "PromptStore pool connections must use WAL journal mode for \
+             multi-reader concurrency; got {mode}"
+        );
     }
 }

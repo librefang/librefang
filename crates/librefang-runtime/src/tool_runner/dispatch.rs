@@ -63,6 +63,16 @@ pub struct ToolExecContext<'a> {
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// Platform conversation id (Telegram chat_id, Discord channel_id,
+    /// WhatsApp JID) the originating user message arrived on. Distinct
+    /// from `sender_id` for group chats; coincides in DMs. Threaded
+    /// through `DeferredToolExecution.chat_id` so approval-resume routing
+    /// (the bridge listener fast-path and `wake_agent_after_approval`)
+    /// can target the originating conversation instead of always
+    /// hitting the human's DM with the bot. `None` for non-channel
+    /// call sites; the deferred payload falls back to `sender_id` in
+    /// that case.
+    pub chat_id: Option<&'a str>,
     /// LibreFang `SessionId` the tool call belongs to. When `Some`, the
     /// `file_read` / `file_write` builtins consult
     /// `kernel.acp_fs_client(session_id)` and route through the editor's
@@ -163,6 +173,10 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel,
+        // Only consumed by `execute_tool` upstream to thread into
+        // `DeferredToolExecution.chat_id`; the raw-execution path
+        // (`execute_tool_raw`, this fn) doesn't reference it.
+        chat_id: _,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -863,9 +877,11 @@ pub async fn execute_tool_raw(
         // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
         // tool fn (`enforce_memory_acl`) using the attributed sender +
         // channel, mirroring the proactive-retrieval gate.
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id, *channel),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id, *channel),
-        "memory_list" => tool_memory_list(*kernel, *sender_id, *channel),
+        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id, *channel),
+        "memory_recall" => {
+            tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
+        }
+        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
         "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),
@@ -996,10 +1012,21 @@ pub async fn execute_tool_raw(
         "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
         "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
-        // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
-        "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
-        "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
+        // Cron scheduling tools — first slice of the #3576 typed-error
+        // migration. The submodule now returns `Result<String, ToolError>`;
+        // the dispatch arm narrows it to `Result<String, String>` here at
+        // the boundary so the broader dispatch table stays uniform until
+        // every submodule has migrated. Follow-up PRs will lift the dispatch
+        // return type itself; until then this is the bridge.
+        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "cron_list" => tool_cron_list(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => {
@@ -1318,6 +1345,7 @@ pub async fn execute_tool(
     process_registry: Option<&crate::process_registry::ProcessRegistry>,
     sender_id: Option<&str>,
     channel: Option<&str>,
+    chat_id: Option<&str>,
     checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
     session_id: Option<&str>,
@@ -1417,7 +1445,7 @@ pub async fn execute_tool(
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
         {
-            let agent_id_str = caller_agent_id.unwrap_or("unknown");
+            let agent_id_str = caller_agent_id.unwrap_or("");
             let input_str = input.to_string();
             let summary = format!(
                 "{}: {}",
@@ -1444,6 +1472,7 @@ pub async fn execute_tool(
                 exec_policy: exec_policy.cloned(),
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
+                chat_id: chat_id.map(|c| c.to_string()),
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
                 // When the user gate demanded approval, hand-tagged agents
                 // must NOT auto-approve — see kernel `submit_tool_approval`.
@@ -1530,6 +1559,7 @@ pub async fn execute_tool(
         process_registry,
         sender_id,
         channel,
+        chat_id,
         session_id: parsed_session_id,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,

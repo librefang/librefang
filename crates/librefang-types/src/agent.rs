@@ -278,6 +278,20 @@ const CRON_RUN_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0x7e, 0x91, 0x2c, 0x4f, 0xb5, 0xa3, 0x48, 0xd1, 0xa0, 0x6c, 0xe2, 0x83, 0x1f, 0x57, 0xc4, 0x09,
 ]);
 
+/// Distinct UUID v5 namespace for per-fire trigger session IDs.
+/// audit: trigger-new-session-non-deterministic — random `SessionId::new()`
+/// minted at `triggers_and_workflow.rs` dispatch made "trigger X fired at T"
+/// log lines impossible to correlate to a specific SessionId. Mirror the
+/// cron `for_cron_run` design: derive deterministic v5 UUID from
+/// `(agent, trigger_id, fire_time)`. Disjoint from both
+/// `CHANNEL_SESSION_NAMESPACE` and `CRON_RUN_SESSION_NAMESPACE` so a
+/// `for_trigger_fire` id can never collide with any other session-key
+/// flavour even if input strings happen to coincide.
+/// Generated via `uuidgen`: e1e39b22-c416-4e06-93a5-60657b06e003.
+const TRIGGER_FIRE_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0xe1, 0xe3, 0x9b, 0x22, 0xc4, 0x16, 0x4e, 0x06, 0x93, 0xa5, 0x60, 0x65, 0x7b, 0x06, 0xe0, 0x03,
+]);
+
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
@@ -312,10 +326,12 @@ impl SessionId {
     /// them silently disagreeing would re-introduce #4868 (channel `/new`
     /// deleting the wrong sid).
     pub fn for_sender_scope(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> Self {
-        let scope = match chat_id {
-            Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
-            _ => channel.to_string(),
-        };
+        // `compose_sender_scope` returns `None` only when `channel` is
+        // empty, which is callers' responsibility to avoid (the kernel's
+        // channel branch already guards `!ctx.channel.is_empty()` before
+        // reaching here). Falling back to the bare channel preserves the
+        // pre-helper behaviour without panicking on a degenerate input.
+        let scope = compose_sender_scope(channel, chat_id).unwrap_or_else(|| channel.to_string());
         Self::for_channel(agent_id, &scope)
     }
 
@@ -335,6 +351,39 @@ impl SessionId {
         let name = format!("{}:{}", agent_id.0, run_key.to_lowercase());
         Self(uuid::Uuid::new_v5(
             &CRON_RUN_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+
+    /// Derive a per-fire trigger session id keyed by
+    /// `(agent, trigger_id, fire_time)`.
+    ///
+    /// audit: trigger-new-session-non-deterministic — used when an event
+    /// trigger fires with `SessionMode::New` (manifest default or
+    /// per-trigger override). The dispatcher previously minted a random
+    /// `SessionId::new()`, which made it impossible to correlate a
+    /// "trigger X fired at T" log line to the actual SessionId for
+    /// diagnostics. Mirrors `for_cron_run` so log-driven debugging on
+    /// triggers behaves the same as cron.
+    ///
+    /// `trigger_id` is taken as a raw `Uuid` to avoid a layering inversion:
+    /// the concrete `TriggerId` newtype lives in `librefang-kernel`, which
+    /// depends on this crate. The dispatcher passes `trigger_match.trigger_id.0`.
+    /// `fire_time` is the moment the dispatcher resolved the match; the
+    /// kernel event bus already carries `Event::timestamp` for this.
+    pub fn for_trigger_fire(
+        agent_id: AgentId,
+        trigger_id: uuid::Uuid,
+        fire_time: DateTime<Utc>,
+    ) -> Self {
+        let name = format!(
+            "{}:{}:{}",
+            agent_id.0,
+            trigger_id,
+            fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        );
+        Self(uuid::Uuid::new_v5(
+            &TRIGGER_FIRE_SESSION_NAMESPACE,
             name.as_bytes(),
         ))
     }
@@ -376,6 +425,30 @@ impl SessionId {
             name.as_bytes(),
         ))
     }
+}
+
+/// Canonical scope-string formula shared by [`SessionId::for_sender_scope`]
+/// and the kernel's `sender_chat_scope` metadata stamp (#5227).
+///
+/// Returns `Some("<channel>:<chat_id>")` when both fields are non-empty,
+/// `Some("<channel>")` when chat_id is absent/empty, and `None` when
+/// channel itself is empty (no scope to compose).
+///
+/// Keeping the two consumers in lockstep is load-bearing: if the kernel's
+/// session-id derivation and the runtime's memory-scope filter ever
+/// disagree on this formula, a memory written under one chat will leak
+/// into the SessionId-isolated history of the OTHER chat — exactly the
+/// regression #5227 set out to close. Both call sites take a
+/// `(channel, chat_id)` pair via this helper rather than re-inlining
+/// `format!("{ch}:{cid}")`.
+pub fn compose_sender_scope(channel: &str, chat_id: Option<&str>) -> Option<String> {
+    if channel.is_empty() {
+        return None;
+    }
+    Some(match chat_id {
+        Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
+        _ => channel.to_string(),
+    })
 }
 
 impl std::str::FromStr for SessionId {
@@ -447,6 +520,19 @@ pub enum RunningSessionState {
 ///
 /// Controls whether background ticks, triggers, and `agent_send` calls
 /// reuse the agent's persistent session or create a fresh one each time.
+///
+/// **Strict-variant deserialization** (audit:
+/// session-mode-deserialize-fallback). serde's standard derive errors
+/// hard on unknown variants — there is no `#[serde(other)]` arm here
+/// and `#[default]` does NOT serve as a fallback for unknown variant
+/// strings (it only fires when `#[serde(default)]` is set on a
+/// container or field and the entire key is missing). The tests
+/// `session_mode_*` below pin this contract so a future refactor
+/// that adds a permissive `#[serde(other)]` arm gets caught — silently
+/// re-mapping `session_mode = "New"` (capitalised typo) to
+/// `Persistent` would run the operator straight into CLAUDE.md's
+/// warning that "concurrent writes to a single persistent session
+/// are undefined."
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
@@ -974,8 +1060,14 @@ pub struct AgentManifest {
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub fallback_models: Vec<FallbackModel>,
+    /// `None` means "inherit global fallback_providers"; `Some([])` means
+    /// "disable all fallbacks for this agent".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::option_vec_lenient"
+    )]
+    pub fallback_models: Option<Vec<FallbackModel>>,
     /// Resource quotas.
     pub resources: ResourceQuota,
     /// Priority level.
@@ -1411,7 +1503,7 @@ impl Default for AgentManifest {
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
             model: ModelConfig::default(),
-            fallback_models: Vec::new(),
+            fallback_models: None,
             resources: ResourceQuota::default(),
             priority: Priority::default(),
             capabilities: ManifestCapabilities::default(),
@@ -2341,19 +2433,74 @@ mod tests {
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
             profile: Some(ToolProfile::Coding),
-            fallback_models: vec![FallbackModel {
+            fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
                 extra_params: std::collections::HashMap::new(),
-            }],
+            }]),
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile, Some(ToolProfile::Coding));
-        assert_eq!(back.fallback_models.len(), 1);
+        assert_eq!(back.fallback_models.as_deref().map(|v| v.len()), Some(1));
+    }
+
+    // ----- fallback_models three-state TOML parse tests (#5112) -----
+
+    #[test]
+    fn test_fallback_models_absent_key_yields_none() {
+        // A manifest TOML with NO `fallback_models` key at all must deserialize
+        // to `None` (= inherit global fallback_providers chain).
+        let toml_str = r#"
+            name = "test-agent"
+            [model]
+            provider = "anthropic"
+            model = "claude-3-haiku-20240307"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.fallback_models.is_none(),
+            "absent fallback_models key must produce None, got: {:?}",
+            manifest.fallback_models
+        );
+    }
+
+    #[test]
+    fn test_fallback_models_explicit_empty_yields_some_empty_and_roundtrips() {
+        // `fallback_models = []` (inline TOML array syntax) must deserialize to
+        // `Some(vec![])` — opting the agent out of the global fallback chain.
+        // The roundtrip back to JSON must preserve `Some(vec![])` (i.e.
+        // `skip_serializing_if = "Option::is_none"` must NOT drop it).
+        let toml_str = r#"
+            name = "test-agent"
+            fallback_models = []
+            [model]
+            provider = "anthropic"
+            model = "claude-3-haiku-20240307"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
+            "explicit fallback_models = [] must produce Some(vec![]), got: {:?}",
+            manifest.fallback_models
+        );
+
+        // Round-trip: serialize to JSON then deserialize again.
+        let json = serde_json::to_string(&manifest).unwrap();
+        // Some(vec![]) serializes as `"fallback_models":[]` — the key must be present.
+        assert!(
+            json.contains("fallback_models"),
+            "serialized JSON must contain the fallback_models key when Some(vec![]); json={json}"
+        );
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
+            "roundtrip must preserve Some(vec![]), got: {:?}",
+            back.fallback_models
+        );
     }
 
     #[test]
@@ -2859,6 +3006,78 @@ model = "llama-3.3-70b-versatile"
         assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
     }
 
+    /// #5227 follow-up — `compose_sender_scope` is the canonical
+    /// formula shared by `SessionId::for_sender_scope` and the kernel's
+    /// `sender_chat_scope` metadata stamp. If the two ever drift,
+    /// memories written under one chat would leak into the SessionId-
+    /// isolated history of the OTHER chat — re-opening the original
+    /// bug but for non-WhatsApp adapters. This test pins all four
+    /// behavioural cases so any future change to the formula has to
+    /// own both sides.
+    #[test]
+    fn compose_sender_scope_formula_5227() {
+        // Bare channel — chat_id absent or empty collapses to the
+        // channel string verbatim (matches `for_channel` semantics).
+        assert_eq!(
+            compose_sender_scope("telegram", None),
+            Some("telegram".to_string()),
+        );
+        assert_eq!(
+            compose_sender_scope("telegram", Some("")),
+            Some("telegram".to_string()),
+        );
+
+        // Chat-qualified — `<channel>:<chat_id>`.
+        assert_eq!(
+            compose_sender_scope("telegram", Some("group--999")),
+            Some("telegram:group--999".to_string()),
+        );
+
+        // Already-qualified channel (WhatsApp gateway path) +
+        // chat_id None — passes through.
+        assert_eq!(
+            compose_sender_scope("whatsapp:+15551234567@s.whatsapp.net", None),
+            Some("whatsapp:+15551234567@s.whatsapp.net".to_string()),
+        );
+
+        // Empty channel is `None` — kernel inject sites guard against
+        // this before reaching the helper, but the helper itself stays
+        // defensive so callers can safely propagate the result via
+        // `if let Some(scope) = compose_sender_scope(...) { ... }`.
+        assert_eq!(compose_sender_scope("", None), None);
+        assert_eq!(compose_sender_scope("", Some("anything")), None);
+    }
+
+    /// #5227 follow-up — verify the two consumers of the formula
+    /// actually agree byte-for-byte. The session-id path goes
+    /// `for_sender_scope -> compose_sender_scope -> for_channel`;
+    /// the memory-stamp path stamps the raw `compose_sender_scope`
+    /// output. Both consumers running through the helper guarantees
+    /// they cannot drift, but it's cheap to assert the equality
+    /// explicitly so a refactor that re-inlines one side is caught.
+    #[test]
+    fn compose_sender_scope_matches_for_sender_scope_5227() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        for (channel, chat_id) in [
+            ("telegram", Some("dm-7777")),
+            ("telegram", Some("group--999")),
+            ("slack", Some("C012345")),
+            ("slack", Some("D012345")),
+            ("whatsapp:+15551234567@s.whatsapp.net", None),
+            ("whatsapp", None),
+            ("discord", Some("ch-1")),
+        ] {
+            let scope = compose_sender_scope(channel, chat_id)
+                .expect("non-empty channel composes successfully");
+            assert_eq!(
+                SessionId::for_sender_scope(agent, channel, chat_id),
+                SessionId::for_channel(agent, &scope),
+                "for_sender_scope and for_channel(compose_sender_scope) must agree \
+                 for (channel={channel}, chat_id={chat_id:?})"
+            );
+        }
+    }
+
     #[test]
     fn session_id_from_str_parses_uuid() {
         use std::str::FromStr;
@@ -2901,6 +3120,107 @@ model = "llama-3.3-70b-versatile"
         let persistent = SessionId::for_channel(agent, "cron");
         let isolated = SessionId::for_cron_run(agent, "cron");
         assert_ne!(persistent, isolated);
+    }
+
+    // audit: trigger-new-session-non-deterministic
+    // The tests below pin the contract for `SessionId::for_trigger_fire`.
+    // Mirrors `for_cron_run_*` and `fire_session_override_new_matches_for_cron_run_contract_3657`
+    // (in `librefang-kernel/src/cron.rs`). Any change to derivation shape
+    // (timestamp precision, separator, ordering, namespace) must update all of
+    // these in lockstep — random `SessionId::new()` regressed log-correlation
+    // once, and a quiet shape change would silently repeat that.
+
+    #[test]
+    fn for_trigger_fire_deterministic() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let a = SessionId::for_trigger_fire(agent, trigger_id, t);
+        let b = SessionId::for_trigger_fire(agent, trigger_id, t);
+        assert_eq!(
+            a, b,
+            "same (agent, trigger_id, fire_time) must yield identical SessionId"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_fire_time() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t1 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let t2 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 1).unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent, trigger_id, t1),
+            SessionId::for_trigger_fire(agent, trigger_id, t2),
+            "different fire_times must yield different SessionIds"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_trigger_id() {
+        use chrono::TimeZone;
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let tid_a = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let tid_b = uuid::Uuid::parse_str("c3c4c5c6-d3d4-e3e4-f3f4-a3a4a5a6a7a8").unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent, tid_a, t),
+            SessionId::for_trigger_fire(agent, tid_b, t),
+            "different trigger_ids at the same instant must yield different SessionIds"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinguishes_agent() {
+        use chrono::TimeZone;
+        let agent_a =
+            AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let agent_b =
+            AgentId(uuid::Uuid::parse_str("d4d5d6d7-e4e5-f4f5-a4a5-b4b5b6b7b8b9").unwrap());
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        assert_ne!(
+            SessionId::for_trigger_fire(agent_a, trigger_id, t),
+            SessionId::for_trigger_fire(agent_b, trigger_id, t),
+            "different agents must yield different SessionIds for the same trigger fire"
+        );
+    }
+
+    #[test]
+    fn for_trigger_fire_distinct_namespace_from_cron_and_channel() {
+        use chrono::TimeZone;
+        // Distinct namespaces guarantee: even if a future caller hands
+        // identical input strings to all three derivation flavours, the
+        // resulting SessionIds cannot collide. This pins
+        // TRIGGER_FIRE_SESSION_NAMESPACE as semantically disjoint from
+        // CHANNEL_SESSION_NAMESPACE and CRON_RUN_SESSION_NAMESPACE.
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        // Use the trigger_id's UUID *string* as the colliding input for the
+        // other two namespaces — purely to force the same byte sequence.
+        let trigger_id = uuid::Uuid::parse_str("b2b3b4b5-c2c3-d2d3-e2e3-f2f3f4f5f6f7").unwrap();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let trigger_sid = SessionId::for_trigger_fire(agent, trigger_id, t);
+        let cron_sid = SessionId::for_cron_run(
+            agent,
+            &format!(
+                "{}:{}",
+                trigger_id,
+                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            ),
+        );
+        let channel_sid = SessionId::for_channel(
+            agent,
+            &format!(
+                "{}:{}",
+                trigger_id,
+                t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            ),
+        );
+        assert_ne!(trigger_sid, cron_sid);
+        assert_ne!(trigger_sid, channel_sid);
+        assert_ne!(cron_sid, channel_sid);
     }
 
     #[test]
@@ -3368,5 +3688,72 @@ model = "claude-3-haiku-20240307"
                 "rejection for {name:?} should mention the reserved namespace; got: {msg}"
             );
         }
+    }
+
+    /// Audit: session-mode-deserialize-fallback. Pin serde's
+    /// strict-variant behaviour for `SessionMode`. A future refactor
+    /// that adds `#[serde(other)]` to silence "unknown variant" errors
+    /// would silently re-map operator typos (`"New"`, `"Default"`,
+    /// `""`) to whatever the catch-all arm chose — most likely
+    /// `Persistent` — and the operator who intended `New` semantics
+    /// would land on CLAUDE.md's "concurrent writes to a single
+    /// persistent session are undefined" warning.
+    #[test]
+    fn session_mode_deserializes_lowercase_persistent_and_new() {
+        let p: SessionMode = serde_json::from_str("\"persistent\"").unwrap();
+        assert_eq!(p, SessionMode::Persistent);
+        let n: SessionMode = serde_json::from_str("\"new\"").unwrap();
+        assert_eq!(n, SessionMode::New);
+    }
+
+    #[test]
+    fn session_mode_rejects_capitalised_variant_strings() {
+        // snake_case rename means uppercase / TitleCase variant names
+        // are NOT valid. The dispute resolution in the audit doc rests
+        // on this contract.
+        let err = serde_json::from_str::<SessionMode>("\"New\"").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown variant"),
+            "TitleCase `\"New\"` must error with `unknown variant`, got: {msg}"
+        );
+        let err = serde_json::from_str::<SessionMode>("\"PERSISTENT\"").unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn session_mode_rejects_empty_string_and_typos() {
+        // Common operator mistakes: blank, near-misses.
+        for bad in ["\"\"", "\"presistent\"", "\"none\"", "\"default\""] {
+            let err = serde_json::from_str::<SessionMode>(bad).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown variant"),
+                "{bad} must be rejected as unknown variant, got: {err}"
+            );
+        }
+    }
+
+    /// `Option<SessionMode>` with `#[serde(default)]` is the
+    /// per-trigger / per-cron-job override shape. `#[serde(default)]`
+    /// fires only when the entire key is missing — an explicit
+    /// `session_mode = "New"` typo still errors hard. This test
+    /// pins the boundary.
+    #[test]
+    fn optional_session_mode_default_fires_on_missing_key_not_unknown_string() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Wrap {
+            #[serde(default)]
+            session_mode: Option<SessionMode>,
+        }
+        // Key absent → None via #[serde(default)].
+        let w: Wrap = toml::from_str("").unwrap();
+        assert!(w.session_mode.is_none());
+        // Key present but capitalised → hard error, not silent None.
+        let err =
+            toml::from_str::<Wrap>("session_mode = \"New\"").expect_err("must reject capitalised");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "explicit `session_mode = \"New\"` must error, not fall back to None / Persistent: {err}"
+        );
     }
 }

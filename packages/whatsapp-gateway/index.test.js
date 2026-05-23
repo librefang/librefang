@@ -47,6 +47,7 @@ const {
   SESSION_RECOVERY_MAX_ATTEMPTS,
   runDispatchSelfTest,
   channelTypeForChat,
+  compileGroupTriggerRegex,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -1538,5 +1539,104 @@ describe('ownerIntentsRelay', () => {
     assert.equal(re.test('Sag mir was du denkst'), false);
     assert.equal(re.test('sag mir bitte'), false);
     assert.equal(re.test('sage uns die Wahrheit'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compileGroupTriggerRegex — pattern fallback compiler used by the
+// `wasMentioned via group_trigger_patterns` path. Tests the contract houko
+// flagged in PR #5230: case-insensitive leading `(?i)`, graceful skip on
+// invalid input, and refusal of Rust-style mid-pattern inline flag groups
+// (which JS RegExp silently treats as literal text).
+// ---------------------------------------------------------------------------
+describe('compileGroupTriggerRegex', () => {
+  it('translates leading (?i) into JS i flag (case-insensitive match)', () => {
+    const re = compileGroupTriggerRegex('(?i)\\bbot\\b');
+    assert.ok(re, 'expected a compiled regex');
+    assert.equal(re.flags.includes('i'), true);
+    assert.ok(re.test('Hey BOT, ping'));
+    assert.ok(re.test('hey bot, ping'));
+    assert.ok(re.test('Bot — fai una cosa'));
+  });
+
+  it('returns null and warns on a syntactically invalid pattern (no boot crash)', () => {
+    const orig = console.warn;
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    try {
+      assert.equal(compileGroupTriggerRegex('('), null);
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(warnings.length, 1, 'expected exactly one warn line');
+    assert.ok(/invalid group_trigger_patterns/.test(warnings[0]),
+      `unexpected warn: ${warnings[0]}`);
+  });
+
+  it('returns null on empty / non-string entries (silent skip is OK here)', () => {
+    assert.equal(compileGroupTriggerRegex(''), null);
+    assert.equal(compileGroupTriggerRegex(null), null);
+    assert.equal(compileGroupTriggerRegex(undefined), null);
+    assert.equal(compileGroupTriggerRegex(42), null);
+    assert.equal(compileGroupTriggerRegex({}), null);
+  });
+
+  it('refuses mid-pattern (?i) inline flag groups with a warn (Rust-only syntax)', () => {
+    // Rust `regex` accepts `foo(?i)bar` to switch case-insensitivity from the
+    // middle of a pattern; JS RegExp does not. We bail out rather than emit
+    // a regex that silently never matches.
+    const orig = console.warn;
+    const warnings = [];
+    console.warn = (msg) => warnings.push(String(msg));
+    try {
+      assert.equal(compileGroupTriggerRegex('foo(?i)bar'), null);
+      assert.equal(compileGroupTriggerRegex('(?i)foo(?-i)bar'), null);
+      assert.equal(compileGroupTriggerRegex('(?i:foo)bar'), null);
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(warnings.length, 3);
+    for (const w of warnings) {
+      assert.ok(/mid-pattern inline flag group/.test(w),
+        `unexpected warn: ${w}`);
+    }
+  });
+
+  it('compiles a plain pattern without leading (?i) using default flags', () => {
+    const re = compileGroupTriggerRegex('\\bSignore\\b');
+    assert.ok(re);
+    assert.equal(re.flags, '');
+    assert.ok(re.test('Caro Signore, una nota'));
+    // Case-sensitive by default — matches Rust `regex` behaviour without (?i).
+    assert.equal(re.test('signore minuscolo'), false);
+  });
+
+  it('simulates the wasMentioned fallback decision over typical group text', () => {
+    // Mirror the call shape at index.js:1893 — a compiled regex array tested
+    // against the inbound `text` variable. Covers the four required cases:
+    //   1. patterns present + text matches → fallback fires
+    //   2. patterns present + text empty   → fallback short-circuits
+    //   3. patterns empty                  → fallback never runs
+    //   4. patterns present + no match     → fallback stays false
+    const compiled = [
+      compileGroupTriggerRegex('(?i)\\bsignore\\b'),
+      compileGroupTriggerRegex('(?i)\\bambrogio\\b'),
+    ].filter(Boolean);
+    const hit = (text) => Boolean(text) && compiled.length > 0
+      && compiled.some(re => re.test(text));
+    // 1. Match (mention by name)
+    assert.equal(hit('Signore, fai una cosa'), true);
+    assert.equal(hit('ehi Ambrogio'), true);
+    // 2. Empty text → no fallback fire
+    assert.equal(hit(''), false);
+    assert.equal(hit(null), false);
+    assert.equal(hit(undefined), false);
+    // 3. Empty pattern array → no fallback fire (simulate by clearing)
+    const empty = [];
+    const hitEmpty = (text) => Boolean(text) && empty.length > 0
+      && empty.some(re => re.test(text));
+    assert.equal(hitEmpty('Signore'), false);
+    // 4. No match
+    assert.equal(hit('Caterina, chiedi al barista'), false);
   });
 });

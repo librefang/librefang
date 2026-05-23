@@ -227,7 +227,7 @@ pub async fn synthesize_speech(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -370,7 +370,7 @@ pub async fn generate_music(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
     }
 }
 
@@ -421,13 +421,12 @@ pub async fn transcribe_audio(
         .channels
         .effective_file_download_dir();
     if let Err(e) = std::fs::create_dir_all(&upload_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create upload dir: {e}"))
-            .into_response();
+        return ApiErrorResponse::internal_scrub(e).into_response();
     }
     let file_id = uuid::Uuid::new_v4().to_string();
     let file_path = upload_dir.join(&file_id);
     if let Err(e) = std::fs::write(&file_path, &body) {
-        return ApiErrorResponse::internal(format!("Failed to write audio: {e}")).into_response();
+        return ApiErrorResponse::internal_scrub(e).into_response();
     }
 
     let attachment = librefang_types::media::MediaAttachment {
@@ -452,7 +451,7 @@ pub async fn transcribe_audio(
         }
         Err(e) => {
             let _ = std::fs::remove_file(&file_path);
-            ApiErrorResponse::internal(format!("Transcription failed: {e}")).into_response()
+            ApiErrorResponse::internal_scrub(e).into_response()
         }
     }
 }

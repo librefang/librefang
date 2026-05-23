@@ -242,6 +242,14 @@ The daemon command is `start` (not `daemon`).
   up a new cap, **kill the agent and let it respawn** (or restart the
   daemon); an in-place activate/status flip will silently keep the old
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
+- **Config hot-reload classification**: which `KernelConfig` fields
+  hot-reload, which require a restart, and which are read-live/noop is
+  decided by `build_reload_plan` in
+  `crates/librefang-kernel/src/config_reload.rs`. The canonical
+  ops-facing reference table (one row per field, derived from that
+  function and drift-guarded by a test) lives at
+  `docs/operations/config-reload.md` — consult it before assuming a
+  config edit takes effect on `POST /api/config/reload`.
 - **Skill workshop** (#3328) passively captures teaching signals from
   successful turns into draft skills under
   `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-OFF —
@@ -581,5 +589,6 @@ session burns turns without producing information.
 - When adding `Option<Arc<dyn Trait>>` fields to structs that derive `Serialize`/`Deserialize`/`Clone`/`Debug`, mark them `#[serde(skip)]` and implement the affected traits manually
 - `ErrorTranslator` (from `RequestLanguage`) is `!Send` — any `.await` must happen AFTER `drop(t)`, or the axum handler will fail with a cryptic `Handler<_, _>` trait bound error
 - `LIBREFANG_VAULT_KEY` env var must base64-decode to exactly 32 bytes (use `openssl rand -base64 32` which gives 44 chars). 32 ASCII chars ≠ 32 bytes.
+- `CLAUDE_CODE_HOME` env var overrides the home directory used by the `claude-code` driver when it spawns the Anthropic `claude` CLI subprocess. **LibreFang-private contract — the Anthropic CLI itself does not read this variable**; the driver resolves it kernel-side and projects the value onto the platform-native home var (`$HOME` on Unix, `%USERPROFILE%` on Windows) before spawn. Distinct from the existing `LIBREFANG_HOME` (which relocates the daemon's data dir — see `crates/librefang-kernel/src/config.rs:librefang_home`); the two never share a value. Containers that drop privileges to a numeric uid without a matching passwd entry inherit a placeholder home (`/nonexistent` on glibc, `/var/empty` on BSD/Alpine, `/dev/null` on some hardened images) — set `CLAUDE_CODE_HOME` in the orchestrator manifest / kernel-boot wrapper so the spawned CLI can find `~/.claude/.credentials.json`. The override is unused when the inherited platform home already resolves to a real on-disk directory; when it is set but points at a non-directory the driver emits a `WARN` log and falls back to the inherited platform home rather than honouring the broken override.
 - When parallel agents modify the same crate, `Option::None` defaults for new fields will silently compile but disable features. Always write integration tests at the injection site, not just the implementation site.
 - On Windows: use `taskkill //PID <pid> //F` (double slashes in MSYS2/Git Bash)

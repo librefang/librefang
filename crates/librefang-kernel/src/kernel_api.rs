@@ -136,6 +136,15 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry>;
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry>;
 
+    /// Per-provider credential-pool snapshots, sorted by provider name.
+    ///
+    /// Backs the `GET /api/credential-pools` HTTP endpoint and the
+    /// `librefang auth pool list` CLI command. The returned snapshots are
+    /// redacted (no raw API keys). See issue #4965.
+    fn credential_pool_summaries(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::kernel::subsystems::llm::CredentialPoolSummary>;
+
     // ====================================================================
     // Config / lifecycle
     // ====================================================================
@@ -165,13 +174,25 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // unlock-time Argon2id KDF on every install request (#3598). The trait
     // exposes the high-level installer; the underlying `vault_handle` stays
     // an inherent method to keep the trait surface small.
+    //
+    // Both halves of the return type are `librefang-types`-owned
+    // (`IntegrationOutcome` / `IntegrationError`), not the extensions-crate
+    // `InstallResult` / `ExtensionResult`, so a mock / alternate kernel can
+    // implement this trait without depending on `librefang-extensions` at all.
+    // The real kernel impl converts via the `From<InstallResult>` /
+    // `From<ExtensionError>` bridges defined in that crate. The remaining
+    // extension-typed surfaces on other `KernelApi` methods are tracked under
+    // the broader kernel-depends-on-extensions refactor.
     // ====================================================================
 
     fn install_integration(
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult>;
+    ) -> Result<
+        librefang_types::integration::IntegrationOutcome,
+        librefang_types::integration::IntegrationError,
+    >;
 
     // ====================================================================
     // Inbox / auto-dream observability
@@ -224,6 +245,13 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
     async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
+    /// Delete a single session by id and any process-local side-state keyed
+    /// on it (currently the per-session `file_read_tracker` bucket — see
+    /// `librefang_runtime::file_read_tracker::forget_session`). Use this in
+    /// preference to calling `memory_substrate().delete_session(...)`
+    /// directly so the side-state map does not leak across the daemon's
+    /// lifetime.
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -519,11 +547,21 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
         tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
     )>;
+    // Trait takes `Option<SenderContext>` by value (not by reference) because
+    // callers across crate boundaries (api, channel_bridge) typically build a
+    // fresh `SenderContext` per request and pass ownership in. The matching
+    // inherent impl on `LibreFangKernel` takes `Option<&SenderContext>` and
+    // the trait impl bridges via `.as_ref()` — see line ~1330 below. This
+    // avoids forcing a clone at every call site while keeping the inherent
+    // signature borrow-flexible for internal callers that already hold a
+    // reference. Do not "unify" by making both by-ref or both by-value
+    // without auditing every callsite.
     async fn send_message_streaming_with_incognito(
         self: Arc<Self>,
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -799,6 +837,13 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::SkillsSubsystemApi>::skill_registry_ref(self)
     }
 
+    fn credential_pool_summaries(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::kernel::subsystems::llm::CredentialPoolSummary>
+    {
+        <Self as crate::LlmSubsystemApi>::credential_pool_summaries(self)
+    }
+
     // -- Config / lifecycle --
     fn budget_config(&self) -> BudgetConfig {
         <Self as crate::MeteringSubsystemApi>::current_budget(self)
@@ -838,8 +883,18 @@ impl KernelApi for LibreFangKernel {
         &self,
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
-    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+    ) -> Result<
+        librefang_types::integration::IntegrationOutcome,
+        librefang_types::integration::IntegrationError,
+    > {
+        // The inherent method keeps returning the extensions-crate
+        // `ExtensionResult<InstallResult>`; convert both halves to the
+        // dependency-free `librefang-types` types at the trait boundary via the
+        // `From<InstallResult>` / `From<ExtensionError>` bridges in
+        // `librefang-extensions`.
         Self::install_integration(self, template_id, provided_keys)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     // -- Inbox / auto-dream --
@@ -897,6 +952,9 @@ impl KernelApi for LibreFangKernel {
     }
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
+    }
+    fn delete_session(&self, session_id: SessionId) -> KernelResult<()> {
+        Self::delete_session(self, session_id)
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)
@@ -1298,6 +1356,7 @@ impl KernelApi for LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -1309,6 +1368,7 @@ impl KernelApi for LibreFangKernel {
             agent_id,
             message,
             kernel_handle,
+            sender_context.as_ref(),
             session_id_override,
             incognito,
         )

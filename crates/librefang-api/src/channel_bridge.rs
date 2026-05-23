@@ -234,55 +234,39 @@ fn looks_like_tool_call_object(text: &str) -> bool {
 }
 
 // Feature-gated adapter imports
-#[cfg(feature = "channel-discord")]
-use librefang_channels::discord::DiscordAdapter;
-#[cfg(feature = "channel-email")]
-use librefang_channels::email::EmailAdapter;
-#[cfg(feature = "channel-google-chat")]
-use librefang_channels::google_chat::GoogleChatAdapter;
-#[cfg(feature = "channel-matrix")]
-use librefang_channels::matrix::MatrixAdapter;
-#[cfg(feature = "channel-mattermost")]
-use librefang_channels::mattermost::MattermostAdapter;
-#[cfg(feature = "channel-rocketchat")]
-use librefang_channels::rocketchat::RocketChatAdapter;
-#[cfg(feature = "channel-signal")]
-use librefang_channels::signal::SignalAdapter;
-#[cfg(feature = "channel-slack")]
-use librefang_channels::slack::SlackAdapter;
-#[cfg(feature = "channel-teams")]
-use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-twitch")]
-use librefang_channels::twitch::TwitchAdapter;
-#[cfg(feature = "channel-webhook")]
-use librefang_channels::webhook::WebhookAdapter;
-#[cfg(feature = "channel-whatsapp")]
-use librefang_channels::whatsapp::WhatsAppAdapter;
-#[cfg(feature = "channel-zulip")]
-use librefang_channels::zulip::ZulipAdapter;
+// email migrated to a sidecar (librefang.sidecar.adapters.email);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// google_chat migrated to a sidecar (librefang.sidecar.adapters.google_chat);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// matrix migrated to a sidecar (librefang.sidecar.adapters.matrix);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// mattermost migrated to a sidecar (librefang.sidecar.adapters.mattermost);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// signal migrated to a sidecar (librefang.sidecar.adapters.signal);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// teams migrated to a sidecar (librefang.sidecar.adapters.teams);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// webhook migrated to a sidecar (librefang.sidecar.adapters.webhook);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// whatsapp migrated to a sidecar (librefang.sidecar.adapters.whatsapp);
+// see SIDECAR_CATALOG in routes/channels.rs.
 // Wave 3
-#[cfg(feature = "channel-bluesky")]
-use librefang_channels::bluesky::BlueskyAdapter;
-#[cfg(feature = "channel-feishu")]
-use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
-#[cfg(feature = "channel-line")]
-use librefang_channels::line::LineAdapter;
-#[cfg(feature = "channel-reddit")]
-use librefang_channels::reddit::RedditAdapter;
-// Wave 4
-#[cfg(feature = "channel-nextcloud")]
-use librefang_channels::nextcloud::NextcloudAdapter;
-#[cfg(feature = "channel-webex")]
-use librefang_channels::webex::WebexAdapter;
+// line migrated to a sidecar (librefang.sidecar.adapters.line); see
+// SIDECAR_CATALOG in routes/channels.rs.
+// feishu migrated to a sidecar (librefang.sidecar.adapters.feishu);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// Wave 4 — webex migrated to a sidecar
+// (librefang.sidecar.adapters.webex); see SIDECAR_CATALOG in
+// routes/channels.rs.
 // Wave 5
-#[cfg(feature = "channel-dingtalk")]
-use librefang_channels::dingtalk::DingTalkAdapter;
-#[cfg(feature = "channel-qq")]
-use librefang_channels::qq::QqAdapter;
-#[cfg(feature = "channel-wechat")]
-use librefang_channels::wechat::WeChatAdapter;
-#[cfg(feature = "channel-wecom")]
-use librefang_channels::wecom::WeComAdapter;
+// dingtalk migrated to a sidecar (librefang.sidecar.adapters.dingtalk);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// qq migrated to a sidecar (librefang.sidecar.adapters.qq);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// wechat migrated to a sidecar (librefang.sidecar.adapters.wechat);
+// see SIDECAR_CATALOG in routes/channels.rs.
+// wecom migrated to a sidecar (librefang.sidecar.adapters.wecom);
+// see SIDECAR_CATALOG in routes/channels.rs.
 
 use async_trait::async_trait;
 use librefang_kernel::auth::Action as KernelAction;
@@ -610,6 +594,41 @@ where
 pub struct KernelBridgeAdapter {
     kernel: Arc<dyn KernelApi>,
     started_at: Instant,
+}
+
+/// Compose the message returned to a channel user when `/approve <id>`
+/// or `/reject <id>` found no live pending request.
+///
+/// Distinguishes two cases by checking the recent audit log:
+/// - **Already-resolved**: a recent audit entry's `request_id` starts
+///   with `id_prefix`. The user is double-clicking the inline keyboard
+///   OR following up with a slash command after the button click —
+///   harmless, ack idempotently with the original decision.
+/// - **Truly unknown**: no audit entry matches either. Keep the
+///   original "No pending approval matching" message so a real
+///   typo / stale id still surfaces as a real not-found.
+///
+/// Hoisted out as a free function so it can be unit-tested against a
+/// constructed `ApprovalManager` without going through the full
+/// `KernelApi` mocks the rest of `resolve_approval_text` requires.
+fn resolve_no_pending_message(
+    approvals: &librefang_kernel::approval::ApprovalManager,
+    id_prefix: &str,
+) -> String {
+    // Audit log is sorted DESC by `decided_at`; cap the scan to a small
+    // recent window since duplicate-click races are sub-second. 64 is
+    // generous and bounds the SQL cost.
+    let recent = approvals.query_audit(64, 0, None, None);
+    if let Some(entry) = recent.iter().find(|e| e.request_id.starts_with(id_prefix)) {
+        let short = &entry.request_id[..8.min(entry.request_id.len())];
+        let actor = entry.decided_by.as_deref().unwrap_or("(unknown)");
+        format!(
+            "Approval [{short}] already resolved ({} by {actor}).",
+            entry.decision
+        )
+    } else {
+        format!("No pending approval matching '{id_prefix}'.")
+    }
 }
 
 #[async_trait]
@@ -1211,9 +1230,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         let trigger_id =
-            self.kernel
+            match self
+                .kernel
                 .trigger_engine()
-                .register(agent.id, pattern, prompt.to_string(), 0);
+                .register(agent.id, pattern, prompt.to_string(), 0)
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    // Per-agent cap exceeded (audit:
+                    // trigger-engine-no-per-agent-cap). Surface as a
+                    // human-readable line back to the channel sender so
+                    // they know the bridge isn't broken — they hit the
+                    // ceiling.
+                    return format!("Trigger registration refused: {e}");
+                }
+            };
         let id_str = trigger_id.0.to_string();
         let id_short = safe_truncate_str(&id_str, 8);
         format!("Trigger created [{id_short}] for agent '{agent_name}'.")
@@ -1484,7 +1515,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .filter(|r| r.id.to_string().starts_with(id_prefix))
             .collect();
         match matched.len() {
-            0 => format!("No pending approval matching '{id_prefix}'."),
+            // No pending match. Two sub-cases worth distinguishing for
+            // Telegram / Slack UX: a user double-tapping the inline
+            // `[Approve]` button (or button + slash command) produces a
+            // SECOND `/approve <id>` shortly after the FIRST resolved
+            // the request. Pre-fix that returned "No pending approval
+            // matching" which reads as an error. Check the audit log —
+            // if a recent entry's request_id starts with this prefix,
+            // it's the already-resolved duplicate, ack it idempotently.
+            0 => resolve_no_pending_message(self.kernel.approvals(), id_prefix),
             1 => {
                 let req = matched[0];
                 let decision = if approve {
@@ -1869,105 +1908,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn channel_overrides(
         &self,
-        channel_type: &str,
-        account_id: Option<&str>,
+        _channel_type: &str,
+        _account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        let cfg = self.kernel.config_ref();
-        let channels = &cfg.channels;
-
-        /// Look up channel overrides and default_agent from the matching
-        /// channel config entry. Prefers the entry whose `account_id` matches;
-        /// falls back to the first entry when no account_id is provided.
-        macro_rules! find_channel_info {
-            ($field:ident) => {{
-                let entry = if let Some(aid) = account_id {
-                    channels
-                        .$field
-                        .iter()
-                        .find(|c| c.account_id.as_deref() == Some(aid))
-                } else {
-                    channels.$field.first()
-                };
-                (
-                    entry.map(|c| c.overrides.clone()),
-                    entry.and_then(|c| c.default_agent.clone()),
-                )
-            }};
-        }
-
-        let (mut overrides, default_agent_name) = match channel_type {
-            "discord" => find_channel_info!(discord),
-            "slack" => find_channel_info!(slack),
-            "whatsapp" => find_channel_info!(whatsapp),
-            "signal" => find_channel_info!(signal),
-            "matrix" => find_channel_info!(matrix),
-            "email" => find_channel_info!(email),
-            "teams" => find_channel_info!(teams),
-            "mattermost" => find_channel_info!(mattermost),
-            "google_chat" => find_channel_info!(google_chat),
-            "twitch" => find_channel_info!(twitch),
-            "rocketchat" => find_channel_info!(rocketchat),
-            "zulip" => find_channel_info!(zulip),
-            // Wave 3
-            "line" => find_channel_info!(line),
-            "reddit" => find_channel_info!(reddit),
-            "bluesky" => find_channel_info!(bluesky),
-            "feishu" => find_channel_info!(feishu),
-            // Wave 4
-            "nextcloud" => find_channel_info!(nextcloud),
-            "webex" => find_channel_info!(webex),
-            // Wave 5
-            "dingtalk" => find_channel_info!(dingtalk),
-            "webhook" => find_channel_info!(webhook),
-            "wechat" => find_channel_info!(wechat),
-            "wecom" => find_channel_info!(wecom),
-            _ => (None, None),
-        };
-
-        // Merge the default agent's routing aliases into group_trigger_patterns
-        // so aliases trigger the bot in group chats without needing a formal
-        // @mention. Issue #2292.
-        if let (Some(ref mut ov), Some(agent_name)) = (&mut overrides, default_agent_name) {
-            if let Some(entry) = self.kernel.agent_registry().find_by_name(&agent_name) {
-                if let Some(routing) = entry.manifest.metadata.get("routing") {
-                    let aliases: Vec<String> = routing
-                        .get("aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let weak: Vec<String> = routing
-                        .get("weak_aliases")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for alias in aliases.into_iter().chain(weak) {
-                        if !alias.is_empty() {
-                            let escaped_alias: String = alias
-                                .chars()
-                                .flat_map(|c| {
-                                    if ".+*?^$()[]{}|\\".contains(c) {
-                                        vec!['\\', c]
-                                    } else {
-                                        vec![c]
-                                    }
-                                })
-                                .collect();
-                            // Use \b word boundaries only for ASCII aliases;
-                            // CJK and other non-ASCII aliases use plain substring
-                            // matching since \b is ASCII-only in Rust's regex.
-                            let escaped = if escaped_alias.is_ascii() {
-                                format!("(?i)\\b{}\\b", escaped_alias)
-                            } else {
-                                format!("(?i){}", escaped_alias)
-                            };
-                            if !ov.group_trigger_patterns.iter().any(|p| p == &escaped) {
-                                ov.group_trigger_patterns.push(escaped);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        overrides
+        // Per-channel `ChannelOverrides` only ever lived on the
+        // in-process `[channels.<name>]` configs, alongside an
+        // alias-merging side effect that pushed the default agent's
+        // routing aliases onto `group_trigger_patterns` (#2292).
+        // Sidecars have no equivalent per-instance override slot,
+        // and the alias-merging happens elsewhere now (via
+        // `agent_channel_overrides`, below, which reads the
+        // agent.toml). With every channel sidecar-migrated this
+        // method has nothing to return.
+        //
+        // The trait method stays — callers in the bridge still
+        // invoke it through the `KernelApi` interface, and the
+        // `None` short-circuits the per-channel override merge.
+        None
     }
 
     async fn agent_channel_overrides(
@@ -2307,64 +2264,9 @@ fn apply_channel_proxy<A>(
     }
 }
 
-#[cfg(feature = "channel-email")]
-#[derive(Debug)]
-pub(crate) struct EmailCredentials {
-    pub imap_username: String,
-    pub imap_password: String,
-    pub smtp_username: String,
-    pub smtp_password: String,
-}
-
-/// Resolve the four split-credential fields against an `EmailConfig`,
-/// returning `None` if either side's password env var fails to resolve.
-///
-/// Fallback order for each per-protocol field (`imap_username`,
-/// `smtp_username`, `imap_password_env`, `smtp_password_env`):
-///
-///   1. The protocol-specific override (`em_config.imap_username`, etc.)
-///   2. The shared default (`em_config.username` / `em_config.password_env`)
-///
-/// `read_env` is injected so tests can drive the env-lookup path
-/// without mutating shared process state. Production calls pass
-/// [`read_token`].
-#[cfg(feature = "channel-email")]
-pub(crate) fn resolve_email_credentials<F>(
-    em_config: &librefang_types::config::EmailConfig,
-    read_env: F,
-) -> Option<EmailCredentials>
-where
-    F: Fn(&str, &str) -> Option<String>,
-{
-    let imap_username = em_config
-        .imap_username
-        .as_deref()
-        .unwrap_or(&em_config.username)
-        .to_string();
-    let imap_password_env = em_config
-        .imap_password_env
-        .as_deref()
-        .unwrap_or(&em_config.password_env);
-    let imap_password = read_env(imap_password_env, "Email IMAP")?;
-
-    let smtp_username = em_config
-        .smtp_username
-        .as_deref()
-        .unwrap_or(&em_config.username)
-        .to_string();
-    let smtp_password_env = em_config
-        .smtp_password_env
-        .as_deref()
-        .unwrap_or(&em_config.password_env);
-    let smtp_password = read_env(smtp_password_env, "Email SMTP")?;
-
-    Some(EmailCredentials {
-        imap_username,
-        imap_password,
-        smtp_username,
-        smtp_password,
-    })
-}
+// email migrated to a sidecar (librefang.sidecar.adapters.email);
+// EmailCredentials + resolve_email_credentials removed alongside the
+// in-process adapter. See SIDECAR_CATALOG in routes/channels.rs.
 
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
@@ -2541,59 +2443,15 @@ async fn redispatch_journal_entry(
 
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
-    config: &librefang_types::config::ChannelsConfig,
+    _config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
-    // Check which channels have config — only consider enabled features
-    #[allow(unused_mut)]
-    let mut has_any = false;
-
-    // Emit warnings for configured-but-disabled channels, track enabled ones
-    macro_rules! check_channel {
-        ($field:ident, $feature:literal, $name:expr) => {
-            #[cfg(feature = $feature)]
-            if config.$field.is_some() {
-                has_any = true;
-            }
-            #[cfg(not(feature = $feature))]
-            if config.$field.is_some() {
-                warn!(
-                    "{} channel configured but '{}' feature is not enabled — skipping",
-                    $name, $feature
-                );
-            }
-        };
-    }
-
-    check_channel!(discord, "channel-discord", "Discord");
-    check_channel!(slack, "channel-slack", "Slack");
-    check_channel!(whatsapp, "channel-whatsapp", "WhatsApp");
-    check_channel!(signal, "channel-signal", "Signal");
-    check_channel!(matrix, "channel-matrix", "Matrix");
-    check_channel!(email, "channel-email", "Email");
-    check_channel!(teams, "channel-teams", "Teams");
-    check_channel!(mattermost, "channel-mattermost", "Mattermost");
-    check_channel!(google_chat, "channel-google-chat", "Google Chat");
-    check_channel!(twitch, "channel-twitch", "Twitch");
-    check_channel!(rocketchat, "channel-rocketchat", "Rocket.Chat");
-    check_channel!(zulip, "channel-zulip", "Zulip");
-    check_channel!(line, "channel-line", "LINE");
-    check_channel!(reddit, "channel-reddit", "Reddit");
-    check_channel!(bluesky, "channel-bluesky", "Bluesky");
-    check_channel!(feishu, "channel-feishu", "Feishu");
-    check_channel!(wechat, "channel-wechat", "WeChat");
-    check_channel!(wecom, "channel-wecom", "WeCom");
-    check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
-    check_channel!(webex, "channel-webex", "Webex");
-    check_channel!(dingtalk, "channel-dingtalk", "DingTalk");
-    check_channel!(qq, "channel-qq", "QQ");
-    check_channel!(webhook, "channel-webhook", "Webhook");
-
-    // Sidecar channels (always available, not feature-gated)
-    if !kernel.config_ref().sidecar_channels.is_empty() {
-        has_any = true;
-    }
-
-    if !has_any {
+    // Every channel adapter is now a sidecar; `_config` (the
+    // `[channels]` block from `KernelConfig`) is kept on the
+    // signature for callers that still pass it (hot-reload, etc.)
+    // but is no longer consulted — adapter construction lives in
+    // the sidecar loop below.
+    let sidecar_cfg = kernel.config_ref();
+    if sidecar_cfg.sidecar_channels.is_empty() {
         return (None, Vec::new(), axum::Router::new());
     }
 
@@ -2602,680 +2460,13 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // Collect all adapters to start: (adapter, default_agent_name, account_id)
-    #[allow(unused_mut, clippy::type_complexity)]
+    // (adapter, default_agent_name, account_id) — `account_id` is
+    // always None because `SidecarChannelConfig` carries no such
+    // field (sidecars surface their own per-instance id via env
+    // vars like `TEAMS_ACCOUNT_ID`). The triple stays for the
+    // downstream router-population loop's signature.
+    #[allow(clippy::type_complexity)]
     let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
-
-    // Discord
-    #[cfg(feature = "channel-discord")]
-    for dc_config in config.discord.iter() {
-        if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
-            let base = DiscordAdapter::new(
-                token,
-                dc_config.allowed_guilds.clone(),
-                dc_config.allowed_users.clone(),
-                dc_config.ignore_bots,
-                dc_config.mention_patterns.clone(),
-                dc_config.intents,
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, dc_config.proxy.as_deref(), "Discord", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(dc_config.account_id.clone())
-                    .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                dc_config.default_agent.clone(),
-                dc_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Slack
-    #[cfg(feature = "channel-slack")]
-    for sl_config in config.slack.iter() {
-        if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
-            if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
-                let base =
-                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone());
-                let Some(proxied) =
-                    apply_channel_proxy(base, sl_config.proxy.as_deref(), "Slack", |a, p| {
-                        a.with_proxy(p)
-                    })
-                else {
-                    continue;
-                };
-                let adapter = Arc::new(
-                    proxied
-                        .with_account_id(sl_config.account_id.clone())
-                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
-                        .with_unfurl_links(sl_config.unfurl_links)
-                        .with_backoff(sl_config.initial_backoff_secs, sl_config.max_backoff_secs),
-                );
-                adapters.push((
-                    adapter,
-                    sl_config.default_agent.clone(),
-                    sl_config.account_id.clone(),
-                ));
-            }
-        }
-    }
-
-    // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
-    #[cfg(feature = "channel-whatsapp")]
-    for wa_config in config.whatsapp.iter() {
-        let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env)
-            .ok()
-            .filter(|u| !u.is_empty());
-
-        if cloud_token.is_some() || gateway_url.is_some() {
-            let token = cloud_token.unwrap_or_default();
-            let verify_token =
-                read_token(&wa_config.verify_token_env, "WhatsApp (verify)").unwrap_or_default();
-            let adapter = Arc::new(
-                WhatsAppAdapter::new(
-                    wa_config.phone_number_id.clone(),
-                    token,
-                    verify_token,
-                    wa_config.webhook_port,
-                    wa_config.allowed_users.clone(),
-                )
-                .with_gateway(gateway_url)
-                .with_account_id(wa_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wa_config.default_agent.clone(),
-                wa_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Signal
-    #[cfg(feature = "channel-signal")]
-    for sig_config in config.signal.iter() {
-        if !sig_config.phone_number.is_empty() {
-            match SignalAdapter::with_options(
-                sig_config.api_url.clone(),
-                sig_config.phone_number.clone(),
-                sig_config.allowed_users.clone(),
-                sig_config.api_key.clone(),
-                sig_config.allow_local,
-            ) {
-                Ok(signal_adapter) => {
-                    let adapter = Arc::new(
-                        signal_adapter
-                            .with_account_id(sig_config.account_id.clone())
-                            .with_poll_interval(sig_config.poll_interval_secs),
-                    );
-                    adapters.push((
-                        adapter,
-                        sig_config.default_agent.clone(),
-                        sig_config.account_id.clone(),
-                    ));
-                }
-                Err(e) => {
-                    warn!("Signal channel disabled: {e}");
-                }
-            }
-        } else {
-            warn!("Signal configured but phone_number is empty, skipping");
-        }
-    }
-
-    // Matrix
-    #[cfg(feature = "channel-matrix")]
-    for mx_config in config.matrix.iter() {
-        if let Some(token) = read_token(&mx_config.access_token_env, "Matrix") {
-            let adapter = Arc::new(
-                MatrixAdapter::new(
-                    mx_config.homeserver_url.clone(),
-                    mx_config.user_id.clone(),
-                    token,
-                    mx_config.allowed_rooms.clone(),
-                    mx_config.auto_accept_invites,
-                )
-                .with_account_id(mx_config.account_id.clone())
-                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs)
-                .with_max_upload_bytes(
-                    usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
-                ),
-            );
-            adapters.push((
-                adapter,
-                mx_config.default_agent.clone(),
-                mx_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Email
-    #[cfg(feature = "channel-email")]
-    for em_config in config.email.iter() {
-        let Some(creds) = resolve_email_credentials(em_config, |env_var, adapter_name| {
-            read_token(env_var, adapter_name)
-        }) else {
-            continue;
-        };
-        let adapter = Arc::new(
-            EmailAdapter::new(
-                em_config.imap_host.clone(),
-                em_config.imap_port,
-                em_config.smtp_host.clone(),
-                em_config.smtp_port,
-                creds.imap_username,
-                creds.imap_password,
-                creds.smtp_username,
-                creds.smtp_password,
-                em_config.poll_interval_secs,
-                em_config.folders.clone(),
-                em_config.allowed_senders.clone(),
-            )
-            .with_account_id(em_config.account_id.clone())
-            .with_tls_root_ca_path(
-                em_config
-                    .tls_root_ca_path
-                    .as_ref()
-                    .map(std::path::PathBuf::from),
-            )
-            .with_tls_accept_invalid_certs(em_config.tls_accept_invalid_certs),
-        );
-        adapters.push((
-            adapter,
-            em_config.default_agent.clone(),
-            em_config.account_id.clone(),
-        ));
-    }
-
-    // Teams
-    #[cfg(feature = "channel-teams")]
-    for tm_config in config.teams.iter() {
-        if let Some(password) = read_token(&tm_config.app_password_env, "Teams") {
-            let security_token =
-                read_token(&tm_config.security_token_env, "Teams (security_token)")
-                    .unwrap_or_default();
-            // Default-deny: unsigned webhooks let anyone forge Teams activities.
-            // Also reject when the token is present but cannot be base64-decoded
-            // or decodes to empty bytes — TeamsAdapter::new would otherwise
-            // silently fall back to security_token_key=None and skip
-            // signature verification at the webhook handler.
-            if tm_config.signature_required {
-                use base64::Engine;
-                let decoded = if security_token.is_empty() {
-                    Err("missing".to_string())
-                } else {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(security_token.as_bytes())
-                        .map_err(|e| format!("invalid base64: {e}"))
-                        .and_then(|b| {
-                            if b.is_empty() {
-                                Err("decodes to empty key".to_string())
-                            } else {
-                                Ok(b)
-                            }
-                        })
-                };
-                if let Err(reason) = decoded {
-                    tracing::error!(
-                        "Teams adapter for app_id={} refused: signature_required=true \
-                         but security_token_env '{}' is {reason}. Set the env var to a \
-                         valid base64-encoded outgoing-webhook token, or explicitly \
-                         set signature_required=false (NOT recommended).",
-                        tm_config.app_id,
-                        tm_config.security_token_env
-                    );
-                    continue;
-                }
-            }
-            let adapter = Arc::new(
-                TeamsAdapter::new(
-                    tm_config.app_id.clone(),
-                    password,
-                    security_token,
-                    tm_config.webhook_port,
-                    tm_config.allowed_tenants.clone(),
-                )
-                .with_account_id(tm_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tm_config.default_agent.clone(),
-                tm_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Mattermost
-    #[cfg(feature = "channel-mattermost")]
-    for mm_config in config.mattermost.iter() {
-        if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
-            let base = MattermostAdapter::new(
-                mm_config.server_url.clone(),
-                token,
-                mm_config.allowed_channels.clone(),
-            );
-            let Some(proxied) =
-                apply_channel_proxy(base, mm_config.proxy.as_deref(), "Mattermost", |a, p| {
-                    a.with_proxy(p)
-                })
-            else {
-                continue;
-            };
-            let adapter = Arc::new(
-                proxied
-                    .with_account_id(mm_config.account_id.clone())
-                    .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
-            );
-            adapters.push((
-                adapter,
-                mm_config.default_agent.clone(),
-                mm_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Google Chat
-    #[cfg(feature = "channel-google-chat")]
-    for gc_config in config.google_chat.iter() {
-        // Try service_account_key_path first, then fall back to env var
-        let key = gc_config
-            .service_account_key_path
-            .as_ref()
-            .filter(|p| !p.is_empty())
-            .and_then(|path| match std::fs::read_to_string(path) {
-                Ok(contents) => Some(contents),
-                Err(e) => {
-                    warn!("Google Chat: failed to read service account key from {path}: {e}");
-                    None
-                }
-            })
-            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
-        if let Some(key) = key {
-            let adapter = Arc::new(
-                GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
-                    .with_account_id(gc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                gc_config.default_agent.clone(),
-                gc_config.account_id.clone(),
-            ));
-        } else {
-            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
-        }
-    }
-
-    // Twitch
-    #[cfg(feature = "channel-twitch")]
-    for tw_config in config.twitch.iter() {
-        if let Some(token) = read_token(&tw_config.oauth_token_env, "Twitch") {
-            let adapter = Arc::new(
-                TwitchAdapter::new(token, tw_config.channels.clone(), tw_config.nick.clone())
-                    .with_account_id(tw_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                tw_config.default_agent.clone(),
-                tw_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Rocket.Chat
-    #[cfg(feature = "channel-rocketchat")]
-    for rc_config in config.rocketchat.iter() {
-        if let Some(token) = read_token(&rc_config.token_env, "Rocket.Chat") {
-            let adapter = Arc::new(
-                RocketChatAdapter::new(
-                    rc_config.server_url.clone(),
-                    token,
-                    rc_config.user_id.clone(),
-                    rc_config.allowed_channels.clone(),
-                )
-                .with_account_id(rc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                rc_config.default_agent.clone(),
-                rc_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Zulip
-    #[cfg(feature = "channel-zulip")]
-    for z_config in config.zulip.iter() {
-        if let Some(api_key) = read_token(&z_config.api_key_env, "Zulip") {
-            let adapter = Arc::new(
-                ZulipAdapter::new(
-                    z_config.server_url.clone(),
-                    z_config.bot_email.clone(),
-                    api_key,
-                    z_config.streams.clone(),
-                )
-                .with_account_id(z_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                z_config.default_agent.clone(),
-                z_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // ── Wave 3 ──────────────────────────────────────────────────
-
-    // LINE
-    #[cfg(feature = "channel-line")]
-    for ln_config in config.line.iter() {
-        if let Some(secret) = read_token(&ln_config.channel_secret_env, "LINE (secret)") {
-            if let Some(token) = read_token(&ln_config.access_token_env, "LINE (token)") {
-                let adapter = Arc::new(
-                    LineAdapter::new(secret, token, ln_config.webhook_port)
-                        .with_account_id(ln_config.account_id.clone()),
-                );
-                adapters.push((
-                    adapter,
-                    ln_config.default_agent.clone(),
-                    ln_config.account_id.clone(),
-                ));
-            }
-        }
-    }
-
-    // Reddit
-    #[cfg(feature = "channel-reddit")]
-    for rd_config in config.reddit.iter() {
-        if let Some(secret) = read_token(&rd_config.client_secret_env, "Reddit (secret)") {
-            if let Some(password) = read_token(&rd_config.password_env, "Reddit (password)") {
-                let adapter = Arc::new(
-                    RedditAdapter::new(
-                        rd_config.client_id.clone(),
-                        secret,
-                        rd_config.username.clone(),
-                        password,
-                        rd_config.subreddits.clone(),
-                    )
-                    .with_account_id(rd_config.account_id.clone()),
-                );
-                adapters.push((
-                    adapter,
-                    rd_config.default_agent.clone(),
-                    rd_config.account_id.clone(),
-                ));
-            }
-        }
-    }
-
-    // Bluesky
-    #[cfg(feature = "channel-bluesky")]
-    for bs_config in config.bluesky.iter() {
-        if let Some(password) = read_token(&bs_config.app_password_env, "Bluesky") {
-            let adapter = Arc::new(
-                BlueskyAdapter::new(bs_config.identifier.clone(), password)
-                    .with_account_id(bs_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                bs_config.default_agent.clone(),
-                bs_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Feishu/Lark (unified adapter)
-    #[cfg(feature = "channel-feishu")]
-    for fs_config in config.feishu.iter() {
-        let region = match fs_config.region.as_str() {
-            "intl" | "lark" => FeishuRegion::Intl,
-            _ => FeishuRegion::Cn,
-        };
-        let receive_mode = match fs_config.receive_mode.as_str() {
-            "webhook" => FeishuReceiveMode::Webhook,
-            _ => FeishuReceiveMode::Websocket,
-        };
-        let label = region.label();
-        if let Some(secret) = read_token(&fs_config.app_secret_env, label) {
-            let adapter = Arc::new(
-                FeishuAdapter::new(
-                    fs_config.app_id.clone(),
-                    secret,
-                    fs_config.webhook_port,
-                    region,
-                    receive_mode,
-                )
-                .with_account_id(fs_config.account_id.clone())
-                .with_verification(
-                    fs_config.verification_token.clone(),
-                    fs_config.encrypt_key.clone(),
-                ),
-            );
-            adapters.push((
-                adapter,
-                fs_config.default_agent.clone(),
-                fs_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // WeChat (personal account via iLink)
-    // Only start when a bot token is available — without a token the adapter
-    // would block on QR login which stalls the entire server startup.
-    // Users obtain a token via the dashboard QR flow, which saves it to
-    // secrets.env; on next restart the adapter will start normally.
-    #[cfg(feature = "channel-wechat")]
-    for wx_config in config.wechat.iter() {
-        let bot_token = read_token(&wx_config.bot_token_env, "WeChat");
-        if bot_token.is_none() {
-            warn!("WeChat: no bot token available — skipping adapter start (use dashboard QR login to obtain one)");
-            continue;
-        }
-        let adapter = Arc::new(
-            WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
-                .with_account_id(wx_config.account_id.clone())
-                .with_backoff(wx_config.initial_backoff_secs, wx_config.max_backoff_secs),
-        );
-        adapters.push((
-            adapter,
-            wx_config.default_agent.clone(),
-            wx_config.account_id.clone(),
-        ));
-    }
-
-    // WeCom intelligent bot (WebSocket or callback mode)
-    #[cfg(feature = "channel-wecom")]
-    for wc_config in config.wecom.iter() {
-        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom Bot") {
-            use librefang_types::config::WeComMode;
-            let adapter: Arc<WeComAdapter> = match wc_config.mode {
-                WeComMode::Websocket => Arc::new(
-                    WeComAdapter::new(wc_config.bot_id.clone(), secret)
-                        .with_account_id(wc_config.account_id.clone()),
-                ),
-                WeComMode::Callback => {
-                    let token = wc_config
-                        .token_env
-                        .as_ref()
-                        .and_then(|env| std::env::var(env).ok());
-                    let encoding_aes_key = wc_config
-                        .encoding_aes_key_env
-                        .as_ref()
-                        .and_then(|env| std::env::var(env).ok());
-                    Arc::new(
-                        WeComAdapter::new_callback(
-                            wc_config.bot_id.clone(),
-                            secret,
-                            wc_config.webhook_port,
-                            token,
-                            encoding_aes_key,
-                        )
-                        .with_account_id(wc_config.account_id.clone()),
-                    )
-                }
-            };
-            adapters.push((
-                adapter,
-                wc_config.default_agent.clone(),
-                wc_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // ── Wave 4 ──────────────────────────────────────────────────
-
-    // Nextcloud Talk
-    #[cfg(feature = "channel-nextcloud")]
-    for nc_config in config.nextcloud.iter() {
-        if let Some(token) = read_token(&nc_config.token_env, "Nextcloud") {
-            let adapter = Arc::new(
-                NextcloudAdapter::new(
-                    nc_config.server_url.clone(),
-                    token,
-                    nc_config.allowed_rooms.clone(),
-                )
-                .with_account_id(nc_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                nc_config.default_agent.clone(),
-                nc_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Webex
-    #[cfg(feature = "channel-webex")]
-    for wx_config in config.webex.iter() {
-        if let Some(token) = read_token(&wx_config.bot_token_env, "Webex") {
-            let adapter = Arc::new(
-                WebexAdapter::new(token, wx_config.allowed_rooms.clone())
-                    .with_account_id(wx_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                wx_config.default_agent.clone(),
-                wx_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // ── Wave 5 ──────────────────────────────────────────────────
-
-    // DingTalk
-    #[cfg(feature = "channel-dingtalk")]
-    for dt_config in config.dingtalk.iter() {
-        use librefang_types::config::DingTalkReceiveMode;
-        match dt_config.receive_mode {
-            DingTalkReceiveMode::Stream => {
-                if let Some(client_id) = read_token(&dt_config.app_key_env, "DingTalk (app_key)") {
-                    let client_secret =
-                        match read_token(&dt_config.app_secret_env, "DingTalk (app_secret)") {
-                            Some(s) if !s.is_empty() => s,
-                            _ => {
-                                warn!("DingTalk stream mode requires app_secret; skipping adapter");
-                                continue;
-                            }
-                        };
-                    let adapter = Arc::new(
-                        DingTalkAdapter::new_stream(client_id, client_secret)
-                            .with_account_id(dt_config.account_id.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        dt_config.default_agent.clone(),
-                        dt_config.account_id.clone(),
-                    ));
-                }
-            }
-            DingTalkReceiveMode::Webhook => {
-                if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-                    // #3441: refuse to register a webhook adapter with an empty
-                    // signing secret.  An empty secret would still reject all
-                    // verifications (HMAC of an empty key fails the equality
-                    // check), but this is loud rather than silent — a misconfig
-                    // here means every inbound message is dropped, and the
-                    // operator should know at boot.
-                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
-                        Some(s) if !s.is_empty() => s,
-                        _ => {
-                            tracing::error!(
-                                env = %dt_config.secret_env,
-                                "DingTalk webhook adapter requires a non-empty signing secret \
-                                 (env var unset or empty); refusing to register adapter \
-                                 (default-deny). Set the env var or switch receive_mode \
-                                 to \"stream\".",
-                            );
-                            continue;
-                        }
-                    };
-                    let adapter = Arc::new(
-                        DingTalkAdapter::new(token, secret, dt_config.webhook_port)
-                            .with_account_id(dt_config.account_id.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        dt_config.default_agent.clone(),
-                        dt_config.account_id.clone(),
-                    ));
-                }
-            }
-        }
-    }
-
-    // QQ
-    #[cfg(feature = "channel-qq")]
-    for qq_config in config.qq.iter() {
-        if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
-            let adapter = Arc::new(
-                QqAdapter::new(
-                    qq_config.app_id.clone(),
-                    secret,
-                    qq_config.allowed_users.clone(),
-                )
-                .with_account_id(qq_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                qq_config.default_agent.clone(),
-                qq_config.account_id.clone(),
-            ));
-        }
-    }
-
-    // Webhook
-    #[cfg(feature = "channel-webhook")]
-    for wh_config in config.webhook.iter() {
-        if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
-            match WebhookAdapter::new(
-                secret,
-                wh_config.listen_port,
-                wh_config.callback_url.clone(),
-            ) {
-                Ok(wa) => {
-                    let adapter = Arc::new(
-                        wa.with_account_id(wh_config.account_id.clone())
-                            .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
-                    );
-                    adapters.push((
-                        adapter,
-                        wh_config.default_agent.clone(),
-                        wh_config.account_id.clone(),
-                    ));
-                }
-                Err(e) => {
-                    tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
-                }
-            }
-        }
-    }
 
     // ── Sidecar channel adapters ───────────────────────────────
     // Re-init path: this loop runs on every channel-bridge cycle, not just
@@ -3291,7 +2482,6 @@ pub async fn start_channel_bridge_with_config(
     // that handler-side follow-up will silently fail to spawn the sidecar
     // (the supervisor map stays empty); audit any new save endpoint that
     // touches `sidecar_channels` for this pattern.
-    let sidecar_cfg = kernel.config_ref();
     for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
             name = %sidecar_config.name,
@@ -3302,7 +2492,13 @@ pub async fn start_channel_bridge_with_config(
             sidecar_config,
             kernel.home_dir().to_path_buf(),
         ));
-        adapters.push((adapter, None, None));
+        // #5294 — propagate `default_agent` from the sidecar config so the
+        // router-population loop below seeds `AgentRouter.channel_defaults`
+        // for this channel. Without this, sidecar adapters fall through to
+        // the non-deterministic "first available agent" branch in
+        // `resolve_or_fallback`, silently routing traffic to whichever agent
+        // happens to be first in the registry iteration order.
+        adapters.push((adapter, sidecar_config.default_agent.clone(), None));
     }
 
     if adapters.is_empty() {
@@ -3609,6 +2805,47 @@ pub async fn reload_channels_from_disk(
 mod tests {
     use super::*;
     use librefang_kernel::event_bus::EventBus;
+
+    // ── resolve_no_pending_message ───────────────────────────────
+    //
+    // Telegram / Slack: a user double-tapping the `[Approve]` inline
+    // keyboard (or button + slash command in quick succession)
+    // produces a SECOND `/approve <id>` shortly after the first one
+    // resolved the request. Pre-fix that branch returned "No pending
+    // approval matching '<id>'" which reads as an error. The fixed
+    // helper detects the audit-log hit and acks idempotently.
+
+    fn fresh_approval_manager() -> librefang_kernel::approval::ApprovalManager {
+        // In-memory `ApprovalManager` without a persistent audit DB —
+        // `query_audit` returns `Vec::new()` for that path, which is
+        // exactly the "no audit hit" branch we want to exercise. The
+        // happy-resolved-path is covered by `kernel::approval`'s own
+        // unit suite (`test_request_approval_approve` et al), which
+        // wires up the SQLite-backed audit log end-to-end.
+        let policy = librefang_types::approval::ApprovalPolicy::default();
+        librefang_kernel::approval::ApprovalManager::new(policy)
+    }
+
+    #[test]
+    fn resolve_no_pending_message_falls_back_to_not_found_without_audit_hit() {
+        let mgr = fresh_approval_manager();
+        let msg = resolve_no_pending_message(&mgr, "deadbeef");
+        assert!(
+            msg.contains("No pending approval matching 'deadbeef'"),
+            "no-audit-hit branch must surface the not-found message verbatim, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_no_pending_message_handles_empty_prefix_safely() {
+        // Defensive: an empty `id_prefix` would `starts_with("")`
+        // match every audit row. Without an audit DB it should still
+        // gracefully report not-found rather than panic / surface
+        // unrelated approvals.
+        let mgr = fresh_approval_manager();
+        let msg = resolve_no_pending_message(&mgr, "");
+        assert!(msg.contains("No pending approval matching"));
+    }
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -4226,29 +3463,10 @@ mod tests {
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
-        assert!(config.channels.discord.is_none());
-        assert!(config.channels.slack.is_none());
-        assert!(config.channels.whatsapp.is_none());
-        assert!(config.channels.signal.is_none());
-        assert!(config.channels.matrix.is_none());
-        assert!(config.channels.email.is_none());
-        assert!(config.channels.teams.is_none());
-        assert!(config.channels.mattermost.is_none());
-        assert!(config.channels.google_chat.is_none());
-        assert!(config.channels.twitch.is_none());
-        assert!(config.channels.rocketchat.is_none());
-        assert!(config.channels.zulip.is_none());
-        // Wave 3
-        assert!(config.channels.line.is_none());
-        assert!(config.channels.reddit.is_none());
-        assert!(config.channels.bluesky.is_none());
-        assert!(config.channels.feishu.is_none());
-        // Wave 4
-        assert!(config.channels.nextcloud.is_none());
-        assert!(config.channels.webex.is_none());
-        // Wave 5
-        assert!(config.channels.dingtalk.is_none());
-        assert!(config.channels.webhook.is_none());
+        // All previously in-process channels (google_chat, webhook,
+        // …) migrated to sidecars. With no `[[sidecar_channels]]`
+        // configured either, the bridge must skip.
+        assert!(config.sidecar_channels.is_empty());
     }
 
     #[test]
@@ -4360,137 +3578,6 @@ mod tests {
         assert_eq!(bus.dropped_count(), 8);
     }
 
-    // -- resolve_email_credentials: split-creds fallback semantics ----------
-    //
-    // Pins the four fallback paths in EmailConfig:
-    //   imap_username      -> falls back to em_config.username
-    //   imap_password_env  -> falls back to em_config.password_env
-    //   smtp_username      -> falls back to em_config.username
-    //   smtp_password_env  -> falls back to em_config.password_env
-    //
-    // Production wires `read_token` (which reads `std::env::var`); these
-    // tests inject a closure-based env lookup so they don't mutate
-    // shared process state and are race-free under cargo test's
-    // multi-threaded harness.
-
-    #[cfg(feature = "channel-email")]
-    use super::resolve_email_credentials;
-    #[cfg(feature = "channel-email")]
-    use librefang_types::config::EmailConfig;
-
-    #[cfg(feature = "channel-email")]
-    fn email_base() -> EmailConfig {
-        EmailConfig {
-            imap_host: "imap.example.com".to_string(),
-            imap_port: 993,
-            smtp_host: "smtp.example.com".to_string(),
-            smtp_port: 587,
-            username: "shared@example.com".to_string(),
-            password_env: "SHARED_PASSWORD".to_string(),
-            ..EmailConfig::default()
-        }
-    }
-
-    /// Both passwords resolve from the shared `password_env` when no
-    /// per-protocol overrides are set; usernames inherit `username`.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn shared_credentials_resolve_to_same_password_for_both_sides() {
-        let cfg = email_base();
-        let creds = resolve_email_credentials(&cfg, |env, _| {
-            (env == "SHARED_PASSWORD").then(|| "shared-secret".to_string())
-        })
-        .expect("must resolve when shared password env is set");
-        assert_eq!(creds.imap_username, "shared@example.com");
-        assert_eq!(creds.smtp_username, "shared@example.com");
-        assert_eq!(creds.imap_password, "shared-secret");
-        assert_eq!(creds.smtp_password, "shared-secret");
-    }
-
-    /// `imap_username = Some(...)` overrides the shared username on the
-    /// IMAP side only; SMTP still falls back to `username`.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn imap_username_override_does_not_leak_into_smtp_side() {
-        let mut cfg = email_base();
-        cfg.imap_username = Some("imap-user@example.com".to_string());
-        let creds =
-            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
-        assert_eq!(creds.imap_username, "imap-user@example.com");
-        assert_eq!(creds.smtp_username, "shared@example.com");
-    }
-
-    /// `smtp_username = Some(...)` overrides on SMTP side only.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn smtp_username_override_does_not_leak_into_imap_side() {
-        let mut cfg = email_base();
-        cfg.smtp_username = Some("smtp-user@example.com".to_string());
-        let creds =
-            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
-        assert_eq!(creds.smtp_username, "smtp-user@example.com");
-        assert_eq!(creds.imap_username, "shared@example.com");
-    }
-
-    /// Per-protocol password env overrides resolve through DIFFERENT
-    /// secrets — pin against a regression where both sides accidentally
-    /// share the same fallback variable.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn per_protocol_password_envs_resolve_independently() {
-        let mut cfg = email_base();
-        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
-        cfg.smtp_password_env = Some("SMTP_SECRET".to_string());
-        let creds = resolve_email_credentials(&cfg, |env, _| match env {
-            "IMAP_SECRET" => Some("imap-pw".to_string()),
-            "SMTP_SECRET" => Some("smtp-pw".to_string()),
-            _ => None,
-        })
-        .expect("must resolve");
-        assert_eq!(creds.imap_password, "imap-pw");
-        assert_eq!(creds.smtp_password, "smtp-pw");
-    }
-
-    /// IMAP-specific override resolves; SMTP falls back to `password_env`.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn imap_password_override_smtp_falls_back_to_shared() {
-        let mut cfg = email_base();
-        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
-        let creds = resolve_email_credentials(&cfg, |env, _| match env {
-            "IMAP_SECRET" => Some("imap-pw".to_string()),
-            "SHARED_PASSWORD" => Some("shared-pw".to_string()),
-            _ => None,
-        })
-        .expect("must resolve");
-        assert_eq!(creds.imap_password, "imap-pw");
-        assert_eq!(creds.smtp_password, "shared-pw");
-    }
-
-    /// If the IMAP password resolution yields `None` (env var missing
-    /// or empty), the entire adapter is skipped — `None` is returned
-    /// short-circuit BEFORE the SMTP side is consulted.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn missing_imap_password_short_circuits_to_none() {
-        use std::cell::Cell;
-        let cfg = email_base();
-        let lookups = Cell::new(0_u32);
-        let result = resolve_email_credentials(&cfg, |env, _| {
-            lookups.set(lookups.get() + 1);
-            // Both sides default to "SHARED_PASSWORD"; returning None
-            // here forces the IMAP `?` to short-circuit.
-            let _ = env;
-            None
-        });
-        assert!(result.is_none(), "missing password must yield None");
-        assert_eq!(
-            lookups.get(),
-            1,
-            "SMTP-side lookup must NOT run after IMAP fails — short-circuit via the `?` operator on the first read_env call"
-        );
-    }
-
     /// `SessionId::for_sender_scope` is the SINGLE source of truth for the
     /// channel-scope formula and is called by both ends of the round-trip
     /// (the channel-bridge reset helpers and the four kernel inbound
@@ -4531,25 +3618,9 @@ mod tests {
         );
     }
 
-    /// Smoke test for the silent-skip-on-empty case my comment flagged:
-    /// when `password_env = ""` (operator wiped it intending the
-    /// per-protocol fields to take over) and only one side is
-    /// configured, the OTHER side hits the empty fallback and the
-    /// adapter is skipped. Surfaces clearly via `None`.
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn empty_shared_password_env_with_single_side_override_skips_adapter() {
-        let mut cfg = email_base();
-        cfg.password_env = String::new();
-        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
-        // SMTP side has neither override nor a usable shared env.
-        let result = resolve_email_credentials(&cfg, |env, _| match env {
-            "IMAP_SECRET" => Some("imap-pw".to_string()),
-            _ => None, // empty `password_env` looks up "" and gets None
-        });
-        assert!(
-            result.is_none(),
-            "operator must set BOTH per-protocol envs when wiping the shared one"
-        );
-    }
+    // empty_shared_password_env_with_single_side_override_skips_adapter
+    // removed alongside resolve_email_credentials when email migrated
+    // to a sidecar (librefang.sidecar.adapters.email). The credential
+    // fallback logic now lives in the Python sidecar and is covered by
+    // tests/test_email_adapter.py::test_imap_specific_username_overrides.
 }

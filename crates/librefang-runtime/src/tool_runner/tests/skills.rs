@@ -440,6 +440,7 @@ async fn run_file_read_for_dedup(
         None,
         None,
         None,
+        None, // chat_id,
         None,
         None,
         Some(session_id),

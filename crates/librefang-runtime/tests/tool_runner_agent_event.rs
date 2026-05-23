@@ -99,6 +99,7 @@ impl MemoryAccess for CapturingKernel {
         _: &str,
         _: serde_json::Value,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
@@ -106,11 +107,13 @@ impl MemoryAccess for CapturingKernel {
         &self,
         _: &str,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn memory_list(
         &self,
+        _: Option<&str>,
         _: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
@@ -261,6 +264,7 @@ fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> T
         process_registry: None,
         sender_id: None,
         channel: None,
+        chat_id: None,
         session_id: None,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,

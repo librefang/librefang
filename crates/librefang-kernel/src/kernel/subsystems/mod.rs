@@ -62,7 +62,7 @@ pub mod workflow;
 pub use agents::{AgentSubsystem, AgentSubsystemApi};
 pub use events::{EventSubsystem, EventSubsystemApi};
 pub use governance::{GovernanceSubsystem, GovernanceSubsystemApi};
-pub use llm::{LlmSubsystem, LlmSubsystemApi};
+pub use llm::{CredentialPoolSummary, LlmSubsystem, LlmSubsystemApi};
 pub use mcp::{McpSubsystem, McpSubsystemApi};
 pub use media::{MediaSubsystem, MediaSubsystemApi};
 pub use memory::{MemorySubsystem, MemorySubsystemApi};

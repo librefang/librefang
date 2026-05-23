@@ -57,6 +57,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/providers/{name}/default",
             axum::routing::post(set_default_provider),
         )
+        // Credential pools (#4965) — list per-provider key-rotation pool
+        // status, with redacted snapshots and cooldown/usage telemetry.
+        .route(
+            "/credential-pools",
+            axum::routing::get(list_credential_pools),
+        )
 }
 
 use super::skills::{remove_secret_env, write_secret_env};
@@ -410,8 +416,7 @@ pub async fn set_model_overrides(
                     catalog.remove_overrides(&id_for_rollback);
                 }
             });
-        return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Return the persisted overrides entity so callers can `setQueryData`
     // without a follow-up GET. (Refs #3832.)
@@ -973,8 +978,7 @@ pub async fn add_custom_model(
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.remove_custom_model(&id_for_rollback);
         });
-        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (
@@ -1024,8 +1028,7 @@ pub async fn remove_custom_model(
                 catalog.add_custom_model(entry.clone());
             });
         }
-        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -1049,6 +1052,12 @@ pub async fn set_provider_key(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Shape-check the path-supplied provider name BEFORE we derive an env
+    // var from it. See `docs/issues/set-provider-key-arbitrary-names.md`.
+    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
+        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+    }
+
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
@@ -1057,23 +1066,34 @@ pub async fn set_provider_key(
     };
 
     // Look up env var from catalog; for unknown/custom providers derive one.
+    // The catalog hit is the trust path (operator-curated `api_key_env`);
+    // the derive path crosses a second gate (`check_derived_env_var`) so
+    // path-supplied names can only land env vars that match the
+    // `^[A-Z][A-Z0-9_]{0,63}_API_KEY$` shape — see
+    // `docs/issues/set-provider-key-arbitrary-names.md`.
     let env_var = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog
+        let from_catalog = catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| {
-                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
-                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
-            })
+            .filter(|env| !env.trim().is_empty());
+        match from_catalog {
+            Some(env) => env,
+            None => {
+                // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY.
+                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
+                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                }
+                derived
+            }
+        }
     };
 
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
-        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Set env var in current process so detect_auth picks it up. Serialized
@@ -1260,16 +1280,31 @@ pub async fn delete_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    // Shape-check the path-supplied provider name BEFORE we derive an env
+    // var from it. Mirrors `set_provider_key`; without this gate an admin
+    // could ask the daemon to `remove_var("STRIPE_API_KEY")` (etc.) on the
+    // live process. See `docs/issues/set-provider-key-arbitrary-names.md`.
+    if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
+        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+    }
+
     let env_var = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog
+        let from_catalog = catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
-            .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| {
-                // Custom/unknown provider — derive env var from convention
-                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
-            })
+            .filter(|env| !env.trim().is_empty());
+        match from_catalog {
+            Some(env) => env,
+            None => {
+                // Custom/unknown provider — derive env var from convention.
+                let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+                if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
+                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                }
+                derived
+            }
+        }
     };
 
     if env_var.is_empty() {
@@ -1280,8 +1315,7 @@ pub async fn delete_provider_key(
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Remove from process environment. `std::env::remove_var` carries the
@@ -1734,7 +1768,7 @@ pub async fn set_provider_url(
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Some(ref pu) = proxy_url {
         if let Err(e) = upsert_provider_proxy_url(&config_path, &name, pu) {
@@ -2006,6 +2040,116 @@ fn normalize_base_url(input: &str) -> String {
         // Bare host[:port] — assume OpenAI-compatible default.
         format!("{trimmed}/v1")
     }
+}
+
+// ── Credential pools (#4965) ────────────────────────────────────────────────
+
+/// Render a `CredentialPoolStrategy` into the snake_case string used in
+/// `config.toml`. Kept inline so the API JSON shape matches the config TOML
+/// exactly — `round_robin`, never `RoundRobin` — and so we never depend on
+/// `Debug` formatting (which would silently change response shape on a
+/// future variant rename).
+fn strategy_label(s: &librefang_llm_drivers::PoolStrategy) -> &'static str {
+    use librefang_llm_drivers::PoolStrategy;
+    match s {
+        PoolStrategy::FillFirst => "fill_first",
+        PoolStrategy::RoundRobin => "round_robin",
+        PoolStrategy::Random => "random",
+        PoolStrategy::LeastUsed => "least_used",
+    }
+}
+
+/// GET /api/credential-pools — Per-provider credential pool snapshot.
+///
+/// Returns an array of provider pools (sorted by provider name) with their
+/// strategy, available/total key counts, and per-credential redacted
+/// snapshots. The raw API key is never serialized — only a `key_hint`
+/// (last 4 chars prefixed by `****`) and per-key telemetry are included.
+///
+/// Each credential entry has the shape:
+/// ```json
+/// {
+///   "label": "Primary",
+///   "key_hint": "****abcd",
+///   "priority": 10,
+///   "request_count": 42,
+///   "is_exhausted": false,
+///   "cooldown_remaining_secs": null
+/// }
+/// ```
+/// `cooldown_remaining_secs` is `null` while available, a non-negative
+/// integer (seconds) while in a 429/402/5xx cooldown, or the literal
+/// string `"permanent"` for keys marked permanently invalid by an auth
+/// failure (the kernel encodes this as the `u64::MAX` sentinel
+/// internally; this endpoint converts it to `"permanent"` so SDK
+/// consumers do not encounter a `2^64 - 1` magic number).
+///
+/// Labels are carried with each materialized credential, so partial
+/// env-var resolution (a configured pool entry whose env var is unset at
+/// boot time) never shifts a label onto the wrong key/cooldown row.
+///
+/// Issue #4965: backs the dashboard Providers page credential-pools card
+/// and the `librefang auth pool list` CLI command.
+#[utoipa::path(
+    get,
+    path = "/api/credential-pools",
+    tag = "models",
+    operation_id = "list_credential_pools",
+    responses(
+        (status = 200, description = "Per-provider credential pool snapshots. \
+            Each entry has `provider`, `strategy` (snake_case: \
+            fill_first / round_robin / random / least_used), \
+            `available_count`, `total_count`, and `credentials[]` with \
+            fields `label`, `key_hint` (last 4 chars prefixed by `****`), \
+            `priority`, `request_count`, `is_exhausted`, and \
+            `cooldown_remaining_secs` (null | non-negative integer seconds \
+            | literal string \"permanent\").",
+         body = Vec<serde_json::Value>)
+    )
+)]
+pub async fn list_credential_pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // `credential_pool_summaries` is part of the `KernelApi` trait that
+    // `AppState::kernel` already implements via the inherent forward in
+    // `subsystem_forwards.rs` — the method is in scope on `state.kernel`
+    // without an explicit `use` import.
+    let summaries = state.kernel.credential_pool_summaries();
+
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+    for (_provider, summary) in summaries {
+        let credentials: Vec<serde_json::Value> = summary
+            .credentials
+            .iter()
+            .map(|c| {
+                // The label travels with the credential inside the pool
+                // (see PooledCredential::label), so a missing env-var skip
+                // at boot can never shift labels onto the wrong row.
+                let cooldown = c.cooldown_remaining_secs.map(|secs| {
+                    if secs == u64::MAX {
+                        serde_json::json!("permanent")
+                    } else {
+                        serde_json::json!(secs)
+                    }
+                });
+                serde_json::json!({
+                    "label": c.label,
+                    "key_hint": c.key_hint,
+                    "priority": c.priority,
+                    "request_count": c.request_count,
+                    "is_exhausted": c.is_exhausted,
+                    "cooldown_remaining_secs": cooldown,
+                })
+            })
+            .collect();
+        out.push(serde_json::json!({
+            "provider": summary.provider,
+            "strategy": strategy_label(&summary.strategy),
+            "available_count": summary.available_count,
+            "total_count": summary.total_count,
+            "credentials": credentials,
+        }));
+    }
+
+    (StatusCode::OK, Json(out))
 }
 
 #[cfg(test)]
