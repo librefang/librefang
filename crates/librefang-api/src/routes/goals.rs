@@ -90,7 +90,7 @@ pub async fn get_goal(
         Ok(_) => ApiErrorResponse::not_found(format!("Goal '{}' not found", id)).into_json_tuple(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
-            ApiErrorResponse::internal(format!("Failed to load goals: {e}")).into_json_tuple()
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
@@ -218,7 +218,7 @@ pub async fn create_goal(
             }
         }
         tracing::warn!("Failed to save goal: {e}");
-        return ApiErrorResponse::internal(format!("Failed to save goal: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (StatusCode::CREATED, Json(entry))
@@ -386,8 +386,7 @@ pub async fn update_goal_by_id(
                 .into_json_tuple();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to update goal: {e}"))
-                .into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
 
@@ -457,7 +456,7 @@ pub async fn delete_goal(
                     .into_response();
             }
         }
-        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}"))
+        return ApiErrorResponse::internal_scrub(e)
             .into_json_tuple()
             .into_response();
     }

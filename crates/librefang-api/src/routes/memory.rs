@@ -1413,15 +1413,13 @@ pub async fn memory_config_patch(
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
-                .into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
     let mut table: toml::Value = match toml::from_str(&content) {
         Ok(t) => t,
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to parse config: {e}"))
-                .into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
 
@@ -1481,8 +1479,7 @@ pub async fn memory_config_patch(
 
     let new_content = toml::to_string_pretty(&table).unwrap_or_default();
     if let Err(e) = std::fs::write(&config_path, &new_content) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     tracing::info!("Memory config updated via API");

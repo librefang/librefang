@@ -784,10 +784,8 @@ pub async fn configure_sidecar_channel(
                 continue;
             }
             if f.field_type == "secret" {
-                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed).map_err(|e| {
-                    ApiErrorResponse::internal(format!("failed to write secret: {e}"))
-                        .into_json_tuple()
-                })?;
+                super::secrets_env::upsert_secret(&secrets_path, &f.key, trimmed)
+                    .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
             } else {
                 nonsecret_env.insert(f.key.clone(), trimmed.to_string());
             }
@@ -819,19 +817,18 @@ pub async fn configure_sidecar_channel(
             &nonsecret_env,
             &managed_env_keys,
         )
-        .map_err(|e| {
-            ApiErrorResponse::internal(format!("failed to write config.toml: {e}"))
-                .into_json_tuple()
-        })?;
+        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
     }
 
     // 6. Trigger hot-reload. The kernel diffs the on-disk config
     //    against the live snapshot and returns the resulting plan;
     //    the dashboard surfaces `restart_required` so the operator
     //    knows whether further action is needed.
-    let plan = state.kernel.reload_config().await.map_err(|e| {
-        ApiErrorResponse::internal(format!("config reload failed: {e}")).into_json_tuple()
-    })?;
+    let plan = state
+        .kernel
+        .reload_config()
+        .await
+        .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
 
     // 7. When the plan emits `ReloadChannels`, the kernel has already
     //    cleared `mesh.channel_adapters` — but the supervisor map is

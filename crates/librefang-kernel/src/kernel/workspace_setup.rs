@@ -1065,7 +1065,7 @@ mod identity_write_tests {
 
     impl Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "simulated disk full"))
+            Err(io::Error::other("simulated disk full"))
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())

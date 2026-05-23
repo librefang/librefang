@@ -2175,6 +2175,27 @@ pub async fn run_daemon(
     .with_graceful_shutdown(shutdown_signal(api_shutdown))
     .await?;
 
+    // Once axum has returned (the shutdown signal fired), bound the total
+    // post-shutdown cleanup window with a watchdog. If we are still holding
+    // the daemon.lock after `SHUTDOWN_HARD_DEADLINE`, abort the process so
+    // launchd / systemd / the operator's `librefang restart` script does
+    // not see a half-dead daemon hold the lock while a new one tries to
+    // start (#5477). flock(2) releases on process exit even via abort.
+    const SHUTDOWN_HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    let _shutdown_watchdog = tokio::spawn(async move {
+        tokio::time::sleep(SHUTDOWN_HARD_DEADLINE).await;
+        tracing::error!(
+            deadline_secs = SHUTDOWN_HARD_DEADLINE.as_secs(),
+            "shutdown cleanup exceeded hard deadline; aborting process to \
+             release daemon.lock and avoid a zombie-vs-respawn race (#5477)"
+        );
+        // `process::abort` is async-signal-safe and skips Drop impls — by
+        // this point the operator has already lost any clean-shutdown
+        // benefit, and holding the lock for another minute is strictly
+        // worse than restarting.
+        std::process::abort();
+    });
+
     // Signal background tasks to exit their loops gracefully, then wait up to
     // 5 seconds for each to finish. Abort any that haven't exited by then so
     // we don't stall shutdown indefinitely.
@@ -2207,10 +2228,23 @@ pub async fn run_daemon(
     // Stop channel bridges. Swap out the bridge atomically so no new readers
     // can acquire it, then unwrap the Arc (we just removed the only strong
     // reference stored in AppState) and call stop().
+    //
+    // Bounded with a 5-second hard timeout (#5477): a hung sidecar
+    // subprocess that does not drain on its shutdown channel must not
+    // hold the whole daemon shutdown open until the outer watchdog
+    // fires. The bridge `stop()` is best-effort cleanup — losing it
+    // means orphan sidecar processes the operator must reap, which is
+    // strictly less bad than a zombie daemon holding daemon.lock.
     {
         let old = state.bridge_manager.swap(std::sync::Arc::new(None));
         if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
-            b.stop().await;
+            match tokio::time::timeout(std::time::Duration::from_secs(5), b.stop()).await {
+                Ok(()) => {}
+                Err(_) => tracing::warn!(
+                    "channel bridge stop did not finish within 5s; \
+                     continuing shutdown without waiting (#5477)"
+                ),
+            }
         }
     }
 
@@ -2240,10 +2274,16 @@ pub async fn run_daemon(
             tmux_cleanup_path,
             crate::terminal_tmux::DEFAULT_TMUX_SESSION_NAME.to_string(),
         );
-        if let Err(e) = ctrl.kill_session().await {
-            tracing::debug!("tmux session cleanup: {e}");
-        } else {
-            info!("tmux session cleaned up");
+        // 5s bound (#5477): `tmux kill-session` over a socket can stall
+        // if the tmux daemon itself is wedged. Don't let that hold up
+        // daemon.lock release.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), ctrl.kill_session()).await {
+            Ok(Ok(())) => info!("tmux session cleaned up"),
+            Ok(Err(e)) => tracing::debug!("tmux session cleanup: {e}"),
+            Err(_) => tracing::warn!(
+                "tmux session cleanup did not finish within 5s; \
+                 skipping (#5477)"
+            ),
         }
     }
 

@@ -987,8 +987,7 @@ pub async fn user_budget_ranking(
     let ranking = match usage_store.query_user_ranking(Some(limit)) {
         Ok(r) => r,
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to query user spend: {e}"))
-                .into_response();
+            return ApiErrorResponse::internal_scrub(e).into_response();
         }
     };
 

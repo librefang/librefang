@@ -2563,7 +2563,7 @@ pub async fn kill_agent(
                 );
             }
             tracing::warn!("kill_agent failed for {id}: {e}");
-            ApiErrorResponse::internal(format!("Failed to kill agent {id}: {e}"))
+            ApiErrorResponse::internal_scrub(e)
                 .with_code("agent_kill_failed")
                 .into_response()
         }
@@ -7240,8 +7240,7 @@ mod tests {
         };
         let session_override = Some(SessionId::new());
 
-        let (sender_ctx, incognito, sid) =
-            build_streaming_kernel_args(&req, session_override.clone());
+        let (sender_ctx, incognito, sid) = build_streaming_kernel_args(&req, session_override);
 
         // sender_context: every field that influences resolver behaviour
         // must flow through.
