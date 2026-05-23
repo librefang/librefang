@@ -503,6 +503,16 @@ pub fn build_reload_plan_with_caps(
     // See the helper for the exact field set.
     if external_auth_idp_changed(&old.external_auth, &new.external_auth) {
         plan.hot_actions.push(HotAction::ReloadExternalAuth);
+    } else if field_changed(&old.external_auth, &new.external_auth) {
+        // Non-IdP edits only (session_ttl_secs, allowed_domains, redirect_url,
+        // scopes, audience, require_email_verified). The OAuth layer reads
+        // these live from the ArcSwap config on every request (`oauth.rs`:
+        // `config_ref()` / `config_snapshot()`), so the bare config swap makes
+        // them effective on the next request — no restart, and no cache
+        // eviction (none of these key into the OIDC discovery / JWKS caches).
+        plan.noop_changes.push(
+            "external_auth config changed (effective on next request via config swap)".to_string(),
+        );
     }
 
     if field_changed(&old.sanitize, &new.sanitize) {
@@ -691,18 +701,17 @@ pub fn build_reload_plan_with_caps(
             old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
             "max_concurrent_bg_llm",
         );
-        // external_auth IdP-identity changes (enabled / issuer_url / per-provider
-        // issuer+jwks) are hot-reloaded above via `ReloadExternalAuth` (#5594) —
-        // they evict the JWKS/discovery caches without a restart. Only a NON-IdP
-        // external_auth change (e.g. session_ttl, allowed_domains, scopes) has no
-        // hot path wired, so it still requires a restart. Without this guard the
-        // backfill double-classified IdP changes as both hot AND restart, which
-        // regressed `test_external_auth_issuer_url_change_evicts_oauth_caches`.
-        restart_if_changed(
-            field_changed(&old.external_auth, &new.external_auth)
-                && !external_auth_idp_changed(&old.external_auth, &new.external_auth),
-            "external_auth",
-        );
+        // NOTE: `external_auth` is intentionally NOT classified here. It is
+        // fully hot-reloadable, so its classification lives in the hand-tuned
+        // branch above: an IdP-identity change (enabled / issuer_url /
+        // per-provider issuer+jwks) queues `ReloadExternalAuth` (#5594) to
+        // evict the JWKS/discovery caches, and every other field is read live
+        // from the ArcSwap config by the OAuth layer (`oauth.rs`:
+        // `config_ref()` / `config_snapshot()`), so a non-IdP edit is a no-op
+        // that takes effect on the next request — never a restart. #5652 gated
+        // the backfill's restart on `!external_auth_idp_changed(...)` to clear
+        // the double-classification; this drops the restart for non-IdP edits
+        // entirely since the live-read path makes it unnecessary.
         restart_if_changed(
             field_changed(&old.auto_dream, &new.auto_dream),
             "auto_dream",
@@ -915,6 +924,9 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "log_level",
         "language",
         "mode",
+        // hot-reloadable: ReloadExternalAuth on IdP-identity change, noop
+        // (live-read) otherwise — see the hand-tuned branch above.
+        "external_auth",
         // -- backfilled RESTART branches --
         "config_version",
         "cors_origin",
@@ -953,7 +965,6 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "max_request_body_bytes",
         "max_upload_size_bytes",
         "max_concurrent_bg_llm",
-        "external_auth",
         "auto_dream",
         "audit",
         "telemetry",
@@ -1481,6 +1492,25 @@ mod tests {
              (would force a needless OIDC round-trip on next login): \
              actions={:?}",
             plan.hot_actions
+        );
+        // These knobs are read live from the ArcSwap config by the OAuth layer
+        // (`oauth.rs`), so a config swap applies them on the next request — no
+        // restart required. #5652 left non-IdP edits classified as restart;
+        // this pins them to a no-op instead.
+        assert!(
+            !plan.restart_required,
+            "non-IdP external_auth edits are live-read; restart must not be \
+             required: reasons={:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            plan.noop_changes
+                .iter()
+                .any(|n| n.contains("external_auth")),
+            "non-IdP external_auth edit should record a no-op change so the \
+             operator gets honest 'applied on next request' feedback: \
+             noop_changes={:?}",
+            plan.noop_changes
         );
     }
 

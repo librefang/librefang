@@ -443,8 +443,7 @@ pub async fn auth_start(
     }
     if let Err(e) = store("pkce_state", &pkce_state) {
         tracing::error!(error = %e, "Failed to store PKCE state in vault");
-        return ApiErrorResponse::internal(format!("Failed to store auth state: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Err(e) = store("token_endpoint", &metadata.token_endpoint) {
         tracing::warn!(error = %e, "Failed to store token_endpoint in vault");

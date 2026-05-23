@@ -470,11 +470,18 @@ impl AuditLog {
             chain_anchor: Mutex::new(recovered_anchor),
         };
 
-        // Verify chain integrity on load
+        // Verify chain integrity on load. Logged at WARN: the message itself
+        // recommends `audit-reset` for the dev case and the loaded chain
+        // remains queryable, so this is an alert-worthy condition for
+        // compliance operators (who keep a custom WARN→pager rule) but
+        // not a daemon error in the dev / single-laptop case where this
+        // path fires routinely after every untracked restart. Keeping it
+        // at ERROR (the original level) made `grep ERROR daemon.log`
+        // useless on dev hosts (#5478).
         if count > 0 {
             if let Err(e) = log.verify_integrity() {
-                tracing::error!(
-                    "Audit trail integrity check FAILED on boot: {e}. \
+                tracing::warn!(
+                    "Audit trail integrity check failed on boot: {e}. \
                      Run `librefang security verify` to inspect; if you accept the \
                      loss of pre-break forensic value (typical in dev), \
                      `librefang security audit-reset` truncates the chain and \

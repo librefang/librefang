@@ -2843,9 +2843,7 @@ pub async fn create_schedule(
             entry["id"] = serde_json::Value::String(job_id.to_string());
             (StatusCode::CREATED, Json(entry))
         }
-        Err(e) => {
-            ApiErrorResponse::internal(format!("Failed to create schedule: {e}")).into_json_tuple()
-        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 

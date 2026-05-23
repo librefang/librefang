@@ -416,8 +416,7 @@ pub async fn set_model_overrides(
                     catalog.remove_overrides(&id_for_rollback);
                 }
             });
-        return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Return the persisted overrides entity so callers can `setQueryData`
     // without a follow-up GET. (Refs #3832.)
@@ -979,8 +978,7 @@ pub async fn add_custom_model(
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.remove_custom_model(&id_for_rollback);
         });
-        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (
@@ -1030,8 +1028,7 @@ pub async fn remove_custom_model(
                 catalog.add_custom_model(entry.clone());
             });
         }
-        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -1096,8 +1093,7 @@ pub async fn set_provider_key(
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
-        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Set env var in current process so detect_auth picks it up. Serialized
@@ -1319,8 +1315,7 @@ pub async fn delete_provider_key(
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Remove from process environment. `std::env::remove_var` carries the
@@ -1773,7 +1768,7 @@ pub async fn set_provider_url(
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     if let Some(ref pu) = proxy_url {
         if let Err(e) = upsert_provider_proxy_url(&config_path, &name, pu) {

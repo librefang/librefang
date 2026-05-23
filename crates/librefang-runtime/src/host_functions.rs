@@ -803,20 +803,35 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             json!({"ok": val})
         }
         Ok(None) => {
-            // TODO(#5070-cleanup): On legacy fallback hit, migrate the row to
-            // the agent-scoped namespace (re-store via
-            // memory_store(key, val, Some(agent_id), None)) and delete the
-            // legacy shared-namespace row. Currently the old row is left in
-            // place, so repeated fallbacks keep hitting it.
             let legacy_key = format!("{}:{key}", state.agent_id);
             match kernel.memory_recall(&legacy_key, None, None) {
                 Ok(Some(val)) => {
-                    tracing::warn!(
-                        key = %key,
-                        agent_id = %state.agent_id,
-                        "host_kv_get: found value with deprecated key-prefix format; \
-                         re-store with current scheme to migrate"
-                    );
+                    // Migrate the row into the agent-scoped namespace
+                    // so the next read resolves through the primary
+                    // lookup and never falls through to the deprecated
+                    // shared-namespace path again. The legacy row is
+                    // left in place (the `MemoryAccess` trait has no
+                    // `delete` today); orphan cleanup is a separate
+                    // concern tracked outside this fix.
+                    if let Err(e) =
+                        kernel.memory_store(key, val.clone(), Some(&state.agent_id), None)
+                    {
+                        tracing::warn!(
+                            key = %key,
+                            agent_id = %state.agent_id,
+                            error = %e,
+                            "host_kv_get: legacy-row migrate write failed; \
+                             returning the legacy value but the next read will \
+                             fall through again"
+                        );
+                    } else {
+                        tracing::info!(
+                            key = %key,
+                            agent_id = %state.agent_id,
+                            "host_kv_get: migrated value from deprecated \
+                             key-prefix format to the agent-scoped namespace"
+                        );
+                    }
                     json!({"ok": val})
                 }
                 _ => json!({"ok": null}),
@@ -1247,6 +1262,12 @@ mod tests {
         stored: std::sync::Mutex<Vec<(Option<String>, String, serde_json::Value)>>,
         /// Records every (agent_id, key) passed to memory_recall.
         recalled: std::sync::Mutex<Vec<(Option<String>, String)>>,
+        /// Optional pre-populated values keyed by `(agent_id, key)`.
+        /// When set, `memory_recall` returns the stored value for matching
+        /// lookups; unmatched lookups still return `Ok(None)`.
+        preloaded: std::sync::Mutex<
+            std::collections::HashMap<(Option<String>, String), serde_json::Value>,
+        >,
     }
 
     impl RecordingKernel {
@@ -1254,7 +1275,15 @@ mod tests {
             std::sync::Arc::new(Self {
                 stored: std::sync::Mutex::new(Vec::new()),
                 recalled: std::sync::Mutex::new(Vec::new()),
+                preloaded: std::sync::Mutex::new(std::collections::HashMap::new()),
             })
+        }
+
+        fn preload(&self, agent_id: Option<&str>, key: &str, value: serde_json::Value) {
+            self.preloaded
+                .lock()
+                .unwrap()
+                .insert((agent_id.map(|s| s.to_string()), key.to_string()), value);
         }
     }
 
@@ -1310,7 +1339,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((agent_id.map(|s| s.to_string()), key.to_string()));
-            Ok(None)
+            let aid = agent_id.map(|s| s.to_string());
+            Ok(self
+                .preloaded
+                .lock()
+                .unwrap()
+                .get(&(aid, key.to_string()))
+                .cloned())
         }
         fn memory_list(
             &self,
@@ -1489,6 +1524,86 @@ mod tests {
         assert_eq!(
             recalled[1].1, "agent-alice:secret",
             "legacy fallback must use namespaced key"
+        );
+    }
+
+    /// Regression test for #5657: when host_kv_get falls through to the
+    /// deprecated `<agent_id>:<key>` shared-namespace row, it must
+    /// re-store the value under the agent-scoped namespace so the next
+    /// read resolves through the primary lookup and never falls through
+    /// again. The legacy row is left in place (`MemoryAccess` has no
+    /// `delete`); orphan cleanup is tracked separately.
+    #[tokio::test]
+    async fn test_kv_get_migrates_legacy_row_on_fallback_hit() {
+        let kernel = RecordingKernel::new();
+        // Preload a value under the legacy shared-namespace shape only.
+        // Primary lookup `(Some("agent-alice"), "secret")` returns None,
+        // legacy lookup `(None, "agent-alice:secret")` returns the value.
+        kernel.preload(None, "agent-alice:secret", json!("legacy-value"));
+
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![
+                Capability::MemoryRead("*".to_string()),
+                Capability::MemoryWrite("*".to_string()),
+            ],
+            std::sync::Arc::clone(&kernel),
+        );
+        let result = host_kv_get(&state, &json!({"key": "secret"}));
+
+        assert_eq!(result["ok"], json!("legacy-value"));
+
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "legacy hit must trigger exactly one migration write"
+        );
+        assert_eq!(
+            stored[0].0.as_deref(),
+            Some("agent-alice"),
+            "migration write must be agent-scoped"
+        );
+        assert_eq!(
+            stored[0].1, "secret",
+            "migration write must use the guest-facing key, not the legacy `<aid>:<key>` shape"
+        );
+        assert_eq!(
+            stored[0].2,
+            json!("legacy-value"),
+            "migration write must carry the legacy row's value verbatim"
+        );
+    }
+
+    /// When the primary lookup already succeeds, no legacy fallback is
+    /// attempted and no migration write happens.
+    #[tokio::test]
+    async fn test_kv_get_primary_hit_does_not_trigger_migration() {
+        let kernel = RecordingKernel::new();
+        kernel.preload(Some("agent-alice"), "secret", json!("current-value"));
+
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![
+                Capability::MemoryRead("*".to_string()),
+                Capability::MemoryWrite("*".to_string()),
+            ],
+            std::sync::Arc::clone(&kernel),
+        );
+        let result = host_kv_get(&state, &json!({"key": "secret"}));
+
+        assert_eq!(result["ok"], json!("current-value"));
+        let recalled = kernel.recalled.lock().unwrap();
+        assert_eq!(
+            recalled.len(),
+            1,
+            "primary hit must not trigger the legacy fallback recall"
+        );
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            0,
+            "primary hit must not trigger a migration write"
         );
     }
 
