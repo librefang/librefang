@@ -21,7 +21,7 @@ librefang-wire = { path = "../librefang-wire" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
-librefang-migrate = { path = "../librefang-migrate" }
+librefang-import = { path = "../librefang-import" }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
