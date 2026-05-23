@@ -498,6 +498,23 @@ impl TokenStore {
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
 
 /// GET /api/auth/providers — List available authentication providers.
+///
+/// Gated by `require_auth_for_reads` at the middleware layer (it lives in
+/// `PUBLIC_ROUTES_DASHBOARD_READS`): in strict mode an unauthenticated caller
+/// gets 401 before reaching this handler. In open mode the route is reachable
+/// without a token.
+///
+/// The response is intentionally names-only (`id` + `display_name`) for **every**
+/// caller — the minimum the login UI needs to render its provider buttons. The
+/// per-provider OAuth `scopes` (and any other configuration detail) are never
+/// returned here, so the IdP scope configuration cannot be enumerated through
+/// this endpoint regardless of the caller's privilege. (An earlier revision
+/// keyed `scopes` exposure on the `AuthenticatedApiUser` extension, but the
+/// static `api_key` — the highest-privilege credential — is identity-less and
+/// never carries that extension, so the gate both under-disclosed to the admin
+/// key and inverted the privilege ordering. Scopes aren't security-sensitive,
+/// but they also aren't needed here; admins read full provider config from the
+/// auth-gated `/api/config` surface instead.)
 #[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = crate::types::JsonObject)))]
 pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
@@ -514,10 +531,12 @@ pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let summary: Vec<serde_json::Value> = providers
         .iter()
         .map(|p| {
+            // Names-only for all callers: omit `scopes` (and any other
+            // configuration detail) so the IdP scope set is never enumerable
+            // through this endpoint.
             serde_json::json!({
                 "id": p.id,
                 "display_name": p.display_name,
-                "scopes": p.scopes,
             })
         })
         .collect();
@@ -2463,6 +2482,11 @@ mod tests {
 
     static OAUTH_CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // The `OAUTH_CACHE_TEST_MUTEX` guard is deliberately held across the
+    // `.await`s below: it serializes these cases against the process-global
+    // caches, so it must stay locked for the whole test body, awaits
+    // included.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_clears_jwks_entries() {
         let _g = OAUTH_CACHE_TEST_MUTEX
@@ -2511,6 +2535,8 @@ mod tests {
         );
     }
 
+    // Guard held across awaits on purpose — see the JWKS test above.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_clears_discovery_entries() {
         let _g = OAUTH_CACHE_TEST_MUTEX
@@ -2554,6 +2580,8 @@ mod tests {
         );
     }
 
+    // Guard held across awaits on purpose — see the JWKS test above.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_is_idempotent_on_empty() {
         let _g = OAUTH_CACHE_TEST_MUTEX

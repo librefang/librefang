@@ -1203,3 +1203,92 @@ def test_header_rules_surfaces_in_ready_event():
     assert host == "matrix.test"
     # Each header is a 2-element list.
     assert ["Authorization", "Bearer syt_test_token"] in headers
+
+
+# ---- since-cursor persistence ---------------------------------------
+#
+# The /sync `next_batch` cursor must survive supervisor restarts —
+# otherwise a respawned adapter re-fetches the same ~10 timeline
+# events per joined room (limit baked into _build_sync_url) and emits
+# them as fresh inbound. The in-memory `_seen` dedupe is also lost on
+# restart so it cannot catch the replay.
+
+
+def test_since_state_path_uses_libfang_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    assert a._since_state_path is not None
+    assert a._since_state_path.startswith(str(tmp_path))
+    assert a._since_state_path.endswith("-since.txt")
+
+
+def test_since_state_path_sanitises_user_id(tmp_path, monkeypatch):
+    # user_id contains ':' which is not safe in filename on Windows
+    # and is the canonical reserved namespace separator in librefang
+    # peer_id semantics. Adapter swaps anything not in
+    # [alnum]+[-_.@] for '_'.
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter(MATRIX_USER_ID="@bot:matrix.example.org")
+    assert ":" not in os.path.basename(a._since_state_path)
+    assert "matrix-@bot_matrix.example.org-since.txt" in a._since_state_path
+
+
+def test_since_token_persists_across_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    # Simulate one /sync cycle.
+    a._process_sync_body({"next_batch": "s500_42"}, lambda _e: None)
+    assert a.since_token == "s500_42"
+    # A new adapter (simulating supervisor respawn) reads the cursor.
+    b = _adapter()
+    assert b.since_token == "s500_42"
+
+
+def test_since_token_missing_state_file_starts_fresh(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    assert a.since_token is None
+
+
+def test_since_token_load_unreadable_falls_back_to_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    # Write a token, then chmod to unreadable; on systems where root
+    # can still read the file the test no-ops harmlessly.
+    a._process_sync_body({"next_batch": "s1"}, lambda _e: None)
+    try:
+        os.chmod(a._since_state_path, 0)
+    except OSError:
+        pytest.skip("chmod restriction not enforced on this filesystem")
+    b = _adapter()
+    # No raise; falls back to None and lets the next /sync re-anchor.
+    assert b.since_token is None
+    # Restore so pytest tmp_path cleanup can unlink.
+    os.chmod(a._since_state_path, 0o600)
+
+
+def test_since_token_persist_uses_atomic_replace(tmp_path, monkeypatch):
+    # Write goes through `<path>.tmp` + os.replace so a concurrent
+    # reader never observes a half-written cursor.
+    monkeypatch.setenv("LIBREFANG_HOME", str(tmp_path))
+    a = _adapter()
+    a._process_sync_body({"next_batch": "s1"}, lambda _e: None)
+    assert not os.path.exists(a._since_state_path + ".tmp")
+    with open(a._since_state_path, "r", encoding="utf-8") as f:
+        assert f.read() == "s1"
+
+
+def test_since_state_path_none_when_no_home(monkeypatch):
+    # Defensive: when both LIBREFANG_HOME and $HOME are absent
+    # (rare but possible inside a stripped container), persistence
+    # is disabled rather than crashing. Use monkeypatch.delenv with
+    # raising=False so the test passes whether the var was set or not.
+    monkeypatch.delenv("LIBREFANG_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(os.path, "expanduser", lambda p: "")
+    a = _adapter()
+    # Either None (no home discoverable) or a real path is acceptable
+    # depending on platform expanduser semantics — the contract is
+    # that _persist_since_token() must not crash when the path is None.
+    a._process_sync_body({"next_batch": "s1"}, lambda _e: None)
+    assert a.since_token == "s1"

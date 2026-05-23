@@ -145,3 +145,58 @@ async fn registry_content_path_is_relative_not_absolute() {
         "expected relative `providers/<id>.toml`, got {path:?}"
     );
 }
+
+/// API-surface-hygiene roundup (#2: registry id validation). The identifier is
+/// joined into a filesystem path, so it is validated against
+/// `^[a-zA-Z0-9._-]+$` with a 128-char cap. Anything outside the allowlist —
+/// path separators, `..`, whitespace, shell metacharacters, or an over-long
+/// value — must be rejected with 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_content_rejects_malformed_identifiers() {
+    let h = boot().await;
+
+    let long = "a".repeat(129);
+    let bad_ids: &[&str] = &[
+        "../etc",
+        "..",
+        ".",
+        "a/b",
+        "a\\b",
+        "a b",
+        "a;rm -rf",
+        "a$(whoami)",
+        "naïve",
+        long.as_str(),
+        "", // empty after extraction → "Missing" or "Invalid", both 400
+    ];
+
+    for id in bad_ids {
+        let body = serde_json::json!({ "id": id });
+        let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "identifier {id:?} must be rejected with 400; got {status} / {resp}"
+        );
+    }
+}
+
+/// Well-formed identifiers that exercise the full allowlist (alphanumerics plus
+/// `.`, `_`, `-`) are accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_content_accepts_dotted_and_dashed_identifiers() {
+    let h = boot().await;
+    let body = serde_json::json!({
+        "id": "my.provider-name_1",
+        "display_name": "OK",
+        "api_key_env": "MY_PROVIDER_NAME_1_API_KEY",
+        "base_url": "https://example.invalid/v1",
+        "key_required": false
+    });
+    let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+    assert_eq!(status, StatusCode::OK, "unexpected status: {resp}");
+    assert_eq!(
+        resp.get("path").and_then(|v| v.as_str()),
+        Some("providers/my.provider-name_1.toml")
+    );
+}
