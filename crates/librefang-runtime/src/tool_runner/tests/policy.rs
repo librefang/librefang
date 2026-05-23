@@ -1521,6 +1521,7 @@ impl MemoryAccess for SpawnCheckKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1529,6 +1530,7 @@ impl MemoryAccess for SpawnCheckKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1536,6 +1538,7 @@ impl MemoryAccess for SpawnCheckKernel {
 
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())

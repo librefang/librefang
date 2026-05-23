@@ -877,9 +877,11 @@ pub async fn execute_tool_raw(
         // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
         // tool fn (`enforce_memory_acl`) using the attributed sender +
         // channel, mirroring the proactive-retrieval gate.
-        "memory_store" => tool_memory_store(input, *kernel, *sender_id, *channel),
-        "memory_recall" => tool_memory_recall(input, *kernel, *sender_id, *channel),
-        "memory_list" => tool_memory_list(*kernel, *sender_id, *channel),
+        "memory_store" => tool_memory_store(input, *kernel, *caller_agent_id, *sender_id, *channel),
+        "memory_recall" => {
+            tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
+        }
+        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
         "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),
@@ -1443,7 +1445,7 @@ pub async fn execute_tool(
         if !skip_approval_for_full_exec
             && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
         {
-            let agent_id_str = caller_agent_id.unwrap_or("unknown");
+            let agent_id_str = caller_agent_id.unwrap_or("");
             let input_str = input.to_string();
             let summary = format!(
                 "{}: {}",
