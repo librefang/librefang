@@ -61,8 +61,10 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0081" },
     { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0098" },
     { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0134" },
 ]
+# Note: RUSTSEC-2025-0134 (rustls-pemfile unmaintained) was removed — the
+# crate was dropped from the dependency tree by an upstream dep bump and the
+# ignore entry would otherwise cause cargo-deny to fail with "no crate matched".
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Licenses — explicit allow-list. Anything not listed fails the check.
@@ -77,22 +79,32 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
+    "MIT-0",            # MIT Zero Attribution (borrow-or-share); subset of MIT, more permissive
     "BSD-2-Clause",
     "BSD-3-Clause",
     "0BSD",
+    "BSL-1.0",          # Boost Software License 1.0 (xxhash-rust); permissive, OSI-approved
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "MPL-2.0",
     "Zlib",
     "CC0-1.0",
+    "Unlicense",        # Public domain (ext-sort); effectively CC0 equivalent
     # CDLA-Permissive-2.0 is used by webpki-roots; OSI-approved permissive
     # license compatible with our distribution model.
     "CDLA-Permissive-2.0",
 ]
 # Per-crate license clarifications go here. Add only when SPDX detection is
 # ambiguous AND the upstream LICENSE file has been read manually.
-exceptions = []
+exceptions = [
+    # surrealdb-protocol uses BUSL-1.1 (Business Source License 1.1 — converts to
+    # Apache-2.0 after 4 years). Required as a transitive dep of surrealdb 3.0.5
+    # which BossFang pins as the primary storage backend. The BUSL grants unlimited
+    # non-production use and production use below 100 nodes; BossFang's use fits
+    # both criteria. Review at next surrealdb major version bump.
+    { allow = ["BUSL-1.1"], name = "surrealdb-protocol" },
+]
 
 # `ring` ships a hand-rolled license file rather than a single SPDX ID;
 # this clarification matches the upstream reality (MIT + ISC + OpenSSL).
@@ -100,6 +112,15 @@ exceptions = []
 name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# `libbz2-rs-sys` declares a non-SPDX license field ("bzip2-1.0.6"). The bzip2
+# license is a BSD-2-Clause variant with identical terms; this clarification maps
+# it to the nearest SPDX identifier. Hash verified against libbz2-rs-sys 0.2.5.
+[[licenses.clarify]]
+name = "libbz2-rs-sys"
+expression = "BSD-2-Clause"
+license-files = [{ path = "LICENSE", hash = 0xd0588441 }]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bans — duplicate-version, wildcard, and explicit deny / allow lists.
@@ -145,12 +166,46 @@ skip-tree = []
 # ─────────────────────────────────────────────────────────────────────────────
 [sources]
 # https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
-# Anything outside crates.io must be explicitly allow-listed. The workspace
-# currently has zero git dependencies (verified by `rg 'git\s*=\s*"'` over
-# every Cargo.toml at the time of writing); if that ever changes, add the
-# repository to `allow-git` together with a comment linking to the upstream
-# issue / PR explaining why a published version is not yet usable.
+# Anything outside crates.io must be explicitly allow-listed. Each entry below
+# links to the upstream issue / PR explaining why a published crates.io version
+# is not yet usable or why the fork is required.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # ── BossFang-exclusive git deps ────────────────────────────────────────────
+    # liter-llm: unified LLM router used by UAR driver; no stable crates.io
+    # release yet (rc versioning). GQAdonis/liter-llm is the BossFang fork.
+    "https://github.com/GQAdonis/liter-llm.git",
+
+    # universal-agent-runtime: UAR provider giving access to 142+ LLM providers.
+    # BossFang uses GQAdonis fork which pins surreal-backend for surrealdb 3.x
+    # compatibility. No published crates.io release.
+    "https://github.com/GQAdonis/universal-agent-runtime.git",
+
+    # kreuzberg: document parsing library pulled in transitively via
+    # universal-agent-runtime. Public repo; SSH URL is in Cargo.lock because it
+    # is fetched via SSH upstream — a .cargo/config.toml source-replacement
+    # redirects to HTTPS for CI runners without SSH key access.
+    "ssh://git@github.com/GQAdonis/kreuzberg.git",
+
+    # surreal-memory: SurrealDB-native memory substrate (semantic search,
+    # knowledge graphs, task tracking). No crates.io release; embedded feature
+    # required (no external SurrealDB service dependency).
+    "https://github.com/Prometheus-AGS/surreal-memory-server",
+
+    # prometheus-parking-lot: BossFang fork of parking-lot patched for
+    # SurrealDB 3.x lock-poisoning semantics. Required until parking-lot
+    # upstream releases a compatible version.
+    "https://github.com/Prometheus-AGS/prometheus-parking-lot-rs",
+
+    # ── Upstream git deps (from librefang/librefang) ───────────────────────────
+    # modelcontextprotocol/rust-sdk: official MCP Rust SDK. Used at a specific
+    # git rev because the release cadence lags the protocol spec; upstream
+    # tracks the rev that matches the supported MCP protocol version.
+    "https://github.com/modelcontextprotocol/rust-sdk",
+
+    # sycophancy-correction-skill: sycophancy-detection skill pulled in via the
+    # upstream skills system. MIT licensed; no crates.io release yet.
+    "https://github.com/Know-Me-Tools/sycophancy-correction-skill.git",
+]
