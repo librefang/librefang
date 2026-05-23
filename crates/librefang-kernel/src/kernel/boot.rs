@@ -2686,7 +2686,6 @@ mod provider_env_validation {
         ));
         let got: Vec<_> = collect_provider_env_var_declarations(&cfg)
             .into_iter()
-            .map(|(p, e, s)| (p, e, s))
             .collect();
         assert_eq!(
             got,
