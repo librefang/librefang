@@ -787,6 +787,7 @@ impl ContextEngine for ScriptableContextEngine {
         let process_pool = std::sync::Arc::clone(&self.process_pool);
         let sem = std::sync::Arc::clone(&self.after_turn_sem);
         let trace_store = self.trace_store.clone();
+        let trace_backend = self.trace_backend.clone();
         let plugin_name = self.plugin_name.clone();
         let agent_id_str = agent_id.0.to_string();
         // Compute agent-scoped state path for this after_turn call.
@@ -802,6 +803,7 @@ impl ContextEngine for ScriptableContextEngine {
         let cb_breakers = std::sync::Arc::clone(&self.circuit_breakers);
         let cb_cfg = self.circuit_breaker_cfg.clone();
         let cb_trace_store = self.trace_store.clone();
+        let cb_trace_backend = self.trace_backend.clone();
         {
             let mut tasks = self.after_turn_tasks.lock().await;
             // Reap already-completed tasks to prevent unbounded growth.
@@ -851,6 +853,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     annotations: output.get("annotations").cloned(),
                                 },
                                 trace_store.as_ref(),
+                                trace_backend.as_ref(),
                                 &plugin_name,
                             )
                             .await;
@@ -873,6 +876,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     annotations: None,
                                 },
                                 trace_store.as_ref(),
+                                trace_backend.as_ref(),
                                 &plugin_name,
                             )
                             .await;
@@ -895,6 +899,7 @@ impl ContextEngine for ScriptableContextEngine {
                         &hook_schemas,
                         shared_state_path.as_deref(),
                         trace_store.as_ref(),
+                        trace_backend.as_ref(),
                         &plugin_name,
                         &correlation_id_at,
                         output_schema_strict,
@@ -950,7 +955,17 @@ impl ContextEngine for ScriptableContextEngine {
                             (state.consecutive_failures, opened_str, false)
                         }
                     };
-                    if let Some(ref store) = cb_trace_store {
+                    if let Some(ref backend) = cb_trace_backend {
+                        if just_reset {
+                            let _ = backend.delete_circuit_state(&key);
+                        } else {
+                            let _ = backend.save_circuit_state(
+                                &key,
+                                failures,
+                                opened_at_rfc3339.as_deref(),
+                            );
+                        }
+                    } else if let Some(ref store) = cb_trace_store {
                         if just_reset {
                             let _ = store.delete_circuit_state(&key);
                         } else {

@@ -527,15 +527,44 @@ impl ScriptableContextEngine {
 
     /// Inject a backend-agnostic trace backend (used when `surreal-backend` is active).
     ///
-    /// When set, the backend receives circuit-breaker state persisted by this engine.
-    /// TODO(surreal-trace): wire `trace_backend` through `push_trace` so individual
-    /// hook traces also land in SurrealDB (currently `push_trace` uses `trace_store`
-    /// which is `None` when surreal-backend is enabled — a follow-up PR).
+    /// When set, the backend supersedes `trace_store` for all trace writes and
+    /// circuit-breaker persistence. Circuit-breaker state is restored here so tripped
+    /// circuits survive daemon restarts regardless of which backend is active.
     pub fn with_trace_backend(
         mut self,
         backend: std::sync::Arc<dyn crate::storage_backends::TraceBackend>,
     ) -> Self {
         self.trace_backend = Some(backend);
+
+        // Restore circuit-breaker state from the injected backend.
+        if let Some(ref backend) = self.trace_backend {
+            if let Ok(saved) = backend.load_circuit_states() {
+                if let Ok(mut guard) = self.circuit_breakers.lock() {
+                    for (key, (failures, opened_at)) in saved {
+                        guard.entry(key).or_insert_with(|| {
+                            let opened_instant = opened_at.as_deref().and_then(|s| {
+                                chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+                                    let elapsed_secs = chrono::Utc::now()
+                                        .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                                        .num_seconds()
+                                        .max(0)
+                                        as u64;
+                                    std::time::Instant::now()
+                                        .checked_sub(std::time::Duration::from_secs(elapsed_secs))
+                                        .unwrap_or_else(std::time::Instant::now)
+                                })
+                            });
+                            CircuitBreakerState {
+                                consecutive_failures: failures,
+                                opened_at: opened_instant,
+                                half_open: false,
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
         self
     }
 
@@ -621,6 +650,7 @@ impl ScriptableContextEngine {
             let hook_schemas = self.hook_schemas.clone();
             let shared_state_path = self.shared_state_path.clone();
             let trace_store = self.trace_store.clone();
+            let trace_backend = self.trace_backend.clone();
             let max_memory_mb = self.max_memory_mb;
             let allow_network = self.allow_network;
             let output_schema_strict = self.inner.config.output_schema_strict;
@@ -660,6 +690,7 @@ impl ScriptableContextEngine {
                             let schemas_c = hook_schemas.clone();
                             let state_c = shared_state_path.clone();
                             let store_c = trace_store.clone();
+                            let backend_c = trace_backend.clone();
                             let runtime = runtime.clone();
                             tokio::spawn(async move {
                                 let _ = ScriptableContextEngine::run_hook(
@@ -677,6 +708,7 @@ impl ScriptableContextEngine {
                                     &schemas_c,
                                     state_c.as_deref(),
                                     store_c.as_ref(),
+                                    backend_c.as_ref(),
                                     &plugin_name_c,
                                     &generate_trace_id(),
                                     output_schema_strict,
@@ -719,29 +751,29 @@ impl ScriptableContextEngine {
             .collect()
     }
 
-    /// Push a trace record into the in-memory ring buffer and the SQLite store.
+    /// Push a trace record into the in-memory ring buffer and the persistent store.
     ///
-    /// The ring buffer provides fast in-process access; the SQLite store persists
-    /// traces across daemon restarts for post-mortem analysis.  Both writes are
-    /// best-effort — errors are silently swallowed so a telemetry failure never
-    /// propagates to the caller.
+    /// `trace_backend` (surreal-backend path) takes priority over `trace_store`
+    /// (sqlite-backend path). Both writes are best-effort — errors are silently
+    /// swallowed so a telemetry failure never propagates to the caller.
     async fn push_trace(
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         trace: HookTrace,
         trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        trace_backend: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
         plugin_name: &str,
     ) {
-        // Persist to SQLite first. The async `insert` offloads the actual
-        // SQL work to `tokio::task::spawn_blocking` so the calling tokio
-        // worker is never held during disk I/O or the (amortised) prune
-        // scan. Cloning the `Arc<TraceStore>` is cheap (one atomic bump).
-        if let Some(store) = trace_store {
+        // surreal-backend path: sync call through the TraceBackend trait.
+        if let Some(backend) = trace_backend {
+            backend.insert(plugin_name, &trace);
+        } else if let Some(store) = trace_store {
+            // sqlite-backend path: async insert offloads SQL work to spawn_blocking.
             store
                 .clone()
                 .insert(plugin_name.to_string(), trace.clone())
                 .await;
         }
-        // Then push into the bounded in-memory ring buffer.
+        // Push into the bounded in-memory ring buffer.
         if let Ok(mut buf) = traces.lock() {
             if buf.len() >= TRACE_BUFFER_CAPACITY {
                 buf.pop_front();
@@ -919,8 +951,14 @@ impl ScriptableContextEngine {
             }
         };
 
-        // Persist to SQLite if trace store is available.
-        if let Some(ref store) = self.trace_store {
+        // Persist circuit-breaker state: surreal-backend takes priority over sqlite.
+        if let Some(ref backend) = self.trace_backend {
+            if just_reset {
+                let _ = backend.delete_circuit_state(&key);
+            } else {
+                let _ = backend.save_circuit_state(&key, failures, opened_at_rfc3339.as_deref());
+            }
+        } else if let Some(ref store) = self.trace_store {
             if just_reset {
                 let _ = store.delete_circuit_state(&key);
             } else {
@@ -1211,6 +1249,7 @@ impl ScriptableContextEngine {
         let hook_schemas = self.hook_schemas.clone();
         let shared_state_path = self.shared_state_path.clone();
         let trace_store = self.trace_store.clone();
+        let trace_backend = self.trace_backend.clone();
         let max_retries = 0u32; // events are best-effort
         let retry_delay_ms = 0u64;
         let max_memory_mb = self.max_memory_mb;
@@ -1240,6 +1279,7 @@ impl ScriptableContextEngine {
                 &hook_schemas,
                 shared_state_path.as_deref(),
                 trace_store.as_ref(),
+                trace_backend.as_ref(),
                 &plugin_name,
                 &generate_trace_id(),
                 output_schema_strict,
@@ -1278,6 +1318,7 @@ impl ScriptableContextEngine {
         hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
         shared_state_path: Option<&std::path::Path>,
         trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        trace_backend: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
         plugin_name: &str,
         correlation_id: &str,
         output_schema_strict: bool,
@@ -1373,6 +1414,7 @@ impl ScriptableContextEngine {
                                             annotations: None,
                                         },
                                         trace_store,
+                                        trace_backend,
                                         plugin_name,
                                     )
                                     .await;
@@ -1399,6 +1441,7 @@ impl ScriptableContextEngine {
                             annotations: v.get("annotations").cloned(),
                         },
                         trace_store,
+                        trace_backend,
                         plugin_name,
                     )
                     .await;
@@ -1424,6 +1467,7 @@ impl ScriptableContextEngine {
                 annotations: None,
             },
             trace_store,
+            trace_backend,
             plugin_name,
         )
         .await;
@@ -1594,6 +1638,7 @@ impl ScriptableContextEngine {
                                             annotations: None,
                                         },
                                         self.trace_store.as_ref(),
+                                        self.trace_backend.as_ref(),
                                         &self.plugin_name,
                                     )
                                     .await;
@@ -1620,6 +1665,7 @@ impl ScriptableContextEngine {
                             annotations: output.get("annotations").cloned(),
                         },
                         self.trace_store.as_ref(),
+                        self.trace_backend.as_ref(),
                         &self.plugin_name,
                     )
                     .await;
@@ -1642,6 +1688,7 @@ impl ScriptableContextEngine {
                             annotations: None,
                         },
                         self.trace_store.as_ref(),
+                        self.trace_backend.as_ref(),
                         &self.plugin_name,
                     )
                     .await;
@@ -1664,6 +1711,7 @@ impl ScriptableContextEngine {
                 &self.hook_schemas,
                 effective_state_path.as_deref(),
                 self.trace_store.as_ref(),
+                self.trace_backend.as_ref(),
                 &self.plugin_name,
                 correlation_id,
                 self.inner.config.output_schema_strict,
