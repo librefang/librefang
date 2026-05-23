@@ -94,7 +94,7 @@ classified differently — the row note spells out which is which.
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
-| `external_auth` | R/H | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`) are **R**: no hot reapply path is wired, so the planner conservatively flags a restart even though the OAuth handlers read them live. |
+| `external_auth` | H/N | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`) are **N**: the OAuth layer reads them live from the ArcSwap config on every request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so a bare config swap makes them effective on the next request — no restart, no cache eviction. |
 | `oauth` | R | OAuth client-ID overrides for PKCE flows. |
 | `auth_profiles` | R | Per-provider auth profiles for key rotation. |
 | `pairing` | N | Device pairing config (read live per request). |
