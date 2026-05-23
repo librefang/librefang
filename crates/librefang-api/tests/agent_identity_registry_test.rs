@@ -12,17 +12,24 @@
 //! These tests catch regressions at the API ↔ kernel ↔ identity-registry
 //! boundary on every push (per CLAUDE.md / refs #3721 — integration
 //! tests are the canonical replacement for the old curl checklist).
+//!
+//! Harness: the full production router (`server::build_router`) served on a
+//! real loopback socket — NOT the handler-only mock `start_test_server`.
+//! The full router wires the auth, rate-limit, idempotency, body-size, and
+//! error-envelope layers that the mock silently dropped, so these tests now
+//! exercise the same middleware stack a live daemon does. Empty `api_key` +
+//! a loopback peer keeps the single-user dev fast-path open; booting the same
+//! harness with a non-empty key (`start_full_router("<key>")`) proves the auth
+//! layer is active (see `auth_layer_enforced_on_identity_routes`).
 
-use axum::Router;
-use librefang_api::{middleware, routes, ws};
-use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_kernel::LibreFangKernel;
+use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 struct TestServer {
     base_url: String,
-    state: Arc<routes::AppState>,
+    state: Arc<librefang_api::routes::AppState>,
     _tmp: tempfile::TempDir,
 }
 
@@ -32,53 +39,67 @@ impl Drop for TestServer {
     }
 }
 
-async fn start_test_server() -> TestServer {
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
-        cfg.default_model.provider = "ollama".to_string();
-        cfg.default_model.model = "test-model".to_string();
-        cfg.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
-    }));
-    let config_path = test.tmp_path().join("config.toml");
-    let test = test.with_config_path(config_path);
-    let (state, _tmp, _) = test.into_parts();
-    state.kernel.clone().set_self_handle();
+/// Boot the real kernel and serve the full production router on a random
+/// loopback port. `api_key` empty → single-user dev fast-path (loopback
+/// peers pass auth without a token); non-empty → token auth is enforced.
+async fn start_full_router(api_key: &str) -> TestServer {
+    let tmp = tempfile::tempdir().expect("create temp dir");
 
-    let app = Router::new()
-        .route(
-            "/api/agents",
-            axum::routing::get(routes::list_agents).post(routes::spawn_agent),
-        )
-        .route(
-            "/api/agents/identities",
-            axum::routing::get(routes::list_agent_identities),
-        )
-        .route(
-            "/api/agents/identities/{name}/reset",
-            axum::routing::post(routes::reset_agent_identity),
-        )
-        .route(
-            "/api/agents/{id}",
-            axum::routing::get(routes::get_agent).delete(routes::kill_agent),
-        )
-        .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
-        .layer(axum::middleware::from_fn(middleware::request_logging))
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
-        .with_state(state.clone());
+    // Sync registry content into the temp home_dir so the kernel boots with
+    // a populated model catalog (mirrors api_integration_test::start_full_router).
+    librefang_kernel::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    let (app, state) = librefang_api::server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
     let addr = listener.local_addr().unwrap();
 
+    // SECURITY: `into_make_service_with_connect_info` injects the peer
+    // SocketAddr the auth layer reads to classify loopback vs. non-loopback
+    // callers — the same wiring production uses (`server.rs`). Without it the
+    // empty-key fast-path would fail closed (missing ConnectInfo → 401).
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestServer {
         base_url: format!("http://{}", addr),
         state,
-        _tmp,
+        _tmp: tmp,
     }
 }
 
@@ -114,7 +135,7 @@ async fn spawn_one(server: &TestServer, manifest: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_registers_canonical_uuid() {
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let agent_id = spawn_one(&server, TEST_MANIFEST).await;
 
     let recorded = server
@@ -128,7 +149,7 @@ async fn spawn_registers_canonical_uuid() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_without_confirm_returns_409_and_preserves_identity() {
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let agent_id = spawn_one(&server, TEST_MANIFEST).await;
 
     let client = reqwest::Client::new();
@@ -161,7 +182,7 @@ async fn delete_without_confirm_returns_409_and_preserves_identity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_with_confirm_purges_identity_and_respawn_recovers_uuid() {
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let first_id = spawn_one(&server, TEST_MANIFEST).await;
 
     let client = reqwest::Client::new();
@@ -214,7 +235,7 @@ async fn delete_with_confirm_purges_identity_and_respawn_recovers_uuid() {
 async fn delete_invalid_uuid_short_circuits_400_before_confirm_check() {
     // Refs #4614: malformed UUID is still 400 (not 409), since the
     // parse failure happens before the confirm check fires.
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let client = reqwest::Client::new();
     let resp = client
         .delete(format!("{}/api/agents/not-a-uuid", server.base_url))
@@ -226,7 +247,7 @@ async fn delete_invalid_uuid_short_circuits_400_before_confirm_check() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn list_identities_returns_registered_entries() {
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let agent_id = spawn_one(&server, TEST_MANIFEST).await;
 
     let client = reqwest::Client::new();
@@ -248,7 +269,7 @@ async fn list_identities_returns_registered_entries() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reset_identity_endpoint_gates_on_confirm() {
-    let server = start_test_server().await;
+    let server = start_full_router("").await;
     let _agent_id = spawn_one(&server, TEST_MANIFEST).await;
     let client = reqwest::Client::new();
 
@@ -295,4 +316,137 @@ async fn reset_identity_endpoint_gates_on_confirm() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// Real-middleware coverage the mock router could not provide: with a
+/// configured `api_key` the full router's auth layer rejects unauthenticated
+/// writes to the identity domain (even from loopback — the unconditional
+/// loopback bypass was removed, see middleware bug #3558), and accepts the
+/// same request once a valid bearer token is supplied. The handler-only
+/// `start_test_server` mock had no auth layer at all, so this entire class of
+/// regression was invisible to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_layer_enforced_on_identity_routes() {
+    const KEY: &str = "identity-registry-test-key";
+    let server = start_full_router(KEY).await;
+    let client = reqwest::Client::new();
+
+    // Spawn requires auth — without a token the write is rejected 401, never
+    // reaching the handler (so no identity is registered).
+    let unauth_spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauth_spawn.status(),
+        401,
+        "unauthenticated spawn must be rejected by the auth layer"
+    );
+    assert!(
+        server
+            .state
+            .kernel
+            .agent_identities()
+            .get("respawn-target")
+            .is_none(),
+        "a 401'd spawn must not have registered a canonical UUID"
+    );
+
+    // With the correct bearer token the same spawn succeeds and registers.
+    let authed_spawn = client
+        .post(format!("{}/api/agents", server.base_url))
+        .header("authorization", format!("Bearer {KEY}"))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        authed_spawn.status(),
+        201,
+        "authenticated spawn must succeed through the full router"
+    );
+    let agent_id = authed_spawn.json::<serde_json::Value>().await.unwrap()["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        server
+            .state
+            .kernel
+            .agent_identities()
+            .get("respawn-target")
+            .is_some(),
+        "authenticated spawn must register the canonical UUID"
+    );
+
+    // Identity-reset is a write too — unauthenticated POST is 401, the binding
+    // survives, and the authenticated retry purges it.
+    let unauth_reset = client
+        .post(format!(
+            "{}/api/agents/identities/respawn-target/reset?confirm=true",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauth_reset.status(),
+        401,
+        "unauthenticated identity reset must be rejected by the auth layer"
+    );
+    assert!(
+        server
+            .state
+            .kernel
+            .agent_identities()
+            .get("respawn-target")
+            .is_some(),
+        "a 401'd reset must not have purged the canonical UUID"
+    );
+
+    let authed_reset = client
+        .post(format!(
+            "{}/api/agents/identities/respawn-target/reset?confirm=true",
+            server.base_url
+        ))
+        .header("authorization", format!("Bearer {KEY}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        authed_reset.status(),
+        200,
+        "authenticated identity reset must succeed through the full router"
+    );
+
+    // GET /api/agents/identities is NOT in the dashboard-reads allowlist
+    // (only the exact `/api/agents` GET is), so a configured key gates it even
+    // for reads: unauthenticated → 401, authenticated → 200. This is precisely
+    // the enumeration surface the mock router left wide open.
+    let unauth_list = client
+        .get(format!("{}/api/agents/identities", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauth_list.status(),
+        401,
+        "identity listing is not a public read and must require auth when a key is configured"
+    );
+
+    let authed_list = client
+        .get(format!("{}/api/agents/identities", server.base_url))
+        .header("authorization", format!("Bearer {KEY}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        authed_list.status(),
+        200,
+        "authenticated identity listing must succeed"
+    );
+
+    let _ = agent_id;
 }

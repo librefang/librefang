@@ -175,14 +175,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     // exposes the high-level installer; the underlying `vault_handle` stays
     // an inherent method to keep the trait surface small.
     //
-    // The error half is `librefang_types::integration::IntegrationError` (not
-    // the extensions-crate `ExtensionResult`) so a mock / alternate kernel can
-    // implement this trait without depending on `librefang-extensions`. The
-    // real kernel impl converts via the `From<ExtensionError>` bridge defined
-    // in that crate. The success type still references
-    // `librefang_extensions::installer::InstallResult` — eliminating that
-    // remaining leak is part of the broader kernel-depends-on-extensions
-    // refactor, tracked separately.
+    // Both halves of the return type are `librefang-types`-owned
+    // (`IntegrationOutcome` / `IntegrationError`), not the extensions-crate
+    // `InstallResult` / `ExtensionResult`, so a mock / alternate kernel can
+    // implement this trait without depending on `librefang-extensions` at all.
+    // The real kernel impl converts via the `From<InstallResult>` /
+    // `From<ExtensionError>` bridges defined in that crate. The remaining
+    // extension-typed surfaces on other `KernelApi` methods are tracked under
+    // the broader kernel-depends-on-extensions refactor.
     // ====================================================================
 
     fn install_integration(
@@ -190,7 +190,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
     ) -> Result<
-        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationOutcome,
         librefang_types::integration::IntegrationError,
     >;
 
@@ -874,14 +874,17 @@ impl KernelApi for LibreFangKernel {
         template_id: &str,
         provided_keys: &std::collections::HashMap<String, String>,
     ) -> Result<
-        librefang_extensions::installer::InstallResult,
+        librefang_types::integration::IntegrationOutcome,
         librefang_types::integration::IntegrationError,
     > {
-        // The inherent method keeps returning `ExtensionResult`; convert its
-        // error into the dependency-free `IntegrationError` at the trait
-        // boundary via the `From<ExtensionError>` bridge in
+        // The inherent method keeps returning the extensions-crate
+        // `ExtensionResult<InstallResult>`; convert both halves to the
+        // dependency-free `librefang-types` types at the trait boundary via the
+        // `From<InstallResult>` / `From<ExtensionError>` bridges in
         // `librefang-extensions`.
-        Self::install_integration(self, template_id, provided_keys).map_err(Into::into)
+        Self::install_integration(self, template_id, provided_keys)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     // -- Inbox / auto-dream --

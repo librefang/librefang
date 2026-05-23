@@ -84,6 +84,49 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     }
 }
 
+/// Boot a full router with `require_auth_for_reads = true` and an api_key set.
+/// Used to verify that dashboard-read endpoints (including
+/// `/api/auth/providers`) require a token in strict mode. The 401 is produced
+/// by the auth middleware before any handler runs, so external_auth need not be
+/// enabled here (enabling it would require `LIBREFANG_STATE_SECRET`).
+async fn boot_router_strict_reads() -> RouterHarness {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    librefang_kernel::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: "test-secret-key".to_string(),
+        require_auth_for_reads: Some(true),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
+
+    RouterHarness {
+        app,
+        _tmp: tmp,
+        _state: state,
+    }
+}
+
 /// Returns `true` if `path` is unconditionally public on GET requests — i.e.
 /// it appears in `PUBLIC_ROUTES_ALWAYS`, `PUBLIC_ROUTES_GET_ONLY`, or is
 /// handled by the dedicated `is_mcp_oauth_callback` guard in the middleware
@@ -198,7 +241,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/auth/callback", Expect::AlwaysPublic),
     re("/api/auth/dashboard-login", Expect::AlwaysPublic),
     re("/api/auth/dashboard-check", Expect::AlwaysPublic),
-    re("/api/auth/providers", Expect::AlwaysPublic),
     re("/api/auth/login", Expect::AlwaysPublic),
     re("/api/auth/login/google", Expect::AlwaysPublic),
     // Regression for audit: login-prefix-match. A bare
@@ -244,6 +286,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // Dashboard reads (public when require_auth_for_reads is off, which is default)
     re("/api/agents", Expect::DashboardRead),
     re("/api/a2a/agents", Expect::DashboardRead),
+    // `/api/auth/providers` enumerates configured IdPs; gated by
+    // require_auth_for_reads (open mode returns names-only — see
+    // oauth::auth_providers). Moved out of AlwaysPublic in the
+    // API-surface-hygiene roundup.
+    re("/api/auth/providers", Expect::DashboardRead),
     re("/api/auto-dream/status", Expect::DashboardRead),
     re("/api/budget", Expect::DashboardRead),
     re("/api/budget/agents", Expect::DashboardRead),
@@ -538,4 +585,124 @@ async fn skill_workshop_pending_endpoints_require_token() {
              (the skill-workshop pending surface is sensitive)"
         );
     }
+}
+
+/// Helper: GET a path and return (status, parsed-JSON-body).
+async fn get_status_and_body(app: axum::Router, path: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, body)
+}
+
+/// API-surface-hygiene roundup (#5: auth-providers leak): with
+/// `require_auth_for_reads = true` and an api_key configured, an
+/// unauthenticated `GET /api/auth/providers` must be rejected with 401 — the
+/// IdP enumeration is no longer unconditionally public.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_providers_requires_token_in_strict_reads_mode() {
+    let harness = boot_router_strict_reads().await;
+    let status = get_status(harness.app.clone(), "/api/auth/providers").await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "/api/auth/providers must require a token when require_auth_for_reads is on"
+    );
+}
+
+/// API-surface-hygiene roundup (#5): in open mode (no api_key, no
+/// require_auth_for_reads), an unauthenticated `GET /api/auth/providers` is
+/// reachable but returns NAMES ONLY — the `scopes` configuration must not leak
+/// to an anonymous caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_providers_open_mode_returns_names_only() {
+    use librefang_types::config::{ExternalAuthConfig, OidcProvider};
+
+    // external_auth=enabled requires a valid LIBREFANG_STATE_SECRET at boot.
+    // 32 zero bytes, base64-encoded (44 chars) — only used to satisfy the
+    // boot-time shape check; these tests never exercise the OAuth state HMAC.
+    // Process-global env mutation: we only ever SET it (never clear), and the
+    // value is valid for any concurrent kernel boot, so parallel tests are
+    // unaffected.
+    std::env::set_var(
+        "LIBREFANG_STATE_SECRET",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    librefang_kernel::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: String::new(), // open mode
+        external_auth: ExternalAuthConfig {
+            enabled: true,
+            providers: vec![OidcProvider {
+                id: "test".into(),
+                display_name: "Test".into(),
+                issuer_url: String::new(),
+                auth_url: "https://example.invalid/authorize".into(),
+                token_url: "https://example.invalid/token".into(),
+                userinfo_url: String::new(),
+                jwks_uri: String::new(),
+                client_id: "client-id".into(),
+                client_secret_env: "LIBREFANG_TEST_OAUTH_SECRET_DOES_NOT_EXIST".into(),
+                redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),
+                scopes: vec!["openid".into()],
+                allowed_domains: vec![],
+                audience: String::new(),
+                require_email_verified: None,
+            }],
+            ..Default::default()
+        },
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
+    let harness = RouterHarness {
+        app,
+        _tmp: tmp,
+        _state: state,
+    };
+
+    let (status, body) = get_status_and_body(harness.app.clone(), "/api/auth/providers").await;
+    assert_eq!(status, StatusCode::OK, "open mode must be reachable");
+    assert_eq!(body["enabled"], true);
+    let arr = body["providers"].as_array().expect("providers array");
+    let p = arr
+        .iter()
+        .find(|p| p["id"] == "test")
+        .expect("provider 'test'");
+    assert_eq!(p["display_name"], "Test");
+    assert!(
+        p.get("scopes").is_none(),
+        "open-mode anonymous response must NOT include `scopes`; got {p:?}"
+    );
 }
