@@ -423,6 +423,94 @@ impl ClaudeCodeDriver {
         }
     }
 
+    /// Force the spawned CLI's home directory to a path where it can
+    /// actually find its credentials.
+    ///
+    /// Containers that drop privileges to a numeric uid without a matching
+    /// passwd entry inherit a placeholder home directory from the OS:
+    ///   * glibc / Linux: `/nonexistent`
+    ///   * BSD / Alpine `nobody`: `/var/empty`
+    ///   * Some hardened images: `/dev/null`
+    ///   * Some misconfigured services: empty string
+    ///
+    /// The spawned `claude.exe` then tries to read
+    /// `~/.claude/.credentials.json` under that path, finds nothing, and
+    /// exits silently before draining its stdin. The kernel-side
+    /// `stdin.write_all(prompt)` then hits `Broken pipe (os error 32)` once
+    /// the prompt exceeds the pipe buffer (~64 KiB) and the caller sees
+    /// `Failed to write prompt to Claude Code CLI stdin: Broken pipe`
+    /// with no actionable detail.
+    ///
+    /// Resolution order:
+    ///   1. `CLAUDE_CODE_HOME` — the documented kernel-boot override, set by
+    ///      the wrapper / Lazycat init (see `CLAUDE.md` "Environment").
+    ///   2. The platform's home variable: `$HOME` on Unix,
+    ///      `%USERPROFILE%` on Windows.
+    ///
+    /// The candidate must resolve to an existing directory on disk. That
+    /// single `is_dir()` check rejects every placeholder above — and any
+    /// future passwd-less sentinel some distro might invent — without us
+    /// having to enumerate them. If neither source yields a real
+    /// directory we leave the inherited home alone; the caller has
+    /// bigger problems and the existing diagnostic surfaces them.
+    ///
+    /// `CLAUDE_CODE_HOME` is a LibreFang-private contract; the Anthropic CLI
+    /// itself does not read it. We resolve it here and project the value
+    /// onto the platform-native home variable so the upstream CLI sees a
+    /// real directory through its normal lookup.
+    ///
+    /// Multi-tenant note: all agents in the process share a single
+    /// `~/.claude/.credentials.json` (whichever directory this helper picks
+    /// for the parent process). Per-agent credential isolation is out of
+    /// scope for this helper — if it ever becomes necessary it belongs in
+    /// the spawn site, not here.
+    fn ensure_home_env(cmd: &mut tokio::process::Command) {
+        // Spawned CLI resolves `~` via `$HOME` on Unix and `%USERPROFILE%`
+        // on Windows. Override only the platform-relevant variable; the
+        // other one is either ignored by the CLI or already correct.
+        #[cfg(unix)]
+        let env_var = "HOME";
+        #[cfg(windows)]
+        let env_var = "USERPROFILE";
+
+        // Warn (once per spawn) when the operator set CLAUDE_CODE_HOME but
+        // it does not resolve to a directory: without this they get the
+        // exact same "Broken pipe" symptom as the no-override case and
+        // assume the override is being honoured. The fallback to the
+        // platform home below still runs.
+        if let Some(raw) = std::env::var_os("CLAUDE_CODE_HOME") {
+            let is_bad = raw.is_empty() || !std::path::Path::new(&raw).is_dir();
+            if is_bad {
+                warn!(
+                    claude_code_home = %raw.to_string_lossy(),
+                    "CLAUDE_CODE_HOME is set but does not resolve to a directory; \
+                     falling back to inherited platform home",
+                );
+            }
+        }
+
+        // Two-step resolution (houko review of #4997): when
+        // CLAUDE_CODE_HOME is set-but-invalid, `Option::or_else` skips
+        // the platform-home branch (the receiver is `Some`), so the
+        // documented fallback never ran. Validate the override first;
+        // only fall through to HOME/USERPROFILE when the override is
+        // absent **or** rejected.
+        let validate = |raw: std::ffi::OsString| -> Option<std::ffi::OsString> {
+            if raw.is_empty() || !std::path::Path::new(&raw).is_dir() {
+                None
+            } else {
+                Some(raw)
+            }
+        };
+        let candidate = std::env::var_os("CLAUDE_CODE_HOME")
+            .and_then(validate)
+            .or_else(|| std::env::var_os(env_var).and_then(validate));
+
+        if let Some(home) = candidate {
+            cmd.env(env_var, home);
+        }
+    }
+
     fn build_command_args(
         &self,
         output_format: &str,
@@ -701,6 +789,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
+        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -982,6 +1071,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         Self::apply_env_filter(&mut cmd);
+        Self::ensure_home_env(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -1912,6 +2002,490 @@ mod tests {
         // Argument vector must be small and bounded — no prompt body in it.
         assert!(args.iter().all(|a| a.len() < 256));
         assert!(args.contains(&"-p".to_string()));
+    }
+
+    /// Pin: when the daemon inherited `HOME=/nonexistent` (Lazycat-style
+    /// containers default uid-without-passwd to that path), `ensure_home_env`
+    /// MUST override it with `CLAUDE_CODE_HOME` or the spawned `claude.exe`
+    /// can't find its credentials and the next `stdin.write_all` hits
+    /// `Broken pipe`.
+    ///
+    /// `#[serial]` because every test in this module that mutates `HOME` /
+    /// `CLAUDE_CODE_HOME` must run sequentially: `std::env::{set,remove}_var`
+    /// is UB while other threads exist, and `cargo test` /  `cargo nextest`
+    /// run tests concurrently by default.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_overrides_nonexistent_when_claude_code_home_set() {
+        // A real on-disk directory so the new `is_dir()` filter accepts it.
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: #[serial_test::serial] serialises every env-mutating test
+        // in this binary, so no other thread reads or writes these vars.
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::set_var("CLAUDE_CODE_HOME", dir.path());
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        // Round-trip via Command::get_envs() — env() overrides land here.
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        // SAFETY: restore env BEFORE asserting — a failed assert otherwise
+        // poisons sibling tests that read these vars.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_keeps_real_home_when_no_claude_code_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: see the comment on the test above.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::remove_var("CLAUDE_CODE_HOME");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+        );
+    }
+
+    /// Regression for the houko 2026-05-22 review on #4997. Earlier
+    /// the resolver used
+    /// `var_os("CLAUDE_CODE_HOME").or_else(|| var_os(env_var)).filter(is_dir)`
+    /// — `or_else` short-circuits when the override is `Some(invalid)`,
+    /// so the platform-home fallback documented in CLAUDE.md never ran
+    /// and the child inherited `HOME=/nonexistent` (the exact failure
+    /// this PR exists to fix). The fix validates the override **before**
+    /// falling back; this test pins it.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_falls_back_to_platform_home_when_override_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: #[serial_test::serial] serialises env-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("CLAUDE_CODE_HOME", "/this/path/definitely/does/not/exist");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        // SAFETY: restore env BEFORE asserting.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        // Invalid override → fallback to the *valid* platform HOME. The
+        // child must NOT inherit the broken `/this/path/...` value.
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+            "invalid CLAUDE_CODE_HOME must fall back to valid platform HOME",
+        );
+    }
+
+    /// Companion to the test above: when BOTH the override AND the
+    /// platform HOME are invalid, no override is written (the existing
+    /// diagnostic warning surfaces it).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_writes_nothing_when_both_override_and_home_invalid() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::set_var("CLAUDE_CODE_HOME", "/also/not/a/dir");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert!(
+            resolved.iter().all(|(k, _)| k != "HOME"),
+            "no HOME override expected when both override and platform HOME are invalid, got: {resolved:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_leaves_command_alone_when_no_candidate() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: see the comment on the first test in this group.
+        unsafe {
+            std::env::set_var("HOME", "/nonexistent");
+            std::env::remove_var("CLAUDE_CODE_HOME");
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        // No HOME override should be added when neither CLAUDE_CODE_HOME nor a
+        // valid HOME is available. The child will inherit the broken HOME and
+        // we surface the underlying issue via the existing diagnostic.
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert!(
+            resolved.iter().all(|(k, _)| k != "HOME"),
+            "no HOME override expected, got: {resolved:?}",
+        );
+    }
+
+    /// Beyond `/nonexistent`, the broader class of passwd-less placeholders
+    /// — `/var/empty` (BSD / Alpine `nobody`), `/dev/null` (some hardened
+    /// images), the empty string, plus any path that does not resolve to
+    /// an existing directory — must also be rejected. The single
+    /// `Path::is_dir()` check in `ensure_home_env` covers them all
+    /// without us having to enumerate.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_rejects_broader_placeholders() {
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+
+        // `/dev/null` exists but is a character device, not a directory.
+        // `/this/.../does/not/exist` is the catch-all for unknown sentinels.
+        // Empty string is the "misconfigured uid" case.
+        for placeholder in &["", "/dev/null", "/this/path/should/not/exist"] {
+            // SAFETY: see the comment on the first test in this group.
+            unsafe {
+                std::env::set_var("HOME", placeholder);
+                std::env::remove_var("CLAUDE_CODE_HOME");
+            }
+            let mut cmd = tokio::process::Command::new("/bin/true");
+            ClaudeCodeDriver::ensure_home_env(&mut cmd);
+            let resolved: Vec<(String, Option<String>)> = cmd
+                .as_std()
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|s| s.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            // Restore env before each potential assert! failure (loop).
+            // SAFETY: same as above.
+            unsafe {
+                match &saved_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &saved_claude_code_home {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                    None => std::env::remove_var("CLAUDE_CODE_HOME"),
+                }
+            }
+            assert!(
+                resolved.iter().all(|(k, _)| k != "HOME"),
+                "placeholder HOME={placeholder:?} should be rejected, got: {resolved:?}",
+            );
+        }
+    }
+
+    /// Pin the resolution order: when both `CLAUDE_CODE_HOME` and `HOME`
+    /// point at real directories, the explicit override must win. Without
+    /// this guard a future refactor could accidentally swap the two
+    /// `var_os` calls in `ensure_home_env` and the change would still
+    /// compile, still pass every other test, and silently demote the
+    /// operator-set override to a no-op.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_override_beats_real_home() {
+        let override_dir = tempfile::tempdir().unwrap();
+        let inherited_dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: see the comment on the first test in this group.
+        unsafe {
+            std::env::set_var("HOME", inherited_dir.path());
+            std::env::set_var("CLAUDE_CODE_HOME", override_dir.path());
+        }
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let home = resolved.iter().find(|(k, _)| k == "HOME").cloned();
+        // SAFETY: restore env BEFORE asserting — see first test in group.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert_eq!(
+            home,
+            Some((
+                "HOME".to_string(),
+                Some(override_dir.path().to_string_lossy().into_owned()),
+            )),
+            "CLAUDE_CODE_HOME must beat HOME even when HOME is a valid directory",
+        );
+    }
+
+    /// Windows mirror of the Unix override test. On Windows the spawned
+    /// CLI resolves `~` via `%USERPROFILE%`, so `ensure_home_env` must
+    /// project the candidate onto `USERPROFILE` instead of `HOME`.
+    /// Without an assertion here the `cfg(windows)` branch of the
+    /// function compiles and clippy-checks but is never exercised — a
+    /// silent typo (`USERPROILE`, anyone?) would survive review.
+    ///
+    /// Full env-mutation coverage on the Windows branch additionally
+    /// depends on the Windows runner in the CI matrix; the unit lane
+    /// here verifies the helper's contract once the platform is right.
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial]
+    fn ensure_home_env_injects_userprofile_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved_userprofile = std::env::var_os("USERPROFILE");
+        let saved_claude_code_home = std::env::var_os("CLAUDE_CODE_HOME");
+        // SAFETY: see the comment on the first Unix test in this group.
+        unsafe {
+            std::env::set_var("USERPROFILE", "C:\\nonexistent-librefang-test");
+            std::env::set_var("CLAUDE_CODE_HOME", dir.path());
+        }
+        let mut cmd = tokio::process::Command::new("cmd");
+        ClaudeCodeDriver::ensure_home_env(&mut cmd);
+        let resolved: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let userprofile = resolved.iter().find(|(k, _)| k == "USERPROFILE").cloned();
+        // SAFETY: restore env BEFORE asserting.
+        unsafe {
+            match saved_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match saved_claude_code_home {
+                Some(v) => std::env::set_var("CLAUDE_CODE_HOME", v),
+                None => std::env::remove_var("CLAUDE_CODE_HOME"),
+            }
+        }
+        assert_eq!(
+            userprofile,
+            Some((
+                "USERPROFILE".to_string(),
+                Some(dir.path().to_string_lossy().into_owned()),
+            )),
+            "CLAUDE_CODE_HOME must project onto USERPROFILE on Windows",
+        );
+    }
+
+    /// Wiring-pin tests: confirm both `LlmDriver::complete` (~line 753)
+    /// and `LlmDriver::stream` (~line 1035) call `ensure_home_env` on
+    /// the freshly built `tokio::process::Command`. Behavioural tests
+    /// on those entry points would require the full async driver
+    /// harness; a source-level grep is the cheapest, most stable
+    /// regression guard against a future refactor silently dropping
+    /// one of the two calls — which is exactly the failure mode the
+    /// review feedback flagged (deferred 3 times before this round).
+    ///
+    /// The file path is computed via `file!()` at compile time and the
+    /// tests run only when the source is reachable from the test's
+    /// working directory — which is the case for in-tree `cargo test`
+    /// invocations (the only ones that actually exercise this crate).
+    /// If the file is missing the test is skipped rather than failing
+    /// (e.g. an out-of-tree consumer running our published tests).
+    fn read_claude_code_source() -> Option<String> {
+        let path = std::path::Path::new(file!());
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            // CARGO_MANIFEST_DIR points at the crate root; file!() is
+            // relative to that.
+            let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")?;
+            std::path::PathBuf::from(manifest_dir).join(path)
+        };
+        std::fs::read_to_string(&abs).ok()
+    }
+
+    #[test]
+    fn ensure_home_env_is_wired_in_complete_spawn_site() {
+        let Some(source) = read_claude_code_source() else {
+            // Test source unavailable — skip rather than failing.
+            return;
+        };
+        // Slice the source from the `impl LlmDriver for ClaudeCodeDriver`
+        // marker through the `async fn stream` marker; the `complete`
+        // function lives entirely inside that window.
+        let trait_impl_start = source
+            .find("impl LlmDriver for ClaudeCodeDriver")
+            .expect("LlmDriver impl block must exist");
+        let stream_start = source[trait_impl_start..]
+            .find("async fn stream(")
+            .map(|off| trait_impl_start + off)
+            .expect("LlmDriver::stream must exist");
+        let complete_body = &source[trait_impl_start..stream_start];
+        assert!(
+            complete_body.contains("Self::ensure_home_env(&mut cmd)"),
+            "LlmDriver::complete must call Self::ensure_home_env(&mut cmd) \
+             on the spawned Command — without it, containers with a \
+             placeholder $HOME silently fail with `Broken pipe`",
+        );
+    }
+
+    #[test]
+    fn ensure_home_env_is_wired_in_stream_spawn_site() {
+        let Some(source) = read_claude_code_source() else {
+            return;
+        };
+        let stream_start = source
+            .find("async fn stream(")
+            .expect("LlmDriver::stream must exist");
+        // The test module begins with `#[cfg(test)]\nmod tests`; cap the
+        // search there so the wiring assertion can't be satisfied by
+        // text inside the test module itself (including these tests).
+        let tests_marker = source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("test module marker must exist");
+        assert!(
+            stream_start < tests_marker,
+            "stream impl must precede the test module",
+        );
+        let stream_body = &source[stream_start..tests_marker];
+        assert!(
+            stream_body.contains("Self::ensure_home_env(&mut cmd)"),
+            "LlmDriver::stream must call Self::ensure_home_env(&mut cmd) \
+             on the spawned Command — without it, containers with a \
+             placeholder $HOME silently fail with `Broken pipe`",
+        );
     }
 
     #[test]
