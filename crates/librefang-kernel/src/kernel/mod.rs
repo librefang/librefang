@@ -1339,6 +1339,10 @@ impl LibreFangKernel {
     /// operator-facing copy (push notifications, channel messages,
     /// human-readable descriptions) only.
     fn approval_agent_display(&self, agent_id: &str) -> String {
+        if agent_id.is_empty() {
+            return "\"unknown\"".to_string();
+        }
+
         if let Ok(aid) = agent_id.parse::<AgentId>() {
             if let Some(entry) = self.agents.registry.get(aid) {
                 let short = agent_id.get(..8).unwrap_or(agent_id);

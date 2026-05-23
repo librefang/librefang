@@ -279,6 +279,7 @@ fn make_ctx<'a>(
         process_registry: None,
         sender_id: None,
         channel: None,
+        chat_id: None,
         session_id: None,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,
