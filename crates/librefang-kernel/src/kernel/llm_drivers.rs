@@ -201,28 +201,11 @@ impl LibreFangKernel {
             }
         };
 
-        // Build effective fallback list: agent-level fallbacks + global fallback_providers.
-        // Resolve "default" provider in fallback entries to the actual default provider.
-        let mut effective_fallbacks = manifest.fallback_models.clone();
-        // Append global fallback_providers so every agent benefits from the configured chain
-        for gfb in &cfg.fallback_providers {
-            let already_present = effective_fallbacks
-                .iter()
-                .any(|fb| fb.provider == gfb.provider && fb.model == gfb.model);
-            if !already_present {
-                effective_fallbacks.push(librefang_types::agent::FallbackModel {
-                    provider: gfb.provider.clone(),
-                    model: gfb.model.clone(),
-                    api_key_env: if gfb.api_key_env.is_empty() {
-                        None
-                    } else {
-                        Some(gfb.api_key_env.clone())
-                    },
-                    base_url: gfb.base_url.clone(),
-                    extra_params: std::collections::HashMap::new(),
-                });
-            }
-        }
+        // Build effective fallback list.
+        // Three-state logic: None → inherit global, Some([]) → opt-out,
+        // Some([…]) → use agent chain exclusively (#5112).
+        let effective_fallbacks =
+            resolve_effective_fallbacks(&manifest.fallback_models, &cfg.fallback_providers);
 
         // If fallback models are configured, wrap in FallbackDriver
         if !effective_fallbacks.is_empty() {
@@ -282,5 +265,106 @@ impl LibreFangKernel {
         }
 
         Ok(primary)
+    }
+}
+
+/// Pure helper: resolve the effective fallback list for an agent turn.
+///
+/// Three-state logic (#5112):
+/// - `manifest.fallback_models == None`      → inherit from `global_fallbacks`
+/// - `manifest.fallback_models == Some([])`  → opt-out; returns empty vec
+/// - `manifest.fallback_models == Some([…])` → use agent's explicit chain only
+pub(crate) fn resolve_effective_fallbacks(
+    agent_fallbacks: &Option<Vec<librefang_types::agent::FallbackModel>>,
+    global_fallbacks: &[librefang_types::config::FallbackProviderConfig],
+) -> Vec<librefang_types::agent::FallbackModel> {
+    match agent_fallbacks {
+        Some(list) => list.clone(),
+        None => global_fallbacks
+            .iter()
+            .map(|gfb| librefang_types::agent::FallbackModel {
+                provider: gfb.provider.clone(),
+                model: gfb.model.clone(),
+                api_key_env: if gfb.api_key_env.is_empty() {
+                    None
+                } else {
+                    Some(gfb.api_key_env.clone())
+                },
+                base_url: gfb.base_url.clone(),
+                extra_params: std::collections::HashMap::new(),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::{agent::FallbackModel, config::FallbackProviderConfig};
+
+    fn make_global(provider: &str, model: &str) -> FallbackProviderConfig {
+        FallbackProviderConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            api_key_env: String::new(),
+            base_url: None,
+        }
+    }
+
+    fn make_agent_fb(provider: &str, model: &str) -> FallbackModel {
+        FallbackModel {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            api_key_env: None,
+            base_url: None,
+            extra_params: std::collections::HashMap::new(),
+        }
+    }
+
+    // Branch 1: None + non-empty global → inherit global chain.
+    #[test]
+    fn fallback_resolution_none_inherits_global() {
+        let global = vec![
+            make_global("groq", "llama-3.3-70b"),
+            make_global("ollama", "llama3.2:latest"),
+        ];
+        let result = resolve_effective_fallbacks(&None, &global);
+        assert_eq!(result.len(), 2, "None must inherit both global entries");
+        assert_eq!(result[0].provider, "groq");
+        assert_eq!(result[0].model, "llama-3.3-70b");
+        assert_eq!(result[1].provider, "ollama");
+        assert_eq!(result[1].model, "llama3.2:latest");
+    }
+
+    // Branch 2: Some([]) + non-empty global → opt-out; empty vec (no FallbackDriver).
+    #[test]
+    fn fallback_resolution_some_empty_opts_out() {
+        let global = vec![make_global("groq", "llama-3.3-70b")];
+        let result = resolve_effective_fallbacks(&Some(vec![]), &global);
+        assert!(
+            result.is_empty(),
+            "Some([]) must produce empty effective fallbacks regardless of global chain"
+        );
+    }
+
+    // Branch 3: Some([X]) + non-empty global → agent chain only; global not appended.
+    #[test]
+    fn fallback_resolution_some_explicit_uses_agent_chain_only() {
+        let global = vec![make_global("groq", "llama-3.3-70b")];
+        let agent_fb = vec![make_agent_fb("openai", "gpt-4o-mini")];
+        let result = resolve_effective_fallbacks(&Some(agent_fb), &global);
+        assert_eq!(
+            result.len(),
+            1,
+            "global must not be appended to agent chain"
+        );
+        assert_eq!(
+            result[0].provider, "openai",
+            "provider must match agent chain"
+        );
+        assert_eq!(
+            result[0].model, "gpt-4o-mini",
+            "model must match agent chain"
+        );
     }
 }

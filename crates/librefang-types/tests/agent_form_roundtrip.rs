@@ -82,8 +82,12 @@ position = "before_user"
     let m: AgentManifest = toml::from_str(toml).expect("advanced manifest must parse");
     assert_eq!(m.priority, librefang_types::agent::Priority::High);
     assert_eq!(m.session_mode, librefang_types::agent::SessionMode::New);
-    assert_eq!(m.fallback_models.len(), 1);
-    assert_eq!(m.fallback_models[0].model, "claude-3-5-sonnet");
+    let fallbacks = m
+        .fallback_models
+        .as_deref()
+        .expect("fallback_models should be Some");
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].model, "claude-3-5-sonnet");
     assert_eq!(m.context_injection.len(), 1);
     assert_eq!(m.context_injection[0].name, "policy");
     assert!(m.thinking.is_some());

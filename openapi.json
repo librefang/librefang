@@ -3703,6 +3703,7 @@
           "auth"
         ],
         "summary": "GET /api/auth/providers — List available authentication providers.",
+        "description": "Gated by `require_auth_for_reads` at the middleware layer (it lives in\n`PUBLIC_ROUTES_DASHBOARD_READS`): in strict mode an unauthenticated caller\ngets 401 before reaching this handler. In open mode the route is reachable\nwithout a token.\n\nThe response is intentionally names-only (`id` + `display_name`) for **every**\ncaller — the minimum the login UI needs to render its provider buttons. The\nper-provider OAuth `scopes` (and any other configuration detail) are never\nreturned here, so the IdP scope configuration cannot be enumerated through\nthis endpoint regardless of the caller's privilege. (An earlier revision\nkeyed `scopes` exposure on the `AuthenticatedApiUser` extension, but the\nstatic `api_key` — the highest-privilege credential — is identity-less and\nnever carries that extension, so the gate both under-disclosed to the admin\nkey and inverted the privilege ordering. Scopes aren't security-sensitive,\nbut they also aren't needed here; admins read full provider config from the\nauth-gated `/api/config` surface instead.)",
         "operationId": "auth_providers",
         "responses": {
           "200": {

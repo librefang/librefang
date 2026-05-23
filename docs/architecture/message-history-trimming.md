@@ -129,3 +129,6 @@ simpler dial. The token cap is currently global and not per-agent.
 - Repair primitives: `crates/librefang-runtime/src/session_repair.rs`
   (`find_safe_trim_point`, `validate_and_repair`,
   `ensure_starts_with_user`).
+- Reload behaviour: `max_history_messages` is read live and takes effect
+  on the next message (no restart). See the canonical reload reference
+  [`../operations/config-reload.md`](../operations/config-reload.md).

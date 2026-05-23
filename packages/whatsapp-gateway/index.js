@@ -370,6 +370,7 @@ function readWhatsAppConfig(configPath) {
     // to enable extra language packs.
     relay_intent_languages: ['en'],
     api_key: '',
+    group_trigger_patterns: [],
   };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
@@ -389,6 +390,10 @@ function readWhatsAppConfig(configPath) {
       // enforces it on `/api/*` endpoints when set; without it we get HTTP
       // 401 "Invalid API key" and inbound messages never reach the agent.
       api_key: typeof parsed?.api_key === 'string' ? parsed.api_key : defaults.api_key,
+      group_trigger_patterns:
+        Array.isArray(wa.group_trigger_patterns) && wa.group_trigger_patterns.length > 0
+          ? wa.group_trigger_patterns
+          : defaults.group_trigger_patterns,
     };
     console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, stream_to_channel=${cfg.stream_to_channel}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}, api_key=${cfg.api_key ? '<set>' : '<empty>'}`);
     return cfg;
@@ -417,6 +422,50 @@ if (!LIBREFANG_API_KEY) {
 function kernelAuthHeader() {
   return LIBREFANG_API_KEY ? { Authorization: `Bearer ${LIBREFANG_API_KEY}` } : {};
 }
+
+// Compile `[channels.whatsapp].group_trigger_patterns` into JS RegExp objects
+// at boot. The Rust daemon uses Rust `regex` which honours the `(?i)` inline
+// flag; JavaScript regexes don't — `new RegExp("(?i)foo")` matches the
+// literal three-character "(?i)" prefix instead of enabling case-insensitive
+// matching. Strip a leading `(?i)` and translate it to the JS `i` flag so
+// the same config file can be shared verbatim between daemon and gateway.
+//
+// Rust `regex` also accepts mid-pattern flag groups: `foo(?i)bar`,
+// `(?i)foo(?-i)bar`, `(?i:foo)bar`. JavaScript silently treats those as
+// literal `(?` constructs (or rejects only some forms). We bail out with a
+// warning when any unhandled `(?<flags>...)` / `(?<flags>:...)` group is
+// detected, so the operator notices the silent-no-match foot-gun.
+function compileGroupTriggerRegex(pattern) {
+  if (typeof pattern !== 'string' || !pattern) return null;
+  let flags = '';
+  let body = pattern;
+  if (body.startsWith('(?i)')) {
+    flags += 'i';
+    body = body.slice(4);
+  }
+  // Detect any surviving Rust-style inline flag group. Recognised flag chars
+  // (regex crate): i s m U u x. The `(?…)` set construct may be terminated
+  // with `)` (flag set) or `:` (non-capturing group with flags). Either form
+  // is unsupported by JS RegExp — warn rather than silently produce a regex
+  // that never matches in production.
+  const inlineFlagGroup = /\(\?[ismUuxa-]+[):]/;
+  if (inlineFlagGroup.test(body)) {
+    console.warn(
+      `[gateway] group_trigger_patterns entry ${JSON.stringify(pattern)} uses a mid-pattern inline flag group (e.g. \`(?i)…\` or \`(?i:…)\`) which JavaScript RegExp does not support. ` +
+      `Skipped — split it into separate, fully-flagged entries (e.g. one with a leading \`(?i)\` covering the whole pattern).`
+    );
+    return null;
+  }
+  try {
+    return new RegExp(body, flags);
+  } catch (err) {
+    console.warn(`[gateway] Skipping invalid group_trigger_patterns entry ${JSON.stringify(pattern)}: ${err.message}`);
+    return null;
+  }
+}
+const GROUP_TRIGGER_REGEXES = (tomlConfig.group_trigger_patterns || [])
+  .map(compileGroupTriggerRegex)
+  .filter(Boolean);
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || tomlConfig.default_agent;
 const AGENT_NAME = DEFAULT_AGENT;
 
@@ -1878,6 +1927,7 @@ async function startConnection() {
 
       // Detect @mention: check if our JID is in the mentionedJid list
       let wasMentioned = false;
+      let wasMentionedSource = null;
       if (isGroup && ownJid) {
         const mentionedJids = innerMsg.extendedTextMessage?.contextInfo?.mentionedJid
           || innerMsg.imageMessage?.contextInfo?.mentionedJid
@@ -1886,6 +1936,35 @@ async function startConnection() {
         // ownJid is normalized like "1234567890@s.whatsapp.net"
         const ownNumber = ownJid.replace(/@.*$/, '');
         wasMentioned = mentionedJids.some(jid => jid.replace(/@.*$/, '') === ownNumber);
+        if (wasMentioned) wasMentionedSource = 'structured';
+      }
+      // Fallback: when WhatsApp's structured @-mention is absent (because the
+      // user typed the agent name as plain text rather than tapping `@` in
+      // the compose UI), match against `[channels.whatsapp].group_trigger_patterns`
+      // so the gateway's `was_mentioned` signal stays accurate. The Rust
+      // daemon does its own pattern check independently — this is purely
+      // about giving the gateway logs and the forwarded payload an honest
+      // wasMentioned value.
+      //
+      // Reuse the `text` variable computed at line 1724 — single source of
+      // truth, no shape drift with the upstream extraction path (in particular
+      // `documentWithCaptionMessage?.message?.documentMessage?.caption`,
+      // which a previous draft of this branch fudged).
+      if (isGroup && !wasMentioned && text && GROUP_TRIGGER_REGEXES.length > 0) {
+        if (GROUP_TRIGGER_REGEXES.some(re => re.test(text))) {
+          wasMentioned = true;
+          wasMentionedSource = 'pattern_fallback';
+          // Telemetry: operators can grep this to see how often Baileys'
+          // structured mentionedJid array under-reports relative to plain-text
+          // mentions of the agent name. Logged at info level (single line per
+          // hit, low cardinality).
+          console.log(JSON.stringify({
+            event: 'was_mentioned_pattern_fallback',
+            chat_jid: sender,
+            push_name: pushName,
+            text_length: text.length,
+          }));
+        }
       }
 
       // Rate limiting for strangers and group messages
@@ -2217,7 +2296,7 @@ async function startConnection() {
           collectedOwnerNotices.push(text);
         };
         const rawResponse = await forwardToLibreFangStreaming(
-          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, groupParticipants, onOwnerNotice },
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, wasMentionedSource, groupParticipants, onOwnerNotice },
         );
 
         // §A — fan out collected owner notices to every configured OWNER_JID.
@@ -2844,7 +2923,7 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '', groupParticipants = [], onOwnerNotice = null } = {}, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, wasMentionedSource = null, chatJid = '', groupParticipants = [], onOwnerNotice = null } = {}, retryCount = 0) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
   // `whatsapp` channel loses per-conversation session isolation; the kernel
   // would merge unrelated chats into the same session.
@@ -2885,6 +2964,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
       push_name: pushName,
       is_group: !!isGroup,
       was_mentioned: !!wasMentioned,
+      was_mentioned_source: wasMentionedSource,
     }));
   }
 
@@ -2896,6 +2976,13 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
     is_group: isGroup,
     was_mentioned: wasMentioned,
   };
+  // Provenance tag — daemon and operators can distinguish a hit from the
+  // Baileys-structured `mentionedJid` array vs the gateway's plain-text
+  // `group_trigger_patterns` fallback. Only emitted when wasMentioned is
+  // true (a `null` source on `false` carries no signal).
+  if (wasMentioned && wasMentionedSource) {
+    payload.was_mentioned_source = wasMentionedSource;
+  }
 
   // Include attachments if present
   if (attachments && attachments.length > 0) {
@@ -2937,7 +3024,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
               console.log('[gateway] Agent UUID stale (404), re-resolving...');
               cachedAgentId = null;
               resolveAgentId()
-                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid }, retryCount + 1))
+                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, wasMentionedSource, chatJid }, retryCount + 1))
                 .then(resolve)
                 .catch(reject);
               return;
@@ -3018,7 +3105,7 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @param {(text: string) => Promise<void>} onProgress
  * @returns {Promise<string>} complete response
  */
-async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, groupParticipants = [], onOwnerNotice = null } = {}) {
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, wasMentionedSource = null, groupParticipants = [], onOwnerNotice = null } = {}) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid (same
   // rationale as `forwardToLibreFang`). Keeps streaming parity.
   if (!chatJid) {
@@ -3054,6 +3141,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
       push_name: pushName,
       is_group: !!isGroup,
       was_mentioned: !!wasMentioned,
+      was_mentioned_source: wasMentionedSource,
     }));
   }
 
@@ -3103,7 +3191,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
             console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
-            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, wasMentionedSource, chatJid, onOwnerNotice })
               .then(resolve)
               .catch(reject);
           });
@@ -3198,7 +3286,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         res.on('error', (err) => {
           clearTimeout(pendingEdit);
           console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
-          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, wasMentionedSource, chatJid, onOwnerNotice })
             .then(resolve)
             .catch(reject);
         });
@@ -3207,7 +3295,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
     req.on('error', (err) => {
       console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
-      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, wasMentionedSource, chatJid, onOwnerNotice })
         .then(resolve)
         .catch(reject);
     });
@@ -3878,4 +3966,5 @@ module.exports = {
   runDispatchSelfTest,
   channelTypeForChat,
   buildSessionKey,
+  compileGroupTriggerRegex,
 };

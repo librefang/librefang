@@ -76,6 +76,24 @@ const PSEUDONYM_MAP_CAP: usize = 10_000;
 ///
 /// These are compiled once at `PiiFilter` construction time.
 const BUILTIN_PATTERNS: &[(&str, &str)] = &[
+    // WhatsApp JIDs: `<digits>@lid` / `<digits>@s.whatsapp.net` / `<digits>@c.us`
+    // / `<digits>@g.us` / `<digits>@broadcast` / `<digits>@newsletter`. Also
+    // multi-device addressing — `<digits>:<device>@<domain>` (baileys /
+    // whatsmeow both emit these) — handled by the optional `(?::\d+)?` group
+    // before `@`. Without it the `phone` pattern would partial-match the
+    // leading digits and leave `:5@s.whatsapp.net` visible (houko #5469
+    // review — same partial-redact class this PR exists to eliminate).
+    //
+    // Must come BEFORE `phone` so the digit prefix is consumed as part of the
+    // JID and not partial-matched by `phone` (which has no lookahead support
+    // in `regex_lite`). A partial match would leave the trailing digits and
+    // `@<domain>` suffix visible (e.g. `[REDACTED]257@lid`), which is both an
+    // information leak and breaks downstream consumers that parse JIDs from
+    // the redacted text.
+    (
+        "whatsapp_jid",
+        r"\b\d{5,20}(?::\d+)?@(?:lid|s\.whatsapp\.net|c\.us|g\.us|broadcast|newsletter)\b",
+    ),
     // Email addresses
     ("email", r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
     // Phone numbers: E.164 (+1234567890), US formats, international with spaces/dashes
@@ -437,6 +455,111 @@ mod tests {
         let text = "Normal text";
         let result = filter.filter_message(text, &PrivacyMode::Redact);
         assert_eq!(result, text);
+    }
+
+    // -- WhatsApp JID --
+
+    #[test]
+    fn test_redact_whatsapp_lid_jid() {
+        let filter = make_filter();
+        let text = "Sender JID: 393511083257@lid sent the message";
+        let result = filter.filter_message(text, &PrivacyMode::Redact);
+        assert!(!result.contains("393511083257"));
+        assert!(!result.contains("@lid"));
+        assert!(result.contains(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_redact_whatsapp_phone_jid() {
+        let filter = make_filter();
+        let text = "From 14155552671@s.whatsapp.net";
+        let result = filter.filter_message(text, &PrivacyMode::Redact);
+        assert!(!result.contains("14155552671"));
+        assert!(!result.contains("@s.whatsapp.net"));
+        assert!(result.contains(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_redact_whatsapp_group_jid() {
+        let filter = make_filter();
+        let text = "Group routed via 123456789012345@g.us today";
+        let result = filter.filter_message(text, &PrivacyMode::Redact);
+        assert!(!result.contains("123456789012345"));
+        assert!(!result.contains("@g.us"));
+        assert!(result.contains(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_jid_redact_is_atomic_not_partial() {
+        // Regression: the `phone` regex used to greedy-match the digit prefix
+        // of a WhatsApp JID, leaving the tail and `@<domain>` suffix in the
+        // text (e.g. `[REDACTED]257@lid`). With the `whatsapp_jid` pattern
+        // running first the full JID is replaced as a single unit, and no
+        // partial digits or the `@<domain>` suffix survive in the output.
+        let filter = make_filter();
+        let text = "JID 393511083257@lid arrived";
+        let result = filter.filter_message(text, &PrivacyMode::Redact);
+        assert!(!result.contains("@lid"));
+        assert!(!result.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_jid_redact_atomic_for_device_suffixed_jid() {
+        // Regression (houko #5469 review): multi-device WhatsApp JIDs
+        // (`<phone>:<device>@<domain>`) emitted by baileys / whatsmeow
+        // weren't matched by the previous pattern (which required `\d`
+        // immediately before `@`), so the `phone` rule partial-matched
+        // the leading digits and left `:<device>@<domain>` visible.
+        // Same partial-redact class this PR exists to eliminate.
+        let filter = make_filter();
+        for jid in [
+            "15551234567:5@s.whatsapp.net",
+            "15551234567:5@lid",
+            "393511083257:12@s.whatsapp.net",
+            "393511083257:1@c.us",
+        ] {
+            let text = format!("JID {jid} arrived");
+            let result = filter.filter_message(&text, &PrivacyMode::Redact);
+            assert!(
+                !result.contains("@s.whatsapp.net")
+                    && !result.contains("@lid")
+                    && !result.contains("@c.us"),
+                "device-suffixed JID `{jid}` must be atomically redacted, got: {result}"
+            );
+            assert!(
+                !result.chars().any(|c| c.is_ascii_digit() || c == ':'),
+                "no JID digit or device `:N` separator must survive, got: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pseudonymize_whatsapp_jid_is_stable() {
+        let filter = make_filter();
+        let text1 = "first: 393511083257@lid";
+        let text2 = "second: 393511083257@lid";
+        let r1 = filter.filter_message(text1, &PrivacyMode::Pseudonymize);
+        let r2 = filter.filter_message(text2, &PrivacyMode::Pseudonymize);
+        // Same JID must map to the same pseudonym across calls
+        assert!(r1.contains("[Whatsapp_jid-A]"));
+        assert!(r2.contains("[Whatsapp_jid-A]"));
+        assert!(!r1.contains("393511083257"));
+        assert!(!r2.contains("393511083257"));
+    }
+
+    #[test]
+    fn test_jid_does_not_match_plain_email_or_number() {
+        let filter = make_filter();
+        // Plain email should still go through the `email` pattern, not `whatsapp_jid`.
+        let email_text = "Contact alice@example.com";
+        let email_result = filter.filter_message(email_text, &PrivacyMode::Redact);
+        assert!(!email_result.contains("alice@example.com"));
+        assert!(email_result.contains(REDACTED_PLACEHOLDER));
+        // A bare phone number (no `@<wa-domain>`) should still match `phone`.
+        let phone_text = "Call +1 415 555 2671";
+        let phone_result = filter.filter_message(phone_text, &PrivacyMode::Redact);
+        assert!(!phone_result.contains("415"));
+        assert!(phone_result.contains(REDACTED_PLACEHOLDER));
     }
 
     // -- SenderContext filtering --

@@ -240,6 +240,14 @@ The daemon command is `start` (not `daemon`).
   up a new cap, **kill the agent and let it respawn** (or restart the
   daemon); an in-place activate/status flip will silently keep the old
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
+- **Config hot-reload classification**: which `KernelConfig` fields
+  hot-reload, which require a restart, and which are read-live/noop is
+  decided by `build_reload_plan` in
+  `crates/librefang-kernel/src/config_reload.rs`. The canonical
+  ops-facing reference table (one row per field, derived from that
+  function and drift-guarded by a test) lives at
+  `docs/operations/config-reload.md` — consult it before assuming a
+  config edit takes effect on `POST /api/config/reload`.
 - **Skill workshop** (#3328) passively captures teaching signals from
   successful turns into draft skills under
   `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-OFF —

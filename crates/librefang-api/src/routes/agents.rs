@@ -5519,8 +5519,12 @@ pub async fn reload_agent_manifest(
             StatusCode::OK,
             Json(serde_json::json!({"status": "reloaded", "agent_id": id})),
         ),
+        // Mirror clone/push error mapping for consistency: AgentNotFound → 404
+        // (an unknown id is a missing resource, not a malformed request), and
+        // on-disk config faults (missing/unreadable/invalid agent.toml) → 500
+        // (the request is well-formed; the server-side state is the problem).
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            kernel_err_to_status(&e),
             Json(
                 serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
             ),

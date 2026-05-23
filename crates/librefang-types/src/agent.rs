@@ -1060,8 +1060,14 @@ pub struct AgentManifest {
     /// LLM model configuration.
     pub model: ModelConfig,
     /// Fallback model chain — tried in order if the primary model fails.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub fallback_models: Vec<FallbackModel>,
+    /// `None` means "inherit global fallback_providers"; `Some([])` means
+    /// "disable all fallbacks for this agent".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::option_vec_lenient"
+    )]
+    pub fallback_models: Option<Vec<FallbackModel>>,
     /// Resource quotas.
     pub resources: ResourceQuota,
     /// Priority level.
@@ -1497,7 +1503,7 @@ impl Default for AgentManifest {
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
             model: ModelConfig::default(),
-            fallback_models: Vec::new(),
+            fallback_models: None,
             resources: ResourceQuota::default(),
             priority: Priority::default(),
             capabilities: ManifestCapabilities::default(),
@@ -2427,19 +2433,74 @@ mod tests {
     fn test_manifest_with_new_fields() {
         let manifest = AgentManifest {
             profile: Some(ToolProfile::Coding),
-            fallback_models: vec![FallbackModel {
+            fallback_models: Some(vec![FallbackModel {
                 provider: "groq".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
                 extra_params: std::collections::HashMap::new(),
-            }],
+            }]),
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile, Some(ToolProfile::Coding));
-        assert_eq!(back.fallback_models.len(), 1);
+        assert_eq!(back.fallback_models.as_deref().map(|v| v.len()), Some(1));
+    }
+
+    // ----- fallback_models three-state TOML parse tests (#5112) -----
+
+    #[test]
+    fn test_fallback_models_absent_key_yields_none() {
+        // A manifest TOML with NO `fallback_models` key at all must deserialize
+        // to `None` (= inherit global fallback_providers chain).
+        let toml_str = r#"
+            name = "test-agent"
+            [model]
+            provider = "anthropic"
+            model = "claude-3-haiku-20240307"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.fallback_models.is_none(),
+            "absent fallback_models key must produce None, got: {:?}",
+            manifest.fallback_models
+        );
+    }
+
+    #[test]
+    fn test_fallback_models_explicit_empty_yields_some_empty_and_roundtrips() {
+        // `fallback_models = []` (inline TOML array syntax) must deserialize to
+        // `Some(vec![])` — opting the agent out of the global fallback chain.
+        // The roundtrip back to JSON must preserve `Some(vec![])` (i.e.
+        // `skip_serializing_if = "Option::is_none"` must NOT drop it).
+        let toml_str = r#"
+            name = "test-agent"
+            fallback_models = []
+            [model]
+            provider = "anthropic"
+            model = "claude-3-haiku-20240307"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
+            "explicit fallback_models = [] must produce Some(vec![]), got: {:?}",
+            manifest.fallback_models
+        );
+
+        // Round-trip: serialize to JSON then deserialize again.
+        let json = serde_json::to_string(&manifest).unwrap();
+        // Some(vec![]) serializes as `"fallback_models":[]` — the key must be present.
+        assert!(
+            json.contains("fallback_models"),
+            "serialized JSON must contain the fallback_models key when Some(vec![]); json={json}"
+        );
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.fallback_models.as_ref().map(|v| v.is_empty()) == Some(true),
+            "roundtrip must preserve Some(vec![]), got: {:?}",
+            back.fallback_models
+        );
     }
 
     #[test]
