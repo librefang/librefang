@@ -67,6 +67,15 @@ pub struct ApprovalManager {
     /// memory so user-level remembered decisions don't outlive an
     /// `acp` invocation in surprising ways.
     remembered: DashMap<(String, String), ApprovalDecision>,
+    /// Per-session approval cache (#5600): once a user approves a tool
+    /// inside a chat session, every subsequent call of that exact tool
+    /// name in the same session auto-approves without re-prompting.
+    /// Keyed on `(session_id, tool_name)`; populated by [`Self::resolve`]
+    /// on `Approved` outcomes and read in
+    /// `LibreFangKernel::submit_tool_approval`. Lives in memory only —
+    /// daemon restart drops the cache, matching the in-memory
+    /// `remembered` slot above.
+    session_approvals: DashMap<(String, String), ()>,
 }
 
 struct PendingRequest {
@@ -110,6 +119,7 @@ impl ApprovalManager {
             failure_rw_mutex: StdMutex::new(()),
             events_tx,
             remembered: DashMap::new(),
+            session_approvals: DashMap::new(),
         }
     }
 
@@ -135,6 +145,7 @@ impl ApprovalManager {
             failure_rw_mutex: StdMutex::new(()),
             events_tx,
             remembered: DashMap::new(),
+            session_approvals: DashMap::new(),
         }
     }
 
@@ -163,6 +174,56 @@ impl ApprovalManager {
         self.remembered
             .remove(&(agent_id.to_string(), tool_name.to_string()))
             .map(|(_, v)| v)
+    }
+
+    // -----------------------------------------------------------------
+    // Per-session approval cache (#5600)
+    // -----------------------------------------------------------------
+
+    /// Record that the user approved `tool_name` inside `session_id`.
+    /// Future calls of the same tool in the same session short-circuit
+    /// to `AutoApproved` without re-prompting. Idempotent.
+    pub fn remember_session_approval(&self, session_id: &str, tool_name: &str) {
+        if session_id.is_empty() || tool_name.is_empty() {
+            return;
+        }
+        self.session_approvals
+            .insert((session_id.to_string(), tool_name.to_string()), ());
+    }
+
+    /// True iff `(session_id, tool_name)` is in the per-session approval
+    /// cache (i.e. the user already approved this tool earlier in the
+    /// same chat session).
+    pub fn has_session_approval(&self, session_id: &str, tool_name: &str) -> bool {
+        if session_id.is_empty() || tool_name.is_empty() {
+            return false;
+        }
+        self.session_approvals
+            .contains_key(&(session_id.to_string(), tool_name.to_string()))
+    }
+
+    /// Drop the per-session approval entry for `(session_id, tool_name)`.
+    /// Returns `true` if an entry was actually removed.
+    pub fn forget_session_approval(&self, session_id: &str, tool_name: &str) -> bool {
+        self.session_approvals
+            .remove(&(session_id.to_string(), tool_name.to_string()))
+            .is_some()
+    }
+
+    /// Drop every session-cached approval for `session_id` (e.g. on
+    /// session reset). Returns the number of entries removed.
+    pub fn clear_session_approvals(&self, session_id: &str) -> usize {
+        let to_remove: Vec<(String, String)> = self
+            .session_approvals
+            .iter()
+            .filter(|kv| kv.key().0 == session_id)
+            .map(|kv| kv.key().clone())
+            .collect();
+        let n = to_remove.len();
+        for k in to_remove {
+            self.session_approvals.remove(&k);
+        }
+        n
     }
 
     /// Subscribe to [`ApprovalEvent`]s from this manager.
@@ -939,6 +1000,33 @@ impl ApprovalManager {
                         if policy.tool_requires_totp(&pending.request.tool_name) {
                             self.record_totp_grace(uid);
                         }
+                    }
+                }
+
+                // Record per-session approval (#5600) so the same tool
+                // does not re-prompt for the rest of this chat session.
+                // Guarded by `policy.cache_approvals_per_session` so
+                // operators who want strict per-call approval can opt
+                // out. Only populates on `Approved`; denials never
+                // auto-approve future calls.
+                //
+                // SECURITY (RBAC M3, #3054): skip cache population when
+                // the underlying deferred call had `force_human=true`.
+                // That flag means the per-user policy demanded an
+                // explicit human approval on every call — caching the
+                // outcome would let future calls in the same session
+                // pick it up via `has_session_approval` and bypass the
+                // per-call requirement. Symmetric with the read-side
+                // guard in `LibreFangKernel::submit_tool_approval`.
+                let from_force_human = pending
+                    .deferred
+                    .as_ref()
+                    .map(|d| d.force_human)
+                    .unwrap_or(false);
+                if decision.is_approved() && policy.cache_approvals_per_session && !from_force_human
+                {
+                    if let Some(sid) = pending.request.session_id.as_deref() {
+                        self.remember_session_approval(sid, &pending.request.tool_name);
                     }
                 }
 
@@ -1956,6 +2044,24 @@ mod tests {
         ApprovalManager::new(ApprovalPolicy::default())
     }
 
+    fn make_deferred(agent_id: &str) -> DeferredToolExecution {
+        DeferredToolExecution {
+            agent_id: agent_id.to_string(),
+            tool_use_id: "tool-use-test".to_string(),
+            tool_name: "test".to_string(),
+            input: serde_json::json!({}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            chat_id: None,
+            workspace_root: None,
+            force_human: false,
+            session_id: None,
+        }
+    }
+
     fn make_request(agent_id: &str, tool_name: &str, timeout_secs: u64) -> ApprovalRequest {
         ApprovalRequest {
             id: Uuid::new_v4(),
@@ -1985,6 +2091,138 @@ mod tests {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
         assert!(!mgr.requires_approval("file_read"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-session approval cache (#5600)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_approval_round_trip() {
+        let mgr = default_manager();
+        assert!(!mgr.has_session_approval("sess-1", "mcp_jira_create"));
+        mgr.remember_session_approval("sess-1", "mcp_jira_create");
+        assert!(mgr.has_session_approval("sess-1", "mcp_jira_create"));
+        // Different session: cache miss.
+        assert!(!mgr.has_session_approval("sess-2", "mcp_jira_create"));
+        // Different tool in same session: cache miss.
+        assert!(!mgr.has_session_approval("sess-1", "mcp_jira_delete"));
+    }
+
+    #[test]
+    fn session_approval_idempotent_and_safe_against_empty_keys() {
+        let mgr = default_manager();
+        mgr.remember_session_approval("sess-1", "tool");
+        mgr.remember_session_approval("sess-1", "tool");
+        assert!(mgr.has_session_approval("sess-1", "tool"));
+        // Empty session_id / tool_name are accepted but never cached —
+        // a defensive guard so a missing context doesn't grant blanket
+        // approval to all later calls.
+        mgr.remember_session_approval("", "tool");
+        mgr.remember_session_approval("sess-1", "");
+        assert!(!mgr.has_session_approval("", "tool"));
+        assert!(!mgr.has_session_approval("sess-1", ""));
+    }
+
+    #[test]
+    fn session_approval_forget_clears_entry() {
+        let mgr = default_manager();
+        mgr.remember_session_approval("sess-1", "tool");
+        assert!(mgr.forget_session_approval("sess-1", "tool"));
+        assert!(!mgr.has_session_approval("sess-1", "tool"));
+        // Second forget is a no-op, returns false.
+        assert!(!mgr.forget_session_approval("sess-1", "tool"));
+    }
+
+    #[test]
+    fn session_approval_clear_all_for_session_drops_only_matching() {
+        let mgr = default_manager();
+        mgr.remember_session_approval("sess-1", "tool_a");
+        mgr.remember_session_approval("sess-1", "tool_b");
+        mgr.remember_session_approval("sess-2", "tool_a");
+        assert_eq!(mgr.clear_session_approvals("sess-1"), 2);
+        assert!(!mgr.has_session_approval("sess-1", "tool_a"));
+        assert!(!mgr.has_session_approval("sess-1", "tool_b"));
+        // sess-2 entries survive — clear_session_approvals is scoped.
+        assert!(mgr.has_session_approval("sess-2", "tool_a"));
+    }
+
+    #[test]
+    fn resolve_approved_populates_session_cache_when_policy_allows() {
+        let mgr = default_manager();
+        let mut req = make_request("agent-x", "mcp_jira_create", 60);
+        req.session_id = Some("sess-1".to_string());
+        let id = req.id;
+        mgr.submit_request(req, make_deferred("agent-x"))
+            .expect("submit");
+        mgr.resolve(id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve");
+        assert!(
+            mgr.has_session_approval("sess-1", "mcp_jira_create"),
+            "Approved + cache_approvals_per_session=true (default) must populate session cache"
+        );
+    }
+
+    #[test]
+    fn resolve_denied_does_not_populate_session_cache() {
+        let mgr = default_manager();
+        let mut req = make_request("agent-x", "mcp_jira_delete", 60);
+        req.session_id = Some("sess-1".to_string());
+        let id = req.id;
+        mgr.submit_request(req, make_deferred("agent-x"))
+            .expect("submit");
+        mgr.resolve(id, ApprovalDecision::Denied, None, false, None)
+            .expect("resolve");
+        assert!(
+            !mgr.has_session_approval("sess-1", "mcp_jira_delete"),
+            "Denied outcome must NOT populate session cache"
+        );
+    }
+
+    #[test]
+    fn resolve_approved_skips_cache_when_policy_disables() {
+        let policy = ApprovalPolicy {
+            cache_approvals_per_session: false,
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+        let mut req = make_request("agent-x", "mcp_jira_create", 60);
+        req.session_id = Some("sess-1".to_string());
+        let id = req.id;
+        mgr.submit_request(req, make_deferred("agent-x"))
+            .expect("submit");
+        mgr.resolve(id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve");
+        assert!(
+            !mgr.has_session_approval("sess-1", "mcp_jira_create"),
+            "cache_approvals_per_session=false must keep the cache empty even on Approved"
+        );
+    }
+
+    /// RBAC M3 (#3054) regression guard for #5600.
+    ///
+    /// When a deferred tool call carries `force_human=true` the
+    /// per-user policy demanded an explicit human approval on every
+    /// invocation. The session cache MUST NOT capture that outcome —
+    /// otherwise the next call of the same tool in the same session
+    /// would hit `has_session_approval` and silently auto-approve,
+    /// defeating the RBAC M3 carve-out enforced in
+    /// `LibreFangKernel::submit_tool_approval`.
+    #[test]
+    fn resolve_approved_skips_cache_when_deferred_force_human() {
+        let mgr = default_manager();
+        let mut req = make_request("agent-x", "mcp_jira_create", 60);
+        req.session_id = Some("sess-1".to_string());
+        let id = req.id;
+        let mut deferred = make_deferred("agent-x");
+        deferred.force_human = true;
+        mgr.submit_request(req, deferred).expect("submit");
+        mgr.resolve(id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve");
+        assert!(
+            !mgr.has_session_approval("sess-1", "mcp_jira_create"),
+            "force_human=true approvals must NOT populate the session cache (RBAC M3 #3054)"
+        );
     }
 
     #[test]

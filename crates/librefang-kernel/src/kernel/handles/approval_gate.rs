@@ -272,6 +272,34 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         }
 
         let policy = self.governance.approval_manager.policy();
+        // #5600: per-session approval cache. If this exact tool name has
+        // already been approved earlier in the same session, skip the
+        // prompt. Gated by `policy.cache_approvals_per_session`
+        // (default true).
+        //
+        // SECURITY (RBAC M3, #3054): MUST be skipped when
+        // `deferred.force_human=true`. The user-policy gate flips
+        // `force_human` on every call that demanded human approval —
+        // honouring the session cache here would let the second call
+        // of a tool silently bypass the per-call approval that the
+        // RBAC M3 carve-out is designed to enforce.
+        if policy.cache_approvals_per_session && !deferred.force_human {
+            if let Some(sid) = session_id {
+                if self
+                    .governance
+                    .approval_manager
+                    .has_session_approval(sid, tool_name)
+                {
+                    info!(
+                        agent_id,
+                        tool_name,
+                        session_id = sid,
+                        "Auto-approved by per-session cache (#5600)"
+                    );
+                    return Ok(ToolApprovalSubmission::AutoApproved);
+                }
+            }
+        }
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
         let agent_display = self.approval_agent_display(agent_id);
         let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
