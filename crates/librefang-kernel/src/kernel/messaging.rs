@@ -1529,11 +1529,21 @@ impl LibreFangKernel {
     /// Runs a normal streaming agent turn but with `incognito: true` in
     /// `LoopOptions` so session messages and proactive-memory writes are
     /// suppressed while memory reads remain full-access.
+    ///
+    /// `sender_context` is forwarded to the session resolver so per-chat
+    /// scoping (`SessionId::for_sender_scope`) fires when the caller is a
+    /// channel bridge. Passing `None` falls back to the per-agent
+    /// `Persistent` session pointer — appropriate for raw `api` callers
+    /// that don't identify a sender, but a silent privacy leak for channel
+    /// traffic. The HTTP `/message/stream` handler must build this from
+    /// the request body (see `request_sender_context` in
+    /// `crates/librefang-api/src/routes/agents.rs`).
     pub async fn send_message_streaming_with_incognito(
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
         session_id_override: Option<SessionId>,
         incognito: bool,
     ) -> KernelResult<(
@@ -1542,7 +1552,7 @@ impl LibreFangKernel {
     )> {
         let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         let effective_id = self
-            .resolve_assistant_target(agent_id, message, None)
+            .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
@@ -1565,7 +1575,7 @@ impl LibreFangKernel {
             effective_id,
             message,
             handle,
-            None,
+            sender_context,
             None,
             session_id_override,
             loop_opts,

@@ -425,6 +425,7 @@ impl MemoryAccess for NamedWsKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -433,6 +434,7 @@ impl MemoryAccess for NamedWsKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -440,6 +442,7 @@ impl MemoryAccess for NamedWsKernel {
 
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())

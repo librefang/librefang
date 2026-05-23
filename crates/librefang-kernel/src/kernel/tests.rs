@@ -5442,6 +5442,17 @@ fn approval_display_non_uuid_string_falls_back_verbatim() {
 }
 
 #[test]
+fn approval_display_empty_string_uses_unknown_sentinel() {
+    let kernel = boot_kernel_for_display_tests();
+
+    let rendered = kernel.approval_agent_display("");
+
+    assert_eq!(rendered, "\"unknown\"");
+
+    kernel.shutdown();
+}
+
+#[test]
 fn approval_display_escapes_quote_in_agent_name() {
     let kernel = boot_kernel_for_display_tests();
     let id = register_test_agent(&kernel, "jar\"vis");
