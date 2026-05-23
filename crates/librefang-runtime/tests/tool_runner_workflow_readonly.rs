@@ -57,6 +57,7 @@ impl MemoryAccess for WorkflowStubKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
@@ -64,12 +65,14 @@ impl MemoryAccess for WorkflowStubKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
@@ -211,7 +214,7 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         kernel: Some(kernel),
         allowed_tools: None,
         available_tools: None,
-        caller_agent_id: Some("test-agent"),
+        caller_agent_id: Some("test-agent"), // mock-only: non-UUID ok since mock kernel ignores agent_id
         skill_registry: None,
         allowed_skills: None,
         mcp_connections: None,

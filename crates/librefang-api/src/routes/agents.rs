@@ -2049,6 +2049,30 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     })
 }
 
+/// Build the (sender_context, incognito, session_id_override) triple that the
+/// streaming handler hands to `send_message_streaming_with_incognito`.
+///
+/// Factored out of `send_message_stream` so the regression test
+/// `test_streaming_handler_threads_sender_context_to_kernel_args` exercises
+/// the exact code path the handler uses. A future mutation that silently
+/// drops one of the three fields on its way to the kernel call breaks the
+/// test, not just a sibling unit that happens to call `request_sender_context`
+/// the same way.
+fn build_streaming_kernel_args(
+    req: &MessageRequest,
+    session_id_override: Option<librefang_types::agent::SessionId>,
+) -> (
+    Option<SenderContext>,
+    bool,
+    Option<librefang_types::agent::SessionId>,
+) {
+    (
+        request_sender_context(req),
+        req.incognito,
+        session_id_override,
+    )
+}
+
 /// Query params for `GET /api/agents/{id}/session`.
 ///
 /// Using a typed struct (rather than `HashMap<String,String>`) gives us
@@ -2831,6 +2855,21 @@ pub async fn send_message_stream(
         },
     };
 
+    // Build sender context from the request body BEFORE handing off to the
+    // kernel. The session resolver uses this to derive
+    // `SessionId::for_sender_scope(agent, channel, chat_id)` so per-chat
+    // isolation holds — without it, every inbound (DM, group, stranger)
+    // collapses onto the agent's global `Persistent` session pointer and
+    // contexts cross-pollinate. The non-streaming sibling `send_message`
+    // has always built this; the streaming variant historically did not,
+    // which is the bug fixed here.
+    //
+    // Use `build_streaming_kernel_args` so the test
+    // `test_streaming_handler_threads_sender_context_to_kernel_args`
+    // exercises the exact code path: if a future change silently drops
+    // sender_context (or any other field) here, the test breaks.
+    let (sender_context, incognito, session_override) =
+        build_streaming_kernel_args(&req, session_id_override);
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     let (rx, handle) = match state
         .kernel
@@ -2839,8 +2878,9 @@ pub async fn send_message_stream(
             agent_id,
             &req.message,
             Some(kernel_handle),
-            session_id_override,
-            req.incognito,
+            sender_context,
+            session_override,
+            incognito,
         )
         .await
     {
@@ -7065,6 +7105,185 @@ mod tests {
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants.len(), 2);
         assert_eq!(sender.group_participants[1].display_name, "Bob");
+    }
+
+    /// Regression for the 2026-05-19 cross-chat leak: the streaming
+    /// `/message/stream` handler historically called the kernel without
+    /// a `SenderContext`, so the resolver fell through to the per-agent
+    /// `Persistent` session pointer and collapsed every chat (DM, group,
+    /// stranger) onto one session. After the fix the handler must build
+    /// the same `SenderContext` the non-streaming sibling builds, and
+    /// the resolver derives a deterministic `SessionId::for_sender_scope`
+    /// per `(agent, channel:chat_id)` pair.
+    ///
+    /// This test exercises the boundary in two parts: (1) the request
+    /// shapes the gateway actually posts produce non-`None` sender
+    /// contexts whose `channel` field uniquely identifies the chat; (2)
+    /// passing those contexts through `SessionId::for_sender_scope` for
+    /// the same agent yields *different* session ids — which is the
+    /// invariant the streaming endpoint must preserve and the live
+    /// incident violated.
+    #[test]
+    fn test_streaming_handler_builds_sender_context_for_distinct_chats() {
+        use librefang_types::agent::SessionId;
+
+        // Two real channel_type shapes captured from the live incident
+        // log on 2026-05-19: the WhatsApp gateway posts the JID baked
+        // into the `channel_type` field (chat_id remains None on the
+        // SenderContext). The resolver's `for_sender_scope` therefore
+        // distinguishes scopes via `channel` alone.
+        let group_req = MessageRequest {
+            message: "ciao tutti".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("393285497365@s.whatsapp.net".to_string()),
+            sender_name: Some("Cate".to_string()),
+            channel_type: Some("whatsapp:393285497365-1412881543@g.us".to_string()),
+            is_group: true,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        };
+        let dm_req = MessageRequest {
+            message: "ora riproponimi i vocali per erika".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("+393760105565".to_string()),
+            sender_name: None,
+            channel_type: Some("whatsapp:191856289808491@lid".to_string()),
+            is_group: false,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        };
+
+        let group_ctx =
+            request_sender_context(&group_req).expect("group request must produce sender context");
+        let dm_ctx =
+            request_sender_context(&dm_req).expect("dm request must produce sender context");
+
+        // Sanity: the gateway-side channel values match the live
+        // incident exactly (no normalization between transport and
+        // kernel).
+        assert_eq!(group_ctx.channel, "whatsapp:393285497365-1412881543@g.us");
+        assert_eq!(dm_ctx.channel, "whatsapp:191856289808491@lid");
+
+        // The resolver invariant: same agent, two different chats →
+        // two different deterministic session ids. Before the fix, the
+        // streaming handler passed `None` for sender_context and BOTH
+        // requests landed on the agent's single `entry.session_id`.
+        let agent = AgentId::new();
+        let group_sid =
+            SessionId::for_sender_scope(agent, &group_ctx.channel, group_ctx.chat_id.as_deref());
+        let dm_sid = SessionId::for_sender_scope(agent, &dm_ctx.channel, dm_ctx.chat_id.as_deref());
+        assert_ne!(
+            group_sid, dm_sid,
+            "group and DM must resolve to distinct session ids — same id means cross-chat history bleed"
+        );
+
+        // And the derivation is stable: repeating the call must return
+        // the same id (otherwise the per-chat session would churn
+        // turn-by-turn).
+        assert_eq!(
+            group_sid,
+            SessionId::for_sender_scope(agent, &group_ctx.channel, group_ctx.chat_id.as_deref())
+        );
+    }
+
+    /// Regression test promoted per houko review on PR #5288: the original
+    /// precondition test only validated `request_sender_context` output and
+    /// `SessionId` derivation independently. A mutation that drops
+    /// sender_context, incognito, or session_id_override on the way to the
+    /// kernel call would silently bypass it. This test exercises
+    /// `build_streaming_kernel_args` — the exact triple the streaming
+    /// handler hands to `send_message_streaming_with_incognito` — so any
+    /// such mutation fails here.
+    ///
+    /// A full SSE-driven e2e test (TestServer → SSE → kernel mock capturing
+    /// arg values) was considered but deemed too heavy: it would require a
+    /// stubbed `LibreFangKernelApi` impl plus async stream plumbing for a
+    /// linear data-flow assertion. The helper-extraction approach gives
+    /// equivalent mutation-detection coverage at unit-test cost.
+    #[test]
+    fn test_streaming_handler_threads_sender_context_to_kernel_args() {
+        use librefang_types::agent::SessionId;
+
+        let req = MessageRequest {
+            message: "test".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("393285497365@s.whatsapp.net".to_string()),
+            sender_name: Some("Cate".to_string()),
+            channel_type: Some("whatsapp:393285497365-1412881543@g.us".to_string()),
+            is_group: true,
+            was_mentioned: true,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: Some(vec![
+                ParticipantRef {
+                    jid: "111@s.whatsapp.net".to_string(),
+                    display_name: "Alice".to_string(),
+                },
+                ParticipantRef {
+                    jid: "222@s.whatsapp.net".to_string(),
+                    display_name: "Bob".to_string(),
+                },
+            ]),
+            session_id: None,
+            incognito: true,
+        };
+        let session_override = Some(SessionId::new());
+
+        let (sender_ctx, incognito, sid) =
+            build_streaming_kernel_args(&req, session_override.clone());
+
+        // sender_context: every field that influences resolver behaviour
+        // must flow through.
+        let sender_ctx = sender_ctx.expect("sender_id present must yield SenderContext");
+        assert_eq!(sender_ctx.channel, "whatsapp:393285497365-1412881543@g.us");
+        assert_eq!(sender_ctx.user_id, "393285497365@s.whatsapp.net");
+        assert_eq!(sender_ctx.display_name, "Cate");
+        assert!(sender_ctx.is_group);
+        assert!(sender_ctx.was_mentioned);
+        assert_eq!(sender_ctx.group_participants.len(), 2);
+
+        // incognito + session override must not be dropped on the path to
+        // the kernel call.
+        assert!(incognito, "incognito flag must propagate to kernel call");
+        assert_eq!(
+            sid, session_override,
+            "session_id_override must propagate unchanged"
+        );
+
+        // Negative branch: no sender_id → no sender_context (resolver
+        // falls back to global Persistent — historical behaviour for
+        // direct API callers).
+        let bare = MessageRequest {
+            message: "test".to_string(),
+            attachments: Vec::new(),
+            sender_id: None,
+            sender_name: None,
+            channel_type: None,
+            is_group: false,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        };
+        let (ctx, _, _) = build_streaming_kernel_args(&bare, None);
+        assert!(
+            ctx.is_none(),
+            "missing sender_id must produce None — kernel then uses its own fallback"
+        );
     }
 
     #[test]

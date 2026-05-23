@@ -1339,6 +1339,10 @@ impl LibreFangKernel {
     /// operator-facing copy (push notifications, channel messages,
     /// human-readable descriptions) only.
     fn approval_agent_display(&self, agent_id: &str) -> String {
+        if agent_id.is_empty() {
+            return "\"unknown\"".to_string();
+        }
+
         if let Ok(aid) = agent_id.parse::<AgentId>() {
             if let Some(entry) = self.agents.registry.get(aid) {
                 let short = agent_id.get(..8).unwrap_or(agent_id);
@@ -1420,15 +1424,23 @@ impl LibreFangKernel {
         use librefang_types::approval::ApprovalDecision;
         use librefang_types::tool::{ToolExecutionStatus, ToolResult};
 
-        let agent_id = match uuid::Uuid::parse_str(&deferred.agent_id) {
-            Ok(u) => AgentId(u),
-            Err(e) => {
+        let agent_id = match deferred.agent_id.as_str() {
+            "" => {
                 warn!(
-                    "handle_approval_resolution: invalid agent_id '{}': {e}",
-                    deferred.agent_id
+                    "handle_approval_resolution: empty agent_id in deferred tool '{}', skipping resolution",
+                    deferred.tool_name
                 );
                 return;
             }
+            s => match uuid::Uuid::parse_str(s) {
+                Ok(u) => AgentId(u),
+                Err(e) => {
+                    warn!(
+                        "handle_approval_resolution: invalid agent_id '{s}': {e}, skipping resolution"
+                    );
+                    return;
+                }
+            },
         };
 
         let result = match &decision {
@@ -1664,7 +1676,13 @@ impl LibreFangKernel {
             // Deferred resume path has no live agent-loop context, so the
             // lazy-load meta-tools fall back to the builtin catalog.
             available_tools: None,
-            caller_agent_id: Some(deferred.agent_id.as_str()),
+            caller_agent_id: if deferred.agent_id.is_empty() {
+                None
+            } else {
+                uuid::Uuid::parse_str(&deferred.agent_id)
+                    .ok()
+                    .map(|_| deferred.agent_id.as_str())
+            },
             skill_registry: Some(skill_snapshot),
             // Deferred tools have already passed the approval gate; skill
             // allowlist is not available here so we skip the check (None).
