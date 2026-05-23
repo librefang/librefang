@@ -1,2 +1,15 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Source replacement: redirect kreuzberg from SSH to HTTPS so CI runners
+# (which have no SSH key) can fetch the transitive dep pulled in via
+# universal-agent-runtime → kreuzberg.  Both URLs resolve to the same public
+# GQAdonis/kreuzberg repo; the lock-file commit hash is reused verbatim.
+[source.kreuzberg-ssh]
+git = "ssh://git@github.com/GQAdonis/kreuzberg.git"
+branch = "main"
+replace-with = "kreuzberg-https"
+
+[source.kreuzberg-https]
+git = "https://github.com/GQAdonis/kreuzberg.git"
+branch = "main"
