@@ -1849,4 +1849,66 @@ mod tests {
              KernelConfig fields (renamed/removed?): {stale:?}"
         );
     }
+
+    /// The ops-facing reference table in `docs/operations/config-reload.md`
+    /// must list exactly the same set of fields that
+    /// [`super::classified_reload_fields`] classifies. The doc is
+    /// hand-transcribed from `build_reload_plan`, so without this guard a
+    /// classification change (or a newly-added field) could land in the code
+    /// while the doc silently rots — defeating the doc's stated purpose of
+    /// being the canonical "does this hot-reload?" answer.
+    ///
+    /// The doc lists each field as the first column of a markdown table row,
+    /// `| `field_name` | ... |`. We parse those backtick-wrapped leading
+    /// tokens and compare the set to `classified_reload_fields()` in both
+    /// directions.
+    #[test]
+    fn doc_reload_table_matches_classified_reload_fields() {
+        // CARGO_MANIFEST_DIR = <repo>/crates/librefang-kernel
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/operations/config-reload.md");
+        let doc = std::fs::read_to_string(&doc_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {e}", doc_path.display());
+        });
+
+        // Collect the first-column backtick token of every table row.
+        let mut doc_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for line in doc.lines() {
+            let line = line.trim_start();
+            let Some(rest) = line.strip_prefix("| `") else {
+                continue;
+            };
+            // Token runs until the closing backtick. Field names are
+            // `[a-z0-9_]+`; anything else (legend rows, prose) won't match.
+            let Some(end) = rest.find('`') else { continue };
+            let token = &rest[..end];
+            if !token.is_empty()
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                doc_fields.insert(token.to_string());
+            }
+        }
+
+        let covered: std::collections::BTreeSet<String> = super::classified_reload_fields()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let missing_from_doc: Vec<&String> = covered.difference(&doc_fields).collect();
+        assert!(
+            missing_from_doc.is_empty(),
+            "fields classified in build_reload_plan but absent from \
+             docs/operations/config-reload.md: {missing_from_doc:?}\n\
+             Add a table row for each in the doc."
+        );
+
+        let extra_in_doc: Vec<&String> = doc_fields.difference(&covered).collect();
+        assert!(
+            extra_in_doc.is_empty(),
+            "docs/operations/config-reload.md lists field names that are not \
+             classified in build_reload_plan (renamed/removed?): {extra_in_doc:?}"
+        );
+    }
 }
