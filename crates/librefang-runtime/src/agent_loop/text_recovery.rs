@@ -670,7 +670,7 @@ fn parse_arrow_syntax_tool_call(
     tool_names: &[&str],
 ) -> Option<(String, serde_json::Value)> {
     // Extract tool name: look for `tool => "name"` or `tool=>"name"`
-    let tool_marker_pos = text.find("tool")?;
+    let tool_marker_pos = text.find("tool =>").or_else(|| text.find("tool=>"))?;
     let after_tool = &text[tool_marker_pos + 4..];
     // Skip whitespace and `=>`
     let after_arrow = after_tool.trim_start();
@@ -694,7 +694,7 @@ fn parse_arrow_syntax_tool_call(
     }
 
     // Extract args: look for `args => {` or `args=>{`
-    let args_value = if let Some(args_pos) = text.find("args") {
+    let args_value = if let Some(args_pos) = text.find("args =>").or_else(|| text.find("args=>")) {
         let after_args = &text[args_pos + 4..];
         let after_args = after_args.trim_start();
         let after_args = after_args.strip_prefix("=>")?;
@@ -827,6 +827,9 @@ fn try_parse_bare_json_tool_call(
         match c {
             '{' => depth += 1,
             '}' => {
+                if depth == 0 {
+                    break;
+                }
                 depth -= 1;
                 if depth == 0 {
                     end = i + 1;

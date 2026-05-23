@@ -237,12 +237,12 @@ pub struct ExperimentContext {
     pub request_start: std::time::Instant,
 }
 
-impl Default for ExperimentContext {
-    fn default() -> Self {
+impl ExperimentContext {
+    pub fn new(experiment_id: uuid::Uuid, variant_id: uuid::Uuid, variant_name: String) -> Self {
         Self {
-            experiment_id: uuid::Uuid::default(),
-            variant_id: uuid::Uuid::default(),
-            variant_name: String::new(),
+            experiment_id,
+            variant_id,
+            variant_name,
             request_start: std::time::Instant::now(),
         }
     }

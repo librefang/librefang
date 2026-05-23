@@ -12,30 +12,15 @@ use tracing::warn;
 
 use super::LoopOptions;
 
-/// Default ceiling for message history before auto-trimming.
+/// Default ceiling for message-history auto-trimming (value: 60).
 ///
-/// The earlier value of 40 assumed "tool calls consume 4–6 messages per
-/// user turn → 7–10 conversation turns", which held for chat-style
-/// agents but underestimated coordinator hands. In production logs we
-/// observed `creator:creator-hand` (polling `video_status` every 15-20s)
-/// trimming every turn at total_messages=41 with `hit_ratio=0.0` — the
-/// trim was invalidating the prompt-cache prefix on every turn because
-/// the cap was too tight for the actual workflow length. Survey of the
-/// librefang-registry hands shows `max_iterations` of 50–80 is the
-/// norm; at ~8 messages per real turn that fills the bucket in 5
-/// turns, far less than the 7–10 the comment claimed.
-///
-/// 60 gives ~7–10 real turns for those heavier workflows and leaves
-/// the prompt-cache prefix stable across normal back-and-forth.
-/// Long-workflow hands (researcher / creator / devops / predictor)
-/// still set explicit per-hand `max_history_messages` overrides in the
-/// registry to push their headroom higher.
-///
-/// Override per-agent via `AgentManifest.max_history_messages` or
-/// globally via `KernelConfig.max_history_messages`; resolved at loop
-/// entry by `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES`
-/// are clamped up at runtime.
+/// 60 gives ~7–10 real turns for typical workflows while keeping the
+/// prompt-cache prefix stable. Override per-agent via
+/// `AgentManifest.max_history_messages` or globally via
+/// `KernelConfig.max_history_messages`.
 pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 60;
+
+const MAX_HISTORY_MESSAGES: usize = 500;
 
 /// Floor for the message-history cap. Values below this are clamped up
 /// with a warning log: `safe_trim_messages` re-validates the trimmed
@@ -54,6 +39,7 @@ pub(super) const MIN_HISTORY_MESSAGES: usize = 4;
 ///
 /// The resolved value is then clamped up to `MIN_HISTORY_MESSAGES` if it
 /// would otherwise defeat the safe-trim heuristic.
+#[must_use]
 pub(super) fn resolve_max_history(manifest: &AgentManifest, opts: &LoopOptions) -> usize {
     let raw = manifest
         .max_history_messages
@@ -65,10 +51,21 @@ pub(super) fn resolve_max_history(manifest: &AgentManifest, opts: &LoopOptions) 
 /// Clamp a requested cap up to `MIN_HISTORY_MESSAGES`, logging a warning
 /// when the requested value is too low. Returning silently for values at
 /// or above the floor keeps logs quiet for the common path.
-fn clamp_max_history(requested: usize, agent: &str) -> usize {
+#[must_use]
+#[inline]
+fn clamp_max_history(requested: usize, agent_name: &str) -> usize {
+    if requested > MAX_HISTORY_MESSAGES {
+        warn!(
+            requested,
+            max = MAX_HISTORY_MESSAGES,
+            agent_name,
+            "max_history_messages exceeds upper bound, clamping"
+        );
+        return MAX_HISTORY_MESSAGES;
+    }
     if requested < MIN_HISTORY_MESSAGES {
         warn!(
-            agent = %agent,
+            agent = %agent_name,
             requested,
             applied = MIN_HISTORY_MESSAGES,
             "max_history_messages below floor; clamping"

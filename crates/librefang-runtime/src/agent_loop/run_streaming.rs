@@ -1383,7 +1383,7 @@ pub async fn run_agent_loop_streaming(
                         latency_ms: 0,
                         new_messages_start,
                         owner_notice: None,
-                        actual_provider: None,
+                        actual_provider: last_actual_provider.clone(),
                     });
                 }
                 let text = response.text();

@@ -18,7 +18,7 @@ use tracing::warn;
 /// but the upstream API expects just `org/model` (e.g. `google/gemini-2.5-flash`).
 ///
 /// For providers that require qualified `org/model` format (OpenRouter, Together, Fireworks,
-/// Replicate, Chutes), bare model names like `gemini-2.5-flash` are normalized to their
+/// Replicate, HuggingFace), bare model names like `gemini-2.5-flash` are normalized to their
 /// fully-qualified form (e.g. `google/gemini-2.5-flash`) to prevent 400 errors.
 pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     let slash_prefix = format!("{}/", provider);
@@ -133,9 +133,15 @@ fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
         m if m.starts_with("claude-") => format!("anthropic/{base}{suffix}"),
         // OpenAI models
         m if m.starts_with("gpt-")
-            || m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4") =>
+            || m.starts_with("o1-")
+            || m.starts_with("o1:")
+            || m == "o1"
+            || m.starts_with("o3-")
+            || m.starts_with("o3:")
+            || m == "o3"
+            || m.starts_with("o4-")
+            || m.starts_with("o4:")
+            || m == "o4" =>
         {
             format!("openai/{base}{suffix}")
         }

@@ -133,12 +133,31 @@ async fn generate_search_queries(
         };
 
     let text = response.text();
-    // Extract JSON from response — find the outermost { }
-    let start = text.find('{')?;
-    let end = text.rfind('}')? + 1;
-    let json_str = &text[start..end];
-
-    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let max_attempts = 20;
+    let mut scan = 0;
+    let mut attempt = 0;
+    let parsed: serde_json::Value = loop {
+        if scan >= text.len() || attempt >= max_attempts {
+            return None;
+        }
+        let start = match text[scan..].find('{') {
+            Some(i) => scan + i,
+            None => return None,
+        };
+        let end = match text[start..].rfind('}') {
+            Some(i) => start + i + 1,
+            None => return None,
+        };
+        let candidate = &text[start..end];
+        match serde_json::from_str::<serde_json::Value>(candidate) {
+            Ok(value) => break value,
+            Err(_) => {
+                scan = start + 1;
+                attempt += 1;
+                continue;
+            }
+        }
+    };
     let queries: Vec<String> = parsed["queries"]
         .as_array()?
         .iter()
