@@ -4,3 +4,10 @@
 # tests would fail cross-platform. (Rust source + JSON are fine as-is; the
 # explicit `eol=lf` here is a safety rail for tests that byte-compare.)
 crates/librefang-api/tests/fixtures/*.json text eol=lf
+
+# Orchestrator state files: always keep our branch version on merge/rebase.
+# The branch version is always more advanced than an older main snapshot.
+# Activate the driver once per clone: git config merge.ours.driver true
+# (or run: just setup)
+.kbd-orchestrator/**/*.json merge=ours
+.kbd-orchestrator/**/*.md merge=ours
