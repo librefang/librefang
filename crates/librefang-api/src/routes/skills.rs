@@ -412,8 +412,7 @@ pub async fn install_skill(
         home.join("skills")
     };
     if let Err(e) = std::fs::create_dir_all(&skills_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Install from local registry (~/.librefang/registry/skills/{name}/)
@@ -458,7 +457,7 @@ pub async fn install_skill(
             tracing::warn!("Skill install failed: {e}");
             // Clean up partial copy
             let _ = std::fs::remove_dir_all(&dest);
-            ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
@@ -3376,8 +3375,7 @@ pub async fn set_hand_secret(
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
-        return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Set in current process. Serialized through the process-global env
@@ -3822,7 +3820,7 @@ pub async fn hand_send_message(
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
@@ -3924,9 +3922,7 @@ pub async fn hand_get_session(
             )
         }
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
-        Err(e) => {
-            ApiErrorResponse::internal(format!("Failed to load session: {e}")).into_json_tuple()
-        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -4401,8 +4397,7 @@ pub async fn add_mcp_server(
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Trigger config reload
@@ -5220,8 +5215,7 @@ pub async fn get_supporting_file(
     let content = match std::fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to read file: {e}"))
-                .into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
     let (truncated, body) = if content.len() > MAX_BYTES {
@@ -6184,8 +6178,7 @@ pub async fn uninstall_extension(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
-        return ApiErrorResponse::internal(format!("Failed to update config: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Sync the in-memory config before reload_mcp_servers runs. Otherwise

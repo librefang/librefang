@@ -2563,7 +2563,7 @@ pub async fn kill_agent(
                 );
             }
             tracing::warn!("kill_agent failed for {id}: {e}");
-            ApiErrorResponse::internal(format!("Failed to kill agent {id}: {e}"))
+            ApiErrorResponse::internal_scrub(e)
                 .with_code("agent_kill_failed")
                 .into_response()
         }

@@ -506,7 +506,7 @@ pub async fn a2a_send_task(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
                 ),
-                None => ApiErrorResponse::internal(format!("Agent error: {e}")).into_json_tuple(),
+                None => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
             }
         }
     }
@@ -2129,9 +2129,7 @@ pub async fn comms_send(
             }
             (StatusCode::OK, Json(resp))
         }
-        Err(e) => {
-            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
-        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -2170,7 +2168,7 @@ pub async fn comms_task(
                 "task_id": task_id,
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(format!("Failed to post task: {e}")).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 

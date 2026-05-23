@@ -1942,7 +1942,7 @@ pub async fn run_migrate(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::internal(format!("Migration failed: {e}")).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
