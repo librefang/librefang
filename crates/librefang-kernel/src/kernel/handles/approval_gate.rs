@@ -275,10 +275,15 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // #5600: per-session approval cache. If this exact tool name has
         // already been approved earlier in the same session, skip the
         // prompt. Gated by `policy.cache_approvals_per_session`
-        // (default true). Hand-agent fast-path above already returned
-        // for that case, so this only fires for normal user-facing
-        // agents.
-        if policy.cache_approvals_per_session {
+        // (default true).
+        //
+        // SECURITY (RBAC M3, #3054): MUST be skipped when
+        // `deferred.force_human=true`. The user-policy gate flips
+        // `force_human` on every call that demanded human approval —
+        // honouring the session cache here would let the second call
+        // of a tool silently bypass the per-call approval that the
+        // RBAC M3 carve-out is designed to enforce.
+        if policy.cache_approvals_per_session && !deferred.force_human {
             if let Some(sid) = session_id {
                 if self
                     .governance

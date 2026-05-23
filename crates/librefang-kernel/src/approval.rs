@@ -1009,7 +1009,22 @@ impl ApprovalManager {
                 // operators who want strict per-call approval can opt
                 // out. Only populates on `Approved`; denials never
                 // auto-approve future calls.
-                if decision.is_approved() && policy.cache_approvals_per_session {
+                //
+                // SECURITY (RBAC M3, #3054): skip cache population when
+                // the underlying deferred call had `force_human=true`.
+                // That flag means the per-user policy demanded an
+                // explicit human approval on every call — caching the
+                // outcome would let future calls in the same session
+                // pick it up via `has_session_approval` and bypass the
+                // per-call requirement. Symmetric with the read-side
+                // guard in `LibreFangKernel::submit_tool_approval`.
+                let from_force_human = pending
+                    .deferred
+                    .as_ref()
+                    .map(|d| d.force_human)
+                    .unwrap_or(false);
+                if decision.is_approved() && policy.cache_approvals_per_session && !from_force_human
+                {
                     if let Some(sid) = pending.request.session_id.as_deref() {
                         self.remember_session_approval(sid, &pending.request.tool_name);
                     }
@@ -2181,6 +2196,32 @@ mod tests {
         assert!(
             !mgr.has_session_approval("sess-1", "mcp_jira_create"),
             "cache_approvals_per_session=false must keep the cache empty even on Approved"
+        );
+    }
+
+    /// RBAC M3 (#3054) regression guard for #5600.
+    ///
+    /// When a deferred tool call carries `force_human=true` the
+    /// per-user policy demanded an explicit human approval on every
+    /// invocation. The session cache MUST NOT capture that outcome —
+    /// otherwise the next call of the same tool in the same session
+    /// would hit `has_session_approval` and silently auto-approve,
+    /// defeating the RBAC M3 carve-out enforced in
+    /// `LibreFangKernel::submit_tool_approval`.
+    #[test]
+    fn resolve_approved_skips_cache_when_deferred_force_human() {
+        let mgr = default_manager();
+        let mut req = make_request("agent-x", "mcp_jira_create", 60);
+        req.session_id = Some("sess-1".to_string());
+        let id = req.id;
+        let mut deferred = make_deferred("agent-x");
+        deferred.force_human = true;
+        mgr.submit_request(req, deferred).expect("submit");
+        mgr.resolve(id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve");
+        assert!(
+            !mgr.has_session_approval("sess-1", "mcp_jira_create"),
+            "force_human=true approvals must NOT populate the session cache (RBAC M3 #3054)"
         );
     }
 
