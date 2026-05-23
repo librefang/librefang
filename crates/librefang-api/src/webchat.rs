@@ -118,8 +118,8 @@ fn embedded_dashboard_available() -> bool {
 fn embedded_only_mode() -> bool {
     // BossFang default: embedded-only=true unless explicitly opted out.
     // Check BOSSFANG_* first, fall back to LIBREFANG_* for back-compat.
-    let val = std::env::var(EMBEDDED_ONLY_ENV_BOSSFANG)
-        .or_else(|_| std::env::var(EMBEDDED_ONLY_ENV));
+    let val =
+        std::env::var(EMBEDDED_ONLY_ENV_BOSSFANG).or_else(|_| std::env::var(EMBEDDED_ONLY_ENV));
     match val.ok().as_deref() {
         Some(v) => {
             let n = v.trim().to_ascii_lowercase();

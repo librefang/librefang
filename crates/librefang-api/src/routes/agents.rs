@@ -6737,7 +6737,10 @@ async fn spawn_uar_agent(
         ),
         Err(e) => {
             tracing::warn!(error = %e, "UAR agent spawn failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
         }
     }
 }

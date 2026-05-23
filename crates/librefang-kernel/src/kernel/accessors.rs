@@ -1313,9 +1313,13 @@ impl LibreFangKernel {
             Some("sqlite") | Some("") => "sqlite".to_string(),
             None => {
                 #[cfg(feature = "surreal-backend")]
-                { "surreal".to_string() }
+                {
+                    "surreal".to_string()
+                }
                 #[cfg(not(feature = "surreal-backend"))]
-                { "sqlite".to_string() }
+                {
+                    "sqlite".to_string()
+                }
             }
             Some(other) => other.to_string(),
         }

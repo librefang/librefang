@@ -18,9 +18,9 @@ pub mod ollama;
 pub mod openai;
 pub mod qwen_code;
 pub mod token_rotation;
+pub(crate) mod trace_headers;
 #[cfg(feature = "uar-driver")]
 pub mod uar;
-pub(crate) mod trace_headers;
 pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};

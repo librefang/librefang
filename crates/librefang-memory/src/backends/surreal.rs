@@ -134,8 +134,8 @@ impl SurrealMemoryBackend {
 /// for an agent live inside the embedded `entry` JSON itself
 /// (`created_at` / `last_active`).
 fn row_for(entry: &AgentEntry) -> LibreFangResult<JsonValue> {
-    let entry_json =
-        serde_json::to_value(entry).map_err(|e| LibreFangError::serialization_msg(e.to_string()))?;
+    let entry_json = serde_json::to_value(entry)
+        .map_err(|e| LibreFangError::serialization_msg(e.to_string()))?;
     let updated_at_ms = chrono::Utc::now().timestamp_millis();
     Ok(serde_json::json!({
         "id": entry.id.0.to_string(),
@@ -149,7 +149,8 @@ fn entry_from_row(row: &JsonValue) -> LibreFangResult<AgentEntry> {
     let inner = row
         .get("entry")
         .ok_or_else(|| LibreFangError::serialization_msg("missing entry field"))?;
-    serde_json::from_value(inner.clone()).map_err(|e| LibreFangError::serialization_msg(e.to_string()))
+    serde_json::from_value(inner.clone())
+        .map_err(|e| LibreFangError::serialization_msg(e.to_string()))
 }
 
 #[async_trait]

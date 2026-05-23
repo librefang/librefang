@@ -179,7 +179,9 @@ impl PromptBackend for SurrealPromptStore {
                 .create::<Option<serde_json::Value>>(("prompt_versions", id))
                 .content(row)
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB create_version: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB create_version: {e}"))
+                })?;
             Ok(())
         })
     }
@@ -267,7 +269,9 @@ impl PromptBackend for SurrealPromptStore {
             self.db
                 .delete::<Option<serde_json::Value>>(("prompt_versions", id.to_string()))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB delete_version: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB delete_version: {e}"))
+                })?;
             Ok(())
         })
     }
@@ -283,10 +287,12 @@ impl PromptBackend for SurrealPromptStore {
                 )
                 .bind(("agent_id", agent.clone()))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB count_versions: {e}")))?;
-            let rows: Vec<serde_json::Value> = res
-                .take(0)
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB count_versions: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB count_versions: {e}"))
+                })?;
+            let rows: Vec<serde_json::Value> = res.take(0).map_err(|e| {
+                LibreFangError::memory_msg(format!("SurrealDB count_versions: {e}"))
+            })?;
             let count = rows
                 .first()
                 .and_then(|r| r.get("cnt"))
@@ -307,7 +313,9 @@ impl PromptBackend for SurrealPromptStore {
                 .bind(("agent_id", agent))
                 .bind(("excess", excess))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB prune_versions: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB prune_versions: {e}"))
+                })?;
             Ok(())
         })
     }
@@ -396,7 +404,9 @@ impl PromptBackend for SurrealPromptStore {
                 .create::<Option<serde_json::Value>>(("prompt_experiments", id))
                 .content(row)
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB create_experiment: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB create_experiment: {e}"))
+                })?;
             Ok(())
         })
     }
@@ -409,10 +419,12 @@ impl PromptBackend for SurrealPromptStore {
                 .query("SELECT * FROM prompt_experiments WHERE agent_id = $agent_id")
                 .bind(("agent_id", agent))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB list_experiments: {e}")))?;
-            let rows: Vec<serde_json::Value> = res
-                .take(0)
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB list_experiments: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB list_experiments: {e}"))
+                })?;
+            let rows: Vec<serde_json::Value> = res.take(0).map_err(|e| {
+                LibreFangError::memory_msg(format!("SurrealDB list_experiments: {e}"))
+            })?;
             Ok(rows.iter().filter_map(parse_experiment).collect())
         })
     }
@@ -423,7 +435,9 @@ impl PromptBackend for SurrealPromptStore {
                 .db
                 .select(("prompt_experiments", id.to_string()))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB get_experiment: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB get_experiment: {e}"))
+                })?;
             Ok(row.as_ref().and_then(parse_experiment))
         })
     }
@@ -489,7 +503,9 @@ impl PromptBackend for SurrealPromptStore {
                 .db
                 .select::<Option<serde_json::Value>>(("experiment_metrics", existing_id.clone()))
                 .await
-                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB record_request: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::memory_msg(format!("SurrealDB record_request: {e}"))
+                })?;
 
             if check.is_some() {
                 // Use type::thing() to construct the record reference without string interpolation

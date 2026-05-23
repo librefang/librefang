@@ -34,10 +34,7 @@ pub const DEPRECATED_VERSIONS: &[&str] = &[];
 /// clients pinned to the LibreFang vendor type don't break on the
 /// cutover. [`VENDOR_PREFIXES[0]`] is the canonical prefix new code
 /// should reach for; the parser tries every entry.
-const VENDOR_PREFIXES: &[&str] = &[
-    "application/vnd.bossfang.",
-    "application/vnd.librefang.",
-];
+const VENDOR_PREFIXES: &[&str] = &["application/vnd.bossfang.", "application/vnd.librefang."];
 
 // ---------------------------------------------------------------------------
 // ApiVersion enum

@@ -225,7 +225,9 @@ impl UsageBackend for SurrealUsageStore {
                     )
                     .bind(("agent_id", aid.0.to_string()))
                     .await
-                    .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}")))?
+                    .map_err(|e| {
+                        LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}"))
+                    })?
             } else {
                 self.db
                     .query(
@@ -237,7 +239,9 @@ impl UsageBackend for SurrealUsageStore {
                          FROM usage_events",
                     )
                     .await
-                    .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}")))?
+                    .map_err(|e| {
+                        LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}"))
+                    })?
             };
             let rows: Vec<serde_json::Value> = res
                 .take(0)
