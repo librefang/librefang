@@ -1456,6 +1456,7 @@ mod tests {
             totp_grace_period_secs: 300,
             totp_tools: Vec::new(),
             audit_retention_days: 90,
+            cache_approvals_per_session: true,
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
