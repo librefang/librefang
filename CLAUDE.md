@@ -52,9 +52,11 @@ giving defense in depth on top of the Claude Code PreToolUse layer.
   duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
   staged additions to `[Unreleased]` (#3400); `detect-secrets` scan against
   `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
-- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
-  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
-  generated SDKs are stale. Expected 30-90s on a warm cache.
+- `pre-push` — refuses direct pushes to `main` / `master` and exits in
+  &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
+  lives in CI rather than gating every push — see #4532 for the
+  rationale. Skip the branch guard for a maintainer hotfix with
+  `LIBREFANG_PREPUSH_SKIP=1`.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).
