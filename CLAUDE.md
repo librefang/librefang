@@ -68,6 +68,15 @@ hooks active and keeps them current with `git pull` automatically. The
 `session-start-worktree-check.sh` banner reminds you if it isn't configured
 yet.
 
+Also enable the orchestrator-file merge driver (prevents `.kbd-orchestrator/`
+conflicts from surfacing during `git rebase` / `git merge`):
+```bash
+git config merge.ours.driver true
+```
+`.gitattributes` declares `merge=ours` for all `.kbd-orchestrator/**/*.json`
+and `.kbd-orchestrator/**/*.md` files. Without the driver registered, git
+falls back to manual conflict resolution on those files.
+
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (31 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
