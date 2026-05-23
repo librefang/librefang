@@ -1,19 +1,33 @@
 {
-  "active_phase": "phase-2-rebrand-cleanup",
+  "active_phase": "phase-3-upstream-sync-and-ci-hardening",
   "active_change": null,
-  "last_updated": "2026-05-15T00:00:00Z",
-  "last_updated_by": "kbd-execute",
+  "last_updated": "2026-05-23T00:00:00Z",
+  "last_updated_by": "kbd-reflect",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-reflect phase-2-rebrand-cleanup",
-    "description": "M10 DONE (PR #20). All 3/3 Phase-2 changes complete. Run /kbd-reflect to produce phase reflection doc, summarize what was delivered vs plan, and identify any carryover for Phase 3."
+    "command": "/kbd-assess phase-3-upstream-sync-and-ci-hardening",
+    "description": "Phase 2 reflection complete. Start Phase 3 with an assessment: kreuzberg SSH/CI fix, upstream merge audit (PRs #21/#22 — 114 commits), gitattributes orchestrator merge strategy, execution.md tooling."
   },
-  "phase_progress": "Phase 2: 3/3 changes DONE (M8+M11, M9b, M10). Advance to /kbd-reflect.",
+  "phase_progress": "Phase 2: COMPLETE (reflection written). Phase 3: NOT STARTED.",
   "last_completed": {
-    "change_id": "m10-legacy-key-removal-planning",
-    "milestones": ["M10"],
-    "completed_at": "2026-05-15T00:00:00Z",
-    "pr": "https://github.com/GQAdonis/librefang/pull/20"
+    "change_id": "phase-2-rebrand-cleanup",
+    "phase_action": "kbd-reflect",
+    "completed_at": "2026-05-23T00:00:00Z",
+    "reflection_doc": ".kbd-orchestrator/phases/phase-2-rebrand-cleanup/reflection.md"
+  },
+  "phase_2_summary": {
+    "milestones_met": ["M8", "M9b", "M10", "M11"],
+    "prs": [
+      "https://github.com/GQAdonis/librefang/pull/18",
+      "https://github.com/GQAdonis/librefang/pull/19",
+      "https://github.com/GQAdonis/librefang/pull/20"
+    ],
+    "debt_carried_forward": [
+      "kreuzberg SSH URL blocks CI --all-features jobs",
+      "TODO(drop-legacy-key) scheduled v2026.8.x",
+      "execution.md gaps for m9b and m10",
+      "shellcheck pre-push hook DEFERRED"
+    ]
   }
 }
