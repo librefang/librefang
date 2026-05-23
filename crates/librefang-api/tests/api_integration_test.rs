@@ -2134,46 +2134,122 @@ async fn test_auth_disabled_when_no_key() {
 // Tool endpoints
 // ---------------------------------------------------------------------------
 
+// These tests run against the **full router** (`start_full_router`) so the
+// `/api/tools` reads flow through the production middleware stack: auth,
+// rate-limit, body-size, and request-logging. The old `start_test_server`
+// mock harness mounted no auth layer at all on `/api/tools`, so the
+// authentication boundary on these endpoints went completely untested
+// (first slice of the mock-router -> full-router migration tracked in
+// docs/issues/integration-tests-mock-router.md). `/api/tools` and
+// `/api/tools/{name}` are NOT in any `PUBLIC_ROUTES_*` allowlist
+// (middleware.rs), so once an api_key is configured an unauthenticated read
+// must be rejected — `test_list_tools_requires_auth` pins that contract,
+// which the mock harness silently allowed through.
+const TOOLS_API_KEY: &str = "tools-cluster-test-key";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_tools() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    let resp = client
-        .get(format!("{}/api/tools", server.base_url))
-        .send()
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["tools"].is_array());
     assert!(body["total"].as_u64().unwrap() > 0);
 }
 
+/// Coverage the mock harness could not provide: `/api/tools` is not in any
+/// public allowlist, so with an api_key configured an unauthenticated read
+/// must be rejected by the auth middleware (401), not served.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_tools_requires_auth() {
+    let harness = start_full_router(TOOLS_API_KEY).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_token = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", "Bearer wrong-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_found() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    // First list tools to get a known tool name
-    let resp = client
-        .get(format!("{}/api/tools", server.base_url))
-        .send()
+    // First list tools to get a known tool name.
+    let list_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_bytes = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
     let first_tool_name = body["tools"][0]["name"].as_str().unwrap().to_string();
 
-    // Now fetch that specific tool
-    let resp = client
-        .get(format!("{}/api/tools/{}", server.base_url, first_tool_name))
-        .send()
+    // Now fetch that specific tool.
+    let tool_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/tools/{first_tool_name}"))
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let tool: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tool_response.status(), StatusCode::OK);
+    let tool_bytes = axum::body::to_bytes(tool_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tool: serde_json::Value = serde_json::from_slice(&tool_bytes).unwrap();
     assert_eq!(tool["name"].as_str().unwrap(), first_tool_name);
     assert!(tool["description"].is_string());
     assert!(tool["input_schema"].is_object());
@@ -2181,20 +2257,26 @@ async fn test_get_tool_found() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_not_found() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    let resp = client
-        .get(format!(
-            "{}/api/tools/nonexistent_tool_xyz",
-            server.base_url
-        ))
-        .send()
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools/nonexistent_tool_xyz")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()

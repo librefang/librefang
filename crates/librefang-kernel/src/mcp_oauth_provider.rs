@@ -8,9 +8,85 @@ use async_trait::async_trait;
 use librefang_extensions::ExtensionError;
 use librefang_runtime::mcp_oauth::{McpOAuthError, McpOAuthProvider, OAuthTokens};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 use tracing::{debug, warn};
+
+/// Classified outcome of a token-endpoint refresh attempt
+/// (audit: `oauth-refresh-error-body-token-leak`, sub-finding "error
+/// classification").
+///
+/// Pre-fix, `try_refresh` returned `Result<OAuthTokens, String>` and
+/// `load_token` collapsed *every* failure — a 503 from the IdP, a DNS
+/// blip, a `invalid_grant` — into `Ok(None)`, which the connection layer
+/// reads as "no token stored → run the OAuth flow again". That throws
+/// away a still-valid refresh token on a transient outage and forces the
+/// operator to re-authorize for no reason.
+///
+/// This enum lets the caller act on the distinction:
+/// - [`Revoked`](RefreshError::Revoked) — the refresh token is dead
+///   (`400 invalid_grant`). The only outcome that should flip the server
+///   back to a re-auth prompt (`Ok(None)` from `load_token`).
+/// - [`Transient`](RefreshError::Transient) — a 5xx / timeout / network
+///   error. The refresh token is presumed still valid; the caller should
+///   keep it and retry later, NOT re-auth.
+/// - [`Permanent`](RefreshError::Permanent) — any other non-success
+///   (4xx that is not `invalid_grant`, malformed body, SSRF block,
+///   missing endpoint). Surfaced as an error so the caller does not
+///   silently discard the refresh token, but it is not a "retry later"
+///   signal.
+#[derive(Debug)]
+pub enum RefreshError {
+    /// `400 invalid_grant` — the refresh token has been revoked / expired
+    /// server-side. Re-authentication is required.
+    Revoked,
+    /// 5xx, request timeout, or transport error. Retry later; do not
+    /// discard the refresh token.
+    Transient(String),
+    /// Any other failure (non-`invalid_grant` 4xx, parse failure, SSRF
+    /// block, missing stored endpoint).
+    Permanent(String),
+}
+
+impl fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RefreshError::Revoked => write!(f, "refresh token revoked (invalid_grant)"),
+            RefreshError::Transient(msg) => write!(f, "transient refresh failure: {msg}"),
+            RefreshError::Permanent(msg) => write!(f, "permanent refresh failure: {msg}"),
+        }
+    }
+}
+
+/// Per-`server_url` single-flight locks for token refresh
+/// (audit: `oauth-refresh-error-body-token-leak`, sub-finding "concurrent
+/// refresh race").
+///
+/// Rotating-refresh-token providers (Google, GitHub Apps, Notion) issue a
+/// *new* refresh token on every refresh and invalidate the old one. If two
+/// `load_token` calls race past the expiry check, both POST the same
+/// (soon-to-be-invalidated) refresh token: the second request arrives with
+/// a token the provider just rotated away, the provider rejects it, and the
+/// whole session is burned even though it was valid.
+///
+/// `KernelOAuthProvider` is stateless and reconstructed per request
+/// (`mcp_auth.rs`, `skills.rs`, `boot.rs` all call `::new`), so the lock map
+/// must be process-global to serialize refreshes across every instance, not
+/// just within one. Keyed by `server_url` so distinct servers never contend.
+type RefreshLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+static REFRESH_LOCKS: LazyLock<RefreshLocks> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Get (or lazily create) the single-flight lock for `server_url`.
+fn refresh_lock_for(server_url: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = REFRESH_LOCKS.lock().expect("REFRESH_LOCKS mutex poisoned");
+    map.entry(server_url.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 /// Structured, sanitized view of an OAuth token-endpoint HTTP response
 /// suitable for `tracing` events.
@@ -86,6 +162,44 @@ pub fn redact_token_endpoint_response(
         content_type: content_type.map(str::to_owned),
         body_sha256_prefix: hex::encode(&digest[..8]),
         body_len: body.len(),
+    }
+}
+
+/// Classify a non-success token-endpoint refresh response (audit:
+/// `oauth-refresh-error-body-token-leak`, sub-finding "error classification").
+///
+/// - `400` with an `error: "invalid_grant"` body (RFC 6749 §5.2) → the
+///   refresh token is revoked / expired → [`RefreshError::Revoked`].
+/// - any `5xx` → [`RefreshError::Transient`] (retry; keep the refresh token).
+/// - everything else → [`RefreshError::Permanent`].
+///
+/// Only the short OAuth `error` code is extracted from the body — never the
+/// token-shaped fields. The carried message keeps just the status code so it
+/// can never leak a secret into a log or an `Err` returned upstream.
+fn classify_refresh_failure(status: reqwest::StatusCode, body: &str) -> RefreshError {
+    if status == reqwest::StatusCode::BAD_REQUEST && oauth_error_code(body) == Some("invalid_grant")
+    {
+        return RefreshError::Revoked;
+    }
+    if status.is_server_error() {
+        return RefreshError::Transient(format!("token endpoint returned HTTP {status}"));
+    }
+    RefreshError::Permanent(format!("token endpoint returned HTTP {status}"))
+}
+
+/// Extract the RFC 6749 §5.2 `error` code from a token-endpoint error body.
+///
+/// Returns the value of the top-level `"error"` string field (e.g.
+/// `"invalid_grant"`) when the body is JSON, otherwise `None`. The function
+/// reads only the `error` code; it never returns or logs `access_token` /
+/// `refresh_token` / `id_token` / `client_secret`.
+fn oauth_error_code(body: &str) -> Option<&'static str> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    match value.get("error")?.as_str()? {
+        // Map to a 'static str so a malicious body cannot smuggle an
+        // arbitrary (possibly token-shaped) string out of this helper.
+        "invalid_grant" => Some("invalid_grant"),
+        _ => Some("other"),
     }
 }
 
@@ -222,23 +336,32 @@ impl KernelOAuthProvider {
     }
 
     /// Try to refresh the access token using a stored refresh token.
+    ///
+    /// Returns a classified [`RefreshError`] on failure (audit:
+    /// `oauth-refresh-error-body-token-leak`). Only [`RefreshError::Revoked`]
+    /// (a `400 invalid_grant`) means the refresh token is dead and the caller
+    /// should re-authenticate; 5xx / timeout / transport failures are
+    /// [`RefreshError::Transient`] and the refresh token must be kept for a
+    /// later retry rather than discarded.
     async fn try_refresh(
         &self,
         server_url: &str,
         refresh_token: &str,
-    ) -> Result<OAuthTokens, String> {
+    ) -> Result<OAuthTokens, RefreshError> {
         let token_endpoint = self
             .vault_get_or_warn(&Self::vault_key(server_url, "token_endpoint"))
-            .ok_or_else(|| "No token_endpoint stored for refresh".to_string())?;
+            .ok_or_else(|| {
+                RefreshError::Permanent("No token_endpoint stored for refresh".to_string())
+            })?;
 
         // SSRF guard (#3623): re-validate the stored token_endpoint before
         // POSTing.  The stored value may predate policy tightening or have
         // been written by a compromised flow — always re-check before making
         // outbound requests.
         if let Err(reason) = librefang_runtime::mcp_oauth::is_ssrf_blocked_url(&token_endpoint) {
-            return Err(format!(
+            return Err(RefreshError::Permanent(format!(
                 "SSRF: token_endpoint rejected for refresh: {reason}"
-            ));
+            )));
         }
 
         let client_id = self.vault_get_or_warn(&Self::vault_key(server_url, "client_id"));
@@ -252,12 +375,22 @@ impl KernelOAuthProvider {
             params.push(("client_id", cid.clone()));
         }
 
-        let resp = client
-            .post(&token_endpoint)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| format!("Refresh token request failed: {e}"))?;
+        let resp = match client.post(&token_endpoint).form(&params).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // A transport-level failure (timeout, DNS, connection
+                // reset) leaves the refresh token untouched on the
+                // server, so it is still usable on the next attempt —
+                // classify as Transient so the caller retries instead of
+                // forcing a re-auth.
+                let msg = if e.is_timeout() {
+                    format!("refresh request timed out: {e}")
+                } else {
+                    format!("refresh request failed: {e}")
+                };
+                return Err(RefreshError::Transient(msg));
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -273,10 +406,7 @@ impl KernelOAuthProvider {
             // providers that echo session state on `invalid_grant`, or
             // adversarially, to plant secrets in operator logs). Never
             // emit the body verbatim — log a sanitized digest only, and
-            // surface a generic message to the caller. The caller's
-            // user-visible path already maps refresh errors to a
-            // re-auth prompt, so dropping the body here has no
-            // behavioural effect on the OAuth state machine.
+            // surface a generic message to the caller.
             let redacted = redact_token_endpoint_response(
                 status.as_u16(),
                 content_type.as_deref(),
@@ -286,15 +416,104 @@ impl KernelOAuthProvider {
                 redacted_response = %redacted,
                 "MCP OAuth token refresh failed (non-success status)",
             );
-            return Err(format!("Token refresh failed (HTTP {status})"));
+            // Classify the HTTP failure (audit: error classification):
+            //   400 invalid_grant → Revoked (re-auth)
+            //   5xx               → Transient (retry, keep refresh token)
+            //   anything else     → Permanent
+            // `invalid_grant` is detected from the parsed OAuth error code
+            // in the body (RFC 6749 §5.2), not the verbatim body — only the
+            // short error code is matched, never the token-shaped fields.
+            return Err(classify_refresh_failure(status, &body));
         }
 
-        let tokens: OAuthTokens = resp
-            .json()
+        resp.json::<OAuthTokens>()
             .await
-            .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
+            .map_err(|e| RefreshError::Permanent(format!("failed to parse refresh response: {e}")))
+    }
 
-        Ok(tokens)
+    /// True when an access token whose absolute `expires_at` (unix seconds)
+    /// is the given value should be refreshed. A 60-second skew matches the
+    /// historical near-expiry window so a token about to expire mid-request
+    /// is refreshed proactively.
+    fn is_expired(expires_at: i64) -> bool {
+        chrono::Utc::now().timestamp() >= expires_at - 60
+    }
+
+    /// Refresh an access token that the caller has determined is expired,
+    /// serialized per `server_url` (audit: `oauth-refresh-error-body-token-leak`,
+    /// single-flight).
+    ///
+    /// The single-flight lock collapses a thundering herd of concurrent
+    /// `load_token` calls that all saw the same expired token into one
+    /// network refresh. After acquiring the lock we **re-read `expires_at`
+    /// from the vault**: if a peer already refreshed while we waited, its
+    /// fresh access token is returned directly and no second refresh POST is
+    /// made — critical for rotating-refresh-token providers, where a second
+    /// POST would arrive with a refresh token the provider just invalidated.
+    ///
+    /// Outcome mapping (audit: error classification):
+    /// - refresh succeeds → `Ok(Some(new_access_token))`.
+    /// - [`RefreshError::Revoked`] → `Ok(None)` (the only re-auth signal).
+    /// - [`RefreshError::Transient`] / [`RefreshError::Permanent`] →
+    ///   `Err(McpOAuthError::RefreshFailed)` so the still-valid refresh token
+    ///   is kept rather than discarded.
+    async fn refresh_expired_token(
+        &self,
+        server_url: &str,
+    ) -> Result<Option<String>, McpOAuthError> {
+        let lock = refresh_lock_for(server_url);
+        let _guard = lock.lock().await;
+
+        // Single-flight recheck: a peer holding the lock before us may have
+        // already refreshed. Re-read `expires_at` and the access token from
+        // the vault and short-circuit if the token is now valid — this is
+        // what stops a second redundant (and, for rotating providers,
+        // session-burning) refresh POST.
+        if let Some(expires_at_str) =
+            self.vault_get_optional(&Self::vault_key(server_url, "expires_at"))?
+        {
+            if let Ok(expires_at) = expires_at_str.parse::<i64>() {
+                if !Self::is_expired(expires_at) {
+                    debug!(
+                        server = %server_url,
+                        "MCP OAuth token already refreshed by a concurrent caller; reusing it"
+                    );
+                    return self.vault_get_optional(&Self::vault_key(server_url, "access_token"));
+                }
+            }
+        }
+
+        let Some(refresh_token) =
+            self.vault_get_optional(&Self::vault_key(server_url, "refresh_token"))?
+        else {
+            // Expired with no refresh token to use — the OAuth flow must run.
+            return Ok(None);
+        };
+
+        match self.try_refresh(server_url, &refresh_token).await {
+            Ok(new_tokens) => {
+                if let Err(e) = self.store_tokens(server_url, new_tokens.clone()).await {
+                    warn!(error = %e, "Failed to store refreshed tokens");
+                }
+                Ok(Some(new_tokens.access_token))
+            }
+            // Revoked is the ONLY outcome that flips the server back to a
+            // re-auth prompt: the refresh token is dead, so the cached state
+            // is worthless and the OAuth flow must run again.
+            Err(RefreshError::Revoked) => {
+                warn!(server = %server_url, "MCP OAuth refresh token revoked; re-auth required");
+                Ok(None)
+            }
+            // Transient / Permanent: do NOT discard the refresh token.
+            // Surface as an error so the connection layer proceeds without a
+            // bearer header (the server may 401), keeping the stored refresh
+            // token intact for a later retry instead of forcing a re-auth on
+            // a transient outage.
+            Err(e @ (RefreshError::Transient(_) | RefreshError::Permanent(_))) => {
+                warn!(server = %server_url, error = %e, "MCP OAuth token refresh failed (keeping refresh token)");
+                Err(McpOAuthError::RefreshFailed(e.to_string()))
+            }
+        }
     }
 
     /// RFC 7591 Dynamic Client Registration.
@@ -402,32 +621,9 @@ impl McpOAuthProvider for KernelOAuthProvider {
             self.vault_get_optional(&Self::vault_key(server_url, "expires_at"))?
         {
             if let Ok(expires_at) = expires_at_str.parse::<i64>() {
-                let now = chrono::Utc::now().timestamp();
-                if now >= expires_at - 60 {
+                if Self::is_expired(expires_at) {
                     debug!(server = %server_url, "MCP OAuth token expired or near expiry, attempting refresh");
-
-                    if let Some(refresh_token) =
-                        self.vault_get_optional(&Self::vault_key(server_url, "refresh_token"))?
-                    {
-                        match self.try_refresh(server_url, &refresh_token).await {
-                            Ok(new_tokens) => {
-                                if let Err(e) =
-                                    self.store_tokens(server_url, new_tokens.clone()).await
-                                {
-                                    warn!(error = %e, "Failed to store refreshed tokens");
-                                }
-                                return Ok(Some(new_tokens.access_token));
-                            }
-                            Err(e) => {
-                                // Refresh-network/HTTP failure is NOT a vault
-                                // storage error — surface as Ok(None) so the
-                                // dashboard re-runs the OAuth flow.
-                                warn!(error = %e, "Token refresh failed");
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    return Ok(None);
+                    return self.refresh_expired_token(server_url).await;
                 }
             }
         }
@@ -1159,6 +1355,194 @@ mod tests {
         assert!(
             returned_err.contains("HTTP 400"),
             "DCR returned Err should still carry status; got: {returned_err}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Audit: `oauth-refresh-error-body-token-leak` — error classification
+    // -------------------------------------------------------------------
+
+    /// `400 invalid_grant` is the only failure that means the refresh token
+    /// is dead. It must classify as `Revoked` so the caller re-authenticates.
+    #[test]
+    fn classify_400_invalid_grant_is_revoked() {
+        let body =
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#;
+        let r = classify_refresh_failure(reqwest::StatusCode::BAD_REQUEST, body);
+        assert!(
+            matches!(r, RefreshError::Revoked),
+            "400 invalid_grant must be Revoked, got {r:?}"
+        );
+    }
+
+    /// A 5xx is a server-side hiccup; the refresh token is presumed valid.
+    /// Must classify as `Transient` so the caller retries instead of
+    /// discarding the refresh token.
+    #[test]
+    fn classify_503_is_transient() {
+        let r = classify_refresh_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, "");
+        assert!(
+            matches!(r, RefreshError::Transient(_)),
+            "503 must be Transient, got {r:?}"
+        );
+        let r = classify_refresh_failure(reqwest::StatusCode::BAD_GATEWAY, "");
+        assert!(
+            matches!(r, RefreshError::Transient(_)),
+            "502 must be Transient, got {r:?}"
+        );
+    }
+
+    /// A non-`invalid_grant` 4xx (e.g. `invalid_client`) is not a retryable
+    /// outage and not a revoked refresh token — it must classify as
+    /// `Permanent`, NOT collapse to a re-auth.
+    #[test]
+    fn classify_400_other_error_is_permanent() {
+        let body = r#"{"error":"invalid_client"}"#;
+        let r = classify_refresh_failure(reqwest::StatusCode::BAD_REQUEST, body);
+        assert!(
+            matches!(r, RefreshError::Permanent(_)),
+            "400 invalid_client must be Permanent, got {r:?}"
+        );
+        // A bare 401/403 with no parseable OAuth error code is Permanent too.
+        let r = classify_refresh_failure(reqwest::StatusCode::UNAUTHORIZED, "not json");
+        assert!(
+            matches!(r, RefreshError::Permanent(_)),
+            "401 with non-JSON body must be Permanent, got {r:?}"
+        );
+    }
+
+    /// The classified error's `Display` carries only the HTTP status — it
+    /// must never echo a token-shaped value smuggled in the error body.
+    #[test]
+    fn classify_error_message_does_not_leak_body() {
+        let body = r#"{"error":"invalid_grant","access_token":"super-secret-12345","refresh_token":"rt-9999"}"#;
+        let r = classify_refresh_failure(reqwest::StatusCode::BAD_REQUEST, body);
+        let shown = r.to_string();
+        for secret in ["super-secret-12345", "rt-9999"] {
+            assert!(
+                !shown.contains(secret),
+                "RefreshError Display leaked '{secret}': {shown}"
+            );
+        }
+    }
+
+    /// `oauth_error_code` extracts only the short RFC 6749 §5.2 `error` code,
+    /// never the surrounding token-shaped fields, and returns a `'static`
+    /// string so a hostile body cannot smuggle an arbitrary value out.
+    #[test]
+    fn oauth_error_code_extracts_only_the_code() {
+        let body = r#"{"error":"invalid_grant","access_token":"leak"}"#;
+        assert_eq!(oauth_error_code(body), Some("invalid_grant"));
+        // Any non-invalid_grant code collapses to the constant "other".
+        assert_eq!(
+            oauth_error_code(r#"{"error":"invalid_client"}"#),
+            Some("other")
+        );
+        // Non-JSON / no error field → None.
+        assert_eq!(oauth_error_code("not json"), None);
+        assert_eq!(oauth_error_code(r#"{"foo":"bar"}"#), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Audit: `oauth-refresh-error-body-token-leak` — single-flight
+    // -------------------------------------------------------------------
+
+    /// The per-`server_url` single-flight lock map returns the *same* lock
+    /// instance for repeated lookups of one URL, and *distinct* locks for
+    /// distinct URLs. Two concurrent refreshers of the same server therefore
+    /// serialize on one lock (only one reaches the network at a time), while
+    /// different servers never contend.
+    #[test]
+    fn refresh_lock_is_shared_per_server_and_isolated_across_servers() {
+        let a1 = refresh_lock_for("https://server-a.example/mcp");
+        let a2 = refresh_lock_for("https://server-a.example/mcp");
+        let b1 = refresh_lock_for("https://server-b.example/mcp");
+
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "same server_url must yield the same lock so refreshes single-flight"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &b1),
+            "distinct server_urls must yield distinct locks so they don't contend"
+        );
+    }
+
+    /// Single-flight recheck: when a peer has already refreshed the token
+    /// while this caller waited on the lock, `load_token` returns the freshly
+    /// stored access token directly and makes NO refresh request.
+    ///
+    /// We exercise the real `load_token` path. The vault holds a *valid*
+    /// (non-expired) `expires_at` plus an `access_token`, but no
+    /// `token_endpoint` / `refresh_token` — so if the recheck branch were
+    /// ever skipped and a refresh were attempted, `try_refresh` would fail
+    /// (no endpoint) and `load_token` would NOT return the stored token.
+    /// Returning the stored token is the proof that the recheck short-circuit
+    /// fired and the network was never touched.
+    #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
+    async fn refresh_recheck_returns_already_refreshed_token_without_network() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
+        let provider = KernelOAuthProvider::new(home);
+        let server_url = "https://recheck.example/mcp";
+
+        // Seed a token that is comfortably valid (expires in 1 hour). No
+        // token_endpoint / refresh_token stored: any refresh attempt would
+        // fail, so a returned token can only come from the valid-token path.
+        let future = chrono::Utc::now().timestamp() + 3600;
+        provider
+            .vault_set(
+                &KernelOAuthProvider::vault_key(server_url, "access_token"),
+                "fresh-token",
+            )
+            .expect("seed access_token");
+        provider
+            .vault_set(
+                &KernelOAuthProvider::vault_key(server_url, "expires_at"),
+                &future.to_string(),
+            )
+            .expect("seed expires_at");
+
+        let token = provider.load_token(server_url).await.expect("load_token");
+        assert_eq!(
+            token,
+            Some("fresh-token".to_string()),
+            "a non-expired token must be returned without any refresh attempt"
+        );
+    }
+
+    /// Counterpart sanity check: when the stored token is genuinely expired
+    /// and there is no refresh token, `load_token` returns `Ok(None)` (the
+    /// OAuth flow must run) — it does NOT return the stale access token.
+    #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
+    async fn load_token_expired_without_refresh_token_yields_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
+        let provider = KernelOAuthProvider::new(home);
+        let server_url = "https://expired.example/mcp";
+
+        let past = chrono::Utc::now().timestamp() - 3600;
+        provider
+            .vault_set(
+                &KernelOAuthProvider::vault_key(server_url, "access_token"),
+                "stale-token",
+            )
+            .expect("seed access_token");
+        provider
+            .vault_set(
+                &KernelOAuthProvider::vault_key(server_url, "expires_at"),
+                &past.to_string(),
+            )
+            .expect("seed expires_at");
+
+        let token = provider.load_token(server_url).await.expect("load_token");
+        assert_eq!(
+            token, None,
+            "expired token with no refresh token must yield Ok(None), not the stale token"
         );
     }
 }

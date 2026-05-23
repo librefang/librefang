@@ -515,17 +515,40 @@ impl CronScheduler {
         count
     }
 
-    /// Warn about cron fires that were missed while the daemon was offline.
+    /// Warn about cron fires that were missed while the daemon was offline,
+    /// and coalesce them into a single catch-up fire.
     ///
     /// Should be called immediately after [`Self::load`] on daemon startup.
     /// Any enabled job whose `next_run` is more than 60 seconds in the past
     /// is considered to have missed at least one fire during downtime. The
-    /// method logs a warning with the estimated missed-fire count and
-    /// immediately reschedules the job to fire on the next tick (by setting
-    /// `next_run = now`) so the scheduler can catch up without further delay.
+    /// method logs a warning that includes the estimated missed-fire count
+    /// AND the coalesce timestamp, then reschedules the job to fire on the
+    /// next tick (by setting `next_run = now`) so the scheduler runs **one**
+    /// catch-up fire — not N.
     ///
-    /// The 60-second grace window prevents false positives for jobs that
-    /// were just about to fire when the daemon stopped.
+    /// # Policy: coalesce, not N-replay
+    ///
+    /// The alternative would be "genuine N-replay": iterate `missed_count`
+    /// times and produce one fire per missed slot, each with its own
+    /// `SessionId::for_cron_run(agent, "<job_id>:<scheduled>")` so
+    /// `session_mode = "new"` jobs see isolated catch-up sessions.
+    ///
+    /// We deliberately do NOT do that. A daemon offline for 10 hours with a
+    /// 1-minute job would replay 600 fires on restart, amplifying boot load
+    /// into a self-DoS. Coalescing into a single fire bounds the catch-up
+    /// cost at one fire per job regardless of downtime, which is safer by
+    /// default. The cost is loss of fidelity: `session_mode = "new"` jobs
+    /// observe only the final coalesced fire on restart, not each missed
+    /// slot. Operators who need per-slot replay should design their action
+    /// to be idempotent over a time range (e.g. read & process all unhandled
+    /// records since `last_run`).
+    ///
+    /// The log line includes `missed_count` and `coalesce_time` as
+    /// structured fields so this trade-off is visible in production logs
+    /// without grepping source. The 60-second grace window prevents false
+    /// positives for jobs that were just about to fire when the daemon
+    /// stopped — in that case `missed_count` would be 1 and the message
+    /// drops the "coalesced" framing.
     pub fn warn_missed_fires(&self) {
         let now = Utc::now();
         for mut entry in self.jobs.iter_mut() {
@@ -550,13 +573,25 @@ impl CronScheduler {
                         }
                     };
                     let missed_count = (overdue_secs / interval_secs).max(1);
-                    warn!(
-                        agent_id = %meta.job.agent_id,
-                        job_id = %meta.job.id,
-                        missed_count,
-                        overdue_secs,
-                        "cron job missed fires during daemon downtime; firing now"
-                    );
+                    if missed_count > 1 {
+                        warn!(
+                            agent_id = %meta.job.agent_id,
+                            job_id = %meta.job.id,
+                            missed_count,
+                            overdue_secs,
+                            coalesce_time = %now.to_rfc3339(),
+                            "cron job missed {missed_count} fires during daemon \
+                             downtime; coalesced into 1 catch-up at {now}",
+                        );
+                    } else {
+                        warn!(
+                            agent_id = %meta.job.agent_id,
+                            job_id = %meta.job.id,
+                            missed_count,
+                            overdue_secs,
+                            "cron job missed 1 fire during daemon downtime; firing now",
+                        );
+                    }
                     // Reschedule to fire immediately on the next tick.
                     meta.job.next_run = Some(now);
                 }
@@ -675,17 +710,23 @@ impl CronScheduler {
     /// The function works by walking `next_run` backwards in time: for
     /// each enabled job whose `last_run` is older than `since`, it counts
     /// how many times the schedule would have fired in `[since, now)` and
-    /// emits one warning per missed fire.  For `Every` schedules this is
-    /// an exact count; for `Cron` expression schedules it is approximate
-    /// (iterates up to 1440 times per job to avoid pathological inputs).
-    /// `At` one-shot jobs that have already passed are silently ignored
-    /// (they would have been removed on successful execution anyway).
+    /// emits ONE warning per job summarising the missed-fire count.  For
+    /// `Every` schedules this is an exact count; for `Cron` expression
+    /// schedules it is approximate (iterates up to 1440 times per job to
+    /// avoid pathological inputs).  `At` one-shot jobs that have already
+    /// passed are silently ignored (they would have been removed on
+    /// successful execution anyway).
     ///
     /// Distinct from [`Self::warn_missed_fires`] (no-arg), which both
     /// logs and reschedules overdue jobs for catch-up firing. Both were
     /// independently introduced as fixes for #3828 in PRs #3906 and
     /// #3923 and ended up colliding on the same name; this one is the
     /// since-windowed log-only variant.
+    ///
+    /// Coalesce semantics — see [`Self::warn_missed_fires`]: even when this
+    /// function reports `missed = N`, the runtime catch-up is a single
+    /// fire, not N. The log wording reflects that so operators do not
+    /// over-estimate observable catch-up behaviour.
     pub fn log_missed_fires_since(&self, since: chrono::DateTime<Utc>) {
         let now = Utc::now();
         if since >= now {
@@ -714,15 +755,27 @@ impl CronScheduler {
                 missed_count += 1;
                 cursor = compute_next_run_after(&meta.job.schedule, cursor);
             }
-            if missed_count > 0 {
+            if missed_count > 1 {
                 warn!(
                     job = %meta.job.name,
                     job_id = %meta.job.id,
                     agent = %meta.job.agent_id,
                     missed = missed_count,
                     since = %since.format("%Y-%m-%dT%H:%M:%SZ"),
-                    "Cron: missed {} fire(s) while daemon was down",
-                    missed_count
+                    coalesce_time = %now.to_rfc3339(),
+                    "Cron: missed {} fires while daemon was down; coalesced \
+                     into 1 catch-up at {}",
+                    missed_count,
+                    now.to_rfc3339(),
+                );
+            } else if missed_count == 1 {
+                warn!(
+                    job = %meta.job.name,
+                    job_id = %meta.job.id,
+                    agent = %meta.job.agent_id,
+                    missed = missed_count,
+                    since = %since.format("%Y-%m-%dT%H:%M:%SZ"),
+                    "Cron: missed 1 fire while daemon was down",
                 );
             }
         }
@@ -2726,5 +2779,217 @@ mod tests {
         };
         let next_utc = compute_next_run_after(&sched_utc, after);
         assert!(next_utc > after);
+    }
+
+    // -- warn_missed_fires: coalesce policy ---------------------------------
+    //
+    // The cron subsystem catches up missed fires by setting `next_run = now`
+    // — that produces exactly ONE catch-up fire on the next scheduler tick,
+    // regardless of how many slots were missed during downtime. The log
+    // wording must reflect that. See `warn_missed_fires` rustdoc for the
+    // rationale (N-replay would amplify a long outage into a self-DoS).
+
+    /// In-memory tracing writer used by the coalesce-log assertions.
+    /// Captures formatted log lines from a scoped subscriber so we can
+    /// `String::contains` against them.
+    #[derive(Clone)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Install a scoped tracing subscriber on the current thread, run `f`,
+    /// then return the captured log output as a String.
+    fn capture_logs<F: FnOnce()>(f: F) -> String {
+        use tracing_subscriber::layer::SubscriberExt;
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = LogBuf(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+        f();
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_warn_missed_fires_coalesces_many_into_one_fire_with_log() {
+        // Job runs every 60s; daemon was offline ~5 cycles (300s). The audit
+        // contract: exactly one catch-up fire, and the log line surfaces the
+        // missed count AND the coalesce timestamp so operators see the
+        // trade-off without grepping source.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::Every { every_secs: 60 };
+        let id = sched.add_job(job, false).unwrap();
+        // Force next_run 5 cycles + a safety margin into the past so the
+        // 60-second grace window is comfortably crossed.
+        if let Some(mut meta) = sched.jobs.get_mut(&id) {
+            meta.job.next_run = Some(Utc::now() - Duration::seconds(60 * 5 + 30));
+        }
+
+        let logs = capture_logs(|| sched.warn_missed_fires());
+
+        // Behaviour: exactly one fire scheduled (next_run is now-ish, not in
+        // the past). The scheduler will run it on the next tick — one fire,
+        // not N.
+        let meta = sched.get_meta(id).unwrap();
+        let next_run = meta.job.next_run.expect("next_run rescheduled");
+        let drift = (Utc::now() - next_run).num_seconds().abs();
+        assert!(
+            drift <= 2,
+            "warn_missed_fires must reschedule to ~now (single catch-up), \
+             got next_run drift = {drift}s"
+        );
+
+        // due_jobs() should hand out exactly one entry — the coalesced
+        // catch-up fire, not N entries for each missed slot.
+        let due = sched.due_jobs();
+        assert_eq!(
+            due.len(),
+            1,
+            "coalesce policy: missed N slots → ONE catch-up fire, not N. \
+             got {} due entries",
+            due.len()
+        );
+
+        // Log: must contain both the coalesce framing and a structured
+        // missed_count >= 5 so the operator can see how much was dropped.
+        assert!(
+            logs.contains("coalesced into 1 catch-up"),
+            "log must explain coalesce semantics; got:\n{logs}"
+        );
+        assert!(
+            logs.contains("missed_count="),
+            "log must carry structured missed_count field; got:\n{logs}"
+        );
+        assert!(
+            logs.contains("coalesce_time="),
+            "log must carry structured coalesce_time field; got:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn test_warn_missed_fires_zero_missed_is_noop() {
+        // A job whose next_run is within the 60s grace window must NOT be
+        // logged or rescheduled — that case is "daemon happened to start
+        // right before a fire", which is normal operation, not catch-up.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let job = make_job(agent);
+        let id = sched.add_job(job, false).unwrap();
+        // Job's next_run is ~1 hour in the future (from add_job's
+        // compute_next_run for Every { 3600 }); nothing is missed.
+        let before = sched.get_meta(id).unwrap().job.next_run;
+
+        let logs = capture_logs(|| sched.warn_missed_fires());
+
+        let after = sched.get_meta(id).unwrap().job.next_run;
+        assert_eq!(
+            before, after,
+            "no overdue job → next_run must not be touched"
+        );
+        assert!(
+            !logs.contains("missed") && !logs.contains("coalesced"),
+            "no missed fires → no log; got:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn test_warn_missed_fires_single_missed_skips_coalesce_framing() {
+        // missed_count == 1 is the "barely overdue" case — daemon was down
+        // for one cycle. The coalesce framing only makes sense for N > 1;
+        // for N == 1 the log should say "missed 1 fire" plainly so
+        // operators are not misled into thinking the system dropped extras.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::Every { every_secs: 3600 };
+        let id = sched.add_job(job, false).unwrap();
+        // 90 seconds in the past: past the 60s grace window, but well under
+        // one 3600s cycle → missed_count = 1.
+        if let Some(mut meta) = sched.jobs.get_mut(&id) {
+            meta.job.next_run = Some(Utc::now() - Duration::seconds(90));
+        }
+
+        let logs = capture_logs(|| sched.warn_missed_fires());
+
+        // Still exactly one catch-up fire (the behaviour is the same for
+        // N==1; only the wording differs).
+        let due = sched.due_jobs();
+        assert_eq!(due.len(), 1);
+
+        assert!(
+            logs.contains("missed 1 fire"),
+            "N==1 should use singular framing; got:\n{logs}"
+        );
+        assert!(
+            !logs.contains("coalesced into 1 catch-up"),
+            "N==1 must NOT use coalesce framing (no extras were dropped); got:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn test_warn_missed_fires_skips_disabled_jobs() {
+        // Disabled jobs must not log a missed-fire warning even if their
+        // next_run is in the past — they were intentionally turned off, not
+        // missed.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::Every { every_secs: 60 };
+        let id = sched.add_job(job, false).unwrap();
+        sched.set_enabled(id, false).unwrap();
+        if let Some(mut meta) = sched.jobs.get_mut(&id) {
+            meta.job.next_run = Some(Utc::now() - Duration::seconds(600));
+        }
+
+        let logs = capture_logs(|| sched.warn_missed_fires());
+
+        assert!(
+            !logs.contains("coalesced") && !logs.contains("missed"),
+            "disabled jobs must be silent; got:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn test_log_missed_fires_since_coalesces_log_for_many_missed() {
+        // Sibling log-only function: behaviour is "do NOT fire" (the runtime
+        // catch-up is `warn_missed_fires`'s job, not this one's), but its
+        // log wording must align so operators see the same coalesce story
+        // regardless of which startup path produced it.
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.schedule = CronSchedule::Every { every_secs: 60 };
+        sched.add_job(job, false).unwrap();
+
+        let since = Utc::now() - Duration::seconds(60 * 5 + 30);
+        let logs = capture_logs(|| sched.log_missed_fires_since(since));
+
+        assert!(
+            logs.contains("coalesced into 1 catch-up"),
+            "log_missed_fires_since must use the same coalesce wording; got:\n{logs}"
+        );
+        assert!(
+            logs.contains("missed="),
+            "structured `missed=` field must be present; got:\n{logs}"
+        );
     }
 }

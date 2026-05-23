@@ -32,6 +32,7 @@ use crate::types;
         routes::config_schema,
         routes::config_set,
         routes::config_reload,
+        routes::export_config,
         routes::quick_init,
         routes::security_status,
         routes::shutdown,
@@ -42,6 +43,7 @@ use crate::types;
         routes::get_profile,
         routes::list_agent_templates,
         routes::get_agent_template,
+        routes::get_agent_template_toml,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
@@ -114,6 +116,17 @@ use crate::types;
         routes::install_skill,
         routes::uninstall_skill,
         routes::create_skill,
+        routes::get_skill_detail,
+        routes::get_supporting_file,
+        routes::list_skill_registry,
+        routes::reload_skills,
+        // Skill evolution (write / patch / rollback)
+        routes::evolve_write_file,
+        routes::evolve_remove_file,
+        routes::evolve_update_skill,
+        routes::evolve_patch_skill,
+        routes::evolve_delete_skill,
+        routes::evolve_rollback_skill,
         // Skill workshop pending review (#3328)
         routes::list_pending_candidates,
         routes::show_pending_candidate,
@@ -134,14 +147,17 @@ use crate::types;
         routes::install_hand,
         routes::list_active_hands,
         routes::get_hand,
+        routes::get_hand_manifest,
         routes::activate_hand,
         routes::check_hand_deps,
         routes::install_hand_deps,
         routes::get_hand_settings,
         routes::update_hand_settings,
+        routes::set_hand_secret,
         routes::pause_hand,
         routes::resume_hand,
         routes::deactivate_hand,
+        routes::uninstall_hand,
         routes::hand_stats,
         routes::hand_instance_browser,
         routes::reload_hands,
@@ -158,6 +174,12 @@ use crate::types;
         routes::mcp_health_handler,
         routes::reload_mcp_handler,
         routes::list_mcp_taint_rules,
+        routes::patch_mcp_server_taint,
+
+        // ── MCP Server OAuth (UI-driven PKCE flow) ──
+        routes::auth_start,
+        routes::auth_status,
+        routes::auth_revoke,
 
         // ── Extensions (dashboard-friendly aliases over MCP store) ──
         routes::list_extensions,
@@ -207,12 +229,22 @@ use crate::types;
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,
+        routes::get_workflow,
         routes::create_workflow,
         routes::update_workflow,
         routes::delete_workflow,
         routes::run_workflow,
+        routes::dry_run_workflow,
         routes::list_workflow_runs,
+        routes::get_workflow_run,
+        routes::cancel_workflow_run,
+        routes::pause_workflow_run,
+        routes::resume_workflow_run,
+        routes::operator_action_workflow_run,
         routes::save_workflow_as_template,
+        routes::list_workflow_templates,
+        routes::get_workflow_template,
+        routes::instantiate_template,
         routes::list_triggers,
         routes::create_trigger,
         routes::get_trigger,
@@ -226,6 +258,7 @@ use crate::types;
         routes::run_schedule,
         routes::list_cron_jobs,
         routes::create_cron_job,
+        routes::get_cron_job,
         routes::delete_cron_job,
         routes::update_cron_job,
         routes::toggle_cron_job,
@@ -238,6 +271,7 @@ use crate::types;
         routes::set_session_label,
         routes::patch_session_model,
         routes::find_session_by_label,
+        routes::search_sessions,
         routes::session_cleanup,
 
         // ── Budget / Usage ──
@@ -248,9 +282,12 @@ use crate::types;
         routes::update_agent_budget,
         routes::user_budget_ranking,
         routes::user_budget_detail,
+        routes::update_user_budget,
+        routes::delete_user_budget,
         routes::usage_stats,
         routes::usage_summary,
         routes::usage_by_model,
+        routes::usage_by_model_performance,
         routes::usage_daily,
 
         // ── Auto-Dream (background memory consolidation) ──
@@ -267,6 +304,12 @@ use crate::types;
         routes::users::delete_user,
         routes::users::import_users,
         routes::users::rotate_user_key,
+        routes::users::get_user_policy,
+        routes::users::update_user_policy,
+
+        // ── Authorization (RBAC checks) ──
+        routes::check,
+        routes::effective_permissions,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -283,8 +326,10 @@ use crate::types;
         routes::memory_add,
         routes::memory_update,
         routes::memory_delete,
+        routes::memory_bulk_delete,
         routes::memory_stats,
         routes::memory_list_agent,
+        routes::memory_count_agent,
         routes::memory_reset_agent,
         routes::memory_clear_level,
         routes::memory_search_agent,
@@ -293,8 +338,13 @@ use crate::types;
         routes::memory_history,
         routes::memory_consolidate,
         routes::memory_cleanup,
+        routes::memory_decay,
         routes::memory_export_agent,
         routes::memory_import_agent,
+        routes::memory_query_relations,
+        routes::memory_store_relations,
+        routes::memory_config_get,
+        routes::memory_config_patch,
 
         // ── Audit / Logs ──
         routes::audit_recent,
@@ -305,10 +355,23 @@ use crate::types;
 
         // ── Approvals ──
         routes::list_approvals,
+        routes::approval_count,
         routes::create_approval,
         routes::get_approval,
         routes::approve_request,
         routes::reject_request,
+        routes::modify_request,
+        routes::batch_resolve,
+        routes::list_approvals_for_session,
+        routes::approve_all_for_session,
+        routes::reject_all_for_session,
+        routes::audit_log,
+
+        // ── Goals ──
+        routes::list_goal_templates,
+
+        // ── Inbox ──
+        routes::inbox_status,
 
         // ── Webhooks ──
         routes::webhook_wake,
@@ -336,6 +399,7 @@ use crate::types;
         routes::list_peers,
         routes::get_peer,
         routes::network_status,
+        routes::network_trusted_peers,
         routes::comms_topology,
         routes::comms_events,
         routes::comms_events_stream,
@@ -346,6 +410,7 @@ use crate::types;
         routes::a2a_list_external_agents,
         routes::a2a_get_external_agent,
         routes::a2a_discover_external,
+        routes::a2a_approve_external,
         routes::a2a_send_external,
         routes::a2a_external_task_status,
         routes::a2a_agent_card,
@@ -353,6 +418,34 @@ use crate::types;
         routes::a2a_send_task,
         routes::a2a_get_task,
         routes::a2a_cancel_task,
+
+        // ── Plugins ──
+        routes::list_plugins,
+        routes::get_plugin,
+        routes::install_plugin,
+        routes::uninstall_plugin,
+        routes::upgrade_plugin,
+        routes::enable_plugin,
+        routes::disable_plugin,
+        routes::reload_plugin,
+        routes::prewarm_plugin,
+        routes::plugin_status,
+        routes::plugin_env,
+        routes::plugin_advanced_config,
+        routes::plugin_doctor,
+        routes::lint_plugin,
+        routes::sign_plugin,
+        routes::scaffold_plugin,
+        routes::install_plugin_deps,
+        routes::test_plugin_hook,
+        routes::list_plugin_registries,
+        // Context engine (plugin-backed)
+        routes::context_engine_config,
+        routes::context_engine_chain,
+        routes::context_engine_health,
+        routes::context_engine_metrics,
+        routes::context_engine_traces,
+        routes::context_engine_sandbox_policy,
 
         // ── MCP HTTP ──
         routes::mcp_http,
