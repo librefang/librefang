@@ -691,8 +691,16 @@ pub fn build_reload_plan_with_caps(
             old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
             "max_concurrent_bg_llm",
         );
+        // external_auth IdP-identity changes (enabled / issuer_url / per-provider
+        // issuer+jwks) are hot-reloaded above via `ReloadExternalAuth` (#5594) —
+        // they evict the JWKS/discovery caches without a restart. Only a NON-IdP
+        // external_auth change (e.g. session_ttl, allowed_domains, scopes) has no
+        // hot path wired, so it still requires a restart. Without this guard the
+        // backfill double-classified IdP changes as both hot AND restart, which
+        // regressed `test_external_auth_issuer_url_change_evicts_oauth_caches`.
         restart_if_changed(
-            field_changed(&old.external_auth, &new.external_auth),
+            field_changed(&old.external_auth, &new.external_auth)
+                && !external_auth_idp_changed(&old.external_auth, &new.external_auth),
             "external_auth",
         );
         restart_if_changed(
