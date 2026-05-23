@@ -274,7 +274,7 @@ fn is_safe_asset_path(path: &str) -> bool {
     // separator on Windows; on Unix it's a legal filename character but
     // a dashboard asset would never legitimately contain one.
     let mut saw_segment = false;
-    for seg in path.split(|c| c == '/' || c == '\\') {
+    for seg in path.split(['/', '\\']) {
         if seg.is_empty() {
             // Empty segments come from leading/trailing/repeated separators;
             // they're benign in URLs ("/a//b" canonicalizes to "/a/b") but

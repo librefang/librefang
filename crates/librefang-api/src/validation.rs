@@ -465,10 +465,10 @@ fn canonicalize_nonexistent(input: &std::path::Path) -> std::io::Result<std::pat
 /// provider is not in the catalog, then write that env var into the
 /// live `std::env` and persist it to `secrets.env`. Without a charset
 /// + length cap an Admin can plant arbitrary process-wide env vars
-/// (`STRIPE_API_KEY`, `AWS_SECRET_ACCESS_KEY`, …) — silently
-/// re-targeting any third-party crate that reads them — or submit
-/// `name = "a".repeat(1_000_000)` to plant a 1 MB env var. See
-/// `docs/issues/set-provider-key-arbitrary-names.md`.
+///   (`STRIPE_API_KEY`, `AWS_SECRET_ACCESS_KEY`, …) — silently
+///   re-targeting any third-party crate that reads them — or submit
+///   `name = "a".repeat(1_000_000)` to plant a 1 MB env var. See
+///   `docs/issues/set-provider-key-arbitrary-names.md`.
 pub fn check_provider_name_shape(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("provider name must not be empty".to_string());

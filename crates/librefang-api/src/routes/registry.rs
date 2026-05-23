@@ -284,7 +284,7 @@ async fn create_registry_content(
     // fails — defensive only; `target` is constructed from `home_dir`
     // above so the prefix should always match.
     let relative_path = target
-        .strip_prefix(&home_dir)
+        .strip_prefix(home_dir)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(target.file_name().unwrap_or(target.as_os_str()))

@@ -2463,6 +2463,11 @@ mod tests {
 
     static OAUTH_CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // The `OAUTH_CACHE_TEST_MUTEX` guard is deliberately held across the
+    // `.await`s below: it serializes these cases against the process-global
+    // caches, so it must stay locked for the whole test body, awaits
+    // included.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_clears_jwks_entries() {
         let _g = OAUTH_CACHE_TEST_MUTEX
@@ -2511,6 +2516,8 @@ mod tests {
         );
     }
 
+    // Guard held across awaits on purpose — see the JWKS test above.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_clears_discovery_entries() {
         let _g = OAUTH_CACHE_TEST_MUTEX
@@ -2554,6 +2561,8 @@ mod tests {
         );
     }
 
+    // Guard held across awaits on purpose — see the JWKS test above.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_invalidate_oauth_caches_is_idempotent_on_empty() {
         let _g = OAUTH_CACHE_TEST_MUTEX
