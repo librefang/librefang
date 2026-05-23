@@ -71,19 +71,34 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
+                "source": "builtin",
             })
         })
         .collect();
 
-    // Include MCP tools so they're visible in Settings -> Tools
+    // Include MCP tools so they're visible in Settings -> Tools.
+    // MCP tool names follow the convention `mcp_{server}_{tool}`, so we
+    // derive the originating server name from the name prefix for grouping
+    // in the dashboard. The kernel stores tools flat (no server field on
+    // ToolDefinition), so prefix parsing is the only available signal.
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         for t in mcp_tools.iter() {
-            tools.push(serde_json::json!({
+            // Extract server name: "mcp_filesystem_read_file" → "filesystem"
+            let mcp_server: Option<&str> = t
+                .name
+                .strip_prefix("mcp_")
+                .and_then(|rest| rest.split_once('_'))
+                .map(|(server, _tool)| server);
+            let mut entry = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
                 "source": "mcp",
-            }));
+            });
+            if let Some(server) = mcp_server {
+                entry["mcp_server"] = serde_json::Value::String(server.to_string());
+            }
+            tools.push(entry);
         }
     }
 
