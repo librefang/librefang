@@ -255,3 +255,14 @@ budget.
 - `crates/librefang-types/src/config/types.rs` — `QueueConcurrencyConfig`
 - `crates/librefang-runtime/src/command_lane.rs` — `Lane::Trigger`, `CommandQueue`
 - `crates/librefang-kernel/src/kernel/mod.rs` — `agent_concurrency_for`, dispatch loop
+
+## Reload behaviour
+
+`queue.concurrency` (the global lane caps) **is** hot-reloadable — a
+config reload resizes the lane semaphores. The per-agent
+`max_concurrent_invocations` cap is **not**: its semaphore is not
+invalidated on manifest hot-reload, so you must kill+respawn the agent
+(or restart the daemon) to pick up a new value — see the Lifecycle
+section above. For the full per-field reload classification of every
+`KernelConfig` field, see the canonical reference
+[`../operations/config-reload.md`](../operations/config-reload.md).

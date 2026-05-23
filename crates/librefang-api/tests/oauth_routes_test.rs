@@ -169,6 +169,73 @@ async fn providers_enabled_lists_configured_provider() {
         arr.iter().any(|p| p["id"] == "test"),
         "expected configured provider 'test' in {body:?}"
     );
+    // Names-only: the IdP scope configuration is never returned by this
+    // endpoint (see `providers_never_exposes_scopes_even_when_authenticated`).
+    let p = arr
+        .iter()
+        .find(|p| p["id"] == "test")
+        .expect("provider 'test'");
+    assert!(
+        p.get("scopes").is_none(),
+        "unauthenticated caller must NOT receive `scopes`; got {p:?}"
+    );
+    assert_eq!(p["display_name"], "Test");
+}
+
+/// Even a caller carrying an attributed identity (`AuthenticatedApiUser`, which
+/// the auth middleware inserts for a per-user key or login session) must NOT
+/// receive provider `scopes`: this endpoint never exposes the IdP scope
+/// configuration, regardless of the caller's privilege. This pins the fix for
+/// the privilege-inversion that an earlier identity-gated `scopes` branch
+/// caused — the static `api_key` is identity-less and carried no extension, so
+/// the highest-privilege credential saw *less* than a per-user key. The
+/// injected extension here is the strongest case (admin role); it still gets
+/// names-only.
+#[tokio::test(flavor = "multi_thread")]
+async fn providers_never_exposes_scopes_even_when_authenticated() {
+    use librefang_api::middleware::{AuthenticatedApiUser, UserRole};
+    use librefang_types::agent::UserId;
+
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.external_auth = enabled_with_one_provider();
+    }));
+    let state = test.state.clone();
+    let app = Router::new()
+        .route(
+            "/api/auth/providers",
+            axum::routing::get(librefang_api::oauth::auth_providers),
+        )
+        .layer(axum::Extension(AuthenticatedApiUser {
+            name: "admin".into(),
+            role: UserRole::Admin,
+            user_id: UserId::from_name("admin"),
+        }))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/auth/providers")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = body["providers"].as_array().expect("providers array");
+    let p = arr
+        .iter()
+        .find(|p| p["id"] == "test")
+        .expect("provider 'test'");
+    assert!(
+        p.get("scopes").is_none(),
+        "endpoint must never expose `scopes`, even to an authenticated caller; got {p:?}"
+    );
+    assert_eq!(p["display_name"], "Test");
+
+    // Keep the kernel from leaking across tests.
+    drop(test);
 }
 
 // ─── /auth/login (legacy single-provider) ────────────────────────────────

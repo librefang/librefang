@@ -181,7 +181,7 @@ impl SetupWizard {
             generate_identity_files: true,
             workspaces: HashMap::new(),
             profile: None,
-            fallback_models: vec![],
+            fallback_models: None,
             exec_policy: None,
             tool_allowlist: vec![],
             tool_blocklist: vec![],
