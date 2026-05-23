@@ -2,32 +2,20 @@
   "active_phase": "phase-3-upstream-sync-and-ci-hardening",
   "active_change": null,
   "last_updated": "2026-05-23T00:00:00Z",
-  "last_updated_by": "kbd-reflect",
+  "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-assess phase-3-upstream-sync-and-ci-hardening",
-    "description": "Phase 2 reflection complete. Start Phase 3 with an assessment: kreuzberg SSH/CI fix, upstream merge audit (PRs #21/#22 — 114 commits), gitattributes orchestrator merge strategy, execution.md tooling."
+    "command": "/kbd-execute m2-upstream-merge-224-commits",
+    "description": "M1+M3 in progress. After PR-A lands, execute M2: git merge upstream/main + SurrealDB v030 + golden regen."
   },
-  "phase_progress": "Phase 2: COMPLETE (reflection written). Phase 3: NOT STARTED.",
-  "last_completed": {
-    "change_id": "phase-2-rebrand-cleanup",
-    "phase_action": "kbd-reflect",
-    "completed_at": "2026-05-23T00:00:00Z",
-    "reflection_doc": ".kbd-orchestrator/phases/phase-2-rebrand-cleanup/reflection.md"
-  },
-  "phase_2_summary": {
-    "milestones_met": ["M8", "M9b", "M10", "M11"],
-    "prs": [
-      "https://github.com/GQAdonis/librefang/pull/18",
-      "https://github.com/GQAdonis/librefang/pull/19",
-      "https://github.com/GQAdonis/librefang/pull/20"
-    ],
-    "debt_carried_forward": [
-      "kreuzberg SSH URL blocks CI --all-features jobs",
-      "TODO(drop-legacy-key) scheduled v2026.8.x",
-      "execution.md gaps for m9b and m10",
-      "shellcheck pre-push hook DEFERRED"
-    ]
+  "phase_progress": "Phase 3: 0/2 changes done. Executing M1+M3 (PR-A) first.",
+  "assessment_complete": true,
+  "assessment_completed_at": "2026-05-23T00:00:00Z",
+  "plan_complete": true,
+  "plan_completed_at": "2026-05-23T00:00:00Z",
+  "decisions_recorded": {
+    "upstream-merge-strategy": "proper-merge",
+    "gitattributes-orchestrator": "YES-implement"
   }
 }
