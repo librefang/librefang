@@ -7240,8 +7240,7 @@ mod tests {
         };
         let session_override = Some(SessionId::new());
 
-        let (sender_ctx, incognito, sid) =
-            build_streaming_kernel_args(&req, session_override.clone());
+        let (sender_ctx, incognito, sid) = build_streaming_kernel_args(&req, session_override);
 
         // sender_context: every field that influences resolver behaviour
         // must flow through.
