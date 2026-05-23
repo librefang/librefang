@@ -69,6 +69,37 @@ pub enum ExtensionError {
 
 pub type ExtensionResult<T> = Result<T, ExtensionError>;
 
+/// Bridge the extensions-crate error space to the dependency-free
+/// [`librefang_types::integration::IntegrationError`] that the kernel's
+/// HTTP-layer `install_integration` façade now returns. Keeping the
+/// conversion here lets the real kernel impl `?`/`map_err` cleanly while
+/// reimplementers of the trait (mocks, alternate kernels) construct
+/// `IntegrationError` directly without ever touching this crate.
+///
+/// The mapping preserves the discriminant the API layer keys HTTP status
+/// codes off (`NotFound` → 404; everything else → 500). Variants that don't
+/// have a direct counterpart collapse into `IntegrationError::Other`, whose
+/// `Display` carries the original `ExtensionError` message so operator-facing
+/// responses are unchanged.
+impl From<ExtensionError> for librefang_types::integration::IntegrationError {
+    fn from(err: ExtensionError) -> Self {
+        use librefang_types::integration::IntegrationError as IE;
+        match err {
+            ExtensionError::NotFound(s) => IE::NotFound(s),
+            ExtensionError::AlreadyInstalled(s) => IE::AlreadyInstalled(s),
+            ExtensionError::Vault(s) => IE::Vault(s),
+            // `VaultLocked` / `VaultKeyMismatch` are still vault failures at
+            // the trait boundary — fold them into `Vault`, carrying each
+            // variant's own `Display` message so the operator-facing text is
+            // unchanged.
+            err @ (ExtensionError::VaultLocked | ExtensionError::VaultKeyMismatch { .. }) => {
+                IE::Vault(err.to_string())
+            }
+            other => IE::Other(other.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +110,37 @@ mod tests {
         assert!(err.to_string().contains("github"));
         let err = ExtensionError::VaultLocked;
         assert!(err.to_string().contains("vault"));
+    }
+
+    /// The `From<ExtensionError>` bridge must preserve the `NotFound`
+    /// discriminant the API layer keys its 404 response off, fold the vault
+    /// family into `IntegrationError::Vault`, and collapse everything else
+    /// into `Other` while keeping the original `Display` message.
+    #[test]
+    fn extension_error_maps_to_integration_error() {
+        use librefang_types::integration::IntegrationError as IE;
+
+        let mapped: IE = ExtensionError::NotFound("github".to_string()).into();
+        assert!(matches!(mapped, IE::NotFound(ref s) if s == "github"));
+
+        let mapped: IE = ExtensionError::AlreadyInstalled("slack".to_string()).into();
+        assert!(matches!(mapped, IE::AlreadyInstalled(ref s) if s == "slack"));
+
+        let mapped: IE = ExtensionError::Vault("disk full".to_string()).into();
+        assert!(matches!(mapped, IE::Vault(ref s) if s == "disk full"));
+
+        // VaultLocked folds into Vault, carrying its own Display message.
+        let mapped: IE = ExtensionError::VaultLocked.into();
+        assert!(matches!(&mapped, IE::Vault(s) if s.contains("vault")));
+
+        // A variant with no direct counterpart collapses into Other but keeps
+        // the original message verbatim.
+        let original = ExtensionError::Http("502 from registry".to_string());
+        let original_msg = original.to_string();
+        let mapped: IE = original.into();
+        match mapped {
+            IE::Other(s) => assert_eq!(s, original_msg),
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 }

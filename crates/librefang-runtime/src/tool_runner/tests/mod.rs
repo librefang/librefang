@@ -438,6 +438,7 @@ impl MemoryAccess for DispatchCapture {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
@@ -446,6 +447,7 @@ impl MemoryAccess for DispatchCapture {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Ok(None)
@@ -453,6 +455,7 @@ impl MemoryAccess for DispatchCapture {
 
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
@@ -729,6 +732,7 @@ impl MemoryAccess for MirrorKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -736,12 +740,14 @@ impl MemoryAccess for MirrorKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1088,6 +1094,7 @@ impl MemoryAccess for ApprovalKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1096,6 +1103,7 @@ impl MemoryAccess for ApprovalKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1103,6 +1111,7 @@ impl MemoryAccess for ApprovalKernel {
 
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1323,6 +1332,7 @@ impl MemoryAccess for ForceHumanCapturingKernel {
         &self,
         _key: &str,
         _value: serde_json::Value,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1331,6 +1341,7 @@ impl MemoryAccess for ForceHumanCapturingKernel {
     fn memory_recall(
         &self,
         _key: &str,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
@@ -1338,6 +1349,7 @@ impl MemoryAccess for ForceHumanCapturingKernel {
 
     fn memory_list(
         &self,
+        _agent_id: Option<&str>,
         _peer_id: Option<&str>,
     ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())

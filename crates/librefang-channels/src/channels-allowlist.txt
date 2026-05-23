@@ -20,27 +20,4 @@
 # explicit maintainer approval — it is not routine.
 #
 # One basename per line, no `.rs`. Keep sorted.
-bluesky
-dingtalk
-discord
-email
-feishu
-google_chat
-line
-matrix
-mattermost
-nextcloud
-qq
-reddit
-rocketchat
 sidecar
-signal
-slack
-teams
-twitch
-webex
-webhook
-wechat
-wecom
-whatsapp
-zulip

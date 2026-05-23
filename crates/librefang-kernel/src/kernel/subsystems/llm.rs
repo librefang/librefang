@@ -13,16 +13,37 @@
 //!     agent spawn.
 //!   * `credential_pools` — multi-key rotation pools per provider.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use arc_swap::ArcSwap;
 use librefang_llm_driver::LlmDriver;
-use librefang_llm_drivers::ArcCredentialPool;
+use librefang_llm_drivers::credential_pool::CredentialSnapshot;
+use librefang_llm_drivers::{ArcCredentialPool, PoolStrategy};
 use librefang_runtime::aux_client::AuxClient;
 use librefang_runtime::drivers::DriverCache;
 use librefang_runtime::embedding::EmbeddingDriver;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::config::DefaultModelConfig;
+
+/// Per-provider credential-pool summary used by diagnostics endpoints (HTTP
+/// `/api/credential-pools`, CLI `librefang auth pool list`, dashboard
+/// Providers page).
+///
+/// Holds only the redacted snapshot — never the raw API key.
+#[derive(Debug, Clone)]
+pub struct CredentialPoolSummary {
+    /// Provider name, e.g. `"openai"`.
+    pub provider: String,
+    /// Selected strategy at pool construction time.
+    pub strategy: PoolStrategy,
+    /// Number of keys currently available (not in cooldown / permanently marked).
+    pub available_count: usize,
+    /// Total keys in the pool.
+    pub total_count: usize,
+    /// Per-credential redacted snapshot, sorted by priority descending.
+    pub credentials: Vec<CredentialSnapshot>,
+}
 
 /// Focused LLM API. Generic mutators (`catalog_update`) stay as
 /// inherent methods on `LlmSubsystem`.
@@ -37,6 +58,13 @@ pub trait LlmSubsystemApi: Send + Sync {
     fn embedding(&self) -> Option<&Arc<dyn EmbeddingDriver + Send + Sync>>;
     /// Default-model override lock.
     fn default_model_override_ref(&self) -> &RwLock<Option<DefaultModelConfig>>;
+    /// Snapshot of every configured credential pool, keyed by provider name.
+    ///
+    /// Returns a `BTreeMap` so callers (HTTP, CLI, dashboard) see a
+    /// deterministic iteration order — important per CLAUDE.md's
+    /// "deterministic prompt ordering" rule, and so that golden-file
+    /// assertions in integration tests are stable.
+    fn credential_pool_summaries(&self) -> BTreeMap<String, CredentialPoolSummary>;
 }
 
 /// LLM driver + model-catalog cluster — see module docs.
@@ -128,5 +156,25 @@ impl LlmSubsystemApi for LlmSubsystem {
     #[inline]
     fn default_model_override_ref(&self) -> &RwLock<Option<DefaultModelConfig>> {
         &self.default_model_override
+    }
+
+    fn credential_pool_summaries(&self) -> BTreeMap<String, CredentialPoolSummary> {
+        // DashMap iteration order isn't stable across processes; collect into
+        // BTreeMap to enforce alphabetical ordering by provider name, then
+        // build the per-provider summary.
+        let mut by_provider: BTreeMap<String, CredentialPoolSummary> = BTreeMap::new();
+        for entry in self.credential_pools.iter() {
+            let provider = entry.key().clone();
+            let pool = entry.value();
+            let summary = CredentialPoolSummary {
+                provider: provider.clone(),
+                strategy: pool.strategy(),
+                available_count: pool.available_count(),
+                total_count: pool.total_count(),
+                credentials: pool.snapshot(),
+            };
+            by_provider.insert(provider, summary);
+        }
+        by_provider
     }
 }

@@ -38,31 +38,16 @@ import urllib.request
 
 from librefang.sidecar import Content, Field, Schema, SidecarAdapter, protocol, run_stdio_main
 from librefang.sidecar import logging as log
+from librefang.sidecar.common import (
+    MAX_BACKOFF_SECS,
+    RETRY_AFTER_DEFAULT_SECS,
+    split_message as _split_message,
+)
 
 MAX_MESSAGE_LEN = 4096
 DEFAULT_SERVER_URL = "https://ntfy.sh"
-
-
-def _split_message(text: str, max_len: int) -> list[str]:
-    """Chunk `text` into <= max_len pieces, preferring newline splits.
-    Mirrors the Rust `split_message` shared helper closely enough for
-    ntfy (which has no markup to keep intact)."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > max_len:
-        window = rest[:max_len]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = max_len
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n") if cut < max_len else rest[cut:]
-    if rest:
-        chunks.append(rest)
-    return chunks
-
-
+# Reconnect/post backoff ceilings, kept separate so the publish-side
+# raise can be capped distinctly from the SSE reconnect curve.
 class NtfyAdapter(SidecarAdapter):
     # ntfy has no typing/reaction/interactive/thread/streaming concept
     # — declare nothing, so LibreFang routes plain text only.
@@ -102,6 +87,35 @@ class NtfyAdapter(SidecarAdapter):
 
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+    @staticmethod
+    def _response_headers(resp_or_err) -> dict:
+        """Pull headers off either a successful response or an HTTPError
+        and normalise keys to lowercase so callers can do
+        case-insensitive lookups (notably for ``Retry-After`` on 429)."""
+        hdrs = getattr(resp_or_err, "headers", None)
+        if hdrs is None:
+            return {}
+        try:
+            return {k.lower(): v for k, v in hdrs.items()}
+        except Exception:  # noqa: BLE001 — defensive against odd shims
+            return {}
+
+    @staticmethod
+    def _retry_after_secs(resp_headers: dict) -> float:
+        """Parse ``Retry-After`` (seconds form). Falls back to
+        ``RETRY_AFTER_DEFAULT_SECS`` if absent / unparseable, floored at
+        1 s and capped at ``MAX_BACKOFF_SECS`` so a misreported value
+        can't block the producer for more than a minute. We don't
+        decode the HTTP-date form — ntfy's rate-limit replies use
+        seconds in practice."""
+        raw = resp_headers.get("retry-after")
+        if not raw:
+            return RETRY_AFTER_DEFAULT_SECS
+        try:
+            return min(max(float(raw), 1.0), MAX_BACKOFF_SECS)
+        except (TypeError, ValueError):
+            return RETRY_AFTER_DEFAULT_SECS
 
     def _parse_event(self, raw: str):
         """ntfy SSE `data:` JSON → (id, message, topic, title) or None
@@ -144,7 +158,22 @@ class NtfyAdapter(SidecarAdapter):
         url = f"{self.server_url}/{self.topic}/sse"
         req = urllib.request.Request(url, headers=self._auth_headers())
         # No read timeout: SSE is a long-lived stream.
-        with urllib.request.urlopen(req) as resp:  # noqa: S310 - configured URL
+        try:
+            resp_cm = urllib.request.urlopen(req)  # noqa: S310 - configured URL
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # ntfy rate-limits topic subscriptions on hot reconnect.
+                # Honour Retry-After before raising so `produce`'s outer
+                # backoff doesn't immediately probe inside the window.
+                wait = self._retry_after_secs(self._response_headers(e))
+                log.warn(
+                    "ntfy 429 on SSE subscribe; sleeping",
+                    topic=self.topic, retry_after_secs=wait,
+                )
+                time.sleep(wait)
+                raise RuntimeError("ntfy 429 — rate-limited") from e
+            raise
+        with resp_cm as resp:
             if getattr(resp, "status", 200) != 200:
                 raise RuntimeError(f"ntfy SSE HTTP {resp.status}")
             log.info("ntfy SSE connected", topic=self.topic)
@@ -198,6 +227,17 @@ class NtfyAdapter(SidecarAdapter):
                     if getattr(resp, "status", 200) >= 300:
                         raise RuntimeError(f"ntfy publish HTTP {resp.status}")
             except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    # Per-topic publish rate-limited. Honour Retry-After
+                    # then raise; the SDK will surface the failure to
+                    # LibreFang which retries on the next send.
+                    wait = self._retry_after_secs(self._response_headers(e))
+                    log.warn(
+                        "ntfy 429 on publish; sleeping",
+                        topic=self.topic, retry_after_secs=wait,
+                    )
+                    time.sleep(wait)
+                    raise RuntimeError("ntfy 429 — rate-limited") from e
                 body = e.read().decode("utf-8", "replace")
                 raise RuntimeError(f"ntfy publish {e.code}: {body}") from e
 

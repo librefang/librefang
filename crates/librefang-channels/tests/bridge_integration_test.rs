@@ -1626,6 +1626,7 @@ async fn test_approval_listener_delivers_to_configured_recipients() {
         tool_name: "shell_exec".to_string(),
         description: "rm -rf /tmp/foo".to_string(),
         risk_level: "high".to_string(),
+        ..Default::default()
     };
     let event = Arc::new(Event::new(
         AgentId::new(),
@@ -1696,6 +1697,7 @@ async fn test_approval_listener_skips_adapter_without_recipients() {
                 tool_name: "shell_exec".to_string(),
                 description: "ls".to_string(),
                 risk_level: "low".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -1786,6 +1788,7 @@ async fn test_approval_listener_scopes_delivery_to_requesting_agent_adapter() {
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -1865,6 +1868,7 @@ async fn test_approval_listener_skips_unbound_adapter() {
                 tool_name: "shell_exec".to_string(),
                 description: "ls".to_string(),
                 risk_level: "low".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -1929,6 +1933,7 @@ async fn test_approval_listener_drops_malformed_agent_id() {
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2012,6 +2017,7 @@ async fn test_approval_listener_does_not_fall_back_from_qualified_to_bare_key() 
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2107,6 +2113,7 @@ async fn test_approval_listener_scopes_to_non_telegram_multibot_adapter() {
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2215,6 +2222,7 @@ async fn test_approval_listener_falls_back_to_agent_binding_when_default_unset()
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2293,6 +2301,7 @@ async fn test_approval_listener_binding_fallback_does_not_leak_cross_agent() {
                 tool_name: "shell_exec".to_string(),
                 description: "ls".to_string(),
                 risk_level: "low".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2366,6 +2375,7 @@ async fn test_approval_listener_fans_out_to_all_bound_chats() {
                 tool_name: "shell_exec".to_string(),
                 description: "rm -rf /tmp/foo".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2446,6 +2456,7 @@ async fn test_approval_listener_skips_binding_with_no_peer_id() {
                 tool_name: "shell_exec".to_string(),
                 description: "ls".to_string(),
                 risk_level: "low".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");
@@ -2513,6 +2524,7 @@ async fn test_approval_listener_binding_respects_account_id_scope() {
                 tool_name: "shell_exec".to_string(),
                 description: "rm".to_string(),
                 risk_level: "high".to_string(),
+                ..Default::default()
             }),
         )))
         .expect("broadcast send");

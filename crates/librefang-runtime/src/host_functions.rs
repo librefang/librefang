@@ -788,11 +788,8 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    // SECURITY: Prefix the key with the agent_id to give each agent its own
-    // isolated KV namespace (Bug #3837). Without this prefix all agents share
-    // a flat key space, so agent A can read or overwrite agent B's keys.
-    let namespaced_key = format!("{}:{key}", state.agent_id);
-    match kernel.memory_recall(&namespaced_key, None) {
+    // Pass agent_id directly — the kernel handles per-agent isolation.
+    match kernel.memory_recall(key, Some(&state.agent_id), None) {
         Ok(Some(val)) => {
             // SECURITY (#3866): cap the value returned to the guest so a
             // value stored before this cap existed cannot be used to push
@@ -805,7 +802,41 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             }
             json!({"ok": val})
         }
-        Ok(None) => json!({"ok": null}),
+        Ok(None) => {
+            let legacy_key = format!("{}:{key}", state.agent_id);
+            match kernel.memory_recall(&legacy_key, None, None) {
+                Ok(Some(val)) => {
+                    // Migrate the row into the agent-scoped namespace
+                    // so the next read resolves through the primary
+                    // lookup and never falls through to the deprecated
+                    // shared-namespace path again. The legacy row is
+                    // left in place (the `MemoryAccess` trait has no
+                    // `delete` today); orphan cleanup is a separate
+                    // concern tracked outside this fix.
+                    if let Err(e) =
+                        kernel.memory_store(key, val.clone(), Some(&state.agent_id), None)
+                    {
+                        tracing::warn!(
+                            key = %key,
+                            agent_id = %state.agent_id,
+                            error = %e,
+                            "host_kv_get: legacy-row migrate write failed; \
+                             returning the legacy value but the next read will \
+                             fall through again"
+                        );
+                    } else {
+                        tracing::info!(
+                            key = %key,
+                            agent_id = %state.agent_id,
+                            "host_kv_get: migrated value from deprecated \
+                             key-prefix format to the agent-scoped namespace"
+                        );
+                    }
+                    json!({"ok": val})
+                }
+                _ => json!({"ok": null}),
+            }
+        }
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -875,11 +906,8 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    // SECURITY: Prefix the key with the agent_id so each agent's KV entries
-    // live in a separate namespace and cannot be accessed by other agents
-    // (Bug #3837).
-    let namespaced_key = format!("{}:{key}", state.agent_id);
-    match kernel.memory_store(&namespaced_key, value, None) {
+    // Pass agent_id directly — the kernel handles per-agent isolation.
+    match kernel.memory_store(key, value, Some(&state.agent_id), None) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -1230,10 +1258,16 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     struct RecordingKernel {
-        /// Records every (namespaced_key, value) passed to memory_store.
-        stored: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
-        /// Records every namespaced_key passed to memory_recall.
-        recalled: std::sync::Mutex<Vec<String>>,
+        /// Records every (agent_id, key, value) passed to memory_store.
+        stored: std::sync::Mutex<Vec<(Option<String>, String, serde_json::Value)>>,
+        /// Records every (agent_id, key) passed to memory_recall.
+        recalled: std::sync::Mutex<Vec<(Option<String>, String)>>,
+        /// Optional pre-populated values keyed by `(agent_id, key)`.
+        /// When set, `memory_recall` returns the stored value for matching
+        /// lookups; unmatched lookups still return `Ok(None)`.
+        preloaded: std::sync::Mutex<
+            std::collections::HashMap<(Option<String>, String), serde_json::Value>,
+        >,
     }
 
     impl RecordingKernel {
@@ -1241,7 +1275,15 @@ mod tests {
             std::sync::Arc::new(Self {
                 stored: std::sync::Mutex::new(Vec::new()),
                 recalled: std::sync::Mutex::new(Vec::new()),
+                preloaded: std::sync::Mutex::new(std::collections::HashMap::new()),
             })
+        }
+
+        fn preload(&self, agent_id: Option<&str>, key: &str, value: serde_json::Value) {
+            self.preloaded
+                .lock()
+                .unwrap()
+                .insert((agent_id.map(|s| s.to_string()), key.to_string()), value);
         }
     }
 
@@ -1277,22 +1319,38 @@ mod tests {
             &self,
             key: &str,
             value: serde_json::Value,
+            agent_id: Option<&str>,
             _peer_id: Option<&str>,
         ) -> Result<(), librefang_kernel_handle::KernelOpError> {
-            self.stored.lock().unwrap().push((key.to_string(), value));
+            self.stored.lock().unwrap().push((
+                agent_id.map(|s| s.to_string()),
+                key.to_string(),
+                value,
+            ));
             Ok(())
         }
         fn memory_recall(
             &self,
             key: &str,
+            agent_id: Option<&str>,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
-            self.recalled.lock().unwrap().push(key.to_string());
-            Ok(None)
+            self.recalled
+                .lock()
+                .unwrap()
+                .push((agent_id.map(|s| s.to_string()), key.to_string()));
+            let aid = agent_id.map(|s| s.to_string());
+            Ok(self
+                .preloaded
+                .lock()
+                .unwrap()
+                .get(&(aid, key.to_string()))
+                .cloned())
         }
         fn memory_list(
             &self,
-            _: Option<&str>,
+            _agent_id: Option<&str>,
+            _peer_id: Option<&str>,
         ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Ok(vec![])
         }
@@ -1434,10 +1492,10 @@ mod tests {
         )
     }
 
-    /// Regression test for Bug #3837: kv_get must namespace the key with
-    /// agent_id so that two agents cannot read each other's KV entries.
+    /// Regression test for Bug #3837: kv_get must pass agent_id to the
+    /// kernel so that two agents cannot read each other's KV entries.
     #[tokio::test]
-    async fn test_kv_get_key_is_namespaced_with_agent_id() {
+    async fn test_kv_get_passes_agent_id_for_isolation() {
         let kernel = RecordingKernel::new();
         let state = state_with_kernel(
             "agent-alice",
@@ -1447,17 +1505,112 @@ mod tests {
         host_kv_get(&state, &json!({"key": "secret"}));
 
         let recalled = kernel.recalled.lock().unwrap();
-        assert_eq!(recalled.len(), 1, "Expected exactly one memory_recall call");
         assert_eq!(
-            recalled[0], "agent-alice:secret",
-            "kv_get must prefix the key with agent_id to isolate namespaces"
+            recalled.len(),
+            2,
+            "Expected primary + legacy-fallback recall"
+        );
+        assert_eq!(
+            recalled[0].0.as_deref(),
+            Some("agent-alice"),
+            "kv_get must pass agent_id for isolation"
+        );
+        assert_eq!(recalled[0].1, "secret", "kv_get must pass the original key");
+        assert_eq!(
+            recalled[1].0.as_deref(),
+            None,
+            "legacy fallback must use None agent_id (shared namespace)"
+        );
+        assert_eq!(
+            recalled[1].1, "agent-alice:secret",
+            "legacy fallback must use namespaced key"
         );
     }
 
-    /// Regression test for Bug #3837: kv_set must namespace the key with
-    /// agent_id so that two agents cannot overwrite each other's KV entries.
+    /// Regression test for #5657: when host_kv_get falls through to the
+    /// deprecated `<agent_id>:<key>` shared-namespace row, it must
+    /// re-store the value under the agent-scoped namespace so the next
+    /// read resolves through the primary lookup and never falls through
+    /// again. The legacy row is left in place (`MemoryAccess` has no
+    /// `delete`); orphan cleanup is tracked separately.
     #[tokio::test]
-    async fn test_kv_set_key_is_namespaced_with_agent_id() {
+    async fn test_kv_get_migrates_legacy_row_on_fallback_hit() {
+        let kernel = RecordingKernel::new();
+        // Preload a value under the legacy shared-namespace shape only.
+        // Primary lookup `(Some("agent-alice"), "secret")` returns None,
+        // legacy lookup `(None, "agent-alice:secret")` returns the value.
+        kernel.preload(None, "agent-alice:secret", json!("legacy-value"));
+
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![
+                Capability::MemoryRead("*".to_string()),
+                Capability::MemoryWrite("*".to_string()),
+            ],
+            std::sync::Arc::clone(&kernel),
+        );
+        let result = host_kv_get(&state, &json!({"key": "secret"}));
+
+        assert_eq!(result["ok"], json!("legacy-value"));
+
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "legacy hit must trigger exactly one migration write"
+        );
+        assert_eq!(
+            stored[0].0.as_deref(),
+            Some("agent-alice"),
+            "migration write must be agent-scoped"
+        );
+        assert_eq!(
+            stored[0].1, "secret",
+            "migration write must use the guest-facing key, not the legacy `<aid>:<key>` shape"
+        );
+        assert_eq!(
+            stored[0].2,
+            json!("legacy-value"),
+            "migration write must carry the legacy row's value verbatim"
+        );
+    }
+
+    /// When the primary lookup already succeeds, no legacy fallback is
+    /// attempted and no migration write happens.
+    #[tokio::test]
+    async fn test_kv_get_primary_hit_does_not_trigger_migration() {
+        let kernel = RecordingKernel::new();
+        kernel.preload(Some("agent-alice"), "secret", json!("current-value"));
+
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![
+                Capability::MemoryRead("*".to_string()),
+                Capability::MemoryWrite("*".to_string()),
+            ],
+            std::sync::Arc::clone(&kernel),
+        );
+        let result = host_kv_get(&state, &json!({"key": "secret"}));
+
+        assert_eq!(result["ok"], json!("current-value"));
+        let recalled = kernel.recalled.lock().unwrap();
+        assert_eq!(
+            recalled.len(),
+            1,
+            "primary hit must not trigger the legacy fallback recall"
+        );
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            0,
+            "primary hit must not trigger a migration write"
+        );
+    }
+
+    /// Regression test for Bug #3837: kv_set must pass agent_id to the
+    /// kernel so that two agents cannot overwrite each other's KV entries.
+    #[tokio::test]
+    async fn test_kv_set_passes_agent_id_for_isolation() {
         let kernel = RecordingKernel::new();
         let state = state_with_kernel(
             "agent-bob",
@@ -1469,9 +1622,11 @@ mod tests {
         let stored = kernel.stored.lock().unwrap();
         assert_eq!(stored.len(), 1, "Expected exactly one memory_store call");
         assert_eq!(
-            stored[0].0, "agent-bob:counter",
-            "kv_set must prefix the key with agent_id to isolate namespaces"
+            stored[0].0.as_deref(),
+            Some("agent-bob"),
+            "kv_set must pass agent_id for isolation"
         );
+        assert_eq!(stored[0].1, "counter", "kv_set must pass the original key");
     }
 
     /// Regression test for Bug #3866: host_kv_set must reject value
@@ -1522,10 +1677,10 @@ mod tests {
         assert_eq!(stored.len(), 0, "Oversized key must not reach memory_store");
     }
 
-    /// Two agents using the same guest key must produce different namespaced
-    /// keys — that is the whole point of the namespace isolation.
+    /// Two agents using the same guest key must pass different agent_ids
+    /// — that is the whole point of the agent-level isolation.
     #[tokio::test]
-    async fn test_kv_two_agents_same_guest_key_different_namespaced_keys() {
+    async fn test_kv_two_agents_same_guest_key_different_agent_ids() {
         let kernel_a = RecordingKernel::new();
         let state_a = state_with_kernel(
             "agent-alice",
@@ -1546,16 +1701,18 @@ mod tests {
         let recalled_b = kernel_b.recalled.lock().unwrap();
 
         assert_ne!(
-            recalled_a[0], recalled_b[0],
-            "Different agents must produce different namespaced keys for the same guest key"
+            recalled_a[0].0, recalled_b[0].0,
+            "Different agents must pass different agent_ids for the same guest key"
         );
-        assert!(
-            recalled_a[0].starts_with("agent-alice:"),
-            "Alice's key must be prefixed with her agent_id"
+        assert_eq!(
+            recalled_a[0].0.as_deref(),
+            Some("agent-alice"),
+            "Alice's call must pass her agent_id"
         );
-        assert!(
-            recalled_b[0].starts_with("agent-bob:"),
-            "Bob's key must be prefixed with his agent_id"
+        assert_eq!(
+            recalled_b[0].0.as_deref(),
+            Some("agent-bob"),
+            "Bob's call must pass his agent_id"
         );
     }
 

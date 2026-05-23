@@ -7,8 +7,13 @@ import {
   updateWorkflow,
   instantiateTemplate,
   saveWorkflowAsTemplate,
+  resolveOperatorStep,
 } from "../http/client";
-import type { WorkflowItem, WorkflowRunInput } from "../../api";
+import type {
+  WorkflowItem,
+  WorkflowRunInput,
+  OperatorActionVerb,
+} from "../../api";
 import { workflowKeys } from "../queries/keys";
 
 function invalidateWorkflowLists(qc: ReturnType<typeof useQueryClient>) {
@@ -122,5 +127,54 @@ export function useSaveWorkflowAsTemplate() {
   return useMutation({
     mutationFn: saveWorkflowAsTemplate,
     onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.templates() }),
+  });
+}
+
+/** HITL operator-step resolution (#4977). Posts `{action, payload?, field?}`
+ *  to `POST /api/workflows/runs/:run_id/operator`. The endpoint replies
+ *  200 immediately and the run resumes asynchronously, so on success we
+ *  invalidate the operator-pause inspector + the worklist + the run
+ *  detail + the workflow's run list so every surface re-fetches the new
+ *  state. */
+export function useResolveOperatorStep() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      runId,
+      action,
+      payload,
+      field,
+    }: {
+      runId: string;
+      action: OperatorActionVerb;
+      payload?: string;
+      field?: string;
+    }) => resolveOperatorStep(runId, { action, payload, field }),
+    onSuccess: (_data, variables) => {
+      // Scoped invalidation — only the surfaces that actually change
+      // when an operator pause resolves. Previously this invalidated
+      // `workflowKeys.all`, which cascaded a refetch of every
+      // workflow list / template / unrelated run on the page; in a
+      // large install with dozens of workflows on screen that's a
+      // visible jank and an unnecessary load on the API.
+      return Promise.all([
+        // The inspected pause is resolved — drop it so the action bar
+        // disappears.
+        qc.invalidateQueries({
+          queryKey: workflowKeys.operatorPause(variables.runId),
+        }),
+        // The whole operator worklist (pendingOperator + any other
+        // operator-scoped subkeys) shifts: at minimum this run leaves
+        // the pending list. Using `operatorAll()` rather than
+        // `pendingOperator()` so any future operator-scoped queries
+        // get invalidated together for free.
+        qc.invalidateQueries({ queryKey: workflowKeys.operatorAll() }),
+        // The run itself transitions Paused → Running (and shortly to
+        // Completed / Failed), so the detail panel needs a refresh.
+        qc.invalidateQueries({
+          queryKey: workflowKeys.runDetail(variables.runId),
+        }),
+      ]);
+    },
   });
 }

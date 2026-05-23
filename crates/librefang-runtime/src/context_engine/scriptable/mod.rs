@@ -301,8 +301,11 @@ pub struct ScriptableContextEngine {
     otel_endpoint: Option<String>,
     /// Canonical plugin name — used as the `plugin` column when writing to trace_store.
     plugin_name: String,
-    /// Persistent trace backend (injected via `with_trace_backend`; None if not provided).
-    trace_store: Option<std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
+    /// Persistent SQLite trace store (None if it could not be opened at construction time).
+    trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
+    /// Backend-agnostic trace backend injected via `with_trace_backend` (used when
+    /// `surreal-backend` is active). When set this supersedes `trace_store`.
+    trace_backend: Option<std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
     /// Tracks all spawned after_turn background tasks for graceful shutdown.
     after_turn_tasks: std::sync::Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
     /// Memory substrate for after_turn hook memory injection.
@@ -441,6 +444,7 @@ impl ScriptableContextEngine {
             otel_endpoint: hooks.otel_endpoint.clone(),
             plugin_name: String::new(), // filled in by with_plugin_name()
             trace_store: None,          // filled in by with_plugin_name()
+            trace_backend: None,        // filled in by with_trace_backend()
             after_turn_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
                 tokio::task::JoinSet::new(),
             )),
@@ -473,22 +477,21 @@ impl ScriptableContextEngine {
             );
         }
 
-        self
-    }
+        // Open the persistent trace store. Failure is non-fatal — traces will
+        // still land in the in-memory ring buffer even if SQLite is unavailable.
+        // When `surreal-backend` is active, trace storage goes through SurrealDB
+        // and `open_trace_store` is not compiled; `self.trace_store` stays None.
+        #[cfg(not(feature = "surreal-backend"))]
+        {
+            self.trace_store = crate::plugin_manager::open_trace_store()
+                .map(std::sync::Arc::new)
+                .map_err(|e| {
+                    warn!(plugin = name, error = %e, "Could not open hook trace store; SQLite persistence disabled");
+                })
+                .ok();
+        }
 
-    /// Inject a trace backend for hook-trace persistence across daemon restarts.
-    ///
-    /// When `surreal-backend` is active, the kernel passes its `SurrealTraceBackend`
-    /// here instead of opening a per-plugin SQLite file. Restoring circuit-breaker
-    /// state lives here (not in `with_plugin_name`) because the backend is only
-    /// available once injected — callers invoke `with_plugin_name` first.
-    pub fn with_trace_backend(
-        mut self,
-        backend: std::sync::Arc<dyn crate::storage_backends::TraceBackend>,
-    ) -> Self {
-        self.trace_store = Some(backend);
-
-        // Restore circuit breaker state from the trace backend so tripped circuits survive daemon restarts.
+        // Restore circuit breaker state from SQLite so tripped circuits survive daemon restarts.
         if let Some(ref store) = self.trace_store {
             if let Ok(saved) = store.load_circuit_states() {
                 if let Ok(mut guard) = self.circuit_breakers.lock() {
@@ -519,6 +522,20 @@ impl ScriptableContextEngine {
             }
         }
 
+        self
+    }
+
+    /// Inject a backend-agnostic trace backend (used when `surreal-backend` is active).
+    ///
+    /// When set, the backend receives circuit-breaker state persisted by this engine.
+    /// TODO(surreal-trace): wire `trace_backend` through `push_trace` so individual
+    /// hook traces also land in SurrealDB (currently `push_trace` uses `trace_store`
+    /// which is `None` when surreal-backend is enabled — a follow-up PR).
+    pub fn with_trace_backend(
+        mut self,
+        backend: std::sync::Arc<dyn crate::storage_backends::TraceBackend>,
+    ) -> Self {
+        self.trace_backend = Some(backend);
         self
     }
 
@@ -708,15 +725,21 @@ impl ScriptableContextEngine {
     /// traces across daemon restarts for post-mortem analysis.  Both writes are
     /// best-effort — errors are silently swallowed so a telemetry failure never
     /// propagates to the caller.
-    fn push_trace(
+    async fn push_trace(
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         trace: HookTrace,
-        trace_store: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
+        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
         plugin_name: &str,
     ) {
-        // Persist to trace backend first (borrows trace by ref).
+        // Persist to SQLite first. The async `insert` offloads the actual
+        // SQL work to `tokio::task::spawn_blocking` so the calling tokio
+        // worker is never held during disk I/O or the (amortised) prune
+        // scan. Cloning the `Arc<TraceStore>` is cheap (one atomic bump).
         if let Some(store) = trace_store {
-            store.insert(plugin_name, &trace);
+            store
+                .clone()
+                .insert(plugin_name.to_string(), trace.clone())
+                .await;
         }
         // Then push into the bounded in-memory ring buffer.
         if let Ok(mut buf) = traces.lock() {
@@ -1114,15 +1137,19 @@ impl ScriptableContextEngine {
                         } else {
                             tags.join(",")
                         };
-                        if let Err(e) = librefang_types::memory::Memory::remember(
-                                &*substrate,
-                                parsed_id,
-                                &content,
-                                librefang_types::memory::MemorySource::System,
-                                &scope,
-                                std::collections::HashMap::new(),
-                            )
-                            .await
+                        // Disambiguate: both Memory and SemanticBackend define `remember`.
+                        // We want the Memory::remember (stores agent memory items) not
+                        // SemanticBackend::remember (semantic-search embedding store).
+                        // Use UFCS with `&*substrate` to deref Arc → &MemorySubstrate.
+                        if let Err(e) = <librefang_memory::MemorySubstrate as librefang_types::memory::Memory>::remember(
+                            &*substrate,
+                            parsed_id,
+                            &content,
+                            librefang_types::memory::MemorySource::System,
+                            &scope,
+                            std::collections::HashMap::new(),
+                        )
+                        .await
                         {
                             tracing::warn!(error = %e, "after_turn hook: failed to inject memory");
                         }
@@ -1250,7 +1277,7 @@ impl ScriptableContextEngine {
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
         shared_state_path: Option<&std::path::Path>,
-        trace_store: Option<&std::sync::Arc<dyn crate::storage_backends::TraceBackend>>,
+        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
         plugin_name: &str,
         correlation_id: &str,
         output_schema_strict: bool,
@@ -1347,7 +1374,8 @@ impl ScriptableContextEngine {
                                         },
                                         trace_store,
                                         plugin_name,
-                                    );
+                                    )
+                                    .await;
                                     return Err(err_msg);
                                 }
                                 for e in &errs {
@@ -1372,7 +1400,8 @@ impl ScriptableContextEngine {
                         },
                         trace_store,
                         plugin_name,
-                    );
+                    )
+                    .await;
                     return Ok((v, elapsed_ms));
                 }
                 Err(e) => last_err = e.to_string(),
@@ -1396,7 +1425,8 @@ impl ScriptableContextEngine {
             },
             trace_store,
             plugin_name,
-        );
+        )
+        .await;
         Err(err_msg)
     }
 
@@ -1565,7 +1595,8 @@ impl ScriptableContextEngine {
                                         },
                                         self.trace_store.as_ref(),
                                         &self.plugin_name,
-                                    );
+                                    )
+                                    .await;
                                     return Err(err_msg);
                                 }
                                 for e in &errs {
@@ -1590,7 +1621,8 @@ impl ScriptableContextEngine {
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
-                    );
+                    )
+                    .await;
                     Ok((output, elapsed_ms))
                 }
                 Err(e) => {
@@ -1611,7 +1643,8 @@ impl ScriptableContextEngine {
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
-                    );
+                    )
+                    .await;
                     Err(err_msg)
                 }
             }

@@ -79,7 +79,7 @@ function RegistryPluginDetails({
           <a
             href={`https://github.com/${repo}`}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="inline-flex items-center gap-1 mt-1 text-[11px] font-mono text-text-dim/70 hover:text-brand transition-colors"
           >
             <GitBranch className="w-3 h-3" />
@@ -360,7 +360,7 @@ export function PluginsPage() {
                     <a
                       href={`https://github.com/${reg.github_repo}`}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                       className="text-[10px] text-text-dim font-mono hover:text-brand transition-colors"
                     >
                       {reg.github_repo}

@@ -1278,3 +1278,130 @@ async fn set_default_provider_happy_path_has_no_sync_failures_and_is_200() {
         "no sync_failures key when every eligible agent migrated cleanly (#5137); body: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// POST / DELETE /api/providers/{name}/key — path-name validation.
+//
+// Refs `docs/issues/set-provider-key-arbitrary-names.md`. Pre-fix, an admin
+// could plant arbitrary env vars (`STRIPE_API_KEY`, …) into the live
+// `std::env` + persisted `secrets.env`, or submit `name = "a".repeat(N)` to
+// plant a giant env var. The handlers now shape-check `name` against
+// `^[a-z0-9-]{1,64}$` BEFORE touching the catalog or env, and shape-check
+// the derived env var against `^[A-Z][A-Z0-9_]{0,63}_API_KEY$` when the
+// provider is not in the catalog.
+//
+// These tests only exercise the REJECTION paths — the 400 is returned
+// before the handler reaches `set_env_var_guarded` / `remove_env_var_guarded`,
+// so they do not mutate the process-shared `std::env` (which would violate
+// the "no global env mutation" rule documented at the top of this file).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_key_rejects_oversize_name() {
+    let h = boot();
+    let name = "a".repeat(1000);
+    let path = format!("/api/providers/{name}/key");
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &path,
+        Some(serde_json::json!({ "key": "sk-test" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1000-char provider name must be rejected by the shape gate; body: {body}"
+    );
+    // ApiErrorResponse envelope: `{"error": {"message": "..."}, "message": "...", ...}`.
+    let err = body["error"]["message"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        err.contains("too long") || err.contains("64"),
+        "rejection must mention the length cap; got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_key_rejects_uppercase_name() {
+    // Uppercase is outside `[a-z0-9-]` — also closes the "plant a known
+    // third-party env var via a name like `STRIPE`" surface, because the
+    // shape gate trips before the derive step.
+    let h = boot();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/STRIPE/key",
+        Some(serde_json::json!({ "key": "sk-test" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "uppercase provider name must be rejected; body: {body}"
+    );
+    let err = body["error"]["message"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        err.contains("invalid characters"),
+        "rejection must mention invalid characters; body: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_key_rejects_dotted_name() {
+    // `.` is not in `[a-z0-9-]`. Also covers any attempt to smuggle a
+    // path-traversal-ish shape into the env-var derivation.
+    let h = boot();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/ab.cd/key",
+        Some(serde_json::json!({ "key": "sk-test" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dotted provider name must be rejected; body: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_provider_key_rejects_oversize_name() {
+    let h = boot();
+    let name = "a".repeat(1000);
+    let path = format!("/api/providers/{name}/key");
+    let (status, body) = json_request(&h, Method::DELETE, &path, None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1000-char provider name must be rejected on DELETE too; body: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_provider_key_rejects_uppercase_name() {
+    let h = boot();
+    let (status, body) = json_request(&h, Method::DELETE, "/api/providers/STRIPE/key", None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "uppercase provider name must be rejected on DELETE; body: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_provider_key_rejects_dotted_name() {
+    let h = boot();
+    let (status, body) = json_request(&h, Method::DELETE, "/api/providers/ab.cd/key", None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dotted provider name must be rejected on DELETE; body: {body}"
+    );
+}

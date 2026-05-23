@@ -16,6 +16,7 @@ pub mod error_code;
 pub mod event;
 pub mod goal;
 pub mod i18n;
+pub mod integration;
 pub mod manifest_signing;
 pub mod mcp;
 pub mod media;

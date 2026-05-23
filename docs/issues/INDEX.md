@@ -1,5 +1,24 @@
 # LibreFang Audit — Issue Index
 
+## Status (2026-05-24 cleanup)
+
+Of the 119 tracking items below, **65 are resolved via GitHub issues** and have had their per-finding docs deleted from this directory. Most links in the sections below point at deleted files; the link text is kept as a historical record of the original audit. To find a resolved finding, search `gh issue list --state closed` by slug or use `git log -- docs/issues/<slug>.md`.
+
+**Active findings (8)** — these `.md` files remain in `docs/issues/`:
+
+| Slug | GitHub Issue |
+|---|---|
+| `audit-log-cap-only-on-trim-interval` | #5665 |
+| `data-layer-rule-clean` | #5666 |
+| `i18n-escapeValue-false` | #5561 |
+| `phf-generator-old-rand` | #5667 |
+| `rustfmt-loses-spaced-paths` | #5664 |
+| `two-migrate-crates` | #5668 |
+| `wechat-bot-token-prefix-debug-log` | #5543 |
+| `workspace-setup-write-all-swallow` | #5585 |
+
+---
+
 **119 tracking items after two rounds of thematic consolidation.** Two independent audits against `/Volumes/Lexar/Workspace/oss/librefang/librefang` @ `087a0481`, each running 10 parallel review agents on 2026-05-18.
 
 Pipeline:

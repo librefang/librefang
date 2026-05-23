@@ -1291,6 +1291,56 @@ pub trait ProactiveMemory: Send + Sync {
     ) -> crate::error::LibreFangResult<bool>;
 }
 
+/// Metadata key under which `auto_memorize` tags memories with their
+/// originating `(channel, chat)` scope. Format mirrors the kernel's
+/// `sender_channel`: either a bare channel type (`"telegram"`) or a
+/// chat-qualified form (`"whatsapp:<chatJid>"`). When present, recall
+/// filters this against the active request's `chat_scope` so a memory
+/// extracted from a group chat cannot bleed into a DM with the same
+/// peer — and vice versa (#5227).
+///
+/// Memories without this key are treated as chat-agnostic (legacy /
+/// manually-stored / `MemoryLevel::User`) and remain recallable across
+/// all chats for the same `(agent, peer)` pair.
+pub const CHAT_SCOPE_METADATA_KEY: &str = "chat_scope";
+
+/// Decide whether a memory (identified by its stored `scope` string and
+/// `metadata` map) is allowed to surface in a recall whose active
+/// `(channel, chat)` scope is `current`. Returns `true` for three
+/// classes that must always cross chats:
+///
+/// 1. `MemoryLevel::User` — stable per-user facts (the `scope` column
+///    stores `"user_memory"` for these). Cross-chat by design.
+/// 2. Memories with no `CHAT_SCOPE_METADATA_KEY` tag — pre-#5227
+///    rows plus anything written through a non-channel path
+///    (dashboard, direct API). Treating them as chat-agnostic avoids
+///    silently hiding existing data.
+/// 3. Memories whose stamped `chat_scope` equals `current`.
+///
+/// All other tagged memories are filtered out.
+///
+/// Pulled out into the types crate so every recall site — proactive
+/// (`MemoryItem`), substrate (`MemoryFragment`), context engine — uses
+/// the same predicate and cannot drift.
+pub fn memory_scope_allows_recall(
+    scope: &str,
+    metadata: &HashMap<String, serde_json::Value>,
+    current: &str,
+) -> bool {
+    // Class 1 — user-level memories cross chats by design.
+    if scope == MemoryLevel::User.scope_str() {
+        return true;
+    }
+    match metadata.get(CHAT_SCOPE_METADATA_KEY) {
+        // Class 3 — stamped scope matches the active one.
+        Some(serde_json::Value::String(s)) if s == current => true,
+        // Stamped scope is set but differs → block.
+        Some(serde_json::Value::String(_)) => false,
+        // Class 2 — no tag (or non-string sentinel) → chat-agnostic.
+        _ => true,
+    }
+}
+
 /// Trait for proactive memory hooks (auto_memorize, auto_retrieve).
 ///
 /// This provides hooks for automatic memory extraction and retrieval:
@@ -1300,20 +1350,31 @@ pub trait ProactiveMemory: Send + Sync {
 pub trait ProactiveMemoryHooks: Send + Sync {
     /// Extract and store important information after agent execution.
     /// When `peer_id` is `Some`, memories are scoped to that peer for isolation.
+    /// When `chat_scope` is `Some`, the originating `(channel, chat)` scope is
+    /// stamped onto each memory's metadata so subsequent recalls in a
+    /// **different** chat (same peer) will not surface it (#5227). Pass `None`
+    /// when the caller has no channel context (e.g. direct API, dashboard) —
+    /// memories then remain chat-agnostic.
     async fn auto_memorize(
         &self,
         user_id: &str,
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
+        chat_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
     /// Proactively retrieve relevant context before agent execution.
     /// When `peer_id` is `Some`, only retrieves memories for that peer.
+    /// When `chat_scope` is `Some`, memories tagged with a **different**
+    /// chat scope are filtered out post-recall — chat-agnostic memories
+    /// (no scope tag, or stamped with the current scope) still surface.
+    /// This is the read side of the #5227 cross-chat isolation guard.
     async fn auto_retrieve(
         &self,
         user_id: &str,
         query: &str,
         peer_id: Option<&str>,
+        chat_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 }
 

@@ -51,9 +51,9 @@ const TAB_ICONS: Record<MediaTab, React.ReactNode> = {
 };
 
 const inputClass =
-  "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
+  "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 const textareaClass =
-  "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary resize-y min-h-[88px]";
+  "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand resize-y min-h-[88px]";
 
 const MAX_BASE64_LENGTH = 2 * 1024 * 1024;
 
@@ -220,7 +220,7 @@ function TabButton({
       onClick={() => onClick(tab)}
       className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-colors ${
         isActive
-          ? "bg-primary text-white shadow-sm"
+          ? "bg-brand text-white shadow-sm"
           : "text-text-dim hover:text-text hover:bg-main"
       }`}
     >
@@ -347,8 +347,8 @@ function ImagePanel({
                 key={i}
                 href={img.url}
                 target="_blank"
-                rel="noreferrer"
-                className="block rounded-xl overflow-hidden border border-border-subtle hover:border-primary/40 transition-colors"
+                rel="noopener noreferrer"
+                className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
               >
                 {img.url ? (
                   <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
@@ -466,7 +466,7 @@ function SpeechPanel({
       {result && (
         <ResultBlock provider={result.provider} model={result.model} duration={result.duration_ms}>
           <audio controls src={result.url} className="w-full" />
-          <a href={result.url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline mt-2 inline-block">
+          <a href={result.url} target="_blank" rel="noopener noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
             {t("media.download")} ({result.format})
           </a>
         </ResultBlock>
@@ -615,7 +615,7 @@ function VideoPanel({
                   <span>{statusResult.width}×{statusResult.height}</span>
                 )}
                 {statusResult.duration_secs != null && <span>{statusResult.duration_secs.toFixed(1)}s</span>}
-                <a href={statusResult.file_url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                <a href={statusResult.file_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
                   {t("media.download")}
                 </a>
               </div>
@@ -720,7 +720,7 @@ function MusicPanel({
       {result && (
         <ResultBlock provider={result.provider} model={result.model} duration={result.duration_ms}>
           <audio controls src={result.url} className="w-full" />
-          <a href={result.url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline mt-2 inline-block">
+          <a href={result.url} target="_blank" rel="noopener noreferrer" className="text-xs text-brand hover:underline mt-2 inline-block">
             {t("media.download")} ({result.format})
           </a>
         </ResultBlock>
@@ -734,7 +734,7 @@ function MusicPanel({
 function PanelHeader({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }) {
   return (
     <div className="flex items-start gap-3 pb-3 border-b border-border-subtle">
-      <div className="p-2 rounded-lg bg-primary/10 text-primary shrink-0">{icon}</div>
+      <div className="p-2 rounded-lg bg-brand/10 text-brand shrink-0">{icon}</div>
       <div>
         <h3 className="text-sm font-extrabold">{title}</h3>
         <p className="text-xs text-text-dim mt-0.5">{desc}</p>

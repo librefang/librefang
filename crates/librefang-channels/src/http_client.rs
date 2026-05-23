@@ -123,11 +123,12 @@ pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Ch
 /// `with_proxy`) gives them a fighting chance to spot the misconfig
 /// before they file a bug.
 ///
-/// Called by `SlackAdapter::start` (Socket Mode), `DiscordAdapter::start`
-/// (Gateway), and `MattermostAdapter::start` (WebSocket). Telegram is
-/// pure REST long-polling and does not call this. The `#[allow]` keeps it
-/// available when all three WS-using channel features happen to be off
-/// (the lib still compiles without forcing a `cfg(any(...))` here).
+/// Called by `MattermostAdapter::start` (WebSocket). Discord and
+/// Slack moved to sidecars in v2026.5 (their `start()` paths called
+/// this too). Telegram is pure REST long-polling and does not call
+/// this. The `#[allow]` keeps it available when the WS-using channel
+/// feature happens to be off (the lib still compiles without forcing
+/// a `cfg(...)` here).
 #[allow(dead_code)]
 pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
     tracing::warn!(
@@ -957,22 +958,11 @@ mod tests {
         }
     }
 
-    /// Smoke test for the per-adapter WS-bypass WARN helper (#4795
-    /// follow-up). The behavioural assertion lives in each adapter test
-    /// (`*_with_proxy_some_sets_ws_bypass_warn_flag`) — this just pins
-    /// that the helper itself does not panic and accepts the three
-    /// adapter names the start() paths pass in.
-    #[cfg(any(
-        feature = "channel-slack",
-        feature = "channel-discord",
-        feature = "channel-mattermost",
-    ))]
-    #[test]
-    fn warn_ws_proxy_bypass_smoke() {
-        warn_ws_proxy_bypass("slack");
-        warn_ws_proxy_bypass("discord");
-        warn_ws_proxy_bypass("mattermost");
-    }
+    // warn_ws_proxy_bypass smoke test removed in the mattermost sidecar
+    // migration — it was the only remaining caller. The helper still
+    // ships for future in-process adapters that may need WS-bypass
+    // warnings; behaviour is exercised by their own tests when they
+    // arrive.
 
     #[test]
     fn channel_proxy_error_display_lists_accepted_schemes() {

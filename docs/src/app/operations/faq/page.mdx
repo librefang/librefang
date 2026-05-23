@@ -257,11 +257,20 @@ librefang doctor
 
 ### Q: Channel connection failed?
 
-```bash
-# Test channel
-librefang channel test telegram
+Channels run as out-of-process sidecar adapters — inspect the
+sidecar's own stdout log for the failure reason.
 
-# Check Bot Token
+```bash
+# Confirm the sidecar is listed and shows the token+configured state
+librefang channel list
+
+# Hot-reload channels (re-spawns the sidecar) after fixing config
+librefang channel reload
+
+# Tail the sidecar's own log
+librefang logs --filter sidecar/telegram --tail 50
+
+# Spot-check the upstream platform directly (Telegram example)
 curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
 ```
 

@@ -200,6 +200,28 @@ pub fn reset_session(session_id: SessionId) {
     }
 }
 
+/// Remove the tracker bucket for `session_id` entirely. No-op if it doesn't
+/// exist.
+///
+/// Called from the session-delete path so the process-wide registry doesn't
+/// accumulate one entry per ever-existed session for the lifetime of the
+/// daemon. Unlike [`reset_session`] (which empties the bucket but keeps the
+/// `(SessionId, _)` pair so a live session can continue tracking after a
+/// compression pass), the session is gone and will never be looked up again
+/// — drop the whole entry. Context-compression GC remains the fallback for
+/// long-lived sessions that never hit the delete path.
+pub fn forget_session(session_id: &SessionId) {
+    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    guard.remove(session_id);
+}
+
+/// Number of sessions currently tracked in the process-wide registry. Test
+/// helper.
+#[cfg(test)]
+fn registry_len() -> usize {
+    registry().lock().unwrap_or_else(|p| p.into_inner()).len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +372,61 @@ mod tests {
         // s2 untouched.
         let after = with_session(s2, |t| t.observe(&PathBuf::from("/tmp/x"), "v1"));
         assert_eq!(after, ReadOutcome::Unchanged { first_turn: 1 });
+    }
+
+    #[test]
+    fn forget_session_drops_bucket_and_preserves_others() {
+        // The registry is process-wide so other tests' sessions count too.
+        // We compare deltas relative to the starting size rather than asserting
+        // absolute counts, and use fresh `SessionId::new()` UUIDs to avoid
+        // colliding with sibling tests.
+        let s1 = SessionId::new();
+        let s2 = SessionId::new();
+        let s3 = SessionId::new();
+        with_session(s1, |t| {
+            t.observe(&PathBuf::from("/tmp/x"), "v1");
+        });
+        with_session(s2, |t| {
+            t.observe(&PathBuf::from("/tmp/x"), "v1");
+        });
+        with_session(s3, |t| {
+            t.observe(&PathBuf::from("/tmp/x"), "v1");
+        });
+        let before = registry_len();
+
+        forget_session(&s2);
+
+        // Bucket count dropped by exactly one (s2's bucket).
+        assert_eq!(registry_len(), before - 1, "exactly one bucket removed");
+
+        // s2 is gone — next access materialises a fresh tracker, so the same
+        // path read returns `First` (would have returned `Unchanged` before).
+        let after_s2 = with_session(s2, |t| t.observe(&PathBuf::from("/tmp/x"), "v1"));
+        assert_eq!(after_s2, ReadOutcome::First);
+
+        // s1 and s3 are untouched — their prior reads still register as
+        // `Unchanged`, proving forget did not touch siblings.
+        let after_s1 = with_session(s1, |t| t.observe(&PathBuf::from("/tmp/x"), "v1"));
+        assert_eq!(after_s1, ReadOutcome::Unchanged { first_turn: 1 });
+        let after_s3 = with_session(s3, |t| t.observe(&PathBuf::from("/tmp/x"), "v1"));
+        assert_eq!(after_s3, ReadOutcome::Unchanged { first_turn: 1 });
+
+        // Clean up — leave the registry as we found it for other tests.
+        forget_session(&s1);
+        forget_session(&s2);
+        forget_session(&s3);
+    }
+
+    #[test]
+    fn forget_session_is_idempotent_on_missing_id() {
+        let unknown = SessionId::new();
+        let before = registry_len();
+        forget_session(&unknown);
+        forget_session(&unknown);
+        assert_eq!(
+            registry_len(),
+            before,
+            "forget on a never-tracked id is a no-op"
+        );
     }
 }

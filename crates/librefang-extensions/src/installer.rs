@@ -30,6 +30,28 @@ pub struct InstallResult {
     pub message: String,
 }
 
+/// Bridge the extensions-crate `InstallResult` to the dependency-free
+/// [`librefang_types::integration::IntegrationOutcome`] that the kernel's
+/// HTTP-layer `install_integration` façade now returns on its `Ok` side.
+/// Keeping the conversion here lets the real kernel impl `.map(Into::into)`
+/// cleanly while reimplementers of the trait (mocks, alternate kernels)
+/// construct `IntegrationOutcome` directly without ever touching this crate.
+///
+/// The mapping is field-for-field — all field types already live in
+/// `librefang-types` — so the success payload the API layer reads (`server`,
+/// `id`, …) is unchanged.
+impl From<InstallResult> for librefang_types::integration::IntegrationOutcome {
+    fn from(result: InstallResult) -> Self {
+        librefang_types::integration::IntegrationOutcome {
+            id: result.id,
+            server: result.server,
+            status: result.status,
+            missing_credentials: result.missing_credentials,
+            message: result.message,
+        }
+    }
+}
+
 /// Resolve a catalog entry + provided credentials into a new
 /// `McpServerConfigEntry`.
 ///

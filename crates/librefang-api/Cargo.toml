@@ -10,21 +10,20 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
-librefang-uar-spec = { path = "../librefang-uar-spec" }
-librefang-runtime = { path = "../librefang-runtime" }
 librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 agent-client-protocol = { workspace = true }
 tokio-util = { workspace = true }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
+librefang-storage = { path = "../librefang-storage", optional = true, default-features = false } # BossFang SurrealDB storage
 librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-wire = { path = "../librefang-wire" }
+librefang-uar-spec = { path = "../librefang-uar-spec" } # BossFang: UAR agent manifest spec
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-migrate = { path = "../librefang-migrate" }
-librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
@@ -77,15 +76,13 @@ metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 [features]
-# Default = a small "core-channels" set + telemetry + surreal-backend.
-# Heavy / unmaintained adapters (matrix, email/imap, google-chat,
-# bluesky, …) stay opt-in via `--features all-channels` so plain
-# `cargo build` and downstream library users don't pay the compile-time
-# cost. Release / packaging pipelines opt in to `all-channels`
-# explicitly. See #3655 / #3688.
+# Default = telemetry + surreal-backend. Channel adapters all run as
+# out-of-process sidecars (`librefang.sidecar.adapters.*` in the SDK) —
+# the historical `core-channels` / `all-channels` / `channel-*` features
+# that gated in-process adapters are gone.
 # BossFang fork: `surreal-backend` is on by default (SurrealDB-as-default
 # storage — zero-config live deployment path).
-default = ["core-channels", "telemetry", "surreal-backend"]
+default = ["telemetry", "surreal-backend"]
 
 # Storage backend feature gates (mirrors librefang-storage).
 # `surreal-backend` is the default; `sqlite-backend` is opt-in for
@@ -109,76 +106,13 @@ telemetry = [
     "dep:metrics-exporter-prometheus",
 ]
 
-# Individual channel features — forwarded to librefang-channels
-channel-discord = ["librefang-channels/channel-discord"]
-channel-slack = ["librefang-channels/channel-slack"]
-channel-matrix = ["librefang-channels/channel-matrix"]
-channel-email = ["librefang-channels/channel-email"]
-channel-webhook = ["librefang-channels/channel-webhook"]
-channel-whatsapp = ["librefang-channels/channel-whatsapp"]
-channel-signal = ["librefang-channels/channel-signal"]
-channel-teams = ["librefang-channels/channel-teams"]
-channel-mattermost = ["librefang-channels/channel-mattermost"]
-channel-google-chat = ["librefang-channels/channel-google-chat"]
-channel-twitch = ["librefang-channels/channel-twitch"]
-channel-rocketchat = ["librefang-channels/channel-rocketchat"]
-channel-zulip = ["librefang-channels/channel-zulip"]
-channel-bluesky = ["librefang-channels/channel-bluesky"]
-channel-feishu = ["librefang-channels/channel-feishu"]
-channel-line = ["librefang-channels/channel-line"]
-channel-reddit = ["librefang-channels/channel-reddit"]
-channel-nextcloud = ["librefang-channels/channel-nextcloud"]
-channel-webex = ["librefang-channels/channel-webex"]
-channel-dingtalk = ["librefang-channels/channel-dingtalk"]
-channel-qq = ["librefang-channels/channel-qq"]
-channel-wechat = ["librefang-channels/channel-wechat"]
-channel-wecom = ["librefang-channels/channel-wecom"]
-
-# Small curated default set: 5 light adapters covering the most common
-# integration points. Each member only uses the workspace HTTP stack
-# (`reqwest` + `rustls`) — no heavy/unmaintained transitive deps at the
-# time of writing. If you add a member, double-check its dep tree before
-# growing this set. Used by `librefang-api`'s `default` and forwarded by
-# `librefang-cli`'s `default`. Anything bigger should opt in via
-# `all-channels` (or pick individual channels).
-core-channels = [
-    "channel-discord",
-    "channel-slack",
-    "channel-webhook",
-]
-
-all-channels = [
-    "channel-discord", "channel-slack", "channel-matrix",
-    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
-    "channel-twitch", "channel-rocketchat", "channel-zulip",
-    "channel-bluesky", "channel-feishu", "channel-line",
-    "channel-reddit",
-    "channel-nextcloud",
-    "channel-webex", "channel-dingtalk",
-    "channel-qq", "channel-wechat", "channel-wecom",
-]
-
-# All channels except email — used for Android targets where rustls-connector's
-# rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
-all-channels-no-email = [
-    "channel-discord", "channel-slack", "channel-matrix",
-    "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
-    "channel-twitch", "channel-rocketchat", "channel-zulip",
-    "channel-bluesky", "channel-feishu", "channel-line",
-    "channel-reddit",
-    "channel-nextcloud",
-    "channel-webex", "channel-dingtalk",
-    "channel-qq", "channel-wechat", "channel-wecom",
-]
-
-# Mini: a small core set of channels
-mini = [
-    "channel-discord", "channel-slack", "channel-matrix",
-    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
-    "channel-teams", "channel-mattermost", "channel-google-chat",
-]
+# `channel-*` / `core-channels` / `all-channels` /
+# `all-channels-no-email` / `mini` removed — every channel adapter
+# runs as a sidecar (see `SIDECAR_CATALOG` in `src/routes/channels.rs`
+# + the `librefang.sidecar.adapters.*` SDK at `sdk/python/`). The
+# `librefang-cli` default-feature reference to `core-channels` and
+# the `librefang-desktop` aliases were cleared in the same change;
+# `mobile-smoke.yml` no longer passes `-f mobile-no-email`.
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }

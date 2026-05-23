@@ -152,6 +152,24 @@ pub struct DeferredToolExecution {
     pub exec_policy: Option<crate::config::ExecPolicy>,
     pub sender_id: Option<String>,
     pub channel: Option<String>,
+    /// Platform conversation id the original message arrived on:
+    /// Telegram `chat_id`, Discord `channel_id`, WhatsApp JID, etc.
+    /// Distinct from `sender_id` for group conversations — in a DM
+    /// they happen to coincide, in a group the human's `sender_id`
+    /// is the user's platform_id while `chat_id` names the group.
+    /// Populated by `tool_runner::dispatch.rs` from the agent_loop's
+    /// `SenderContext.chat_id` when present; `None` otherwise.
+    ///
+    /// Approval-resume routing (`bridge.rs::start_approval_listener`
+    /// fast path, `kernel::wake_agent_after_approval`) prefers
+    /// `chat_id` over `sender_id` so a group-chat-originated tool
+    /// call gets its `[Approve] [Deny]` keyboard AND its eventual
+    /// agent response back in the originating group, not in the
+    /// approver's DM with the bot. Falls back to `sender_id` when
+    /// `chat_id` is absent (DM path; pre-PR clients that never
+    /// emitted the field; in-process non-channel sources).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
     /// `true` when the approval was demanded by the per-user RBAC gate
     /// (`UserToolGate::NeedsApproval`) rather than the standard
@@ -1144,6 +1162,7 @@ mod tests {
             }),
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
+            chat_id: Some("group-456".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
             session_id: None,

@@ -14,12 +14,14 @@ The crate has `default = []` — every workspace consumer
 `default-features = false` and forwards an explicit subset. Pick
 features explicitly when depending on this crate:
 
-- `all-channels` — every adapter, including heavy ones (matrix, IMAP,
-  Bluesky, …). Used by release CI.
-- Per-adapter: `channel-discord`,
-  `channel-slack`, `channel-webhook`, etc. ntfy and telegram migrated
-  to sidecars — see `librefang.sidecar.adapters.ntfy` and
-  `librefang.sidecar.adapters.telegram` in the SDK.
+- `all-channels` — every adapter, including heavy ones (IMAP,
+  google-chat, …). Used by release CI.
+- Per-adapter: `channel-webhook`, `channel-email`, etc. ntfy,
+  telegram, gotify, mastodon, bluesky, reddit, twitch, rocketchat,
+  discord, nextcloud, slack, webex, line, zulip, mattermost, signal,
+  qq, and matrix migrated to sidecars — see
+  `librefang.sidecar.adapters.{ntfy,telegram,gotify,mastodon,bluesky,reddit,twitch,rocketchat,discord,nextcloud,slack,webex,line,zulip,mattermost,signal,qq,matrix}`
+  in the SDK.
 
 See `Cargo.toml` for the full feature list.
 

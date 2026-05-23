@@ -138,7 +138,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         schedule: ScheduleMode::default(),
         session_mode: librefang_types::agent::SessionMode::default(),
         model,
-        fallback_models: Vec::new(),
+        fallback_models: Some(Vec::new()),
         resources: ResourceQuota::default(),
         priority: librefang_types::agent::Priority::default(),
         capabilities,

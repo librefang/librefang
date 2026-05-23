@@ -241,14 +241,10 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/memory/agents/{id}/export` | Export agent memories |
 | POST | `/api/memory/agents/{id}/import` | Import agent memories |
 | **Channels** | | |
-| GET | `/api/channels` | List channels (44 adapters) |
-| GET | `/api/channels/{name}` | Get channel config |
-| POST | `/api/channels/{name}/configure` | Configure channel |
-| DELETE | `/api/channels/{name}/configure` | Remove channel config |
-| POST | `/api/channels/{name}/test` | Test channel |
-| POST | `/api/channels/reload` | Reload all channels |
-| POST | `/api/channels/whatsapp/qr/start` | Start WhatsApp QR session |
-| GET | `/api/channels/whatsapp/qr/status` | WhatsApp QR status |
+| GET | `/api/channels` | List configured + discoverable channels (sidecar-only) |
+| GET | `/api/channels/registry` | Channel metadata from the registry sync |
+| POST | `/api/channels/sidecar/{name}/configure` | Save a `[[sidecar_channels]]` entry (schema-driven) |
+| POST | `/api/channels/reload` | Hot-reload channels from disk |
 | **Templates** | | |
 | GET | `/api/templates` | List templates |
 | GET | `/api/templates/{name}` | Get template |

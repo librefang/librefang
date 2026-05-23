@@ -259,6 +259,47 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 500 Internal Server Error with **server-side full-error
+    /// log + client-side scrubbed body** (audit:
+    /// rusqlite-errors-leak).
+    ///
+    /// `librefang-memory` wraps every rusqlite error in
+    /// `LibreFangError::Internal(e.to_string())` (`substrate.rs:
+    /// 368, 625, 664, 677, 839, 872, 906, 921`). Routes that
+    /// echo `e.to_string()` into the response body leak SQL
+    /// internals — column names, constraint identifiers, "database
+    /// is locked", "UNIQUE constraint failed: agents.id" — to any
+    /// caller able to trigger an internal error. That's a free
+    /// schema-disclosure oracle that helps craft follow-up attacks
+    /// (e.g. via known constraint names) and exposes admin-only
+    /// implementation detail to lower-privilege roles.
+    ///
+    /// `internal_scrub` logs the full error chain at `error!`
+    /// (operators retain forensics via journald / Sentry / log
+    /// aggregator) and returns the static `"Internal server
+    /// error"` to the client. This is the inverse of
+    /// [`Self::internal`], which echoes the raw text — kept around
+    /// for the legacy and tracing-only call sites still in the
+    /// codebase, but new code (and audited rewrites) should use
+    /// `internal_scrub`.
+    ///
+    /// Reference pattern: `MemoryRouteError::Internal` in
+    /// `routes/memory.rs:198-215` already follows this shape; this
+    /// helper lifts it into a workspace-wide accessor so every
+    /// route can adopt it without copy-paste.
+    pub fn internal_scrub(e: impl std::fmt::Display) -> Self {
+        let full = e.to_string();
+        tracing::error!(error = %full, "internal error scrubbed before response");
+        Self {
+            error: "Internal server error".to_string(),
+            code: None,
+            r#type: None,
+            details: None,
+            request_id: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         let code = code.into();
@@ -476,6 +517,23 @@ pub struct MessageResponse {
     /// (BC-01 — Telegram/Discord/Slack continue to function unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_notice: Option<String>,
+    /// Issue #5199 — session id the kernel actually used for this turn.
+    ///
+    /// Set ONLY when the caller did not pin a session in the request
+    /// (`session_id` body field absent / null), mirroring the WS handler's
+    /// `explicit_session.is_none()` branch in `ws.rs`. The dashboard's
+    /// chat HTTP fallback path reads this back so it can auto-pin
+    /// `?sessionId=` in the URL — without it, a bare `?agentId=` chat
+    /// that took the HTTP fallback (WS down or first send before WS
+    /// connected) stays unpinned even though the kernel persisted the
+    /// turn to a concrete session, leaving the user bookmarkable into
+    /// a different canonical session after a daemon restart.
+    ///
+    /// Omitted when the caller passed an explicit `session_id` —
+    /// echoing it back would be redundant and risk implying a server
+    /// auto-resolution that did not happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).
@@ -684,11 +742,14 @@ impl PaginationQuery {
     /// server actually applied, so clients can tell from the response
     /// envelope whether the cap kicked in.
     pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
+        // Audit: agent-list-limit-none-unbounded. Previously `offset =
+        // None && limit = None` meant "return the entire collection
+        // unpaginated", which turns into a memory + JSON-serialisation
+        // DoS on multi-thousand-row deployments. Now an unset `limit`
+        // always falls through to `PAGINATION_MAX_LIMIT`, and an
+        // explicit oversized `limit` still clamps. Callers that need
+        // larger pages must walk the offset cursor.
         let total = items.len();
-        // Both unset → full collection, preserve old behaviour.
-        if self.offset.is_none() && self.limit.is_none() {
-            return (items, total, 0, None);
-        }
         let offset = self.offset.unwrap_or(0).min(total);
         let limit = self
             .limit
@@ -718,6 +779,23 @@ pub struct PushMessageRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_scrub_returns_generic_message_not_source_error() {
+        // Audit: rusqlite-errors-leak. Verifies that the helper hides
+        // SQL- and kernel-internal error chains from clients while still
+        // emitting the full message to tracing (visible in the test
+        // logs, not asserted here — log capture is environment-specific).
+        let leaked = "no such column: agent_workspaces.invalid_field (code 1)";
+        let scrubbed = ApiErrorResponse::internal_scrub(leaked);
+        assert_eq!(scrubbed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(scrubbed.error, "Internal server error");
+        assert!(
+            !scrubbed.error.contains("agent_workspaces"),
+            "scrubbed body must not echo column/table identifiers"
+        );
+        assert!(scrubbed.code.is_none() && scrubbed.details.is_none());
+    }
 
     #[test]
     fn extension_install_request_deserialize() {
@@ -910,13 +988,41 @@ mod tests {
     }
 
     #[test]
-    fn pagination_unspecified_returns_full_collection() {
+    fn pagination_unspecified_falls_back_to_max_limit_not_full_collection() {
+        // Audit: agent-list-limit-none-unbounded. With no params the
+        // server still applies `PAGINATION_MAX_LIMIT` so that a
+        // multi-thousand-row deployment cannot DoS the listing
+        // endpoint via the absence of `?limit=`. Small collections (≤
+        // PAGINATION_MAX_LIMIT) still come back in full because the
+        // cap is a ceiling, not a floor.
         let q = PaginationQuery::default();
         let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
-        assert_eq!(items.len(), 10);
+        assert_eq!(items.len(), 10, "small collection still returned in full");
         assert_eq!(total, 10);
         assert_eq!(offset, 0);
-        assert_eq!(limit, None, "no params → no server cap reported");
+        assert_eq!(
+            limit,
+            Some(PAGINATION_MAX_LIMIT),
+            "the server cap is now always reported, never None"
+        );
+    }
+
+    #[test]
+    fn pagination_unspecified_truncates_large_collection_at_max_limit() {
+        // Companion to `..._not_full_collection`: the cap actually
+        // kicks in for collections > PAGINATION_MAX_LIMIT. This is the
+        // DoS scenario the audit closed (multi-thousand agents → a
+        // single unprotected GET would serialise the whole vec).
+        let q = PaginationQuery::default();
+        let big = (0..(PAGINATION_MAX_LIMIT + 50)).collect::<Vec<_>>();
+        let (items, total, _, limit) = q.paginate(big);
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(
+            total,
+            PAGINATION_MAX_LIMIT + 50,
+            "total reflects the unclipped row count"
+        );
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
     }
 
     #[test]
@@ -998,5 +1104,61 @@ mod tests {
         assert_eq!(json["total"], 3);
         assert_eq!(json["offset"], 0);
         assert!(json["limit"].is_null());
+    }
+
+    // ---------------------------------------------------------------------
+    // MessageResponse.session_id — issue #5199 HTTP fallback auto-pin.
+    // Locks the wire contract the dashboard chat handler reads back: the
+    // field is present (string) on a successful turn that the kernel
+    // auto-resolved, and entirely absent otherwise. The HTTP fallback in
+    // `ChatPage.tsx::sendViaHttp` reads `response.session_id` to call
+    // `onAutoPinSession`, so a regression that flips this to `null` or
+    // an empty string would silently break URL pinning on the fallback
+    // path (Codex review P2 on PR #5253).
+    // ---------------------------------------------------------------------
+
+    fn sample_message_response() -> MessageResponse {
+        MessageResponse {
+            response: "hi".into(),
+            input_tokens: 1,
+            output_tokens: 2,
+            iterations: 1,
+            cost_usd: None,
+            decision_traces: vec![],
+            memories_saved: vec![],
+            memories_used: vec![],
+            memory_conflicts: vec![],
+            thinking: None,
+            owner_notice: None,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn message_response_omits_session_id_when_none() {
+        let resp = sample_message_response();
+        let json = serde_json::to_value(&resp).unwrap();
+        let obj = json.as_object().expect("response must serialize as object");
+        assert!(
+            !obj.contains_key("session_id"),
+            "session_id MUST be omitted (skip_serializing_if) — the HTTP \
+             fallback uses `typeof === 'string'` to decide whether to \
+             auto-pin; a `null` would still pass `typeof` and a misleading \
+             auto-pin would land on the kernel-resolved session even when \
+             the client explicitly pinned. Got: {obj:?}"
+        );
+    }
+
+    #[test]
+    fn message_response_emits_session_id_string_when_present() {
+        let mut resp = sample_message_response();
+        resp.session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json["session_id"],
+            serde_json::json!("11111111-2222-3333-4444-555555555555"),
+            "session_id must serialize as a bare string (no wrapping object) \
+             — the dashboard reads `response.session_id` directly. Got: {json}"
+        );
     }
 }

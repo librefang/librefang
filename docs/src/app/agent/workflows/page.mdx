@@ -506,6 +506,14 @@ When a trigger fires, the engine replaces `{{event}}` in the `prompt_template` w
 
 When `max_fires` is set to a value greater than 0, the trigger automatically disables itself (sets `enabled = false`) once `fire_count >= max_fires`. Setting `max_fires` to 0 means the trigger fires indefinitely.
 
+### Per-Trigger `session_mode` and Concurrency
+
+A trigger may carry a per-trigger `session_mode` override (`"new"` or `"persistent"`) that wins over the agent manifest's default for that trigger's fires. The override controls **session isolation only** — whether each fire gets a fresh `SessionId`.
+
+It does **not** grant parallelism. The per-agent concurrency cap (`max_concurrent_invocations`) is computed from the **manifest** alone and is hard-clamped to 1 when the manifest default `session_mode` is `"persistent"` (concurrent appends to one persistent session's history are undefined). So a trigger with `session_mode = "new"` on a `Persistent`-default agent mints isolated sessions that still run serially. To get real per-trigger parallelism, the **manifest** must set `session_mode = "new"` together with `max_concurrent_invocations > 1`.
+
+See [Trigger dispatch concurrency](https://github.com/librefang/librefang/blob/main/docs/architecture/trigger-dispatch-concurrency.md) (section "Gotcha: per-trigger `session_mode = "new"` does NOT grant parallelism") for the exact resolution order and worked config examples.
+
 ### Trigger Use Cases
 
 **Monitor agent health:**

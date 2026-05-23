@@ -588,3 +588,156 @@ def test_no_account_id_when_unset():
     # When None, protocol.ready should omit the field (matches ntfy
     # behaviour and the base-class contract).
     assert params.get("account_id") in (None, )
+
+
+# ---- 429 Retry-After honour (sidecar cross-audit fix) -------------
+
+
+class _Fake429Then200:
+    """First call raises HTTPError(429) with a Retry-After header,
+    subsequent calls return 200. Used to assert the retry-once path
+    honours the server's backoff window before re-issuing the POST."""
+
+    def __init__(self, retry_after: str = "2"):
+        self.calls: list[dict] = []
+        self._429_emitted = False
+        self._retry_after = retry_after
+
+    def __call__(self, req, timeout=None):
+        body = req.data
+        self.calls.append({"body": body, "timeout": timeout})
+        if not self._429_emitted:
+            self._429_emitted = True
+            from email.message import Message
+            hdrs = Message()
+            hdrs["Retry-After"] = self._retry_after
+            raise ga.urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests", hdrs,
+                io.BytesIO(b"rate limited"),
+            )
+        return _FakeResp(200)
+
+
+class _FakeAlways429:
+    """Every call raises 429. Used to assert the second 429 surfaces
+    instead of looping forever."""
+
+    def __init__(self, retry_after: str = "1"):
+        self.calls = 0
+        self._retry_after = retry_after
+
+    def __call__(self, req, timeout=None):
+        self.calls += 1
+        from email.message import Message
+        hdrs = Message()
+        hdrs["Retry-After"] = self._retry_after
+        raise ga.urllib.error.HTTPError(
+            req.full_url, 429, "Too Many Requests", hdrs,
+            io.BytesIO(b"rate limited"),
+        )
+
+
+def test_publish_honours_retry_after_on_429_and_retries_once(monkeypatch):
+    a = _adapter()
+    fake = _Fake429Then200(retry_after="3")
+    sleeps: list[float] = []
+    monkeypatch.setattr(ga.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ga.time, "sleep", sleeps.append)
+    a._publish("hi")
+    # One sleep observed at the server-suggested 3-second window.
+    assert sleeps == [3.0]
+    # Two POSTs: the rate-limited probe and the retry.
+    assert len(fake.calls) == 2
+
+
+def test_publish_raises_on_second_429(monkeypatch):
+    a = _adapter()
+    fake = _FakeAlways429(retry_after="1")
+    monkeypatch.setattr(ga.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ga.time, "sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="429"):
+        a._publish("hi")
+    # Exactly one sleep then a fresh 429 surfaces — no infinite loop.
+    assert fake.calls == 2
+
+
+def test_publish_429_without_retry_after_uses_default(monkeypatch):
+    a = _adapter()
+
+    class _Fake429ThenOK:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                from email.message import Message
+                raise ga.urllib.error.HTTPError(
+                    req.full_url, 429, "Too Many Requests",
+                    Message(), io.BytesIO(b""),
+                )
+            return _FakeResp(200)
+
+    fake = _Fake429ThenOK()
+    sleeps: list[float] = []
+    monkeypatch.setattr(ga.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ga.time, "sleep", sleeps.append)
+    a._publish("hi")
+    # Without an explicit header we fall back to
+    # RETRY_AFTER_DEFAULT_SECS from the shared common module.
+    from librefang.sidecar import common as _common
+    assert sleeps == [_common.RETRY_AFTER_DEFAULT_SECS]
+
+
+# ---- inbound dedupe (sidecar cross-audit fix) ---------------------
+
+
+def test_ws_loop_dedupes_redelivered_frame_id():
+    """Server replay across reconnect must not double-emit. The
+    sidecar keys on ``gotify-<id>`` which is the message_id round-
+    tripped to the daemon, so the dedupe slot matches what the
+    bridge already keys on too."""
+    a = _adapter()
+    emitted: list[dict] = []
+
+    class _Iter:
+        def __init__(self):
+            self.frames = [
+                '{"id":42,"message":"hi"}',
+                '{"id":42,"message":"hi"}',  # replay
+                '{"id":43,"message":"there"}',
+            ]
+            self.i = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.i >= len(self.frames):
+                raise StopIteration
+            v = self.frames[self.i]
+            self.i += 1
+            return v
+
+    # Patch _WebSocketReader to yield our fixed sequence.
+    def _fake_reader(url, *args, **kwargs):
+        return _Iter()
+
+    import librefang.sidecar.adapters.gotify as gotify_mod
+    orig = gotify_mod._WebSocketReader
+    gotify_mod._WebSocketReader = _fake_reader
+    try:
+        a._ws_loop(emitted.append)
+    finally:
+        gotify_mod._WebSocketReader = orig
+
+    # The replay is suppressed; only the two distinct IDs land.
+    assert [e["params"]["message_id"] for e in emitted] == [
+        "gotify-42", "gotify-43",
+    ]

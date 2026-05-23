@@ -43,6 +43,7 @@ import asyncio
 import json
 import sys
 import threading
+import traceback
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from . import logging as log
@@ -244,7 +245,33 @@ async def run(
             try:
                 await adapter.on_command(cmd)
             except Exception as e:  # noqa: BLE001
-                log.error("on_command failed", error=str(e))
+                # The bare except is load-bearing: we cannot raise out
+                # of `reader()` without taking down the entire sidecar
+                # process for one bad command. But the previous
+                # `error=str(e)` lost the traceback, which has burned
+                # us repeatedly — the four channel reply-routing
+                # regressions fixed in #5417→#5423→#5431→#5439 all
+                # took multiple post-merge review passes to surface
+                # because the original failure looked like
+                # ``on_command failed error="missing parent fullname"``
+                # with no clue WHERE it was raised. Include the
+                # traceback as a structured field so debuggers can
+                # grep for the offending adapter / line directly.
+                #
+                # The richer long-term fix — surfacing on_command
+                # failures as a structured JSON-RPC error response so
+                # the bridge can correlate the failure to the original
+                # cmd id and the agent's error-handling lane fires —
+                # is tracked in a follow-up; it needs a protocol
+                # change (Response.error field) that this hotfix
+                # doesn't ship.
+                log.error(
+                    "on_command failed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                    cmd_type=type(cmd).__name__,
+                )
 
     tasks = [
         asyncio.ensure_future(ready_loop()),

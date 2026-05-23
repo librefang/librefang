@@ -545,6 +545,359 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     );
 }
 
+// ── /api/migrate path containment (audit: migrate-arbitrary-paths) ──────────
+//
+// `POST /api/migrate` previously consumed `source_dir` / `target_dir` via
+// `PathBuf::from(...)` with NO containment check. Admin-only, but a
+// compromised Admin token (leaked CI env, phishing) became a probe for any
+// `.exists()` readable as the daemon UID AND a write primitive into any
+// `target_dir`. The handler now canonicalizes both paths and requires them to
+// fall under an allowlist (currently just `home_dir`). These tests pin that
+// contract by hitting the FULL layered router so a future reorder or revert
+// is caught.
+
+/// `source_dir = "/etc"` (an existing system path, not under daemon home)
+/// must be rejected with 400 — pins the `.exists()` oracle closure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_outside_home() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": "/etc",
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_dir='/etc' must be rejected — outside the allowed migration roots"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("source_dir") && err_text.contains("allowed"),
+        "error must name the rejected field and the allowlist policy: {err_text}"
+    );
+}
+
+/// `source_dir = "../../../etc"` (a relative traversal) must be rejected after
+/// canonicalization — pins that `..`-style escapes don't bypass the check.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_source_dir_dotdot_traversal() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": "../../../etc",
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_dir='../../../etc' must be rejected after canonicalization"
+    );
+}
+
+/// `target_dir = "/tmp/foo"` (an existing non-home directory). The previous
+/// behaviour silently wrote there. Now must be rejected — `target_dir`
+/// resolution walks up to find an existing ancestor (`/tmp`), canonicalizes
+/// it, and rejects when it's not under `home_dir`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_rejects_target_dir_outside_home() {
+    let harness = start_full_router("").await;
+
+    // Provide a valid source under home so we isolate the target-dir check.
+    let source_dir = harness.state.kernel.home_dir().join("legit-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    // /tmp/foo-<unique>: nonexistent path under /tmp, which is outside
+    // home_dir. The validator walks up to /tmp (existing) and rejects.
+    let pid = std::process::id();
+    let outside_target = format!("/tmp/librefang-migrate-outside-{pid}");
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": outside_target,
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "target_dir outside home_dir must be rejected"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("target_dir"),
+        "error must name the rejected field: {err_text}"
+    );
+
+    // And the rejected directory must NOT have been created.
+    assert!(
+        !std::path::Path::new(&outside_target).exists(),
+        "rejected target_dir must not be created on disk"
+    );
+}
+
+/// Legitimate migration under `home_dir/<sub>` must still succeed — pins that
+/// the new check does not break the happy path. Complements
+/// `test_run_migrate_uses_daemon_home_when_target_dir_is_empty` by exercising
+/// the explicit-target (nonexistent subdir of home) branch of the validator.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_run_migrate_accepts_paths_inside_home() {
+    let harness = start_full_router("").await;
+
+    let source_dir = harness.state.kernel.home_dir().join("containment-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    // Nonexistent target subdir of home — exercises the
+    // canonicalize_nonexistent path (walk up to home, canonicalize, append).
+    let target_dir = harness.state.kernel.home_dir().join("containment-target");
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": target_dir.display().to_string(),
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "legitimate migration with both paths under home_dir must still succeed"
+    );
+}
+
+/// `POST /api/migrate/scan { path: "/etc" }` must be rejected with 400 — pins
+/// that the sibling scan endpoint also enforces containment. Without this,
+/// the 200-vs-400 `Directory not found` branch of `migrate_scan` is a
+/// `.exists()` oracle for arbitrary daemon-UID-readable paths even after
+/// `run_migrate` was hardened.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_migrate_scan_rejects_path_outside_home() {
+    let harness = start_full_router("").await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate/scan")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({ "path": "/etc" })).unwrap(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "migrate_scan path='/etc' must be rejected — outside the allowed migration roots"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let err_text = serde_json::to_string(&json).unwrap();
+    assert!(
+        err_text.contains("path") && err_text.contains("allowed"),
+        "error must name the rejected field and the allowlist policy: {err_text}"
+    );
+}
+
+/// End-to-end coverage for the global `enforce_json_body_depth` middleware
+/// wired into `server::build_router` (PR #5412). Unit tests in
+/// `middleware.rs` exercise the layer against a `Router::new()` stub; this
+/// drives a request through the FULL layered router so a missing wiring (or a
+/// reorder that puts the guard behind a body-consuming layer) is caught.
+///
+/// Asserts both directions:
+///   (a) a body nested deeper than `MAX_JSON_BODY_DEPTH` (32) is rejected with
+///       400 carrying the standard `validation_error` shape — proving the
+///       middleware actually fires before the handler; and
+///   (b) a normal shallow JSON body still reaches the handler and succeeds —
+///       proving the buffer-and-reconstruct path does not corrupt normal
+///       traffic.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_router_rejects_deeply_nested_json_body() {
+    let harness = start_full_router("").await;
+
+    // Build `[[[ … 1 … ]]]` with a leaf so each bracket contributes a level.
+    // 40 > MAX_JSON_BODY_DEPTH (32), so the guard must reject it. Empty
+    // arrays would have depth 0 (no items pushed), hence the inner `1`.
+    const DEPTH: usize = 40;
+    let deep_body = format!("{}1{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(deep_body))
+        .unwrap();
+    // Empty api_key + loopback ConnectInfo => the request clears auth, so the
+    // 400 we observe comes from the depth guard, not the auth layer above it.
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "deeply nested JSON must be rejected by the global depth guard"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Standard `ApiErrorResponse` shape produced by `ValidationError`. The
+    // message text distinguishes the depth guard from the handler's own
+    // `Json<MigrateRequest>` deserialization rejection (which would not carry
+    // the `validation_error` code).
+    assert_eq!(json["code"], "validation_error");
+    // The depth message surfaces in both the top-level `message` and the
+    // nested `error.message` of the standard `ApiErrorResponse` envelope; the
+    // text distinguishes the guard from any handler-level rejection.
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nesting depth"),
+        "error body should name the depth violation, got: {json}"
+    );
+
+    // (b) A shallow, well-formed JSON body for the same endpoint still flows
+    //     through the buffer+reconstruct path and reaches the handler.
+    let source_dir = harness.state.kernel.home_dir().join("depth-ok-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{ agents: { list: [ { id: "main", name: "Main" } ], defaults: { model: "anthropic/x" } } }"#,
+    )
+    .unwrap();
+
+    let mut shallow = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": "",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    shallow
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let shallow_resp = harness.app.clone().oneshot(shallow).await.unwrap();
+    assert_eq!(
+        shallow_resp.status(),
+        StatusCode::OK,
+        "shallow JSON must still reach the handler after the depth guard buffers it"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_config_reload_hot_reloads_proxy_changes() {
     let server = start_test_server().await;
@@ -1415,10 +1768,13 @@ async fn test_agent_list_paginated_response_format() {
         body["offset"].is_number(),
         "Response should have 'offset' number"
     );
-    // limit should be null when not specified
-    assert!(
-        body["limit"].is_null(),
-        "limit should be null when not specified"
+    // Audit: agent-list-limit-none-unbounded. `limit` is now always a
+    // finite server-applied cap (DEFAULT_AGENT_LIST_LIMIT = 500), never
+    // null, so an unspecified `limit` can no longer return an
+    // unpaginated collection.
+    assert_eq!(
+        body["limit"], 500,
+        "limit should report the server-applied default cap (500) when not specified"
     );
 }
 
@@ -1778,46 +2134,122 @@ async fn test_auth_disabled_when_no_key() {
 // Tool endpoints
 // ---------------------------------------------------------------------------
 
+// These tests run against the **full router** (`start_full_router`) so the
+// `/api/tools` reads flow through the production middleware stack: auth,
+// rate-limit, body-size, and request-logging. The old `start_test_server`
+// mock harness mounted no auth layer at all on `/api/tools`, so the
+// authentication boundary on these endpoints went completely untested
+// (first slice of the mock-router -> full-router migration tracked in
+// docs/issues/integration-tests-mock-router.md). `/api/tools` and
+// `/api/tools/{name}` are NOT in any `PUBLIC_ROUTES_*` allowlist
+// (middleware.rs), so once an api_key is configured an unauthenticated read
+// must be rejected — `test_list_tools_requires_auth` pins that contract,
+// which the mock harness silently allowed through.
+const TOOLS_API_KEY: &str = "tools-cluster-test-key";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_tools() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    let resp = client
-        .get(format!("{}/api/tools", server.base_url))
-        .send()
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["tools"].is_array());
     assert!(body["total"].as_u64().unwrap() > 0);
 }
 
+/// Coverage the mock harness could not provide: `/api/tools` is not in any
+/// public allowlist, so with an api_key configured an unauthenticated read
+/// must be rejected by the auth middleware (401), not served.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_tools_requires_auth() {
+    let harness = start_full_router(TOOLS_API_KEY).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_token = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", "Bearer wrong-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_found() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    // First list tools to get a known tool name
-    let resp = client
-        .get(format!("{}/api/tools", server.base_url))
-        .send()
+    // First list tools to get a known tool name.
+    let list_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_bytes = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
     let first_tool_name = body["tools"][0]["name"].as_str().unwrap().to_string();
 
-    // Now fetch that specific tool
-    let resp = client
-        .get(format!("{}/api/tools/{}", server.base_url, first_tool_name))
-        .send()
+    // Now fetch that specific tool.
+    let tool_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/tools/{first_tool_name}"))
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let tool: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tool_response.status(), StatusCode::OK);
+    let tool_bytes = axum::body::to_bytes(tool_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tool: serde_json::Value = serde_json::from_slice(&tool_bytes).unwrap();
     assert_eq!(tool["name"].as_str().unwrap(), first_tool_name);
     assert!(tool["description"].is_string());
     assert!(tool["input_schema"].is_object());
@@ -1825,20 +2257,26 @@ async fn test_get_tool_found() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_not_found() {
-    let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let harness = start_full_router(TOOLS_API_KEY).await;
 
-    let resp = client
-        .get(format!(
-            "{}/api/tools/nonexistent_tool_xyz",
-            server.base_url
-        ))
-        .send()
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tools/nonexistent_tool_xyz")
+                .header("authorization", format!("Bearer {TOOLS_API_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
@@ -4059,5 +4497,52 @@ async fn users_rotate_key_admin_returns_403() {
         resp.status(),
         403,
         "Non-Owner users (incl. self-rotate) must be rejected"
+    );
+}
+
+/// Oversize uploads must be rejected at the wire by the route-local
+/// `RequestBodyLimitLayer` (sized to `max_upload_size_bytes`) wrapping the
+/// upload sub-router in `server.rs::build_router`, NOT only by the handler's
+/// after-the-fact `body.len()` check. A body one byte over the configured
+/// cap must yield `413 PAYLOAD_TOO_LARGE` before the handler runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_upload_over_limit_returns_413() {
+    let harness = start_full_router("").await;
+
+    // `start_full_router` boots with `KernelConfig::default()`, so the upload
+    // cap is the compiled default (`default_max_upload_size_bytes` = 10 MiB).
+    let limit = harness.state.kernel.config_ref().max_upload_size_bytes;
+    let oversize = vec![0u8; limit + 1];
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/agents/any-agent/upload")
+        .header("content-type", "text/plain")
+        .header("x-filename", "huge.txt")
+        // Real HTTP clients (reqwest, browsers) always send Content-Length for a
+        // known-size body. With it set, RequestBodyLimitLayer short-circuits to a
+        // clean 413 before reading the body. (Absent it, the layer instead wraps
+        // the body in a `Limited` stream that errors mid-read, which axum's Bytes
+        // extractor surfaces as 400 — not the wire-level cap we are asserting.)
+        .header("content-length", oversize.len().to_string())
+        .body(Body::from(oversize))
+        .unwrap();
+    // oneshot bypasses axum's connection layer, so inject a loopback
+    // ConnectInfo to clear the keyless-auth fail-closed branch (same pattern
+    // as test_run_migrate_uses_daemon_home_when_target_dir_is_empty).
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "upload one byte over max_upload_size_bytes must be rejected with 413 \
+         by the route-local RequestBodyLimitLayer"
     );
 }

@@ -131,3 +131,105 @@ async def test_on_send_text_vs_unsupported(monkeypatch):
     await a.on_send(Cmd("", {"Image": {"url": "u"}}))
     await a.on_send(Cmd("plain", None))
     assert sent == ["hello", "(Unsupported content type)", "plain"]
+
+
+# ---- 429 / Retry-After (ntfy rate-limiting) ---------------------
+
+
+class _HdrShim:
+    """Mimic the parts of ``email.message.Message`` the adapter
+    touches — only ``.items()``."""
+
+    def __init__(self, hdrs):
+        self._hdrs = hdrs or {}
+
+    def items(self):
+        return list(self._hdrs.items())
+
+
+def _http_error_429(url: str, resp_hdrs: dict | None = None):
+    return na.urllib.error.HTTPError(
+        url, 429, "Too Many Requests",
+        _HdrShim(resp_hdrs or {}),
+        io.BytesIO(b"throttled"),
+    )
+
+
+def test_retry_after_secs_parses_header_value():
+    """``Retry-After`` (seconds form) is parsed as a float and capped
+    at ``MAX_BACKOFF_SECS`` so a misreported value can't block the
+    producer for more than a minute."""
+    assert na.NtfyAdapter._retry_after_secs({"retry-after": "5"}) == 5.0
+    assert na.NtfyAdapter._retry_after_secs({"retry-after": "0.5"}) == 1.0
+    assert (
+        na.NtfyAdapter._retry_after_secs({"retry-after": "9999"})
+        == na.MAX_BACKOFF_SECS
+    )
+
+
+def test_retry_after_secs_falls_back_when_absent_or_invalid():
+    """Without a ``Retry-After`` (or with an HTTP-date form we don't
+    decode), fall back to ``RETRY_AFTER_DEFAULT_SECS`` rather than
+    busy-looping at 1 s."""
+    assert (
+        na.NtfyAdapter._retry_after_secs({})
+        == na.RETRY_AFTER_DEFAULT_SECS
+    )
+    assert (
+        na.NtfyAdapter._retry_after_secs(
+            {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"},
+        )
+        == na.RETRY_AFTER_DEFAULT_SECS
+    )
+
+
+def test_sse_loop_429_on_subscribe_sleeps_then_raises(monkeypatch):
+    """ntfy rate-limits topic subscriptions on hot reconnect. The
+    sidecar must honour ``Retry-After`` before raising so the
+    `produce` outer backoff doesn't immediately probe inside the
+    server-side window."""
+    a = _adapter()
+
+    def fake_urlopen(req, *args, **kwargs):
+        raise _http_error_429(req.full_url, {"Retry-After": "7"})
+
+    monkeypatch.setattr(na.urllib.request, "urlopen", fake_urlopen)
+    sleeps: list = []
+    monkeypatch.setattr(na.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._sse_loop(lambda _: None)
+    assert sleeps == [7.0]
+
+
+def test_sse_loop_429_without_header_uses_default(monkeypatch):
+    """A 429 with no ``Retry-After`` falls back to
+    ``RETRY_AFTER_DEFAULT_SECS`` instead of busy-looping at 1 s."""
+    a = _adapter()
+
+    def fake_urlopen(req, *args, **kwargs):
+        raise _http_error_429(req.full_url, {})
+
+    monkeypatch.setattr(na.urllib.request, "urlopen", fake_urlopen)
+    sleeps: list = []
+    monkeypatch.setattr(na.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._sse_loop(lambda _: None)
+    assert sleeps == [na.RETRY_AFTER_DEFAULT_SECS]
+
+
+def test_publish_429_sleeps_retry_after_then_raises(monkeypatch):
+    """Per-topic publish 429 must sleep the indicated interval and
+    raise. ntfy.sh defaults to ~4800 messages/hour/topic on free tier;
+    operators hitting that bucket should not have the sidecar retry
+    in tight loop."""
+    a = _adapter()
+
+    def fake_urlopen(req, *args, **kwargs):
+        raise _http_error_429(req.full_url, {"Retry-After": "6"})
+
+    monkeypatch.setattr(na.urllib.request, "urlopen", fake_urlopen)
+    sleeps: list = []
+    monkeypatch.setattr(na.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="429"):
+        a._publish("hi")
+    assert sleeps == [6.0]

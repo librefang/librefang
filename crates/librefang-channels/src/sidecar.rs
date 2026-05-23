@@ -68,6 +68,19 @@ pub enum SidecarEvent {
     /// developed against the final wire shape.
     #[serde(rename = "typing")]
     Typing { params: SidecarTypingParams },
+    /// Sidecar has fetched a QR-login code and is waiting for the
+    /// user to scan it (WeChat iLink, WhatsApp Web pairing, …). The
+    /// daemon caches this on `ChannelStatus.qr` so
+    /// `GET /api/channels/{name}/qr` can return it to the dashboard
+    /// without requiring the operator to read sidecar logs.
+    #[serde(rename = "qr_ready")]
+    QrReady { params: SidecarQrReadyParams },
+    /// Sidecar reports a state transition on the active QR session
+    /// (scanning → confirmed / expired / failed). Replaces the
+    /// retired `/api/channels/{wechat,whatsapp}/qr/status` long-poll
+    /// the dashboard used pre-sidecar.
+    #[serde(rename = "qr_status")]
+    QrStatus { params: SidecarQrStatusParams },
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +129,43 @@ pub struct SidecarMessageParams {
 #[derive(Debug, Deserialize)]
 pub struct SidecarErrorParams {
     pub message: String,
+}
+
+/// `qr_ready` event params — see [`QrState`](crate::types::QrState)
+/// for the daemon-side projection and lifecycle.
+#[derive(Debug, Deserialize)]
+pub struct SidecarQrReadyParams {
+    /// Raw QR payload the user's scanner reads.
+    pub qr_code: String,
+    /// Optional pre-formed scan URL (deep-link). When `None` the
+    /// dashboard renders `qr_code` directly.
+    #[serde(default)]
+    pub qr_url: Option<String>,
+    /// Optional operator-visible note (e.g. "5-minute window").
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional expiry timestamp from the platform's response.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// `qr_status` event params — drives transitions out of `Pending`.
+///
+/// A previous iteration also carried a `bot_token` field for the
+/// dashboard to auto-persist on `confirmed`. That path was unsafe
+/// against the current configure endpoint (see `types.rs::QrState`
+/// for the full note) so the field was dropped from the protocol
+/// entirely. The sidecar logs the captured token at DEBUG instead
+/// and the operator copies it into `secrets.env`.
+#[derive(Debug, Deserialize)]
+pub struct SidecarQrStatusParams {
+    /// One of `scanning` / `confirmed` / `expired` / `failed`.
+    /// Anything else is treated as `failed` so a sidecar bug can't
+    /// strand the dashboard in `pending` forever.
+    pub status: String,
+    /// Operator-visible reason / next-step hint.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// Inbound typing indicator params — fed to `typing_events()`.
@@ -272,6 +322,107 @@ struct Caps {
     suppress_errors: bool,
     notification_recipients: Vec<ChannelUser>,
     header_rules: Vec<(String, Vec<(String, String)>)>,
+}
+
+/// Detect the canonical Python-side failure mode that fires when
+/// `librefang-sdk` is not importable from the interpreter the daemon
+/// spawned for the sidecar. We narrow on BOTH the `ModuleNotFoundError`
+/// (or module-spec lookup) phrase AND the `librefang` token so a
+/// random adapter that prints "librefang" in stderr for unrelated
+/// reasons doesn't trip the install-hint translation and mask the
+/// real bug. This is intentionally Python-shaped — non-Python
+/// sidecars fall through to the raw passthrough.
+///
+/// Shared with `librefang-api::routes::sidecar_describe` (which
+/// re-uses this single detector + `format_librefang_sdk_missing_hint`
+/// so the discovery-time and runtime-time install hints stay in
+/// lockstep). Keep both call sites in sync — if Python's traceback
+/// format changes, update HERE only.
+pub fn looks_like_librefang_sdk_missing(line: &str) -> bool {
+    let module_not_found =
+        line.contains("ModuleNotFoundError") && line.contains("No module named 'librefang'");
+    let spec_lookup_failed =
+        line.contains("Error while finding module specification for 'librefang.sidecar");
+    module_not_found || spec_lookup_failed
+}
+
+/// Render the single canonical "install librefang-sdk" hint for a
+/// given interpreter command. Used by both the boot-time discovery
+/// translator (in `librefang-api`) and the runtime stderr loop (in
+/// this crate) so operators see exactly the same message regardless
+/// of which path tripped — and editing one updates both.
+///
+/// Single-quoted (not backticked) — the daemon WARN log channel
+/// renders plain text, so markdown backticks appear literally to
+/// operators and read worse than single quotes.
+pub fn format_librefang_sdk_missing_hint(command: &str) -> String {
+    format!(
+        "librefang-sdk is not installed in the Python interpreter \
+         resolved by '{command}'. Install with 'pip install \
+         librefang-sdk' (or 'pip install -e sdk/python/' from a \
+         source checkout). The daemon and your shell can resolve \
+         different python3 binaries under mise / pyenv / conda — \
+         verify with '{command} -c \"import librefang.sidecar; \
+         print(librefang.__file__)\"'."
+    )
+}
+
+/// What `StderrTranslator::handle_line` decided to do with a given
+/// stderr line. Extracted from the inline `warn!`/`debug!` macro
+/// calls so the WARN-then-DEBUG dedupe behavior is unit-testable
+/// without spinning up a tracing subscriber.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StderrAction {
+    /// Emit at WARN level — the line is either the first
+    /// install-hint-worthy crash signal or an unrelated stderr
+    /// line worth surfacing to operators.
+    Warn(String),
+    /// Emit at DEBUG level — subsequent install-hint-worthy lines
+    /// from the same crash (Python's traceback prints across 2-3
+    /// lines and we don't want to triple-WARN per restart).
+    Debug(String),
+}
+
+/// Per-spawn stderr line classifier. Owns the dedupe state for the
+/// install-hint translation so the stderr-reader task in
+/// `spawn_once` stays a thin loop and the WARN-vs-DEBUG decision
+/// is testable in isolation.
+pub struct StderrTranslator {
+    /// Sidecar interpreter command (e.g. `python3`). Referenced in
+    /// the install hint so operators see exactly which binary the
+    /// daemon resolved.
+    command: String,
+    /// Flips to true after we emit the install hint once for this
+    /// spawn. Subsequent matching lines from the same crash drop
+    /// to DEBUG so a 3-line Python traceback doesn't fan out to 3
+    /// identical WARNs per restart attempt.
+    install_hint_emitted: bool,
+}
+
+impl StderrTranslator {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            install_hint_emitted: false,
+        }
+    }
+
+    /// Classify one stderr line. Side-effecting (toggles internal
+    /// dedupe state on the first install-hint match); idempotent
+    /// thereafter on matching lines (always returns `Debug`).
+    pub fn handle_line(&mut self, line: &str) -> StderrAction {
+        if looks_like_librefang_sdk_missing(line) {
+            if !self.install_hint_emitted {
+                self.install_hint_emitted = true;
+                return StderrAction::Warn(format!(
+                    "[sidecar stderr] {}",
+                    format_librefang_sdk_missing_hint(&self.command),
+                ));
+            }
+            return StderrAction::Debug(format!("[sidecar stderr] {line}"));
+        }
+        StderrAction::Warn(format!("[sidecar stderr] {line}"))
+    }
 }
 
 /// Write one newline-delimited JSON command to the child's stdin.
@@ -510,8 +661,29 @@ async fn spawn_once(
     // loader — still reach the child without a daemon restart. The
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
-    let merged_env = build_spawn_env(&ctx.home_dir, &ctx.env);
-    for (k, v) in &merged_env {
+    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.env)
+        .into_iter()
+        .collect();
+    // Embedded-SDK fallback: when the spawn command is a Python
+    // interpreter that cannot already `import librefang.sidecar`, put
+    // the daemon-bundled copy on PYTHONPATH so a fresh user with just
+    // `python3` on PATH can enable a sidecar channel without first
+    // running `pip install librefang-sdk`. No-op for developers whose
+    // editable install already wins, and for non-Python commands
+    // (`uv`, `bash`, …). See `embedded_sdk.rs` for precedence and
+    // extraction details.
+    let existing_pythonpath = env_map
+        .get("PYTHONPATH")
+        .cloned()
+        .or_else(|| std::env::var("PYTHONPATH").ok());
+    if let Some(composed) = crate::embedded_sdk::pythonpath_with_embedded(
+        &ctx.command,
+        &ctx.home_dir,
+        existing_pythonpath.as_deref(),
+    ) {
+        env_map.insert("PYTHONPATH".to_string(), composed);
+    }
+    for (k, v) in &env_map {
         cmd.env(k, v);
     }
     cmd.stdin(std::process::Stdio::piped())
@@ -554,11 +726,19 @@ async fn spawn_once(
     }
 
     let stderr_name = ctx.name.clone();
+    let mut stderr_translator = StderrTranslator::new(&ctx.command);
     tokio::spawn(async move {
         let reader = BufReader::new(child_stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            warn!(adapter = %stderr_name, "[sidecar stderr] {line}");
+            match stderr_translator.handle_line(&line) {
+                StderrAction::Warn(msg) => {
+                    warn!(adapter = %stderr_name, "{msg}");
+                }
+                StderrAction::Debug(msg) => {
+                    debug!(adapter = %stderr_name, "{msg}");
+                }
+            }
         }
     });
 
@@ -663,6 +843,28 @@ async fn spawn_once(
                                         "Received message from sidecar"
                                     );
                                     let mut metadata = params.metadata;
+                                    // #5227 follow-up — sidecar protocol
+                                    // splits `user_id` (the human sender)
+                                    // and `channel_id` (the chat the
+                                    // message belongs to). The bridge's
+                                    // `build_sender_context` derives
+                                    // `chat_id` from `sender.platform_id`
+                                    // (see `bridge.rs` near
+                                    // `build_sender_context`) and reads
+                                    // the human sender from
+                                    // `metadata[SENDER_USER_ID_KEY]`
+                                    // (falling back to `platform_id`). For
+                                    // the in-process Discord adapter
+                                    // `platform_id` is already the chat
+                                    // id; sidecar adapters must mirror
+                                    // that shape so the cross-chat scope
+                                    // composition (`compose_sender_scope`)
+                                    // sees a DM and a group of the same
+                                    // user as DISTINCT chats. Without
+                                    // this swap a Telegram-sidecar group
+                                    // and DM for the same user collapse
+                                    // to one scope (#5227 P3).
+                                    let raw_chat_id = params.channel_id.clone();
                                     if let Some(ch) = params.channel_id {
                                         metadata.insert(
                                             "channel_id".to_string(),
@@ -713,6 +915,23 @@ async fn spawn_once(
                                                 params.text.unwrap_or_default(),
                                             )
                                         });
+                                    let (platform_id, sender_user_id_meta) =
+                                        derive_sidecar_sender_identity(
+                                            &params.user_id,
+                                            raw_chat_id.as_deref(),
+                                        );
+                                    if let Some(uid) = sender_user_id_meta {
+                                        // Only stamp if the upstream sidecar
+                                        // hasn't already populated this key
+                                        // (the Telegram poll-answer path
+                                        // does — see `_poll_answer_to_event`
+                                        // in `telegram.py`).
+                                        metadata
+                                            .entry(
+                                                crate::bridge::SENDER_USER_ID_KEY.to_string(),
+                                            )
+                                            .or_insert(serde_json::Value::String(uid));
+                                    }
                                     let msg = ChannelMessage {
                                         channel: channel_type.clone(),
                                         platform_message_id: params
@@ -722,7 +941,7 @@ async fn spawn_once(
                                                     .to_string()
                                             }),
                                         sender: ChannelUser {
-                                            platform_id: params.user_id,
+                                            platform_id,
                                             display_name: params.user_name,
                                             librefang_user: params.librefang_user,
                                         },
@@ -796,6 +1015,86 @@ async fn spawn_once(
                                         .unwrap_or_else(|e| e.into_inner());
                                     s.last_error = Some(params.message);
                                 }
+                                Ok(SidecarEvent::QrReady { params }) => {
+                                    info!(
+                                        adapter = %adapter_name,
+                                        has_url = params.qr_url.is_some(),
+                                        "Sidecar published QR for login"
+                                    );
+                                    let mut s = status_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    s.qr = Some(crate::types::QrState {
+                                        status: crate::types::QrStatusKind::Pending,
+                                        qr_code: params.qr_code,
+                                        qr_url: params.qr_url,
+                                        message: params.message,
+                                        expires_at: params.expires_at,
+                                        updated_at: Utc::now(),
+                                    });
+                                }
+                                Ok(SidecarEvent::QrStatus { params }) => {
+                                    let kind = match params.status.as_str() {
+                                        "pending" => {
+                                            crate::types::QrStatusKind::Pending
+                                        }
+                                        "scanning" => {
+                                            crate::types::QrStatusKind::Scanning
+                                        }
+                                        "confirmed" => {
+                                            crate::types::QrStatusKind::Confirmed
+                                        }
+                                        "expired" => {
+                                            crate::types::QrStatusKind::Expired
+                                        }
+                                        // Anything off-protocol is treated as
+                                        // terminal failure so the dashboard
+                                        // doesn't spin forever on a sidecar
+                                        // bug that emits a misspelled status.
+                                        _ => crate::types::QrStatusKind::Failed,
+                                    };
+                                    info!(
+                                        adapter = %adapter_name,
+                                        status = ?kind,
+                                        "QR session transitioned"
+                                    );
+                                    let mut s = status_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    // Update in place when we already have a
+                                    // session — keeps qr_code / qr_url stable
+                                    // across transitions. Drop the cached
+                                    // session entirely on a terminal-failure
+                                    // path so a stale, scanned-already QR
+                                    // doesn't leak into a future fresh login.
+                                    match s.qr.as_mut() {
+                                        Some(q) => {
+                                            q.status = kind;
+                                            if params.message.is_some() {
+                                                q.message = params.message;
+                                            }
+                                            q.updated_at = Utc::now();
+                                        }
+                                        None => {
+                                            // qr_status before qr_ready is
+                                            // technically protocol misuse, but
+                                            // we accept it so a sidecar that
+                                            // restarts mid-flow can still
+                                            // surface its state. qr_code is
+                                            // empty because we never saw the
+                                            // payload; the dashboard treats
+                                            // empty as "no scannable image".
+                                            s.qr = Some(crate::types::QrState {
+                                                status: kind,
+                                                qr_code: String::new(),
+                                                qr_url: None,
+                                                message: params.message,
+                                                expires_at: None,
+                                                updated_at: Utc::now(),
+                                            });
+                                        }
+                                    }
+                                }
                                 Err(e) => {
                                     warn!(
                                         adapter = %adapter_name,
@@ -851,18 +1150,34 @@ async fn spawn_once(
 
 /// Circuit-breaker: restarts exhausted. Logged exactly once (the
 /// supervisor breaks right after), so no log-rate gate is needed.
+///
+/// Preserves the most recent per-attempt `last_error` (spawn error,
+/// sidecar-emitted `error` event, or stdout read failure) by composing
+/// it into the final `last_error` and surfacing it on the structured
+/// log as `last_cause`. The earlier behaviour overwrote the specific
+/// cause with a generic "circuit-breaker tripped" message, leaving
+/// `GET /api/channels` / dashboard operators with no actionable signal
+/// when a sidecar had been retrying-and-failing for the same reason
+/// (missing required env var, bad token, etc.) all along.
 fn trip_circuit(ctx: &SpawnCtx, attempt: u32) {
-    {
+    let prior = {
         let mut s = ctx.status.lock().unwrap_or_else(|e| e.into_inner());
         s.connected = false;
-        s.last_error = Some(format!(
-            "sidecar restart circuit-breaker tripped after {attempt} attempts"
-        ));
-    }
+        let prior = s.last_error.clone();
+        s.last_error = Some(match prior.as_deref() {
+            Some(cause) if !cause.is_empty() => format!(
+                "sidecar restart circuit-breaker tripped after {attempt} attempts; \
+                 last cause: {cause}"
+            ),
+            _ => format!("sidecar restart circuit-breaker tripped after {attempt} attempts"),
+        });
+        prior
+    };
     error!(
         adapter = %ctx.name,
         attempt,
         max_retries = ctx.sup.max_retries,
+        last_cause = prior.as_deref().unwrap_or("(none recorded)"),
         "Sidecar exceeded restart attempts; giving up (circuit-break)"
     );
 }
@@ -1418,12 +1733,257 @@ impl ChannelAdapter for SidecarAdapter {
     }
 }
 
+/// Decide how to populate `sender.platform_id` and the optional
+/// `SENDER_USER_ID_KEY` metadata entry for an inbound sidecar message.
+///
+/// **The bridge convention** (`bridge.rs::build_sender_context`) is:
+/// - `sender.platform_id` carries the *chat* id (group id for groups,
+///   user id for DMs — same as the in-process Discord/Slack adapters).
+/// - The actual sender's user id lives in
+///   `metadata[SENDER_USER_ID_KEY]`, with a fallback to `platform_id`
+///   when the key is absent (DM case).
+///
+/// **The sidecar protocol** (Python adapters, see `protocol.message`)
+/// splits the two as `user_id` (the human sender) and `channel_id`
+/// (the chat). Naively copying `user_id` into `platform_id` would
+/// collapse a Telegram-sidecar group and DM for the same user into one
+/// chat scope — re-introducing the #5227 cross-chat bleed via a
+/// different path.
+///
+/// Rule:
+/// - Sidecar supplied a `channel_id` distinct from `user_id` → use
+///   `channel_id` as `platform_id`, return `user_id` for the metadata
+///   stamp.
+/// - Sidecar supplied no `channel_id` (notifications: ntfy / gotify)
+///   or chat == user (Telegram poll-answer DM where the adapter
+///   pre-sets both fields, or any single-actor adapter) → keep the
+///   pre-#5227 behaviour: `platform_id = user_id`, no metadata stamp.
+///
+/// Pure function so the chat-vs-user split has a unit-test
+/// surface that doesn't require spinning up a sidecar process.
+fn derive_sidecar_sender_identity(
+    user_id: &str,
+    channel_id: Option<&str>,
+) -> (String, Option<String>) {
+    match channel_id {
+        Some(ch) if ch != user_id => (ch.to_string(), Some(user_id.to_string())),
+        _ => (user_id.to_string(), None),
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{InteractiveButton, MediaGroupItem};
+
+    #[test]
+    fn looks_like_librefang_sdk_missing_matches_canonical_traceback_lines() {
+        // The two specific Python traceback shapes operators see
+        // when librefang-sdk is not installed in the daemon's
+        // interpreter. Both come straight from CPython's runpy.
+        assert!(looks_like_librefang_sdk_missing(
+            "/usr/bin/python3: Error while finding module specification \
+             for 'librefang.sidecar.adapters.telegram' \
+             (ModuleNotFoundError: No module named 'librefang')"
+        ));
+        assert!(looks_like_librefang_sdk_missing(
+            "ModuleNotFoundError: No module named 'librefang'"
+        ));
+        assert!(looks_like_librefang_sdk_missing(
+            "Error while finding module specification for \
+             'librefang.sidecar.adapters.feishu'"
+        ));
+    }
+
+    #[test]
+    fn looks_like_librefang_sdk_missing_does_not_fire_on_unrelated_imports() {
+        // An adapter's own typo'd ImportError must surface
+        // verbatim — silencing it with the install hint would
+        // mask the real bug.
+        assert!(!looks_like_librefang_sdk_missing(
+            "ImportError: cannot import name 'foo' from \
+             'librefang.sidecar.adapters.telegram'"
+        ));
+        assert!(!looks_like_librefang_sdk_missing(
+            "ModuleNotFoundError: No module named 'requests'"
+        ));
+        // The word "librefang" appearing in unrelated stderr
+        // output must not by itself trigger the hint — the
+        // detector requires BOTH the canonical phrase AND the
+        // librefang token.
+        assert!(!looks_like_librefang_sdk_missing(
+            "[INFO] librefang sidecar adapter started normally"
+        ));
+        assert!(!looks_like_librefang_sdk_missing(""));
+    }
+
+    #[test]
+    fn format_librefang_sdk_missing_hint_interpolates_command_twice() {
+        // The hint references the resolved interpreter command in
+        // BOTH the "resolved by" phrase AND the verification
+        // snippet at the end. Both substitutions must use the
+        // exact command string the daemon ran so operators can
+        // copy-paste the verify command directly.
+        let hint = format_librefang_sdk_missing_hint(
+            "/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3",
+        );
+        assert!(
+            hint.contains(
+                "resolved by '/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3'"
+            ),
+            "hint must name the resolved interpreter in the first \
+             sentence; got: {hint}"
+        );
+        assert!(
+            hint.contains(
+                "verify with '/Users/e-hu/.local/share/mise/installs/python/3.13.11/bin/python3 -c"
+            ),
+            "hint's verify snippet must use the same interpreter; \
+             got: {hint}"
+        );
+        // No backticks (would render literally in plain-text log
+        // channel) — single quotes only.
+        assert!(
+            !hint.contains('`'),
+            "hint must not contain backticks; got: {hint}"
+        );
+    }
+
+    #[test]
+    fn stderr_translator_first_match_warns_subsequent_match_lines_debug() {
+        // A 3-line Python traceback through the same crash must
+        // emit exactly ONE WARN (the install hint) and route the
+        // 2 trailing matching lines to DEBUG. Without the dedupe
+        // the operator would see 3 identical WARNs per restart
+        // attempt — and the restart loop fires every few seconds
+        // by default.
+        let mut t = StderrTranslator::new("python3");
+        // CPython prints the spec-lookup line first, then the
+        // bare ModuleNotFoundError, then sometimes a separator.
+        let line_a = "/usr/bin/python3: Error while finding module specification \
+                      for 'librefang.sidecar.adapters.telegram' \
+                      (ModuleNotFoundError: No module named 'librefang')";
+        let line_b = "ModuleNotFoundError: No module named 'librefang'";
+        let line_c = "  File \"/usr/lib/python3.13/runpy.py\", line 198, in _run_module_as_main";
+        let line_d = "ModuleNotFoundError: No module named 'librefang'";
+        match t.handle_line(line_a) {
+            StderrAction::Warn(msg) => {
+                assert!(msg.contains("librefang-sdk is not installed"));
+                assert!(msg.starts_with("[sidecar stderr] "));
+            }
+            other => panic!("first matching line must WARN; got {other:?}"),
+        }
+        // Second matching line → DEBUG (raw passthrough preserved
+        // so a debug-level operator can see the full traceback).
+        match t.handle_line(line_b) {
+            StderrAction::Debug(msg) => {
+                assert!(msg.contains("ModuleNotFoundError"));
+                assert!(msg.starts_with("[sidecar stderr] "));
+            }
+            other => panic!("second matching line must DEBUG; got {other:?}"),
+        }
+        // Unrelated stderr line (a non-matching traceback frame)
+        // is still WARN even after the install hint fired — only
+        // matching lines drop to DEBUG.
+        match t.handle_line(line_c) {
+            StderrAction::Warn(msg) => {
+                assert!(msg.contains("runpy.py"));
+            }
+            other => panic!("non-matching line must WARN; got {other:?}"),
+        }
+        // And a fourth matching line again → DEBUG.
+        match t.handle_line(line_d) {
+            StderrAction::Debug(_) => {}
+            other => panic!("fourth matching line must DEBUG; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stderr_translator_non_matching_lines_always_warn() {
+        // An adapter that crashes for a NON-SDK reason (typo'd
+        // import, missing required env, raised exception in the
+        // adapter's own code) must surface every stderr line at
+        // WARN so operators see the real failure verbatim.
+        let mut t = StderrTranslator::new("python3");
+        for line in [
+            "Traceback (most recent call last):",
+            "  File \"/path/adapter.py\", line 12, in <module>",
+            "    import requests",
+            "ModuleNotFoundError: No module named 'requests'",
+            "ImportError: cannot import name 'foo'",
+        ] {
+            match t.handle_line(line) {
+                StderrAction::Warn(_) => {}
+                StderrAction::Debug(msg) => panic!(
+                    "non-SDK stderr line was downgraded to DEBUG: \
+                     {msg} (would hide real adapter bugs from operators)"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn stderr_translator_uses_supplied_command_in_hint() {
+        // The hint's "resolved by '<command>'" sentence must
+        // reference the SAME command the translator was
+        // constructed with, not a hardcoded 'python3' fallback.
+        // Otherwise operators with mise / pyenv / conda see a
+        // misleading hint that doesn't match the binary actually
+        // failing.
+        let mut t = StderrTranslator::new("/Users/alice/.pyenv/versions/3.13.0/bin/python3");
+        match t.handle_line("ModuleNotFoundError: No module named 'librefang'") {
+            StderrAction::Warn(msg) => {
+                assert!(
+                    msg.contains("/Users/alice/.pyenv/versions/3.13.0/bin/python3"),
+                    "hint did not propagate the constructor's command; got: {msg}"
+                );
+            }
+            other => panic!("expected WARN; got {other:?}"),
+        }
+    }
+
+    /// #5227 follow-up — chat-vs-user identity split for sidecar
+    /// messages. Telegram-sidecar group: distinct chat_id and user_id
+    /// → swap so `platform_id` becomes the chat and the user_id is
+    /// stamped under `SENDER_USER_ID_KEY`.
+    #[test]
+    fn derive_sidecar_sender_identity_group_swaps_chat_into_platform_id_5227() {
+        let (platform_id, sender_meta) =
+            derive_sidecar_sender_identity("alice-42", Some("-100123"));
+        assert_eq!(
+            platform_id, "-100123",
+            "group chat id must become platform_id so build_sender_context \
+             derives the right chat_id"
+        );
+        assert_eq!(
+            sender_meta.as_deref(),
+            Some("alice-42"),
+            "actual sender user id must be returned for SENDER_USER_ID_KEY stamp"
+        );
+    }
+
+    /// #5227 follow-up — DM where the upstream sidecar already set
+    /// chat_id == user_id (Telegram poll-answer case). Must collapse to
+    /// the pre-fix behaviour: no swap, no extra stamp.
+    #[test]
+    fn derive_sidecar_sender_identity_dm_collapses_5227() {
+        let (platform_id, sender_meta) =
+            derive_sidecar_sender_identity("alice-42", Some("alice-42"));
+        assert_eq!(platform_id, "alice-42");
+        assert!(sender_meta.is_none());
+    }
+
+    /// #5227 follow-up — adapters without a chat concept (ntfy /
+    /// gotify notifications, custom single-actor sidecars). channel_id
+    /// is None → keep the legacy behaviour, no swap.
+    #[test]
+    fn derive_sidecar_sender_identity_no_chat_id_legacy_5227() {
+        let (platform_id, sender_meta) = derive_sidecar_sender_identity("topic-x", None);
+        assert_eq!(platform_id, "topic-x");
+        assert!(sender_meta.is_none());
+    }
 
     // ── parse_secrets_env tolerance for hand-edited dotenv conventions ──
 
@@ -1575,6 +2135,92 @@ mod tests {
             }
             _ => panic!("Expected Error variant"),
         }
+    }
+
+    #[test]
+    fn qr_ready_event_parses_with_optional_fields() {
+        // Minimal — only the required qr_code is set.
+        let minimal = r#"{"method":"qr_ready","params":{"qr_code":"opaque-token"}}"#;
+        let SidecarEvent::QrReady { params } =
+            serde_json::from_str(minimal).expect("minimal qr_ready")
+        else {
+            panic!("expected QrReady variant");
+        };
+        assert_eq!(params.qr_code, "opaque-token");
+        assert!(params.qr_url.is_none());
+        assert!(params.message.is_none());
+        assert!(params.expires_at.is_none());
+
+        // Fully-populated form a real adapter would emit.
+        let full = r#"{"method":"qr_ready","params":{
+            "qr_code":"opaque-token",
+            "qr_url":"https://platform.example.com/login?code=opaque-token",
+            "message":"Scan within 5 minutes",
+            "expires_at":"2099-01-01T00:00:00Z"
+        }}"#;
+        let SidecarEvent::QrReady { params } = serde_json::from_str(full).expect("full qr_ready")
+        else {
+            panic!("expected QrReady variant");
+        };
+        assert_eq!(params.qr_code, "opaque-token");
+        assert_eq!(
+            params.qr_url.as_deref(),
+            Some("https://platform.example.com/login?code=opaque-token"),
+        );
+        assert_eq!(params.message.as_deref(), Some("Scan within 5 minutes"));
+        assert!(params.expires_at.is_some());
+    }
+
+    #[test]
+    fn qr_status_event_parses_all_documented_states() {
+        for state in &["pending", "scanning", "confirmed", "expired", "failed"] {
+            let json = format!(r#"{{"method":"qr_status","params":{{"status":"{state}"}}}}"#);
+            let SidecarEvent::QrStatus { params } =
+                serde_json::from_str(&json).expect("qr_status parse")
+            else {
+                panic!("expected QrStatus variant for state={state}");
+            };
+            assert_eq!(params.status, *state);
+            assert!(params.message.is_none());
+        }
+    }
+
+    #[test]
+    fn qr_status_kind_serde_roundtrips_snake_case_on_the_wire() {
+        // The wire-side spec for `QrStatusKind` is snake_case. A
+        // dashboard or sidecar that emits `"Pending"` would not match,
+        // and a future enum rename to PascalCase would silently break
+        // every existing client — this test pins both directions.
+        use crate::types::QrStatusKind;
+        let cases = [
+            (QrStatusKind::Pending, "\"pending\""),
+            (QrStatusKind::Scanning, "\"scanning\""),
+            (QrStatusKind::Confirmed, "\"confirmed\""),
+            (QrStatusKind::Expired, "\"expired\""),
+            (QrStatusKind::Failed, "\"failed\""),
+        ];
+        for (kind, wire) in cases {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serialized, wire, "serialize {kind:?}");
+            let deserialized: QrStatusKind = serde_json::from_str(wire).unwrap();
+            assert_eq!(deserialized, kind, "deserialize {wire}");
+        }
+    }
+
+    #[test]
+    fn qr_state_field_skipped_when_absent_on_channel_status() {
+        // The new `qr` field MUST `#[serde(skip_serializing_if =
+        // "Option::is_none")]` so every non-QR channel keeps the
+        // historical `ChannelStatus` JSON shape and dashboard / SDK
+        // consumers that don't know about QR don't suddenly see a
+        // `"qr": null` they have to filter.
+        use crate::types::ChannelStatus;
+        let status = ChannelStatus::default();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("qr"),
+            "default ChannelStatus must not emit `qr` key, got: {json}"
+        );
     }
 
     #[test]
@@ -2057,6 +2703,30 @@ mod tests {
         .expect("SidecarChannelConfig from minimal json")
     }
 
+    /// #5294 — `default_agent` is `None` when absent and round-trips
+    /// when explicitly set. The field exists so the router-population
+    /// loop in `channel_bridge.rs` can seed `AgentRouter.channel_defaults`
+    /// for sidecar adapters; missing it caused inbound traffic on sidecar
+    /// channels to fall through to the non-deterministic
+    /// "first available agent" branch.
+    #[test]
+    fn sidecar_default_agent_roundtrip_5294() {
+        // Absent → None (no-op for deployments that don't need routing pin).
+        let minimal = cfg("telegram", "python3", vec![]);
+        assert!(minimal.default_agent.is_none());
+
+        // Explicit value round-trips so channel_bridge.rs can seed the router.
+        let c: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "telegram",
+                "command": "python3",
+                "args": ["-m", "librefang.sidecar.adapters.telegram"],
+                "default_agent": "fandangorodelo",
+            }))
+            .unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("fandangorodelo"));
+    }
+
     #[test]
     fn test_supcfg_defaults_and_overflow_parsing() {
         // Minimal config -> every supervision field at its serde default.
@@ -2254,6 +2924,128 @@ mod tests {
         }
         adapter.stop().await.unwrap();
         assert!(!adapter.status().connected);
+    }
+
+    /// Regression: `trip_circuit` must preserve the specific per-attempt
+    /// cause in `status.last_error` after the breaker trips. Operators
+    /// reading `GET /api/channels` / dashboard rely on `last_error` to
+    /// see *why* a sidecar died (e.g. "TELEGRAM_BOT_TOKEN is required",
+    /// missing binary, bad config); the prior implementation overwrote
+    /// it with a generic "circuit-breaker tripped after N attempts"
+    /// notice, hiding the actionable signal.
+    ///
+    /// Drives the spawn-failure branch via a non-existent command so
+    /// the supervisor never even reaches `ready`; the OS spawn error
+    /// is recorded as `last_error` on each attempt, and after
+    /// `restart_max_retries` the trip must compose both pieces.
+    #[tokio::test]
+    async fn circuit_break_preserves_last_specific_cause() {
+        let config: librefang_types::config::SidecarChannelConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "circuit-cause",
+                // An absolute path that cannot exist — `Command::spawn`
+                // fails synchronously with a stable OS error message
+                // wrapped by `spawn_once` as "Failed to spawn sidecar
+                // '<name>' (<cmd>): <os err>".
+                "command": "/nonexistent/librefang-sidecar-circuit-test",
+                "restart_max_retries": 1,
+                "restart_initial_backoff_ms": 1,
+                "restart_max_backoff_ms": 2,
+            }))
+            .expect("valid SidecarChannelConfig");
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let _stream = adapter.start().await.unwrap();
+
+        // Two failed spawns (attempt 0, attempt 1) then trip
+        // (1 >= max_retries). Backoff is 1-2ms so the test is bounded
+        // by spawn latency; 5s leaves ample headroom on slow CI.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let last_error = loop {
+            if let Some(e) = adapter.status().last_error {
+                if e.contains("circuit-breaker tripped") {
+                    break e;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "supervisor did not trip in time; last_error={:?}",
+                    adapter.status().last_error
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        adapter.stop().await.unwrap();
+
+        assert!(
+            last_error.contains("last cause:"),
+            "circuit-break message must carry the prior cause, got: {last_error}"
+        );
+        // The OS phrasing for "no such file" varies across platforms;
+        // the supervisor's own wrapper is stable, so assert on that.
+        assert!(
+            last_error.contains("Failed to spawn sidecar"),
+            "circuit-break message must surface the spawn-failed wrapper, got: {last_error}"
+        );
+    }
+
+    /// End-to-end: drive a real child that emits `qr_ready` followed
+    /// by `qr_status: confirmed`, then assert the supervisor's stdout
+    /// reader populated `ChannelStatus.qr` accordingly. Catches a
+    /// future refactor that breaks the reader's event-dispatch path
+    /// (e.g. forgetting to wire a new variant through the match arm).
+    #[tokio::test]
+    async fn qr_events_land_on_channel_status() {
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = concat!(
+            "import sys,json,time;",
+            "print(json.dumps({'method':'ready'}),flush=True);",
+            "print(json.dumps({'method':'qr_ready','params':{",
+            "'qr_code':'opaque-token',",
+            "'qr_url':'https://example.invalid/login?code=opaque-token',",
+            "'message':'scan'}}),flush=True);",
+            "print(json.dumps({'method':'qr_status','params':{",
+            "'status':'confirmed','message':'logged in'}}),flush=True);",
+            // Stay alive long enough for the supervisor to handle both
+            // events before stdout closes; we `stop()` from the test.
+            "time.sleep(2)",
+        );
+        let config = cfg(
+            "test-qr",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let _stream = adapter.start().await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let qr = loop {
+            if let Some(q) = adapter.status().qr.clone() {
+                if matches!(q.status, crate::types::QrStatusKind::Confirmed) {
+                    break q;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "supervisor never reached confirmed QR state; last status={:?}",
+                    adapter.status().qr
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        };
+        adapter.stop().await.unwrap();
+
+        assert_eq!(qr.qr_code, "opaque-token");
+        assert_eq!(
+            qr.qr_url.as_deref(),
+            Some("https://example.invalid/login?code=opaque-token"),
+        );
+        // Last-write-wins for `message`: the qr_status arm overrides
+        // the qr_ready preamble when it carries one, so the
+        // confirmed-state message survives.
+        assert_eq!(qr.message.as_deref(), Some("logged in"));
     }
 
     #[tokio::test]

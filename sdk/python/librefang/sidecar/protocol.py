@@ -263,6 +263,56 @@ def typing_event(user_id: str, user_name: str,
                        "is_typing": is_typing}}
 
 
+def qr_ready(qr_code: str, *, qr_url: Optional[str] = None,
+             message: Optional[str] = None,
+             expires_at: Optional[str] = None) -> Dict[str, Any]:
+    """Build a ``qr_ready`` event so the daemon can cache the QR for
+    the dashboard's ``GET /api/channels/{name}/qr`` projection.
+
+    Emit ONCE per QR-login session, immediately after the platform
+    returns a scannable payload. Follow up with :func:`qr_status`
+    transitions as the user scans / confirms / the code expires.
+
+    ``qr_code`` is the raw payload the user's phone scanner reads.
+    ``qr_url`` is an optional pre-formed deep-link the platform's app
+    recognises; when absent the dashboard renders ``qr_code`` to a
+    canvas itself. ``expires_at`` is an ISO 8601 timestamp; supply it
+    when the platform tells you the window (e.g. WeChat's 5 min)."""
+    params: Dict[str, Any] = {"qr_code": qr_code}
+    if qr_url is not None:
+        params["qr_url"] = qr_url
+    if message is not None:
+        params["message"] = message
+    if expires_at is not None:
+        params["expires_at"] = expires_at
+    return {"method": "qr_ready", "params": params}
+
+
+def qr_status(status: str, *,
+              message: Optional[str] = None) -> Dict[str, Any]:
+    """Build a ``qr_status`` event reporting a QR-login transition.
+
+    ``status`` is one of ``"pending"``, ``"scanning"``, ``"confirmed"``,
+    ``"expired"``, ``"failed"``. The daemon coerces unknown values to
+    ``"failed"`` so a misspelled status can't strand the dashboard in
+    ``"pending"`` forever. ``message`` is operator-visible — populate
+    it on ``"expired"`` / ``"failed"`` with the reason, on
+    ``"confirmed"`` with any follow-up hint (e.g. \"set
+    WECHAT_BOT_TOKEN in secrets.env to skip QR next time\").
+
+    The event intentionally does NOT carry the captured credential.
+    The current sidecar-configure endpoint is a full-form upsert that
+    would wipe any other already-set schema fields on a partial save,
+    so auto-persist via the dashboard is unsafe until a narrow
+    ``/api/channels/sidecar/{name}/secrets`` endpoint exists. Until
+    then, sidecars log the token at DEBUG and the operator copies it
+    into ``secrets.env`` by hand."""
+    params: Dict[str, Any] = {"status": status}
+    if message is not None:
+        params["message"] = message
+    return {"method": "qr_status", "params": params}
+
+
 # --------------------------------------------------------------------------
 # Inbound commands (LibreFang -> adapter, stdin)
 # --------------------------------------------------------------------------

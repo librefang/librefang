@@ -244,6 +244,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         timeout_secs: 60,
         sender_id: None,
         channel: None,
+        chat_id: None,
         route_to: vec![explicit_target],
         escalation_count: 1,
         session_id: None,
@@ -4762,6 +4763,239 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
     kernel.shutdown();
 }
 
+/// Workflow `send_message` closure must acquire the per-agent semaphore
+/// before invoking the LLM (audit fix for `triggers_and_workflow.rs:334-336`).
+///
+/// Reproduces the exact closure shape the workflow runner uses: N parallel
+/// fan-out steps each call `agent_concurrency_for(agent_id).acquire_owned()`
+/// then run the step body. With `max_concurrent_invocations = 1` + 3
+/// parallel arms holding the permit for 100 ms, total wall time must be
+/// ~300 ms (serialised), not ~100 ms (which is what the pre-fix path
+/// allowed by bypassing the semaphore).
+///
+/// The test runs the agent in `SessionMode::New` because `Persistent` is
+/// clamped to 1 by `agent_concurrency_for` regardless of manifest cap —
+/// using `New` keeps the cap as the variable under test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_send_message_closure_honours_per_agent_semaphore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-wf-sem-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "wf-fanout-cap-agent".to_string(),
+                description: "cap=1 + 3 parallel fan-out steps must serialise".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                // New (not Persistent) so the manifest cap is honoured
+                // instead of being clamped to 1 by the Persistent guard.
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(1),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Confirm precondition: the cap really is 1 from the resolver.
+    assert_eq!(kernel.agent_concurrency_for(aid).available_permits(), 1);
+
+    // Mirror the workflow `send_message` closure body: acquire the
+    // per-agent semaphore, then run the step. We substitute a 100 ms
+    // sleep for `send_message_full` — the cap-enforcement contract is
+    // identical, and this keeps the test free of LLM driver wiring.
+    let step_body = |k: Arc<LibreFangKernel>, agent_id: librefang_types::agent::AgentId| async move {
+        let sem = k.agent_concurrency_for(agent_id);
+        let _permit = sem
+            .acquire_owned()
+            .await
+            .expect("semaphore must not be closed mid-test");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    let kernel_arc = Arc::new(kernel);
+    let start = std::time::Instant::now();
+    let mut handles = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let k = Arc::clone(&kernel_arc);
+        handles.push(tokio::spawn(step_body(k, aid)));
+    }
+    for h in handles {
+        h.await.expect("step task panicked");
+    }
+    let elapsed = start.elapsed();
+
+    // 3 parallel arms × 100 ms each, gated by cap=1 → wall ~300 ms.
+    // Floor at 250 ms (generous margin for runner scheduling jitter);
+    // pre-fix path with the semaphore bypassed would land near 100 ms.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(250),
+        "3 parallel fan-out arms with max_concurrent_invocations=1 must \
+         serialise via the per-agent semaphore (expected ≥250ms, got {elapsed:?}). \
+         If this fails, the workflow `send_message` closure has stopped \
+         acquiring `agent_concurrency_for` before calling `send_message_full` — \
+         see triggers_and_workflow.rs and the audit note at :334-336.",
+    );
+
+    Arc::try_unwrap(kernel_arc).ok().unwrap().shutdown();
+}
+
+/// Source-shape sentinel for the fix above: the production workflow
+/// `send_message` closure (and its operator-resume twin) in
+/// `triggers_and_workflow.rs` must acquire the per-agent semaphore
+/// before calling `send_message_full`. The behavioral test above proves
+/// `agent_concurrency_for(aid)` enforces the cap *if used* — this test
+/// pins that the production closures actually use it, catching a future
+/// refactor that drops the acquire and silently reintroduces the bypass.
+#[test]
+fn workflow_send_message_closure_contains_per_agent_semaphore_acquire() {
+    let src = include_str!("triggers_and_workflow.rs");
+    // Strip line+block comments so the assertion can't be satisfied by
+    // a leftover doc reference after the wiring is removed.
+    let stripped: String = {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = s.split_at(end + 2).1.to_string();
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            while let Some(start) = s.find("/*") {
+                if let Some(end_rel) = s[start..].find("*/") {
+                    let end = start + end_rel + 2;
+                    s.replace_range(start..end, "");
+                } else {
+                    s.truncate(start);
+                    in_block = true;
+                    break;
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+    // Two production sites must wrap `send_message_full` with the per-agent
+    // semaphore: `run_workflow::send_message` and
+    // `KernelOperatorResumeDriver::drive_operator_timeout::send_message`.
+    let acquire_matches = stripped.matches("agent_concurrency_for(agent_id)").count();
+    assert!(
+        acquire_matches >= 2,
+        "expected ≥2 non-comment `agent_concurrency_for(agent_id)` acquires \
+         in triggers_and_workflow.rs (one in `run_workflow::send_message`, \
+         one in `KernelOperatorResumeDriver::drive_operator_timeout::send_message`); \
+         found {acquire_matches}. Did a refactor drop the acquire and \
+         silently re-bypass `max_concurrent_invocations` on the workflow path?",
+    );
+    let acquire_owned_matches = stripped.matches("acquire_owned()").count();
+    assert!(
+        acquire_owned_matches >= 3,
+        "expected ≥3 non-comment `acquire_owned()` calls in \
+         triggers_and_workflow.rs (Lane::Trigger lane permit + 2 per-agent \
+         semaphore acquires on the workflow paths); found {acquire_owned_matches}.",
+    );
+}
+
+/// Regression for the audit item
+/// `docs/issues/workflow-path-drops-lane-permit.md`: the workflow-dispatch
+/// path in `triggers_and_workflow.rs` MUST move the `Lane::Trigger` permit
+/// (`_lane_permit`, acquired once per dispatch iteration) into the
+/// `tokio::spawn` future for `kernel.run_workflow(...)`. Otherwise the permit
+/// drops as soon as the iteration yields and the run inside the spawn escapes
+/// the `queue.concurrency.trigger_lane` cap — N bursty workflow triggers
+/// produce N concurrent workflow runs, breaking the kernel-wide invariant.
+///
+/// This is a source-shape lint (matches the style of
+/// `workflow_send_message_closure_contains_per_agent_semaphore_acquire`
+/// above): we strip comments so a leftover doc reference can't satisfy the
+/// assertion, then require a non-comment binding that re-anchors the permit
+/// inside the spawn block. Behavioral coverage of the lane cap itself lives
+/// in `trigger_lane_global_semaphore_limits_total_concurrency`; this test
+/// pins the wiring that connects the cap to the workflow path.
+#[test]
+fn workflow_spawn_holds_lane_permit_across_run() {
+    let src = include_str!("triggers_and_workflow.rs");
+    // Strip line + block comments (same approach as the per-agent-semaphore
+    // lint test above) so the assertion is grounded in executable code.
+    let stripped: String = {
+        let mut out = String::with_capacity(src.len());
+        let mut in_block = false;
+        for line in src.lines() {
+            let mut s = line.to_string();
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = s.split_at(end + 2).1.to_string();
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            while let Some(start) = s.find("/*") {
+                if let Some(end_rel) = s[start..].find("*/") {
+                    let end = start + end_rel + 2;
+                    s.replace_range(start..end, "");
+                } else {
+                    s.truncate(start);
+                    in_block = true;
+                    break;
+                }
+            }
+            if let Some(idx) = s.find("//") {
+                s.truncate(idx);
+            }
+            out.push_str(&s);
+            out.push('\n');
+        }
+        out
+    };
+
+    // (1) The capture must exist: the workflow branch rebinds `_lane_permit`
+    // so it can be moved INTO the spawn. Without this binding the permit
+    // would drop at the end of the for-loop iteration (i.e. as soon as
+    // `tokio::spawn` returned), exactly the pre-fix behaviour.
+    assert!(
+        stripped.contains("let lane_permit_for_spawn = _lane_permit"),
+        "expected `let lane_permit_for_spawn = _lane_permit` in the workflow \
+         branch of triggers_and_workflow.rs — without it, the Lane::Trigger \
+         permit drops at iteration end and concurrent workflow runs escape \
+         `queue.concurrency.trigger_lane`. See \
+         docs/issues/workflow-path-drops-lane-permit.md."
+    );
+
+    // (2) The spawned future must actually reference the rebound permit so
+    // Rust's move-capture keeps it alive for the workflow run. The explicit
+    // `drop(lane_permit_for_spawn)` at the tail of the async block serves
+    // both as the capture and as documentation of intent (an unused
+    // `_`-prefixed binding would otherwise let the compiler drop it
+    // immediately).
+    assert!(
+        stripped.contains("drop(lane_permit_for_spawn)"),
+        "expected `drop(lane_permit_for_spawn)` inside the workflow spawn \
+         block so the Lane::Trigger permit is held until the workflow run \
+         ends. Removing the drop allows Rust to release the permit early — \
+         the bug that \
+         docs/issues/workflow-path-drops-lane-permit.md describes."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // push_notification routing — locks the global-fallback match arm.
 //
@@ -5239,6 +5473,17 @@ fn approval_display_non_uuid_string_falls_back_verbatim() {
     let rendered = kernel.approval_agent_display("not-a-uuid");
 
     assert_eq!(rendered, "\"not-a-uuid\"");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn approval_display_empty_string_uses_unknown_sentinel() {
+    let kernel = boot_kernel_for_display_tests();
+
+    let rendered = kernel.approval_agent_display("");
+
+    assert_eq!(rendered, "\"unknown\"");
 
     kernel.shutdown();
 }
@@ -6328,6 +6573,371 @@ fn session_mode_persistent_plus_cap_two_is_clamped_preventing_parallel_fires() {
     );
 
     kernel.shutdown();
+}
+
+// ─── end-to-end parallel-firing concurrency-cap tests ────────────────────────
+//
+// The #3755 tests above check the *resolver* math (`available_permits()`) and
+// prove that a third `try_acquire_owned()` fails once a lane/per-agent
+// semaphore is exhausted. None of them actually fire N tasks at once and
+// observe the real peak in-flight count under load — they hold permits with
+// `try_acquire` and never spawn contending work.
+//
+// These tests close that gap. Each spawns N tasks that replicate the exact
+// acquire-then-work shape of the production trigger dispatcher
+// (`triggers_and_workflow.rs`): take the global `Lane::Trigger` permit, then
+// (agent path) the per-agent permit, then run a body that increments a shared
+// in-flight counter, records the peak, sleeps to create real overlap, and
+// decrements on drop. We then assert `peak <= cap`.
+//
+// We exercise the kernel's *real* semaphores — `kernel.workflows.command_queue`
+// (the same field the dispatcher reads at triggers_and_workflow.rs:357) and
+// `kernel.agent_concurrency_for(aid)` — rather than a standalone semaphore, so
+// a regression in how the kernel sizes either one is caught.
+//
+// What these tests do NOT cover: the full `send_message_full` LLM round-trip.
+// The production dispatcher executes triggers from a *single* event
+// sequentially inside one spawned task (bug #3841 fix), so genuine parallelism
+// across the lane only arises from independent events / workflow re-spawns,
+// neither of which can be driven without real LLM wiring. These tests model
+// the enforcement primitive the dispatcher relies on, which is where the cap
+// is actually held.
+
+/// RAII in-flight tracker: increments a live counter on construction, updates a
+/// monotonic peak, and decrements on drop. Sampling the peak this way is robust
+/// to scheduler jitter — every concurrent body that is simultaneously alive is
+/// counted, so the recorded peak is the true maximum overlap the semaphore
+/// allowed, not an inference from wall-clock time.
+struct InFlightGuard {
+    live: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl InFlightGuard {
+    fn enter(
+        live: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        peak: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        // fetch_add returns the value *before* the add, so the new live count
+        // is +1.
+        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+        // Monotonic max-update; SeqCst keeps the peak coherent with `live`.
+        // The peak is sampled here on entry — the guard only needs to hold
+        // `live` so it can decrement on drop.
+        peak.fetch_max(now, Ordering::SeqCst);
+        Self {
+            live: std::sync::Arc::clone(live),
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// E2E: the global `Lane::Trigger` semaphore must cap total in-flight trigger
+/// dispatches kernel-wide. Boot a kernel with `trigger_lane = 2`, fire 10
+/// tasks that each acquire the lane permit then hold it for 40 ms, and assert
+/// the sampled peak overlap never exceeds 2.
+///
+/// This is the behavioural counterpart to
+/// `trigger_lane_global_semaphore_limits_total_concurrency` (#3755), which only
+/// proves a third `try_acquire` fails — it never spawns 10 contending tasks and
+/// measures the real peak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn e2e_trigger_lane_global_cap_holds_under_parallel_fires() {
+    use librefang_runtime::command_lane::Lane;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("e2e-trigger-lane-cap");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.concurrency.trigger_lane = 2;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+
+    // Precondition: the kernel sized its lane semaphore from config.
+    let lane_sem = kernel
+        .workflows
+        .command_queue
+        .semaphore_for_lane(Lane::Trigger);
+    assert_eq!(
+        lane_sem.available_permits(),
+        2,
+        "kernel must size the trigger lane from queue.concurrency.trigger_lane"
+    );
+
+    const FIRES: usize = 10;
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::with_capacity(FIRES);
+    for _ in 0..FIRES {
+        let k = Arc::clone(&kernel);
+        let live = Arc::clone(&live);
+        let peak = Arc::clone(&peak);
+        let completed = Arc::clone(&completed);
+        handles.push(tokio::spawn(async move {
+            // Mirror the dispatcher: acquire the global Lane::Trigger permit
+            // before doing any work (triggers_and_workflow.rs step (1)).
+            let sem = k.workflows.command_queue.semaphore_for_lane(Lane::Trigger);
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .expect("trigger lane must not be closed mid-test");
+            let _guard = InFlightGuard::enter(&live, &peak);
+            // Hold the permit long enough that all 10 tasks are scheduled and
+            // contending — so if the cap were broken, peak would exceed 2.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            completed.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+    for h in handles {
+        h.await.expect("fire task panicked");
+    }
+
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        FIRES,
+        "every fire must run to completion"
+    );
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "all in-flight permits must be released after the test"
+    );
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert!(
+        observed_peak >= 1,
+        "at least one fire must have run (sanity: peak={observed_peak})"
+    );
+    assert!(
+        observed_peak <= 2,
+        "global Lane::Trigger cap=2 must hold under {FIRES} parallel fires; \
+         observed peak in-flight = {observed_peak}. If this exceeds 2, the \
+         dispatcher's Lane::Trigger acquire (triggers_and_workflow.rs step 1) \
+         has stopped gating concurrency."
+    );
+
+    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
+}
+
+/// E2E: the per-agent semaphore (`max_concurrent_invocations`) caps how many of
+/// ONE agent's fires run in parallel, independently of the global lane. Use a
+/// `session_mode = "new"` agent with cap = 2 and a roomy global lane (8), fire
+/// 10 tasks that each take the per-agent permit, and assert peak <= 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn e2e_per_agent_cap_holds_under_parallel_fires() {
+    use librefang_types::agent::SessionMode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // default trigger_lane = 8, well above the per-agent cap so the per-agent
+    // semaphore is the binding constraint under test.
+    let (kernel, _dir) = minimal_kernel("e2e-per-agent-cap");
+    let aid = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("e2e-per-agent-agent", SessionMode::New, Some(2)),
+            None,
+            None,
+            None,
+        )
+        .expect("agent spawns");
+    assert_eq!(
+        kernel.agent_concurrency_for(aid).available_permits(),
+        2,
+        "precondition: New + cap=2 resolves to a 2-permit semaphore"
+    );
+
+    let kernel = Arc::new(kernel);
+    const FIRES: usize = 10;
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::with_capacity(FIRES);
+    for _ in 0..FIRES {
+        let k = Arc::clone(&kernel);
+        let live = Arc::clone(&live);
+        let peak = Arc::clone(&peak);
+        handles.push(tokio::spawn(async move {
+            // Mirror the dispatcher's per-agent acquire (step 2). The cached
+            // Arc means every fire contends on the SAME semaphore.
+            let sem = k.agent_concurrency_for(aid);
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .expect("per-agent semaphore must not be closed mid-test");
+            let _guard = InFlightGuard::enter(&live, &peak);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }));
+    }
+    for h in handles {
+        h.await.expect("fire task panicked");
+    }
+
+    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&observed_peak),
+        "per-agent cap=2 must hold under {FIRES} parallel fires; observed peak \
+         in-flight = {observed_peak}"
+    );
+
+    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
+}
+
+/// E2E: a `session_mode = "persistent"` agent with `max_concurrent_invocations
+/// = 4` is auto-clamped to 1 by the resolver (parallel writes to one session's
+/// history are undefined). Firing 10 tasks must therefore fully serialise:
+/// peak in-flight == 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn e2e_persistent_plus_cap_gt_one_serialises_under_parallel_fires() {
+    use librefang_types::agent::SessionMode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (kernel, _dir) = minimal_kernel("e2e-persistent-clamp");
+    let aid = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("e2e-persistent-agent", SessionMode::Persistent, Some(4)),
+            None,
+            None,
+            None,
+        )
+        .expect("agent spawns");
+    assert_eq!(
+        kernel.agent_concurrency_for(aid).available_permits(),
+        1,
+        "precondition: Persistent + cap=4 must clamp to 1 permit"
+    );
+
+    let kernel = Arc::new(kernel);
+    const FIRES: usize = 10;
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::with_capacity(FIRES);
+    for _ in 0..FIRES {
+        let k = Arc::clone(&kernel);
+        let live = Arc::clone(&live);
+        let peak = Arc::clone(&peak);
+        handles.push(tokio::spawn(async move {
+            let sem = k.agent_concurrency_for(aid);
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .expect("clamped semaphore must not be closed mid-test");
+            let _guard = InFlightGuard::enter(&live, &peak);
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }));
+    }
+    for h in handles {
+        h.await.expect("fire task panicked");
+    }
+
+    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "Persistent + cap>1 is clamped to 1; {FIRES} parallel fires must \
+         serialise (peak in-flight must be exactly 1). A peak > 1 means the \
+         clamp in agent_concurrency_for stopped enforcing single-writer \
+         access to the persistent session's history."
+    );
+
+    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
+}
+
+/// E2E: the global lane and per-agent caps compose. With `trigger_lane = 4` and
+/// a per-agent cap = 2, firing 10 tasks for the SAME agent must be bounded by
+/// the *tighter* of the two (the per-agent cap = 2), since each fire holds both
+/// permits for the duration of its work — exactly as the dispatcher does
+/// (lane permit, then per-agent permit, both held across the body).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn e2e_layered_caps_compose_to_tighter_bound() {
+    use librefang_runtime::command_lane::Lane;
+    use librefang_types::agent::SessionMode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("e2e-layered-caps");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.concurrency.trigger_lane = 4;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+
+    let aid = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("e2e-layered-agent", SessionMode::New, Some(2)),
+            None,
+            None,
+            None,
+        )
+        .expect("agent spawns");
+    assert_eq!(
+        kernel
+            .workflows
+            .command_queue
+            .semaphore_for_lane(Lane::Trigger)
+            .available_permits(),
+        4,
+        "precondition: lane cap = 4"
+    );
+    assert_eq!(
+        kernel.agent_concurrency_for(aid).available_permits(),
+        2,
+        "precondition: per-agent cap = 2"
+    );
+
+    const FIRES: usize = 10;
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::with_capacity(FIRES);
+    for _ in 0..FIRES {
+        let k = Arc::clone(&kernel);
+        let live = Arc::clone(&live);
+        let peak = Arc::clone(&peak);
+        handles.push(tokio::spawn(async move {
+            // Acquire in the dispatcher's order: lane permit first, then the
+            // per-agent permit, both held across the body.
+            let lane_sem = k.workflows.command_queue.semaphore_for_lane(Lane::Trigger);
+            let _lane_permit = lane_sem
+                .acquire_owned()
+                .await
+                .expect("lane not closed mid-test");
+            let agent_sem = k.agent_concurrency_for(aid);
+            let _agent_permit = agent_sem
+                .acquire_owned()
+                .await
+                .expect("per-agent sem not closed mid-test");
+            let _guard = InFlightGuard::enter(&live, &peak);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }));
+    }
+    for h in handles {
+        h.await.expect("fire task panicked");
+    }
+
+    assert_eq!(live.load(Ordering::SeqCst), 0, "all permits released");
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&observed_peak),
+        "layered caps (lane=4, per-agent=2) must bound a single agent's fires \
+         to the tighter per-agent cap=2; observed peak in-flight = \
+         {observed_peak}"
+    );
+
+    Arc::try_unwrap(kernel).ok().unwrap().shutdown();
 }
 
 // ─── spawn_agent error path unit tests ──────────────────────────────────────────
@@ -9279,4 +9889,75 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
     assert_eq!(entry.manifest.model.model, "anthropic/claude-3.5-sonnet");
 
     kernel.shutdown();
+}
+
+// ── resolve_scope_channel: reserved-name defense-in-depth ──────────────────
+// Audit: cron-channel-name-not-reserved. The kernel's channel-derived session
+// resolver re-sanitizes reserved channel names from UNtrusted callers, but
+// must leave the kernel's own trusted internal system constructors (cron,
+// autonomous, webui) untouched so their persistent SessionIds stay continuous
+// (the issue mandated zero migration).
+
+#[test]
+fn resolve_scope_channel_sanitizes_reserved_names_from_external_callers() {
+    // is_internal_system = false (external / channel-bridge ingress):
+    // every reserved name must be rewritten to `ext-<name>` so it cannot
+    // derive the same SessionId as the internal system path.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {reserved:?} must be rewritten to ext-<name>"
+        );
+        // Case-insensitively too — `for_channel` lowercases internally.
+        let upper = reserved.to_ascii_uppercase();
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(&upper, false),
+            format!("ext-{reserved}"),
+            "external reserved channel {upper:?} must be rewritten case-insensitively"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_preserves_reserved_names_for_internal_system_paths() {
+    // is_internal_system = true (cron tick / autonomous tick / web UI):
+    // the reserved name passes through verbatim so the legacy
+    // for_channel(agent, "<name>") SessionId is preserved. This is the
+    // regression guard for the autonomous internal path, which sets a
+    // reserved "autonomous" channel WITHOUT is_internal_cron.
+    for reserved in [
+        crate::SYSTEM_CHANNEL_CRON,
+        crate::SYSTEM_CHANNEL_AUTONOMOUS,
+        crate::SYSTEM_CHANNEL_WEBUI,
+    ] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(reserved, true),
+            reserved,
+            "trusted internal reserved channel {reserved:?} must pass through unchanged \
+             so existing persistent history is not orphaned"
+        );
+    }
+}
+
+#[test]
+fn resolve_scope_channel_leaves_legitimate_channels_untouched() {
+    // Non-reserved channels pass through regardless of the trust flag, so
+    // ordinary channel traffic (telegram, slack, …) is never disturbed.
+    for channel in ["telegram", "slack", "discord", "api", "ext-cron"] {
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, false),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (external)"
+        );
+        assert_eq!(
+            LibreFangKernel::resolve_scope_channel(channel, true),
+            channel,
+            "legitimate channel {channel:?} must pass through unchanged (internal)"
+        );
+    }
 }

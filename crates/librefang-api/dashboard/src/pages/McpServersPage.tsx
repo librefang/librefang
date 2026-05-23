@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
+import { safeUrl } from "../lib/safeUrl";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
@@ -1149,17 +1150,26 @@ function CatalogInstallWizard({
                       {e.label && (
                         <span className="text-text-dim truncate flex-1">{e.label}</span>
                       )}
-                      {e.get_url && (
-                        <a
-                          href={e.get_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-brand hover:underline shrink-0"
-                          aria-label={t("mcp.wizard.get_credential", { defaultValue: "Get credential" })}
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      )}
+                      {(() => {
+                        // MCP catalog entries are server-controlled, so
+                        // `get_url` is untrusted input. A malicious
+                        // catalogue could ship `javascript:` /
+                        // `data:text/html,…` and have the dashboard
+                        // render a clickable JS bomb. Gate on
+                        // `safeUrl` (audit: rel-noopener-mixed).
+                        const safe = safeUrl(e.get_url);
+                        return safe ? (
+                          <a
+                            href={safe}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-brand hover:underline shrink-0"
+                            aria-label={t("mcp.wizard.get_credential", { defaultValue: "Get credential" })}
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        ) : null;
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -1199,16 +1209,19 @@ function CatalogInstallWizard({
                   >
                     {e.label || e.name}
                   </label>
-                  {e.get_url && (
-                    <a
-                      href={e.get_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-brand hover:underline"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  )}
+                  {(() => {
+                    const safe = safeUrl(e.get_url);
+                    return safe ? (
+                      <a
+                        href={safe}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-brand hover:underline"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null;
+                  })()}
                 </div>
                 {e.help && <span className="text-[10px] text-text-dim/70">{e.help}</span>}
                 <input
@@ -1988,11 +2001,14 @@ export function McpServersPage() {
                         <Key className="w-3 h-3 text-text-dim/60 shrink-0" />
                         <code className="font-mono text-[11px] font-bold text-text-main">{e.name}</code>
                         {e.label && <span className="text-[10px] text-text-dim truncate flex-1">{e.label}</span>}
-                        {e.get_url && (
-                          <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        )}
+                        {(() => {
+                          const safe = safeUrl(e.get_url);
+                          return safe ? (
+                            <a href={safe} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          ) : null;
+                        })()}
                       </div>
                     ))}
                   </div>

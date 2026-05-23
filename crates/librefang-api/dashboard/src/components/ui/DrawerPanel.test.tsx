@@ -137,7 +137,7 @@ describe("DrawerPanel", () => {
       return (
         <>
           {/* Conditionally-mounted config drawer with isOpen literal true,
-              same shape as ChannelsPage::ConfigDialog. */}
+              same shape as ChannelsPage's SidecarForm drawer. */}
           {configMounted && (
             <DrawerPanel isOpen onClose={ConfigOnClose} title="config">
               <p data-testid="config-body">config body</p>

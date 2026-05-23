@@ -12,7 +12,6 @@ pub mod approval;
 pub mod auth;
 pub mod auto_dream;
 pub mod auto_reply;
-pub mod backends;
 pub mod background;
 pub mod capabilities;
 pub mod config;
@@ -28,7 +27,8 @@ pub mod kernel;
 pub mod kernel_api;
 pub mod log_reload;
 pub mod mcp_oauth_provider;
-pub mod storage_backends;
+pub mod oauth_cache_invalidator;
+pub mod storage_backends; // BossFang: SurrealDB / SQLite backend selection
 pub use librefang_kernel_metering as metering;
 pub mod orchestration;
 pub mod pairing;
@@ -43,7 +43,10 @@ pub mod supervised_spawn;
 pub mod supervisor;
 pub mod trajectory;
 pub mod triggers;
-pub mod whatsapp_gateway;
+// whatsapp_gateway module removed alongside the whatsapp sidecar
+// migration — the Baileys gateway is no longer embedded /
+// auto-spawned by the kernel. Operators run it separately as a
+// `[[sidecar_channels]]` entry or an external service.
 pub mod wizard;
 pub mod workflow;
 
@@ -57,9 +60,10 @@ pub use kernel_api::KernelApi;
 // entire `KernelApi` surface, and so the upcoming method-body
 // migration can move callers off `LibreFangKernel` inherent forwards.
 pub use kernel::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
-    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
-    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    AgentSubsystemApi, CredentialPoolSummary, EventSubsystemApi, GovernanceSubsystemApi,
+    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi,
+    MeteringSubsystemApi, ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi,
+    WorkflowSubsystemApi,
 };
 
 // ---------------------------------------------------------------------------

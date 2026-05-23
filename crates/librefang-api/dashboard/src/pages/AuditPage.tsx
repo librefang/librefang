@@ -56,10 +56,9 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
-import { safeStorageGet } from "../lib/safeStorage";
+import { getStoredApiKey } from "../api";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
-import { getStoredApiKey } from "../api";
 import type { AuditQueryEntry } from "../api";
 import { useUIStore } from "../lib/store";
 import { StaggerList } from "../components/ui/StaggerList";
@@ -108,6 +107,14 @@ async function downloadExport(
   format: "csv" | "json",
 ): Promise<void> {
   const url = buildExportUrl(filters, format);
+  // Use the canonical accessor (`getStoredApiKey` in `api.ts`) — it
+  // checks `sessionStorage` first (where #3620 stores the active
+  // token after wiping `localStorage` on save) and falls back to
+  // `localStorage` for legacy tokens. The previous inline
+  // `safeStorageGet("librefang-api-key")` only looked in
+  // `localStorage`, so post-#3620 it always returned `""`, sent
+  // `Authorization: Bearer ` (empty), and the audit export 401'd
+  // for every user.
   const token = getStoredApiKey();
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
