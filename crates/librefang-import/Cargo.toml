@@ -1,9 +1,9 @@
 [package]
-name = "librefang-migrate"
+name = "librefang-import"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Migration engine for importing from other agent frameworks into LibreFang"
+description = "Import engine for migrating from other agent frameworks into LibreFang"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }

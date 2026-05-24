@@ -7,7 +7,7 @@
 
 | Origin | Description | Location |
 |--------|-------------|----------|
-| this | `librefang-migrate` (framework-import tool) and `librefang-memory/src/migration.rs` (SQLite schema) share the same word; searching for "migration" returns the wrong file | `crates/librefang-migrate/`, `crates/librefang-memory/src/migration.rs` |
+| this | `librefang-migrate` (framework-import tool) and `librefang-memory/src/migration.rs` (SQLite schema) share the same word; searching for "migration" returns the wrong file. **Resolved**: renamed to `librefang-import`. | `crates/librefang-import/` (was `crates/librefang-migrate/`), `crates/librefang-memory/src/migration.rs` |
 | stale CLAUDE.md | `extensions/CLAUDE.md` + `channels/CLAUDE.md` are out of sync with the current code | the two CLAUDE.md files |
 | xtask vs justfile | `xtask/` and `justfile` overlap (setup / dev, etc.); newcomers don't know which to use | `xtask/`, `justfile` |
 

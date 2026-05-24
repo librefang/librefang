@@ -21,7 +21,7 @@ members = [
     "crates/librefang-kernel-metering",
     "crates/librefang-cli",
     "crates/librefang-channels",
-    "crates/librefang-migrate",
+    "crates/librefang-import",
     "crates/librefang-skills",
     "crates/librefang-desktop",
     "crates/librefang-hands",

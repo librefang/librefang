@@ -4127,11 +4127,11 @@ dependencies = [
  "librefang-extensions",
  "librefang-hands",
  "librefang-http",
+ "librefang-import",
  "librefang-kernel",
  "librefang-kernel-handle",
  "librefang-llm-drivers",
  "librefang-memory",
- "librefang-migrate",
  "librefang-runtime",
  "librefang-skills",
  "librefang-telemetry",
@@ -4231,9 +4231,9 @@ dependencies = [
  "librefang-api",
  "librefang-channels",
  "librefang-extensions",
+ "librefang-import",
  "librefang-kernel",
  "librefang-memory",
- "librefang-migrate",
  "librefang-runtime",
  "librefang-skills",
  "librefang-types",
@@ -4352,6 +4352,24 @@ dependencies = [
  "rustls-native-certs",
  "tracing",
  "webpki-roots",
+]
+
+[[package]]
+name = "librefang-import"
+version = "2026.5.17-beta.12"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "json5",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "walkdir",
 ]
 
 [[package]]
@@ -4538,24 +4556,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "librefang-migrate"
-version = "2026.5.17-beta.12"
-dependencies = [
- "chrono",
- "dirs 6.0.0",
- "json5",
- "librefang-types",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
- "thiserror 2.0.18",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "walkdir",
 ]
 
 [[package]]
@@ -11980,7 +11980,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
- "librefang-migrate",
+ "librefang-import",
  "regex",
  "serde_json",
  "sha2",

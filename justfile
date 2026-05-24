@@ -1,4 +1,28 @@
 # LibreFang development commands — requires https://github.com/casey/just
+#
+# CANONICAL DEVELOPER ENTRY POINT.
+#
+# `justfile` is the developer-facing surface; the underlying logic lives in
+# `xtask/` (a regular cargo crate that anything in `xtask/src/<name>.rs`
+# can grow without taking a `just` dependency). The rule of thumb:
+#
+#   - Anything non-trivial (multi-step builds, code-gen, release flows,
+#     dependency audits, doctor checks, …) lives in `xtask` and is exposed
+#     here as a one-line `cargo xtask <subcmd> {{ARGS}}` recipe. Add a new
+#     subcommand by editing `xtask/src/main.rs` + a new module; then add a
+#     one-line recipe below that forwards `{{ARGS}}`.
+#   - Recipes that are pure single-line cargo invocations (`cargo build`,
+#     `cargo fmt`, `cargo clippy`, …) may live directly in this file
+#     without going through xtask. Anything more than a single command —
+#     copying files around, running a tool with non-trivial arguments,
+#     branching on platform — belongs in xtask, not as a multi-line `just`
+#     recipe. Multi-line recipes here are a smell.
+#   - Documentation should reference `just <recipe>` everywhere; mentions
+#     of `cargo xtask <subcmd>` in user-facing docs are now a documentation
+#     bug — fix the doc to say `just <subcmd>`.
+#
+# If a recipe and an xtask subcommand drift apart, the xtask side is
+# authoritative — update the recipe to forward, don't reimplement.
 
 set windows-shell := ["cmd", "/c"]
 
