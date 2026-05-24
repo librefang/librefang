@@ -106,8 +106,9 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.max_history_messages` so
     /// operators can lower the default without recompiling or editing every
-    /// manifest. `None` → use the library fallback. Values below
-    /// `MIN_HISTORY_MESSAGES` are clamped up at resolution time.
+    /// manifest. `None` → use the library fallback. Values below the
+    /// supported floor are clamped up at resolution time; values above the
+    /// hard ceiling are clamped down.
     pub max_history_messages: Option<usize>,
     /// Auxiliary LLM client used for cheap-tier side tasks
     /// (context compression, title generation, search summarisation,

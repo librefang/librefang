@@ -46,7 +46,7 @@ mod tool_resolution;
 mod types;
 mod web_augment;
 
-pub use self::history::DEFAULT_MAX_HISTORY_MESSAGES;
+pub use self::history::{DEFAULT_MAX_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES};
 pub use self::model::{apply_session_model_override_to_manifest, strip_provider_prefix};
 pub use self::run_streaming::run_agent_loop_streaming;
 pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase, PhaseCallback};

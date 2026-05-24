@@ -2873,10 +2873,11 @@ pub struct KernelConfig {
     /// Operator override for the agent message-history trim cap. When set,
     /// any agent without its own `max_history_messages` uses this value
     /// instead of the compiled-in default
-    /// (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound
-    /// per-turn token cost; raise it for long-context models. `None` means
-    /// "use the compiled-in default". Values below 4 are silently clamped
-    /// at runtime with a warning log.
+    /// (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to
+    /// bound per-turn token cost; raise it for long-context models. `None`
+    /// means "use the compiled-in default". Runtime clamps values below 4 up
+    /// to the safe-trim floor and values above 500 down to the hard ceiling,
+    /// emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
     /// Kernel-wide Smart Model Router defaults applied to any agent whose

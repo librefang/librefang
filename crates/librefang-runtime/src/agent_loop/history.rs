@@ -1,18 +1,19 @@
-//! Message-history trim cap: default, floor, and per-loop resolution.
+//! Message-history trim cap: default, floor, ceiling, and per-loop resolution.
 //!
 //! Splits the small history-config cluster (`DEFAULT_MAX_HISTORY_MESSAGES`,
-//! `MIN_HISTORY_MESSAGES`, `resolve_max_history`, `clamp_max_history`) out
+//! `MIN_HISTORY_MESSAGES`, `MAX_HISTORY_MESSAGES`, `resolve_max_history`,
+//! `clamp_max_history`) out
 //! of `agent_loop/mod.rs`. None of these helpers touch the agent loop
 //! state directly; they only read `AgentManifest.max_history_messages` /
 //! `LoopOptions.max_history_messages` and clamp the result against the
-//! safe-trim floor.
+//! safe-trim floor and hard ceiling.
 
 use librefang_types::agent::AgentManifest;
 use tracing::warn;
 
 use super::LoopOptions;
 
-/// Default ceiling for message-history auto-trimming (value: 60).
+/// Default cap for message-history auto-trimming (value: 60).
 ///
 /// 60 gives ~7–10 real turns for typical workflows while keeping the
 /// prompt-cache prefix stable. Override per-agent via
@@ -20,7 +21,11 @@ use super::LoopOptions;
 /// `KernelConfig.max_history_messages`.
 pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 60;
 
-const MAX_HISTORY_MESSAGES: usize = 500;
+/// Hard ceiling for message-history auto-trimming (value: 500).
+///
+/// Operator and manifest overrides above this value are clamped down with a
+/// warning log before the cap reaches `safe_trim_messages`.
+pub const MAX_HISTORY_MESSAGES: usize = 500;
 
 /// Floor for the message-history cap. Values below this are clamped up
 /// with a warning log: `safe_trim_messages` re-validates the trimmed
@@ -48,9 +53,9 @@ pub(super) fn resolve_max_history(manifest: &AgentManifest, opts: &LoopOptions) 
     clamp_max_history(raw, &manifest.name)
 }
 
-/// Clamp a requested cap up to `MIN_HISTORY_MESSAGES`, logging a warning
-/// when the requested value is too low. Returning silently for values at
-/// or above the floor keeps logs quiet for the common path.
+/// Clamp a requested cap into the supported range, logging a warning when the
+/// requested value is outside it. Returning silently for values inside the
+/// range keeps logs quiet for the common path.
 #[must_use]
 #[inline]
 fn clamp_max_history(requested: usize, agent_name: &str) -> usize {

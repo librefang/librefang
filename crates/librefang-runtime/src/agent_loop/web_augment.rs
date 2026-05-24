@@ -16,6 +16,7 @@ use librefang_types::message::{Message, Role};
 use tracing::{debug, warn};
 
 use super::strip_provider_prefix;
+use super::text_recovery::find_json_object_end;
 
 /// Check if web search augmentation should be performed for this agent.
 pub(super) fn should_augment_web_search(manifest: &AgentManifest) -> bool {
@@ -144,30 +145,10 @@ async fn generate_search_queries(
             Some(i) => scan + i,
             None => return None,
         };
-        let end = {
-            let mut depth = 0u32;
-            let mut found = None;
-            for (i, ch) in text[start..].char_indices() {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            found = Some(start + i + 1); // +1 for exclusive end
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            match found {
-                Some(e) => e,
-                None => {
-                    scan = start + 1;
-                    attempt += 1;
-                    continue;
-                }
-            }
+        let Some(end) = find_json_object_end(&text[start..]).map(|end| start + end) else {
+            scan = start + 1;
+            attempt += 1;
+            continue;
         };
         let candidate = &text[start..end];
         match serde_json::from_str::<serde_json::Value>(candidate) {
@@ -282,6 +263,10 @@ mod tests {
         observed: Arc<Mutex<Vec<Option<ResponseFormat>>>>,
     }
 
+    struct QueryResponseDriver {
+        response: String,
+    }
+
     impl ResponseFormatRecordingDriver {
         fn new() -> (Self, Arc<Mutex<Vec<Option<ResponseFormat>>>>) {
             let observed = Arc::new(Mutex::new(Vec::new()));
@@ -314,6 +299,33 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl LlmDriver for QueryResponseDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.response.clone(),
+                    provider_metadata: None,
+                }],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+                actual_provider: None,
+            })
+        }
+    }
+
+    fn test_manifest() -> AgentManifest {
+        AgentManifest {
+            model: ModelConfig {
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     /// Regression guard for #5287 (web_augment branch) —
     /// `generate_search_queries` must pin
     /// `response_format = Some(ResponseFormat::Json)` on the aux
@@ -328,14 +340,7 @@ mod tests {
     async fn search_query_request_pins_response_format_json() {
         let (rec, observed) = ResponseFormatRecordingDriver::new();
         let driver: Box<dyn LlmDriver> = Box::new(rec);
-        let manifest = AgentManifest {
-            model: ModelConfig {
-                provider: "deepseek".to_string(),
-                model: "deepseek-chat".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let manifest = test_manifest();
 
         let _ = generate_search_queries(
             driver.as_ref(),
@@ -359,5 +364,56 @@ mod tests {
              the SEARCH_QUERY_GEN_PROMPT explicitly asks for a JSON \
              object and strict-output providers need the flag set"
         );
+    }
+
+    #[tokio::test]
+    async fn search_query_parser_allows_closing_brace_in_json_string() {
+        let driver = QueryResponseDriver {
+            response: r#"prefix {"queries": ["rust } parser"]} suffix"#.to_string(),
+        };
+        let queries = generate_search_queries(
+            &driver,
+            &test_manifest(),
+            &[],
+            "rust parser",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(queries, Some(vec!["rust } parser".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn search_query_parser_allows_opening_brace_in_json_string() {
+        let driver = QueryResponseDriver {
+            response: r#"prefix {"queries": ["rust { parser"]} suffix"#.to_string(),
+        };
+        let queries = generate_search_queries(
+            &driver,
+            &test_manifest(),
+            &[],
+            "rust parser",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(queries, Some(vec!["rust { parser".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn search_query_parser_allows_escaped_quote_before_brace() {
+        let driver = QueryResponseDriver {
+            response: r#"prefix {"queries": ["rust \"}\" parser"]} suffix"#.to_string(),
+        };
+        let queries = generate_search_queries(
+            &driver,
+            &test_manifest(),
+            &[],
+            "rust parser",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(queries, Some(vec!["rust \"}\" parser".to_string()]));
     }
 }

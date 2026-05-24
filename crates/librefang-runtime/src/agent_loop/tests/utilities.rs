@@ -1136,6 +1136,45 @@ fn resolve_max_history_passes_through_at_floor_and_above() {
 }
 
 #[test]
+fn resolve_max_history_clamps_manifest_at_upper_limit() {
+    let opts = LoopOptions::default();
+
+    let manifest_at_limit = AgentManifest {
+        name: "agent-g".into(),
+        max_history_messages: Some(500),
+        ..AgentManifest::default()
+    };
+    assert_eq!(resolve_max_history(&manifest_at_limit, &opts), 500);
+
+    let manifest_above_limit = AgentManifest {
+        name: "agent-g".into(),
+        max_history_messages: Some(501),
+        ..AgentManifest::default()
+    };
+    assert_eq!(resolve_max_history(&manifest_above_limit, &opts), 500);
+}
+
+#[test]
+fn resolve_max_history_clamps_opts_at_upper_limit() {
+    let manifest = AgentManifest {
+        name: "agent-h".into(),
+        ..AgentManifest::default()
+    };
+
+    let opts_at_limit = LoopOptions {
+        max_history_messages: Some(500),
+        ..LoopOptions::default()
+    };
+    assert_eq!(resolve_max_history(&manifest, &opts_at_limit), 500);
+
+    let opts_above_limit = LoopOptions {
+        max_history_messages: Some(501),
+        ..LoopOptions::default()
+    };
+    assert_eq!(resolve_max_history(&manifest, &opts_above_limit), 500);
+}
+
+#[test]
 fn safe_trim_messages_respects_custom_cap() {
     // Build 20 alternating user/assistant messages so the history is
     // well above any reasonable small cap. Each pair is one "turn".
@@ -1410,5 +1449,155 @@ async fn test_incognito_skips_session_save_on_end_turn() {
         "in-memory session must still contain user msg + assistant reply (only the \
          SQLite write is suppressed) — got {} msgs",
         session.messages.len(),
+    );
+}
+
+#[tokio::test]
+async fn test_incognito_skips_proactive_memory_auto_memorize() {
+    let memory = Arc::new(librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap());
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+    let proactive_memory = Arc::new(librefang_memory::ProactiveMemoryStore::with_default_config(
+        Arc::clone(&memory),
+    ));
+    let user_id = agent_id.to_string();
+    let opts = LoopOptions {
+        incognito: true,
+        ..LoopOptions::default()
+    };
+
+    assert_eq!(
+        proactive_memory
+            .count(&user_id, Some(librefang_types::memory::MemoryLevel::User))
+            .expect("memory count before turn must not error"),
+        0,
+    );
+
+    let result = run_agent_loop(
+        &manifest,
+        "I prefer dark mode for all my editors",
+        &mut session,
+        memory.as_ref(),
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(proactive_memory.clone()),
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("loop should complete");
+
+    assert_eq!(result.response, "Hello from the agent!");
+    assert!(
+        result.memories_saved.is_empty(),
+        "incognito turn must not report proactive memories saved: {:?}",
+        result.memories_saved,
+    );
+    assert_eq!(
+        proactive_memory
+            .count(&user_id, Some(librefang_types::memory::MemoryLevel::User))
+            .expect("memory count after incognito turn must not error"),
+        0,
+        "incognito turn must skip proactive auto_memorize storage",
+    );
+}
+
+#[tokio::test]
+async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
+    let memory = Arc::new(librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap());
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+    let proactive_memory = Arc::new(librefang_memory::ProactiveMemoryStore::with_default_config(
+        Arc::clone(&memory),
+    ));
+    let user_id = agent_id.to_string();
+
+    let result = run_agent_loop(
+        &manifest,
+        "I prefer dark mode for all my editors",
+        &mut session,
+        memory.as_ref(),
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(proactive_memory.clone()),
+        None,
+        None,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("loop should complete");
+
+    assert_eq!(result.response, "Hello from the agent!");
+    assert!(
+        !result.memories_saved.is_empty(),
+        "normal turn should report proactive memory writes"
+    );
+    assert!(
+        proactive_memory
+            .count(&user_id, Some(librefang_types::memory::MemoryLevel::User))
+            .expect("memory count after normal turn must not error")
+            > 0,
+        "normal turn should auto_memorize the preference fixture"
     );
 }
