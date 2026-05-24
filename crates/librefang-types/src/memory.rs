@@ -291,6 +291,11 @@ impl Default for ProactiveMemoryConfig {
 /// # or: keep retrieve, skip memorize (tool-output extraction is noise)
 /// [proactive_memory]
 /// auto_memorize = false
+///
+/// # or: per-agent extractor model (#5475) — agent A on a cheap OpenAI
+/// # tier while the global default points elsewhere
+/// [proactive_memory]
+/// extraction_model = "openai/gpt-4o-mini"
 /// ```
 ///
 /// **The override surface is `{workspace}/agent.toml`, NOT `config.toml`** (#5476).
@@ -309,7 +314,12 @@ impl Default for ProactiveMemoryConfig {
 /// [proactive_memory]
 /// auto_memorize = true
 /// ```
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// Note: `Copy` was removed when `extraction_model: Option<String>` was
+/// added in #5475 — the struct is now small but heap-allocating. Callers
+/// that previously moved-by-copy now move-by-clone; that's a trivial
+/// `Arc`-free `Option<String>` deep copy and not on a hot path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProactiveMemoryOverrides {
     /// Override the master switch. `Some(false)` disables both retrieve
@@ -326,6 +336,31 @@ pub struct ProactiveMemoryOverrides {
     /// retrieval (no memory items injected into the prompt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_retrieve: Option<bool>,
+    /// Per-agent override for the LLM model used by proactive memory
+    /// extraction (#5475). Same shape as the global
+    /// [`ProactiveMemoryConfig::extraction_model`] — accepts
+    /// `provider/model`, `provider:model`, or a bare model name that
+    /// falls through to the kernel's default driver. `None` (the
+    /// default) inherits the kernel-global `[proactive_memory]
+    /// extraction_model`.
+    ///
+    /// Use case: multi-provider deployments where each agent's
+    /// extractor should match the provider that hosts its primary
+    /// model — e.g. agent A on `openai/gpt-4o-mini`, agent B on
+    /// `anthropic/claude-haiku-4-5`, agent C on `gemini/gemini-2.0-flash`.
+    /// Without this, the global must pick one extractor that may not
+    /// even be reachable from the other agents' provider keys.
+    ///
+    /// Limitation in this PR: the override switches the model **name**
+    /// passed to the boot-time extraction driver. Cross-provider
+    /// switching (where the override picks a provider different from
+    /// the one the kernel initialised the extraction driver with) is
+    /// honoured only when the same driver supports both — typically
+    /// within an OpenAI-compatible family. Full per-agent driver
+    /// switching (rebuilding the LLM driver per-agent) is tracked as a
+    /// follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_model: Option<String>,
 }
 
 impl ProactiveMemoryOverrides {
@@ -353,11 +388,36 @@ impl ProactiveMemoryOverrides {
         global.enabled && global.auto_memorize
     }
 
+    /// Resolve the effective `extraction_model` for this agent given
+    /// the kernel-global `[proactive_memory]` defaults (#5475).
+    ///
+    /// Resolution chain: agent override → kernel-global → `None`
+    /// (callers fall back to the agent's primary model). Empty strings
+    /// on either side are treated as unset — operators sometimes leave
+    /// `extraction_model = ""` to denote "no override", and the
+    /// global-side `filter(|s| !s.is_empty())` upstream of boot already
+    /// applies that convention.
+    pub fn resolve_extraction_model(&self, global: &ProactiveMemoryConfig) -> Option<String> {
+        if let Some(m) = self.extraction_model.as_ref() {
+            if !m.is_empty() {
+                return Some(m.clone());
+            }
+        }
+        global
+            .extraction_model
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+    }
+
     /// True when *no* field is set — equivalent to `Default::default()`.
     /// Used by call sites that want to skip the resolve dance entirely
     /// for the common "no override" case.
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.auto_memorize.is_none() && self.auto_retrieve.is_none()
+        self.enabled.is_none()
+            && self.auto_memorize.is_none()
+            && self.auto_retrieve.is_none()
+            && self.extraction_model.is_none()
     }
 }
 
@@ -1570,6 +1630,7 @@ mod tests {
             enabled: Some(false),
             auto_memorize: Some(true), // Set but should be ignored.
             auto_retrieve: Some(true),
+            extraction_model: None,
         };
         assert!(
             !overrides.resolve_auto_memorize(&global),
@@ -1579,6 +1640,51 @@ mod tests {
             !overrides.resolve_auto_retrieve(&global),
             "enabled=false wins over per-field auto_retrieve=true"
         );
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_extraction_model_resolution() {
+        // #5475: agent override wins over global, global wins over None.
+        let mut global = ProactiveMemoryConfig::default();
+        let none_override = ProactiveMemoryOverrides::default();
+        assert_eq!(
+            none_override.resolve_extraction_model(&global),
+            None,
+            "no override, no global → None"
+        );
+
+        global.extraction_model = Some("openai/gpt-4o-mini".to_string());
+        assert_eq!(
+            none_override.resolve_extraction_model(&global),
+            Some("openai/gpt-4o-mini".to_string()),
+            "no override → inherit global"
+        );
+
+        let agent_override = ProactiveMemoryOverrides {
+            extraction_model: Some("anthropic/claude-haiku-4-5".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_override.resolve_extraction_model(&global),
+            Some("anthropic/claude-haiku-4-5".to_string()),
+            "agent override wins over global"
+        );
+
+        // Empty-string override is treated as unset (operators sometimes
+        // write `extraction_model = ""` to mean "no override").
+        let empty_override = ProactiveMemoryOverrides {
+            extraction_model: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            empty_override.resolve_extraction_model(&global),
+            Some("openai/gpt-4o-mini".to_string()),
+            "empty-string override falls through to global"
+        );
+
+        // `is_empty()` accounts for the new field.
+        assert!(!agent_override.is_empty());
+        assert!(none_override.is_empty());
     }
 
     #[test]
@@ -1599,16 +1705,23 @@ mod tests {
             enabled: None,
             auto_memorize: Some(false),
             auto_retrieve: None,
+            extraction_model: Some("openai/gpt-4o-mini".to_string()),
         };
         let toml = toml::to_string(&overrides).expect("serialize");
-        // Only the set field is emitted (skip_serializing_if on None).
+        // Only the set fields are emitted (skip_serializing_if on None).
         assert!(toml.contains("auto_memorize"));
+        assert!(toml.contains("extraction_model"));
+        assert!(toml.contains("openai/gpt-4o-mini"));
         assert!(!toml.contains("auto_retrieve"));
         assert!(!toml.contains("enabled"));
         let parsed: ProactiveMemoryOverrides = toml::from_str(&toml).expect("deserialize");
         assert_eq!(parsed.auto_memorize, Some(false));
         assert_eq!(parsed.auto_retrieve, None);
         assert_eq!(parsed.enabled, None);
+        assert_eq!(
+            parsed.extraction_model,
+            Some("openai/gpt-4o-mini".to_string())
+        );
     }
 
     #[test]
