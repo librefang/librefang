@@ -29,8 +29,8 @@ fn dirs_or_home() -> Option<PathBuf> {
 
 pub fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let source = match args.source.as_str() {
-        "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
-        "openfang" => librefang_migrate::MigrateSource::OpenFang,
+        "openclaw" => librefang_import::MigrateSource::OpenClaw,
+        "openfang" => librefang_import::MigrateSource::OpenFang,
         other => {
             return Err(
                 format!("unknown source '{}' — supported: openclaw, openfang", other).into(),
@@ -49,7 +49,7 @@ pub fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| ".librefang".to_string())
     }));
 
-    let options = librefang_migrate::MigrateOptions {
+    let options = librefang_import::MigrateOptions {
         source,
         source_dir: source_dir.clone(),
         target_dir: target_dir.clone(),
@@ -64,7 +64,7 @@ pub fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    let report = librefang_migrate::run_migration(&options)?;
+    let report = librefang_import::run_migration(&options)?;
     report.print_summary();
 
     Ok(())

@@ -122,7 +122,7 @@ librefang-extensions        25 MCP templates, AES-256-GCM vault, OAuth2 PKCE
 librefang-wire              OFP P2P protocol, HMAC-SHA256 mutual auth (see note)
 librefang-cli               CLI, daemon management, TUI dashboard, MCP server mode
 librefang-desktop           Tauri 2.0 native app (tray, notifications, shortcuts)
-librefang-migrate           OpenClaw, LangChain, AutoGPT migration engine
+librefang-import            OpenClaw, LangChain, AutoGPT import/migration engine
 librefang-http              Shared HTTP client builder, proxy, TLS fallback
 librefang-testing           Test infrastructure: mock kernel, mock LLM driver and API route test utilities
 librefang-telemetry         OpenTelemetry + Prometheus metrics instrumentation for LibreFang

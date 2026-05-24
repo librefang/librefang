@@ -31,7 +31,7 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 | `librefang-extensions` | MCP server setup, credential vault, OAuth2 PKCE |
 | `librefang-cli` | CLI binary (ratatui TUI) |
 | `librefang-desktop` | Native desktop app (Tauri 2.0) |
-| `librefang-migrate` | Import from other agent frameworks |
+| `librefang-import` | Import from other agent frameworks |
 | `librefang-telemetry` | OpenTelemetry + Prometheus |
 | `librefang-testing` | Mock kernel, mock LLM, route test utilities |
 | `xtask` | Dev task runner |
