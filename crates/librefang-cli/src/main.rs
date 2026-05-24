@@ -7047,10 +7047,10 @@ fn boot_kernel(config: Option<PathBuf>) -> LibreFangKernel {
 
 fn cmd_migrate(args: MigrateArgs) {
     let source = match args.from {
-        MigrateSourceArg::Openclaw => librefang_migrate::MigrateSource::OpenClaw,
-        MigrateSourceArg::Langchain => librefang_migrate::MigrateSource::LangChain,
-        MigrateSourceArg::Autogpt => librefang_migrate::MigrateSource::AutoGpt,
-        MigrateSourceArg::Openfang => librefang_migrate::MigrateSource::OpenFang,
+        MigrateSourceArg::Openclaw => librefang_import::MigrateSource::OpenClaw,
+        MigrateSourceArg::Langchain => librefang_import::MigrateSource::LangChain,
+        MigrateSourceArg::Autogpt => librefang_import::MigrateSource::AutoGpt,
+        MigrateSourceArg::Openfang => librefang_import::MigrateSource::OpenFang,
     };
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
@@ -7059,10 +7059,10 @@ fn cmd_migrate(args: MigrateArgs) {
             std::process::exit(1);
         });
         match source {
-            librefang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
-            librefang_migrate::MigrateSource::LangChain => home.join(".langchain"),
-            librefang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
-            librefang_migrate::MigrateSource::OpenFang => home.join(".openfang"),
+            librefang_import::MigrateSource::OpenClaw => home.join(".openclaw"),
+            librefang_import::MigrateSource::LangChain => home.join(".langchain"),
+            librefang_import::MigrateSource::AutoGpt => home.join("Auto-GPT"),
+            librefang_import::MigrateSource::OpenFang => home.join(".openfang"),
         }
     });
 
@@ -7073,7 +7073,7 @@ fn cmd_migrate(args: MigrateArgs) {
         println!("  (dry run — no changes will be made)\n");
     }
 
-    let options = librefang_migrate::MigrateOptions {
+    let options = librefang_import::MigrateOptions {
         source,
         source_dir,
         target_dir,
@@ -7081,7 +7081,7 @@ fn cmd_migrate(args: MigrateArgs) {
     };
 
     let mut sp = progress::auto("Running migration", None);
-    match librefang_migrate::run_migration(&options) {
+    match librefang_import::run_migration(&options) {
         Ok(report) => {
             sp.finish("Migration complete");
             report.print_summary();

@@ -728,6 +728,78 @@ fn test_max_in_memory_cap_enforced() {
 }
 
 #[test]
+fn test_record_soft_caps_in_memory_between_trims() {
+    // Regression for #5665: operators that set
+    // `audit.retention.max_in_memory_entries` expect the in-memory
+    // window to stay close to that number even when `trim()` has not
+    // yet fired (it only runs every `trim_interval_secs`, default
+    // 3600s). The append path must therefore enforce its own soft
+    // cap at `configured × 1.5`.
+    let log = AuditLog::new();
+    log.set_max_in_memory_entries(100);
+
+    for i in 0..200 {
+        log.record(
+            "agent-1",
+            AuditAction::RoleChange,
+            format!("event #{i}"),
+            "ok",
+        );
+    }
+
+    // 100 × 3 / 2 = 150 is the soft ceiling.
+    let len = log.len();
+    assert!(
+        len <= 150,
+        "in-memory window grew to {len}, expected <= 150 (1.5× cap)"
+    );
+    // And the cap is actually clamping — i.e. we did evict, not just
+    // sit at 200 because the cap was ignored.
+    assert!(
+        len < 200,
+        "in-memory window stayed at {len}, soft cap was not applied"
+    );
+
+    // Chain still verifies across the trim boundary the soft cap
+    // introduced — the chain_anchor must have been advanced to the
+    // hash of the last dropped entry. Without that, the first
+    // survivor's `prev_hash` would dangle and `verify_integrity()`
+    // would return `chain break at seq …`.
+    assert!(
+        log.verify_integrity().is_ok(),
+        "chain anchor not advanced across soft-cap eviction"
+    );
+    let anchor = log.chain_anchor.lock().unwrap().clone();
+    assert!(
+        anchor.is_some(),
+        "expected chain anchor to be set after soft-cap eviction"
+    );
+
+    // The tail must still be intact — we evict the oldest prefix,
+    // not random rows.
+    let survivors = log.recent(len);
+    assert_eq!(survivors.last().unwrap().detail, "event #199");
+}
+
+#[test]
+fn test_record_soft_cap_default_falls_back_to_hard_cap() {
+    // When `max_in_memory_entries` is left unset (the `0` sentinel),
+    // the record path falls back to `MAX_AUDIT_ENTRIES = 10_000`.
+    // We don't push 10_001 entries here (slow); we instead assert
+    // the helper returns the hard default unchanged.
+    let log = AuditLog::new();
+    assert_eq!(log.effective_soft_cap(), 10_000);
+    log.set_max_in_memory_entries(0);
+    assert_eq!(log.effective_soft_cap(), 10_000);
+
+    // Sanity: configured cap > 0 multiplies through.
+    log.set_max_in_memory_entries(5000);
+    assert_eq!(log.effective_soft_cap(), 7500);
+    log.set_max_in_memory_entries(1);
+    assert_eq!(log.effective_soft_cap(), 1); // 1 × 3 / 2 = 1
+}
+
+#[test]
 fn test_default_config_is_no_op() {
     let log = AuditLog::new();
     log.record("agent-1", AuditAction::ToolInvoke, "x", "ok");
