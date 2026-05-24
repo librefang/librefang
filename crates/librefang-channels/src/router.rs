@@ -31,8 +31,19 @@ pub struct BindingContext<'a> {
 ///
 /// Routing priority: bindings (most specific first) > direct routes > user defaults > system default.
 pub struct AgentRouter {
-    /// Default agent per user (keyed by librefang_user or platform_id).
-    user_defaults: DashMap<String, AgentId>,
+    /// Default agent per user.
+    ///
+    /// Keyed by `(channel_account_key, user_key)`, where `channel_account_key`
+    /// is either `Some("<channel_type>:<account_id>")` (per-bot scope, e.g.
+    /// `Some("telegram:bot-a")`) or `None` (channel-agnostic / global scope,
+    /// the legacy semantics used by tests and pre-#5672 callers).
+    ///
+    /// `user_key` is the platform user ID or `librefang_user` mapping.
+    ///
+    /// Resolution probes the per-channel-account key first, then falls back
+    /// to the global key — so a `/agent` command issued in `bot-a` no longer
+    /// leaks across to `bot-b` for the same user (#5672).
+    user_defaults: DashMap<(Option<String>, String), AgentId>,
     /// Direct routes: (channel_type_key, platform_user_id) -> AgentId.
     direct_routes: DashMap<(String, String), AgentId>,
     /// System-wide default agent.
@@ -100,9 +111,30 @@ impl AgentRouter {
             .map(|entry| *entry.value())
     }
 
-    /// Set a user's default agent.
+    /// Set a user's default agent at **global** scope (channel-agnostic).
+    ///
+    /// This matches the user across every channel and account. Prefer
+    /// [`Self::set_user_default_for_channel`] when the override should be
+    /// scoped to a specific bot, so a `/agent` in `bot-a` does not leak
+    /// across to `bot-b` for the same platform user (#5672).
     pub fn set_user_default(&self, user_key: String, agent_id: AgentId) {
-        self.user_defaults.insert(user_key, agent_id);
+        self.user_defaults.insert((None, user_key), agent_id);
+    }
+
+    /// Set a user's default agent scoped to a specific `channel_account_key`
+    /// (e.g. `"telegram:bot-a"`).
+    ///
+    /// Used by the `/agent` channel-side command so that selecting an agent
+    /// in one bot does not silently override the channel default of every
+    /// other bot the same user can also message (#5672 Layer B).
+    pub fn set_user_default_for_channel(
+        &self,
+        channel_account_key: String,
+        user_key: String,
+        agent_id: AgentId,
+    ) {
+        self.user_defaults
+            .insert((Some(channel_account_key), user_key), agent_id);
     }
 
     /// Set a direct route for a specific (channel, user) pair.
@@ -178,14 +210,19 @@ impl AgentRouter {
             return Some(*agent);
         }
 
-        // 2. Check user defaults
+        // 2. Check user defaults — context-less form only probes the global
+        //    (channel-agnostic) scope. Per-channel-account overrides require
+        //    `resolve_with_context` so the `account_id` can be passed in.
         if let Some(key) = user_key {
-            if let Some(agent) = self.user_defaults.get(key) {
+            if let Some(agent) = self.user_defaults.get(&(None, key.to_string())) {
                 return Some(*agent);
             }
         }
         // Also check by platform_user_id
-        if let Some(agent) = self.user_defaults.get(platform_user_id) {
+        if let Some(agent) = self
+            .user_defaults
+            .get(&(None, platform_user_id.to_string()))
+        {
             return Some(*agent);
         }
 
@@ -218,19 +255,44 @@ impl AgentRouter {
         {
             return Some(*agent);
         }
+        // User defaults: probe the per-channel-account scope first (so
+        // `/agent agent-C` issued in `bot-a` only affects `bot-a`), then fall
+        // back to the channel-agnostic global scope (legacy semantics).
+        let channel_account_key = ctx
+            .account_id
+            .as_deref()
+            .map(|aid| format!("{channel_key}:{aid}"));
         if let Some(key) = user_key {
-            if let Some(agent) = self.user_defaults.get(key) {
+            if let Some(ref scoped) = channel_account_key {
+                if let Some(agent) = self
+                    .user_defaults
+                    .get(&(Some(scoped.clone()), key.to_string()))
+                {
+                    return Some(*agent);
+                }
+            }
+            if let Some(agent) = self.user_defaults.get(&(None, key.to_string())) {
                 return Some(*agent);
             }
         }
-        if let Some(agent) = self.user_defaults.get(platform_user_id) {
+        if let Some(ref scoped) = channel_account_key {
+            if let Some(agent) = self
+                .user_defaults
+                .get(&(Some(scoped.clone()), platform_user_id.to_string()))
+            {
+                return Some(*agent);
+            }
+        }
+        if let Some(agent) = self
+            .user_defaults
+            .get(&(None, platform_user_id.to_string()))
+        {
             return Some(*agent);
         }
         // Account-specific channel default takes priority over the generic channel default.
         // Keys are stored as "telegram:account_id" when account_id is known.
-        if let Some(account_id) = ctx.account_id.as_deref() {
-            let account_key = format!("{}:{}", channel_key, account_id);
-            if let Some(agent) = self.channel_defaults.get(&account_key) {
+        if let Some(ref account_key) = channel_account_key {
+            if let Some(agent) = self.channel_defaults.get(account_key) {
                 return Some(*agent);
             }
         }
@@ -847,5 +909,122 @@ mod tests {
             account_id: Some("bot".to_string()),
         };
         assert_eq!(full.specificity(), 17); // 8+4+2+2+1
+    }
+
+    /// Regression test for #5672 Layer B: a `/agent` selection in `bot-a`
+    /// must NOT leak across to `bot-b` for the same platform user.
+    #[test]
+    fn user_default_does_not_leak_across_bots() {
+        let router = AgentRouter::new();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        let agent_c = AgentId::new();
+
+        // bot-a defaults to agent-A; bot-b defaults to agent-B.
+        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+
+        // User issues `/agent agent-C` in bot-a — scoped to bot-a only.
+        router.set_user_default_for_channel(
+            "telegram:bot-a".to_string(),
+            "user-1".to_string(),
+            agent_c,
+        );
+
+        // bot-a resolution for the same user picks up the override.
+        let ctx_a = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("bot-a")),
+            peer_id: Cow::Borrowed("user-1"),
+            ..Default::default()
+        };
+        let resolved = router.resolve_with_context(&ChannelType::Telegram, "user-1", None, &ctx_a);
+        assert_eq!(
+            resolved,
+            Some(agent_c),
+            "bot-a should honour the user override (agent-C)"
+        );
+
+        // bot-b resolution for the same user must NOT see the override —
+        // it falls through to bot-b's channel default (agent-B).
+        let ctx_b = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("bot-b")),
+            peer_id: Cow::Borrowed("user-1"),
+            ..Default::default()
+        };
+        let resolved = router.resolve_with_context(&ChannelType::Telegram, "user-1", None, &ctx_b);
+        assert_eq!(
+            resolved,
+            Some(agent_b),
+            "bot-b must NOT inherit bot-a's /agent override"
+        );
+    }
+
+    /// Regression test for #5672 Layer B: explicit channel-scoped override
+    /// beats the global (channel-agnostic) override for the matching bot.
+    #[test]
+    fn channel_scoped_user_default_overrides_global() {
+        let router = AgentRouter::new();
+        let global_agent = AgentId::new();
+        let scoped_agent = AgentId::new();
+
+        router.set_user_default("user-1".to_string(), global_agent);
+        router.set_user_default_for_channel(
+            "telegram:bot-a".to_string(),
+            "user-1".to_string(),
+            scoped_agent,
+        );
+
+        let ctx_a = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("bot-a")),
+            peer_id: Cow::Borrowed("user-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "user-1", None, &ctx_a),
+            Some(scoped_agent),
+            "per-(channel,account) scope must win over global"
+        );
+
+        // A different bot still sees only the global override.
+        let ctx_b = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("bot-b")),
+            peer_id: Cow::Borrowed("user-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "user-1", None, &ctx_b),
+            Some(global_agent),
+            "bot-b sees only the global override, not bot-a's scoped one"
+        );
+    }
+
+    /// `set_user_default` (legacy unqualified form) keeps channel-agnostic
+    /// semantics — relied on by existing integration tests and benches.
+    #[test]
+    fn legacy_set_user_default_is_channel_agnostic() {
+        let router = AgentRouter::new();
+        let agent = AgentId::new();
+        router.set_user_default("alice".to_string(), agent);
+
+        // Any channel / account resolves to the global override.
+        let ctx = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("bot-a")),
+            peer_id: Cow::Borrowed("alice"),
+            ..Default::default()
+        };
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "alice", None, &ctx),
+            Some(agent)
+        );
+        // Even without an account_id.
+        assert_eq!(
+            router.resolve(&ChannelType::Discord, "alice", None),
+            Some(agent)
+        );
     }
 }
