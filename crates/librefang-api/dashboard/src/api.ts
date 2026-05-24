@@ -1424,6 +1424,8 @@ export interface AgentToolsResponse {
 export interface ToolDefinition {
   name: string;
   description?: string;
+  source?: "builtin" | "mcp" | string;
+  mcp_server?: string;
 }
 
 export async function getAgentTools(agentId: string): Promise<AgentToolsResponse> {
