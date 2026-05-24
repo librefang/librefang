@@ -91,10 +91,21 @@ export const channelKeys = {
   qr: (name: string) => [...channelKeys.all, "qr", name] as const,
 };
 
+// Cross-agent comms / message bus. Hierarchical mirror of `agentKeys` so
+// `invalidateQueries({ queryKey: commsKeys.lists() })` batches every
+// list-shaped read (topology + events) in a single sweep — the previous
+// shape had `topology()` and `events(limit)` parked directly under `all`,
+// which forced mutations to invalidate the whole `commsKeys.all` subtree
+// or enumerate each list factory by hand. `details()`/`detail(id)` are
+// reserved for the per-event drill-down view planned alongside the
+// `/api/comms/events/:id` endpoint.
 export const commsKeys = {
   all: ["comms"] as const,
-  topology: () => [...commsKeys.all, "topology"] as const,
-  events: (limit = 200) => [...commsKeys.all, "events", limit] as const,
+  lists: () => [...commsKeys.all, "list"] as const,
+  topology: () => [...commsKeys.lists(), "topology"] as const,
+  events: (limit = 200) => [...commsKeys.lists(), "events", limit] as const,
+  details: () => [...commsKeys.all, "detail"] as const,
+  detail: (id: string) => [...commsKeys.details(), id] as const,
 };
 
 export const skillKeys = {
