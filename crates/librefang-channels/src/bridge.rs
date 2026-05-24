@@ -3013,8 +3013,20 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
-        // Auto-set this as the user's default so future messages route directly
-        router.set_user_default(message.sender.platform_id.clone(), id);
+        // Auto-set this as the user's default so future messages route
+        // directly. Scope the cache entry to (channel, account_id) when we
+        // know the bot identity, otherwise we would re-introduce the #5672
+        // cross-bot leak via the fallback path (same platform user reaching
+        // a different bot would inherit this auto-bind).
+        let channel_str = crate::router::channel_type_to_str(&message.channel);
+        match message.metadata.get("account_id").and_then(|v| v.as_str()) {
+            Some(aid) => router.set_user_default_for_channel(
+                format!("{channel_str}:{aid}"),
+                message.sender.platform_id.clone(),
+                id,
+            ),
+            None => router.set_user_default(message.sender.platform_id.clone(), id),
+        }
     }
     fallback
 }
@@ -3364,6 +3376,7 @@ async fn dispatch_message(
                 router,
                 &message.sender,
                 &message.channel,
+                message.metadata.get("account_id").and_then(|v| v.as_str()),
                 overrides.as_ref(),
             )
             .await;
@@ -3733,10 +3746,31 @@ async fn dispatch_message(
                 }
             } else if action.starts_with("model:") {
                 let model_id = action.strip_prefix("model:").unwrap_or("");
-                let agent_id = router.resolve(
+                // #5672 Layer A: use the context-aware resolver so the
+                // interactive `/model` button-callback path routes to the
+                // bot's own agent, not the first-registered channel default.
+                let ctx = crate::router::BindingContext {
+                    channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
+                        &message.channel,
+                    )),
+                    account_id: message
+                        .metadata
+                        .get("account_id")
+                        .and_then(|v| v.as_str())
+                        .map(std::borrow::Cow::Borrowed),
+                    peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
+                    guild_id: message
+                        .metadata
+                        .get("guild_id")
+                        .and_then(|v| v.as_str())
+                        .map(std::borrow::Cow::Borrowed),
+                    roles: smallvec::SmallVec::new(),
+                };
+                let agent_id = router.resolve_with_context(
                     &message.channel,
                     &message.sender.platform_id,
                     message.sender.librefang_user.as_deref(),
+                    &ctx,
                 );
                 let label = {
                     // Best-effort: look up display name from all providers
@@ -3984,6 +4018,7 @@ async fn dispatch_message(
                     router,
                     &message.sender,
                     &message.channel,
+                    message.metadata.get("account_id").and_then(|v| v.as_str()),
                     overrides.as_ref(),
                 )
                 .await;
@@ -5592,6 +5627,14 @@ async fn dispatch_with_blocks(
 /// context. It currently affects `/help` rendering (so disabled/blocked
 /// commands don't appear in the help text); other branches treat it as
 /// advisory.
+///
+/// `account_id` is the bot/account identifier inside `channel_type`
+/// (`message.metadata["account_id"]`). It is plumbed through into every
+/// agent-resolving command arm so multi-bot deployments do not collapse
+/// to the first-registered agent (#5672 Layer A). When the adapter does
+/// not expose an `account_id` (single-bot deployments, channels with no
+/// account concept), pass `None`.
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     name: &str,
     args: &[String],
@@ -5599,8 +5642,43 @@ async fn handle_command(
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
     channel_type: &crate::types::ChannelType,
+    account_id: Option<&str>,
     overrides: Option<&ChannelOverrides>,
 ) -> String {
+    // Helper closure: build a `BindingContext` for the command and resolve
+    // the target agent via the context-aware resolver. This is what the
+    // regular message dispatch path uses (`resolve_or_fallback` →
+    // `resolve_with_context`) — the #5672 regression was that command arms
+    // called the context-less `resolve()` and lost the `account_id` along
+    // the way, so every bot's command would collapse to the first-registered
+    // channel default.
+    let resolve_for_command = || {
+        let ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(channel_type)),
+            account_id: account_id.map(std::borrow::Cow::Borrowed),
+            peer_id: std::borrow::Cow::Borrowed(sender.platform_id.as_str()),
+            guild_id: None,
+            roles: smallvec::SmallVec::new(),
+        };
+        router.resolve_with_context(
+            channel_type,
+            &sender.platform_id,
+            sender.librefang_user.as_deref(),
+            &ctx,
+        )
+    };
+
+    // Channel-account key used to scope user-default writes (e.g. `/agent`)
+    // so that selecting an agent on `bot-a` does not silently override
+    // `bot-b`'s channel default for the same platform user (#5672 Layer B).
+    let channel_account_key = account_id.map(|aid| {
+        format!(
+            "{}:{}",
+            crate::router::channel_type_to_str(channel_type),
+            aid
+        )
+    });
+
     match name {
         "start" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -5636,16 +5714,30 @@ async fn handle_command(
                 return "Usage: /agent <name>".to_string();
             }
             let agent_name = &args[0];
+            // Helper: record the user's selection. If we have a channel
+            // account key (multi-bot adapter), scope the override to
+            // `(channel:account, platform_id)` so it doesn't leak across
+            // other bots the same user can reach (#5672). If we don't have
+            // one (single-bot channel, CLI), fall back to the legacy global
+            // override so existing behaviour is preserved.
+            let store_user_default = |agent_id| match channel_account_key.as_deref() {
+                Some(scope) => router.set_user_default_for_channel(
+                    scope.to_string(),
+                    sender.platform_id.clone(),
+                    agent_id,
+                ),
+                None => router.set_user_default(sender.platform_id.clone(), agent_id),
+            };
             match handle.find_agent_by_name(agent_name).await {
                 Ok(Some(agent_id)) => {
-                    router.set_user_default(sender.platform_id.clone(), agent_id);
+                    store_user_default(agent_id);
                     format!("Now talking to agent: {agent_name}")
                 }
                 Ok(None) => {
                     // Try to spawn it
                     match handle.spawn_agent_by_name(agent_name).await {
                         Ok(agent_id) => {
-                            router.set_user_default(sender.platform_id.clone(), agent_id);
+                            store_user_default(agent_id);
                             format!("Spawned and connected to agent: {agent_name}")
                         }
                         Err(e) => {
@@ -5661,11 +5753,7 @@ async fn handle_command(
                 return "Usage: /btw <question> — ask a side question without affecting session history".to_string();
             }
             let question = args.join(" ");
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             // Build a minimal SenderContext so the kernel can apply the
             // same peer-scoped memory lookup that the regular message path
             // uses (#4923) — otherwise the agent re-asks the user's name
@@ -5690,11 +5778,7 @@ async fn handle_command(
             // pair must match `build_sender_context` exactly so the sid we
             // delete here equals the sid the next inbound message will
             // resolve via `SessionId::for_channel`.
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
                     let ch = channel_type_str(channel_type);
@@ -5712,11 +5796,7 @@ async fn handle_command(
             }
         }
         "reboot" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
                     let ch = channel_type_str(channel_type);
@@ -5734,11 +5814,7 @@ async fn handle_command(
             }
         }
         "compact" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
                     let ch = channel_type_str(channel_type);
@@ -5756,11 +5832,7 @@ async fn handle_command(
             }
         }
         "model" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
                     if args.is_empty() {
@@ -5780,11 +5852,7 @@ async fn handle_command(
             }
         }
         "stop" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => handle
                     .stop_run(aid)
@@ -5794,11 +5862,7 @@ async fn handle_command(
             }
         }
         "usage" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => handle
                     .session_usage(aid)
@@ -5808,11 +5872,7 @@ async fn handle_command(
             }
         }
         "think" => {
-            let agent_id = router.resolve(
-                channel_type,
-                &sender.platform_id,
-                sender.librefang_user.as_deref(),
-            );
+            let agent_id = resolve_for_command();
             match agent_id {
                 Some(aid) => {
                     let on = args.first().map(|a| a == "on").unwrap_or(true);
@@ -6464,6 +6524,7 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
+            None,
         )
         .await;
         assert!(result.contains("coder"));
@@ -6475,6 +6536,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
             None,
         )
         .await;
@@ -6503,6 +6565,7 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
+            None,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -6510,6 +6573,171 @@ mod tests {
         // Verify router was updated
         let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
         assert_eq!(resolved, Some(agent_id));
+    }
+
+    /// MockHandle that records which `agent_id` `/model` was dispatched to,
+    /// so we can assert command-routing isolation between multi-bot
+    /// deployments (#5672).
+    struct RecordingHandle {
+        agents: Mutex<Vec<(AgentId, String)>>,
+        set_model_calls: Mutex<Vec<AgentId>>,
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for RecordingHandle {
+        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+            Ok(format!("Echo: {message}"))
+        }
+        async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+            let agents = self.agents.lock().unwrap();
+            Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+        }
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(self.agents.lock().unwrap().clone())
+        }
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in mock".to_string())
+        }
+        async fn set_model(&self, agent_id: AgentId, _model: &str) -> Result<String, String> {
+            self.set_model_calls.lock().unwrap().push(agent_id);
+            Ok("ok".to_string())
+        }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+    }
+
+    /// Regression test for #5672 Layer A: a channel-side `/command`
+    /// resolved on `bot-a` must route to `bot-a`'s configured default agent,
+    /// not to the first-registered channel default for the channel type.
+    #[tokio::test]
+    async fn command_resolution_respects_account_id() {
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        let agent_c = AgentId::new();
+
+        let recording = Arc::new(RecordingHandle {
+            agents: Mutex::new(vec![
+                (agent_a, "agent-A".to_string()),
+                (agent_b, "agent-B".to_string()),
+                (agent_c, "agent-C".to_string()),
+            ]),
+            set_model_calls: Mutex::new(Vec::new()),
+        });
+        let handle: Arc<dyn ChannelBridgeHandle> = recording.clone();
+        let router = Arc::new(AgentRouter::new());
+
+        // Three Telegram bots, each with their own account-qualified default.
+        // The order of registration is intentional: agent-A is registered
+        // first, which is the agent the pre-fix code would collapse to for
+        // EVERY bot's `/model`.
+        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+        router.set_channel_default("telegram:bot-c".to_string(), agent_c);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // `/model` issued in bot-b must dispatch to agent-B.
+        let _ = handle_command(
+            "model",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-b"),
+            None,
+        )
+        .await;
+        // `/model` issued in bot-c must dispatch to agent-C.
+        let _ = handle_command(
+            "model",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-c"),
+            None,
+        )
+        .await;
+
+        let calls = recording.set_model_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![agent_b, agent_c],
+            "/model must route per-account; got {:?}",
+            calls,
+        );
+    }
+
+    /// Regression test for #5672 Layer B: `/agent` in bot-a must NOT
+    /// override which agent handles bot-b's traffic for the same user.
+    #[tokio::test]
+    async fn agent_command_does_not_leak_across_bots() {
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        let agent_c = AgentId::new();
+
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![
+                (agent_a, "agent-A".to_string()),
+                (agent_b, "agent-B".to_string()),
+                (agent_c, "agent-C".to_string()),
+            ]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+        router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+
+        let sender = ChannelUser {
+            platform_id: "shared-user".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // User runs `/agent agent-C` in bot-a — scope: bot-a only.
+        let result = handle_command(
+            "agent",
+            &["agent-C".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            Some("bot-a"),
+            None,
+        )
+        .await;
+        assert!(result.contains("Now talking to agent: agent-C"));
+
+        // Re-resolving for bot-a returns agent-C (the override).
+        let ctx_a = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed("telegram"),
+            account_id: Some(std::borrow::Cow::Borrowed("bot-a")),
+            peer_id: std::borrow::Cow::Borrowed("shared-user"),
+            ..Default::default()
+        };
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &ctx_a),
+            Some(agent_c),
+            "bot-a should honour /agent override"
+        );
+
+        // Re-resolving for bot-b for the SAME user returns bot-b's default
+        // (agent-B) — the /agent override must not leak across bots.
+        let ctx_b = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed("telegram"),
+            account_id: Some(std::borrow::Cow::Borrowed("bot-b")),
+            peer_id: std::borrow::Cow::Borrowed("shared-user"),
+            ..Default::default()
+        };
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &ctx_b),
+            Some(agent_b),
+            "bot-b must NOT inherit bot-a's /agent override (#5672)"
+        );
     }
 
     #[test]
@@ -7192,6 +7420,7 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
+            None,
         )
         .await;
         assert!(result.contains("Usage:"));
@@ -7219,6 +7448,7 @@ mod tests {
             &sender,
             &ChannelType::CLI,
             None,
+            None,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -7243,6 +7473,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
             None,
         )
         .await;

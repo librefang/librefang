@@ -801,6 +801,7 @@ impl MemorySubstrate {
     /// separate memory entry with `parent_id` and `chunk_index` in its
     /// metadata. The returned `MemoryId` belongs to the first chunk (the
     /// logical parent).
+    #[allow(clippy::too_many_arguments)]
     pub fn remember_with_embedding(
         &self,
         agent_id: AgentId,
@@ -809,6 +810,7 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         Self::store_with_chunking(
             &self.semantic,
@@ -819,6 +821,7 @@ impl MemorySubstrate {
             scope,
             metadata,
             embedding,
+            peer_id,
         )
     }
 
@@ -833,12 +836,13 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         let should_chunk =
             chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
         if !should_chunk {
-            return semantic.remember_with_embedding(
+            return semantic.remember_with_embedding_and_peer(
                 agent_id,
                 content,
                 source,
@@ -848,6 +852,7 @@ impl MemorySubstrate {
                 None,
                 None,
                 Default::default(),
+                peer_id,
             );
         }
 
@@ -891,7 +896,7 @@ impl MemorySubstrate {
             // computed for the full text and is meaningless for individual
             // chunks.  Let the embedding pipeline compute per-chunk embeddings
             // later.
-            let id = semantic.remember_with_embedding(
+            let id = semantic.remember_with_embedding_and_peer(
                 agent_id,
                 chunk,
                 source.clone(),
@@ -901,6 +906,7 @@ impl MemorySubstrate {
                 None,
                 None,
                 Default::default(),
+                peer_id,
             )?;
 
             if parent_id.is_none() {
@@ -949,6 +955,7 @@ impl MemorySubstrate {
     /// Async wrapper for `remember_with_embedding` — runs in a blocking thread.
     ///
     /// Applies chunking when enabled and the content exceeds `max_chunk_size`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn remember_with_embedding_async(
         &self,
         agent_id: AgentId,
@@ -957,12 +964,14 @@ impl MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         let store = self.semantic.clone();
         let content = content.to_string();
         let scope = scope.to_string();
         let embedding_owned = embedding.map(|e| e.to_vec());
         let chunk_config = self.chunk_config.clone();
+        let peer_id_owned = peer_id.map(String::from);
         tokio::task::spawn_blocking(move || {
             Self::store_with_chunking(
                 &store,
@@ -973,6 +982,7 @@ impl MemorySubstrate {
                 &scope,
                 metadata,
                 embedding_owned.as_deref(),
+                peer_id_owned.as_deref(),
             )
         })
         .await
@@ -1615,10 +1625,13 @@ impl Memory for MemorySubstrate {
         source: MemorySource,
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
         // Delegate to remember_with_embedding (no embedding) which handles chunking.
-        self.remember_with_embedding_async(agent_id, content, source, scope, metadata, None)
-            .await
+        self.remember_with_embedding_async(
+            agent_id, content, source, scope, metadata, None, peer_id,
+        )
+        .await
     }
 
     async fn recall(
@@ -1711,6 +1724,7 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1899,6 +1913,7 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1928,6 +1943,7 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1973,6 +1989,7 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&embedding),
+                None,
             )
             .await
             .unwrap();
@@ -2006,6 +2023,7 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -2195,6 +2213,7 @@ mod tests {
                 MemorySource::Conversation,
                 "episodic",
                 HashMap::new(),
+                None,
             )
             .await
             .unwrap();

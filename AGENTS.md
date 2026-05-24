@@ -23,7 +23,7 @@ The workspace contains 31 crates under `crates/` plus an `xtask` crate:
 | `librefang-wire` | OFP (Open Fang Protocol): agent-to-agent P2P networking |
 | `librefang-telemetry` | OpenTelemetry + Prometheus metrics instrumentation |
 | `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, API route test utilities |
-| `librefang-migrate` | Migration engine: import from other agent frameworks |
+| `librefang-import` | Import engine: import agents/memory/sessions/skills/channel configs from other frameworks (OpenClaw, OpenFang, LangChain, AutoGPT) |
 | `librefang-kernel` | Central kernel: agent registry, scheduling, orchestration, event bus, metering |
 | `librefang-kernel-handle` | KernelHandle trait — breaks runtime↔kernel circular dependency |
 | `librefang-kernel-router` | Kernel model routing layer |
@@ -103,6 +103,47 @@ Routes are organized by domain in `crates/librefang-api/src/routes/`:
 - **Testing**: Tests live alongside source code in `#[cfg(test)]` modules; integration test helpers in `librefang-testing`
 - **Commits**: Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
 
+## Process Discipline
+
+How you change code in this repo. Six principles synthesised from Andrej
+Karpathy's behavioural rules and Boris Cherny's principles + self-improvement
+loop. Apply on top of the worktree-isolation rule and BossFang preservation
+rules below. (Claude Code-specific tool names appear in the canonical version
+in `CLAUDE.md § Process Discipline` — for other AI tools, use the equivalent
+plan-mode / task-tracker / persistent-memory affordances of your runtime.)
+
+1. **Think Before Coding** — State assumptions explicitly. Ask if unclear.
+   If multiple approaches exist, present them. If a simpler approach exists,
+   push back. For non-trivial work, plan first (with plan mode or a brief
+   numbered plan with verify-steps).
+2. **Simplicity First** — Minimum code that solves the problem. No features
+   beyond what was asked. No speculative abstractions or "configurability".
+   No error handling for impossible scenarios. If you can delete lines
+   instead of adding them, do that.
+3. **Surgical Changes** — Touch only what you must. Don't "improve" adjacent
+   code or refactor what isn't broken. Match existing style. Every changed
+   line traces directly to the user's request. Mention unrelated dead code
+   you spot — don't delete it inline.
+4. **Root-Cause Discipline** — Find the underlying issue; no band-aids,
+   `#[ignore]`'d tests, suppressed lints, or `--no-verify` flags. A failing
+   test is information.
+5. **Goal-Driven Verification** — Transform vague asks into verifiable
+   goals ("fix the bug" → "add a test that reproduces it, then make it
+   pass"). Verify before claiming done: `cargo check --workspace --lib`
+   AND scoped `cargo test -p <crate>` AND
+   `python3 scripts/enforce-branding.py --check` AND any audit script the
+   change implicates.
+6. **Capture Corrections** — When the user corrects you, or confirms a
+   non-obvious approach worked, persist the rule somewhere your tool will
+   recall next session (Claude Code: write a `feedback` memory; other
+   tools: use your equivalent persistent-instructions affordance). Don't
+   make the user repeat themselves.
+
+Trivial tasks (typo fix, single-line obvious change) can skip the heavier
+parts of this discipline — use judgement. The bias toward caution is
+correct for any change that touches more than one file, modifies
+behaviour, or interacts with the BossFang preservation surface.
+
 ## BossFang Product Identity
 
 This repo is the **BossFang** fork of LibreFang. Upstream branding (LibreFang name,
@@ -163,6 +204,11 @@ coordinating surreal-memory and UAR git refs — version drift breaks the build.
 
 BossFang memory uses `surreal-memory` from `https://github.com/Prometheus-AGS/surreal-memory-server`.
 Implementation in `crates/librefang-memory/src/backends/surreal*.rs` (9 backend files).
+Dependency is pinned to `branch = "main"`; run `cargo update -p surreal-memory` after
+every upstream merge to pull the latest connection-architecture fixes (most recently
+the 2026-05-24 ArcSwap rewrite + typed `RetryAction` + `SURREAL_QUERY_TIMEOUT_MS` env
+var + embedded in-flight semaphore — the `MemoryStorage` trait surface is held stable,
+so picking it up is typically zero-risk on our side).
 
 Never remove; never switch to upstream's SQLite memory backend. The `embedded` feature must
 remain active (no external SurrealDB service required).

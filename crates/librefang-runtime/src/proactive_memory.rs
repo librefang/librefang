@@ -328,26 +328,82 @@ impl LlmMemoryExtractor {
         }
     }
 
-    /// Resolve the `reasoning_echo_policy` for [`Self::model`] via the
+    /// Resolve the `reasoning_echo_policy` for the given model via the
     /// installed kernel handle. Returns `None` (the safe default) when no
     /// handle is installed, the kernel has been dropped, or the model
     /// isn't in the catalog — the driver's substring fallback handles
     /// those cases.
-    fn echo_policy(&self) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+    fn echo_policy_for(&self, model: &str) -> librefang_types::model_catalog::ReasoningEchoPolicy {
         self.kernel_handle
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref()?.upgrade())
-            .map(|k| k.reasoning_echo_policy_for(&self.model))
+            .map(|k| k.reasoning_echo_policy_for(model))
             .unwrap_or_default()
+    }
+
+    /// Convenience alias preserving the pre-#5475 callsite shape.
+    fn echo_policy(&self) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        self.echo_policy_for(&self.model)
+    }
+
+    /// Resolve the per-agent `extraction_model` override (#5475) via
+    /// the installed kernel handle. Returns the model string to use
+    /// for this extraction call, falling back to `self.model` when no
+    /// handle is installed, the kernel has been dropped, the agent
+    /// isn't known to the registry, or no override is configured.
+    ///
+    /// The returned string is whatever the operator wrote in
+    /// `agent.toml` (or the kernel config) — possibly `provider/model`
+    /// or `provider:model`. The boot path already stripped the prefix
+    /// from `self.model` for the global driver, so we mirror that here:
+    /// if the override carries a provider prefix matching the driver
+    /// the extractor was built with, strip it; otherwise pass the
+    /// string through. A mismatched provider prefix is logged but not
+    /// re-routed — full per-agent driver switching is a follow-up
+    /// (see `ProactiveMemoryOverrides::extraction_model` doc).
+    fn resolve_model_for_agent(&self, agent_id: &str) -> String {
+        let Some(override_spec) = self
+            .kernel_handle
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref()?.upgrade())
+            .and_then(|k| k.proactive_memory_extraction_model_for(agent_id))
+        else {
+            return self.model.clone();
+        };
+        // Strip a `provider/` or `provider:` prefix from the override
+        // when present. We do not have the catalog here to validate
+        // the provider — the kernel already enforces that the global
+        // extraction driver's provider is real, so any prefix in the
+        // override that doesn't match a registered provider would
+        // route to the default driver at the boot layer. Here we just
+        // need the bare model name to put on the wire.
+        let bare = override_spec
+            .split_once(':')
+            .or_else(|| override_spec.split_once('/'))
+            .map(|(_, m)| m.to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or(override_spec.clone());
+        tracing::debug!(
+            agent_id = %agent_id,
+            override_spec = %override_spec,
+            resolved_model = %bare,
+            "Per-agent proactive memory extraction_model override applied (#5475)"
+        );
+        bare
     }
 }
 
-#[async_trait::async_trait]
-impl MemoryExtractor for LlmMemoryExtractor {
-    async fn extract_memories(
+impl LlmMemoryExtractor {
+    /// Shared extraction body used by both [`MemoryExtractor::extract_memories`]
+    /// and [`MemoryExtractor::extract_memories_with_agent_id`]. Takes an
+    /// explicit `model` so the per-agent override (#5475) can swap the
+    /// wire-level model name without touching `self.model`.
+    async fn extract_with_model(
         &self,
         messages: &[serde_json::Value],
+        model: &str,
         categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
         // Build a condensed version of the conversation for the LLM.
@@ -385,13 +441,11 @@ impl MemoryExtractor for LlmMemoryExtractor {
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    // Truncate at last complete message (last newline within limit)
                     if let Some(last_newline) =
                         conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
                     {
                         conversation_text.truncate(last_newline);
                     } else {
-                        // No newline within limit — truncate at char boundary
                         let mut safe = MAX_EXTRACTION_CHARS;
                         while safe > 0 && !conversation_text.is_char_boundary(safe) {
                             safe -= 1;
@@ -413,28 +467,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             });
         }
 
-        // NOTE: the fork-based path lives in `extract_memories_with_agent_id`
-        // — `extract_memories` has no agent_id and therefore can't target
-        // a fork. When auto_memorize wants the fork benefits it must call
-        // the _with_agent_id variant (it does, via the trait).
-        //
-        // Build the LLM request. `prompt_caching: true` lets Anthropic
-        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
-        // auto_memorize calls — the user message (conversation text)
-        // differs every call, but the system prompt is stable, so the
-        // driver stamps a `cache_control` marker on the system block and
-        // subsequent calls within the 5-min TTL hit cache. Non-Anthropic
-        // providers ignore the flag (OpenAI caches automatically; others
-        // no-op), so enabling it is safe cross-provider.
-        //
-        // NOTE: this does NOT share cache with the main agent's turn —
-        // LlmMemoryExtractor deliberately uses its own `EXTRACTION_SYSTEM_PROMPT`
-        // (not the agent's system prompt) for better extraction quality.
-        // Cross-call parent-child cache sharing would require rewriting
-        // the extractor to use the forkedAgent pattern + tool calls
-        // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
-            model: self.model.clone(),
+            model: model.to_string(),
             messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(format!(
                 "Extract memories from this conversation:\n\n{conversation_text}"
             ))]),
@@ -452,7 +486,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
-            reasoning_echo_policy: self.echo_policy(),
+            reasoning_echo_policy: self.echo_policy_for(model),
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -463,95 +497,59 @@ impl MemoryExtractor for LlmMemoryExtractor {
         let text = response.text();
         parse_llm_extraction_response(&text)
     }
+}
 
-    /// Fork-aware extraction path. When a kernel handle is configured,
-    /// routes the extraction LLM call through `run_forked_agent_oneshot`
-    /// so it shares the parent agent's cache key. Falls back to the
-    /// standalone `extract_memories` path on any fork failure or when
-    /// no kernel handle was wired.
+#[async_trait::async_trait]
+impl MemoryExtractor for LlmMemoryExtractor {
+    async fn extract_memories(
+        &self,
+        messages: &[serde_json::Value],
+        categories: &[String],
+    ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
+        // No agent context → use the boot-time `self.model`. Per-agent
+        // override (#5475) is honoured only via the `_with_agent_id`
+        // variant, which the proactive-memory store calls on the
+        // auto_memorize hot path.
+        //
+        // `prompt_caching: true` (inside the helper) lets Anthropic
+        // cache the ~1KB `EXTRACTION_SYSTEM_PROMPT` across back-to-back
+        // calls. Non-Anthropic providers ignore the flag (OpenAI caches
+        // automatically; others no-op), so enabling it is safe cross-
+        // provider. This does NOT share cache with the main agent's
+        // turn — `LlmMemoryExtractor` deliberately uses its own
+        // `EXTRACTION_SYSTEM_PROMPT` (not the agent's system prompt) for
+        // better extraction quality. Cross-call parent-child cache
+        // sharing would require rewriting the extractor to use the
+        // forkedAgent pattern + tool calls; that's a separate PR.
+        let model = self.model.clone();
+        self.extract_with_model(messages, &model, categories).await
+    }
+
+    /// Per-agent extraction path. Consults the installed kernel handle
+    /// for the agent's `[proactive_memory] extraction_model` override
+    /// (#5475) and routes the LLM request through that model name
+    /// when one is configured; otherwise falls back to `self.model`
+    /// (the boot-time default).
+    ///
+    /// The driver itself is not swapped — the override changes only
+    /// the wire-level model name on the existing extraction driver. A
+    /// follow-up PR may introduce a per-agent driver cache for full
+    /// cross-provider routing.
+    ///
+    /// The fork-based path that previously lived here was removed
+    /// because `run_forked_agent_oneshot` cannot thread
+    /// `response_format: json_object`, which weak models need to keep
+    /// reply JSON parseable. Standalone calls retain JSON mode + the
+    /// dedicated `EXTRACTION_SYSTEM_PROMPT` + per-call system-block
+    /// caching.
     async fn extract_memories_with_agent_id(
         &self,
         messages: &[serde_json::Value],
         agent_id: &str,
         categories: &[String],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
-        // Re-run the conversation-text builder from `extract_memories`
-        // so the fork prompt gets the same truncation / role filtering.
-        // Duplicating ~40 lines here keeps each method independently
-        // auditable — factoring into a helper would tangle the fork
-        // path with the direct path's truncation quirks (the LLM's
-        // ~8000-char cap is specific to the standalone extractor's
-        // model context; a forked agent inherits its own limits from
-        // the parent manifest).
-        const MAX_EXTRACTION_CHARS: usize = 8000;
-        let mut conversation_text = String::new();
-        for msg in messages {
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if role == "system" || role == "unknown" {
-                continue;
-            }
-            let content = match msg.get("content") {
-                Some(serde_json::Value::String(s)) => s.clone(),
-                Some(serde_json::Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|v| {
-                        v.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| v.as_str().map(|s| s.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => String::new(),
-            };
-            if !content.is_empty() {
-                conversation_text.push_str(&format!("{role}: {content}\n"));
-                if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    if let Some(last_newline) =
-                        conversation_text[..MAX_EXTRACTION_CHARS].rfind('\n')
-                    {
-                        conversation_text.truncate(last_newline);
-                    } else {
-                        let mut safe = MAX_EXTRACTION_CHARS;
-                        while safe > 0 && !conversation_text.is_char_boundary(safe) {
-                            safe -= 1;
-                        }
-                        conversation_text.truncate(safe);
-                    }
-                    break;
-                }
-            }
-        }
-
-        if conversation_text.is_empty() {
-            return Ok(ExtractionResult {
-                has_content: false,
-                memories: Vec::new(),
-                relations: Vec::new(),
-                trigger: "llm_extractor_forked_empty".to_string(),
-                conflicts: Vec::new(),
-            });
-        }
-
-        // Always use the standalone path. The fork path cannot thread
-        // `response_format: json_object` through `run_forked_agent_oneshot`,
-        // so providers that honour JSON mode (ollama, OpenAI-compat,
-        // Anthropic with json schemas, …) lose that guarantee and weak
-        // models reply in prose, causing `Failed to parse extraction
-        // response JSON` warnings with no memory extracted.
-        //
-        // Standalone gives us JSON mode + dedicated EXTRACTION_SYSTEM_PROMPT
-        // + per-call system-block caching (`prompt_caching = true`). The
-        // cross-call parent-child cache sharing that fork was supposed to
-        // enable was never fully wired (see the "separate PR" note in
-        // `extract_memories`), so there is no real regression from
-        // skipping fork here.
-        let _ = agent_id; // kept in signature for forward compat
-        let _ = conversation_text;
-        self.extract_memories(messages, categories).await
+        let model = self.resolve_model_for_agent(agent_id);
+        self.extract_with_model(messages, &model, categories).await
     }
 
     /// LLM-powered conflict resolution: decide ADD/UPDATE/NOOP.

@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use librefang_migrate::{openclaw, openfang, MigrateOptions, MigrateSource};
+use librefang_import::{openclaw, openfang, MigrateOptions, MigrateSource};
 use tempfile::TempDir;
 
 /// Read every regular file under `root` and return a sorted map from

@@ -302,7 +302,7 @@ NOT touch these even when the surrounding file is converted.
 
 **Cargo crate names** (workspace members):
 - `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`,
-  `librefang-testing`, `librefang-migrate`
+  `librefang-testing`, `librefang-import` (renamed upstream from `librefang-migrate` in #5685)
 - `librefang-kernel`, `librefang-kernel-handle`, `librefang-kernel-router`,
   `librefang-kernel-metering`
 - `librefang-runtime`, `librefang-runtime-mcp`, `librefang-runtime-oauth`,

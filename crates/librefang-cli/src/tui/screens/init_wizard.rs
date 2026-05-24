@@ -272,10 +272,10 @@ struct State {
     migration_phase: MigrationPhase,
     migration_choice_list: ListState,
     openclaw_path: Option<PathBuf>,
-    openclaw_scan: Option<librefang_migrate::openclaw::ScanResult>,
+    openclaw_scan: Option<librefang_import::openclaw::ScanResult>,
     openfang_path: Option<PathBuf>,
-    migrate_source: Option<librefang_migrate::MigrateSource>,
-    migration_report: Option<librefang_migrate::report::MigrationReport>,
+    migrate_source: Option<librefang_import::MigrateSource>,
+    migration_report: Option<librefang_import::report::MigrationReport>,
     migration_error: Option<String>,
     migration_done_at: Option<Instant>,
     migrated_provider: Option<String>,
@@ -653,7 +653,7 @@ pub fn run() -> InitResult {
 
     let (test_tx, test_rx) = std::sync::mpsc::channel::<bool>();
     let (migrate_tx, migrate_rx) =
-        std::sync::mpsc::channel::<Result<librefang_migrate::report::MigrationReport, String>>();
+        std::sync::mpsc::channel::<Result<librefang_import::report::MigrationReport, String>>();
 
     let result = loop {
         terminal
@@ -709,9 +709,9 @@ pub fn run() -> InitResult {
         // ── Migration detection (resolves in 1 frame) ──
         if state.step == Step::Migration && state.migration_phase == MigrationPhase::Detecting {
             // Check OpenClaw first (more complex migration with scan)
-            let openclaw_found = match librefang_migrate::openclaw::detect_openclaw_home() {
+            let openclaw_found = match librefang_import::openclaw::detect_openclaw_home() {
                 Some(path) => {
-                    let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
+                    let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
                     let has_content = scan.has_config
                         || !scan.agents.is_empty()
                         || !scan.channels.is_empty()
@@ -720,7 +720,7 @@ pub fn run() -> InitResult {
                     if has_content {
                         state.openclaw_path = Some(path);
                         state.openclaw_scan = Some(scan);
-                        state.migrate_source = Some(librefang_migrate::MigrateSource::OpenClaw);
+                        state.migrate_source = Some(librefang_import::MigrateSource::OpenClaw);
                         true
                     } else {
                         false
@@ -740,7 +740,7 @@ pub fn run() -> InitResult {
                             || path.join("skills").exists();
                         if has_content {
                             state.openfang_path = Some(path);
-                            state.migrate_source = Some(librefang_migrate::MigrateSource::OpenFang);
+                            state.migrate_source = Some(librefang_import::MigrateSource::OpenFang);
                             state.migration_phase = MigrationPhase::Offer;
                         } else {
                             state.advance_to_provider();
@@ -1074,9 +1074,7 @@ pub fn run() -> InitResult {
 fn handle_migration_key(
     state: &mut State,
     code: KeyCode,
-    migrate_tx: &std::sync::mpsc::Sender<
-        Result<librefang_migrate::report::MigrationReport, String>,
-    >,
+    migrate_tx: &std::sync::mpsc::Sender<Result<librefang_import::report::MigrationReport, String>>,
 ) {
     match state.migration_phase {
         MigrationPhase::Detecting => {} // auto-resolves, no keys
@@ -1102,9 +1100,9 @@ fn handle_migration_key(
                     state.migration_phase = MigrationPhase::Running;
                     let migrate_source = state
                         .migrate_source
-                        .unwrap_or(librefang_migrate::MigrateSource::OpenClaw);
+                        .unwrap_or(librefang_import::MigrateSource::OpenClaw);
                     let source_dir = match migrate_source {
-                        librefang_migrate::MigrateSource::OpenFang => {
+                        librefang_import::MigrateSource::OpenFang => {
                             state.openfang_path.clone().unwrap_or_default()
                         }
                         _ => state.openclaw_path.clone().unwrap_or_default(),
@@ -1118,14 +1116,14 @@ fn handle_migration_key(
                     };
                     let tx = migrate_tx.clone();
                     std::thread::spawn(move || {
-                        let options = librefang_migrate::MigrateOptions {
+                        let options = librefang_import::MigrateOptions {
                             source: migrate_source,
                             source_dir,
                             target_dir,
                             dry_run: false,
                         };
                         let result =
-                            librefang_migrate::run_migration(&options).map_err(|e| format!("{e}"));
+                            librefang_import::run_migration(&options).map_err(|e| format!("{e}"));
                         let _ = tx.send(result);
                     });
                 } else {
@@ -1519,7 +1517,7 @@ fn draw_migration_detecting(f: &mut Frame, area: Rect, state: &State) {
 fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     let is_openfang = matches!(
         state.migrate_source,
-        Some(librefang_migrate::MigrateSource::OpenFang)
+        Some(librefang_import::MigrateSource::OpenFang)
     );
 
     // For OpenClaw we need the scan; for OpenFang we just need the path
@@ -1627,7 +1625,7 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             match state.migrate_source {
-                Some(librefang_migrate::MigrateSource::OpenFang) => {
+                Some(librefang_import::MigrateSource::OpenFang) => {
                     "  OpenFang Installation Detected"
                 }
                 _ => "  OpenClaw Installation Detected",
@@ -1723,7 +1721,7 @@ fn draw_migration_running(f: &mut Frame, area: Rect, state: &State) {
             Span::raw("  "),
             Span::styled(spinner, Style::default().fg(theme::ACCENT)),
             Span::raw(match state.migrate_source {
-                Some(librefang_migrate::MigrateSource::OpenFang) => " Migrating from OpenFang...",
+                Some(librefang_import::MigrateSource::OpenFang) => " Migrating from OpenFang...",
                 _ => " Migrating from OpenClaw...",
             }),
         ])),
@@ -1741,7 +1739,7 @@ fn draw_migration_done(f: &mut Frame, area: Rect, state: &State) {
         ]));
     } else if let Some(ref report) = state.migration_report {
         // Group imported items by kind
-        use librefang_migrate::report::ItemKind;
+        use librefang_import::report::ItemKind;
         let config_count = report
             .imported
             .iter()
