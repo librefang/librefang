@@ -225,6 +225,28 @@ The daemon command is `start` (not `daemon`).
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.
+- **Per-agent `proactive_memory` / `skill_workshop` / `compaction`
+  overrides live in `agent.toml`, NOT `config.toml`** (#5476).
+  `KernelConfig` has no `agents` field, so a block like:
+  ```toml
+  # ~/.librefang/config.toml — silently ignored, NOT honoured
+  [agents.my-agent.proactive_memory]
+  auto_memorize = true
+  ```
+  parses but never feeds into any `AgentManifest`. The kernel emits a
+  targeted `WARN` at boot and on `POST /api/config/reload` pointing
+  operators at the correct surface (see
+  `KernelConfig::detect_misplaced_per_agent_overrides`); the
+  load-bearing path is the agent's own manifest:
+  ```toml
+  # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
+  [proactive_memory]
+  auto_memorize = true
+  ```
+  Same shape for `[skill_workshop]` and `[compaction]`. Inside a
+  `HAND.toml` the override sits under `[agents.<name>.<key>]`, which
+  *is* read because `HandManifest` does have an `agents` table —
+  `config.toml` does not.
 - **Trigger dispatch concurrency** has three layered caps, scoped to
   the **trigger dispatcher only** (`agent_send`, channel bridges, and
   cron still serialize at the existing per-agent / per-session locks
