@@ -1,0 +1,35 @@
+# HTTPRoute attached to the cluster's Envoy Gateway.
+#
+# `parentRefs` points at `envoy-gateway` in `envoy-gateway-system`
+# (same parent that UAR and presumably candle-vllm use).
+#
+# The hostname is `bossfang.prometheusags.ai` — placeholder in base/,
+# patched to the real value in overlays/production-gke/. Same with
+# any path-prefix tweaks.
+#
+# TLS termination is handled at the Gateway listener, not here. See
+# overlays/production-gke/tls/README.md for how the wildcard cert
+# for *.prometheusags.ai gets wired in.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bossfang
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: route
+    app.kubernetes.io/part-of: bossfang
+spec:
+  parentRefs:
+    - name: envoy-gateway
+      namespace: envoy-gateway-system
+  hostnames:
+    - "bossfang.prometheusags.ai"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: bossfang
+          port: 4545

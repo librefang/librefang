@@ -1,0 +1,45 @@
+# BossFang config.toml fragment.
+#
+# Mounted as a projected volume at /data/config.toml inside the pod.
+# `BOSSFANG_HOME=/data` env var (set on the Deployment) makes the
+# daemon read this file at boot.
+#
+# Source of truth for the schema is `KernelConfig` in
+# crates/librefang-types/src/config/mod.rs and `StorageConfig` in
+# crates/librefang-storage/src/config.rs.
+#
+# Anything secret (SURREAL_PASS, BOSSFANG_VAULT_KEY, provider API keys)
+# is sourced from env vars (see secrets.template.yaml) — NEVER inline
+# in this ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bossfang-config
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: bossfang
+data:
+  config.toml: |
+    # Listen on all interfaces inside the pod; the Service routes ingress.
+    api_listen = "0.0.0.0:4545"
+
+    # Storage: remote SurrealDB in the same namespace.
+    # Both librefang-storage and surreal-memory pick this up — they share
+    # the same StorageConfig and route to different databases automatically
+    # (main + memory respectively under namespace `bossfang`).
+    [storage]
+    backend = "remote"
+
+    [storage.remote]
+    url = "ws://surrealdb:8000"
+    namespace = "bossfang"
+    database = "main"
+    username = "root"
+    password_env = "SURREAL_PASS"
+    tls_skip_verify = false
+
+    # Optional: structured logging level. Default `info`.
+    [telemetry]
+    log_level = "info"

@@ -1,0 +1,20 @@
+# Tighten BossFang's resource sizing for the production-gke environment.
+#
+# The base ships modest defaults (250m req / 1 CPU limit, 512Mi req / 2Gi limit).
+# Adjust here as actual usage data comes in — keep the base portable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bossfang
+spec:
+  template:
+    spec:
+      containers:
+        - name: bossfang
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi

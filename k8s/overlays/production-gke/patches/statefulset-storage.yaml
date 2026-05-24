@@ -1,0 +1,20 @@
+# Wire the SurrealDB PVC to the GKE-specific StorageClass.
+#
+# Without this patch, the StatefulSet's volumeClaimTemplates use the
+# cluster default. Use bossfang-immediate (pd-ssd, Retain) for SurrealDB
+# so RocksDB has low-latency I/O and the disk survives pod deletion.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: surrealdb
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: surrealdb-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: bossfang-immediate
+        resources:
+          requests:
+            storage: 20Gi

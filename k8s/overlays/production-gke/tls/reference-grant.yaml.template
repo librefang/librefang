@@ -1,0 +1,22 @@
+# TEMPLATE — copy to reference-grant.yaml, fill in actual names, then
+# uncomment under `resources:` in ../kustomization.yaml.
+#
+# Use this ONLY if Step 1 of tls/README.md determines the wildcard cert
+# lives in a different namespace and the Gateway needs explicit cross-
+# namespace reference permission.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: bossfang-cert-reference
+  # The grant lives in the namespace that OWNS the cert (the one the
+  # cert's Secret was provisioned into for candle-vllm).
+  namespace: REPLACE_WITH_CERT_SOURCE_NAMESPACE
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      namespace: envoy-gateway-system
+  to:
+    - group: ""
+      kind: Secret
+      name: REPLACE_WITH_WILDCARD_CERT_SECRET_NAME

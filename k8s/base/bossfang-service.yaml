@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bossfang
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: app
+    app.kubernetes.io/part-of: bossfang
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: app
+  ports:
+    - name: http
+      port: 4545
+      targetPort: http
+      protocol: TCP

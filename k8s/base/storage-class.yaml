@@ -1,0 +1,19 @@
+# GKE persistent disks for BossFang and SurrealDB.
+#
+# Mirror of UAR's `uar-immediate` pattern. pd-ssd because both SurrealDB
+# (RocksDB) and BossFang's runtime state benefit from low-latency I/O.
+# Immediate binding so the volume provisions at PVC-create time instead
+# of pod-schedule time (avoids races on zone selection).
+# Retain so a pod deletion doesn't blow away the underlying disk.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: bossfang-immediate
+  labels:
+    app.kubernetes.io/part-of: bossfang
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: Immediate
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+parameters:
+  type: pd-ssd

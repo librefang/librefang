@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bossfang
+
+resources:
+  - ../../base
+  # Add `secrets.yaml` here AFTER you copy secrets.template.yaml,
+  # populate it, and confirm it's gitignored (k8s/.gitignore covers
+  # overlays/*/secrets.yaml):
+  # - secrets.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: bossfang-prod
+      environment: production
+    includeSelectors: false
+
+# Pin the BossFang image. Replace the tag with the SHA built by your
+# CI pipeline (or by the manual `docker build && docker push` step
+# documented in k8s/README.md).
+images:
+  - name: PLACEHOLDER_BOSSFANG_IMAGE
+    newName: gcr.io/prometheus-461323/bossfang
+    newTag: latest
+
+patches:
+  - path: patches/deployment-resources.yaml
+    target:
+      kind: Deployment
+      name: bossfang
+  - path: patches/statefulset-storage.yaml
+    target:
+      kind: StatefulSet
+      name: surrealdb
+  - path: patches/httproute-hostname.yaml
+    target:
+      kind: HTTPRoute
+      name: bossfang
