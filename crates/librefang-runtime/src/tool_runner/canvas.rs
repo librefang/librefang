@@ -5,18 +5,51 @@ use super::CANVAS_MAX_BYTES;
 use std::path::{Path, PathBuf};
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#x27;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
-fn strip_html_entities(s: &str) -> String {
+fn decode_html_entities(s: &str) -> String {
     static ENTITY_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"&(?:#\d+;|#x[0-9a-fA-F]+;|\w+;)").unwrap()
+        regex_lite::Regex::new(r"&#(\d+);|&#[xX]([0-9a-fA-F]+);").unwrap()
     });
-    ENTITY_RE.replace_all(s, "").into_owned()
+    let mut result = String::with_capacity(s.len());
+    let mut pos = 0;
+    while pos < s.len() {
+        if let Some(m) = ENTITY_RE.find_at(s, pos) {
+            result.push_str(&s[pos..m.start()]);
+            if let Some(caps) = ENTITY_RE.captures_at(s, pos) {
+                if let Some(dec) = caps.get(1) {
+                    if let Ok(n) = dec.as_str().parse::<u32>() {
+                        if let Some(c) = char::from_u32(n) {
+                            result.push(c);
+                        }
+                    }
+                } else if let Some(hex) = caps.get(2) {
+                    if let Ok(n) = u32::from_str_radix(hex.as_str(), 16) {
+                        if let Some(c) = char::from_u32(n) {
+                            result.push(c);
+                        }
+                    }
+                }
+            }
+            pos = m.end();
+        } else {
+            result.push_str(&s[pos..]);
+            break;
+        }
+    }
+    result
 }
 
 /// Sanitize HTML for canvas presentation.
@@ -55,14 +88,14 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
         );
     }
 
-    let decoded = strip_html_entities(html);
+    let decoded = decode_html_entities(html);
     static DANGEROUS_SCHEME_RE: std::sync::LazyLock<regex_lite::Regex> =
         std::sync::LazyLock::new(|| {
             regex_lite::Regex::new(r"(?i)(?:javascript\s*:|vbscript\s*:|data\s*:\s*text/html)")
                 .unwrap()
         });
-    if DANGEROUS_SCHEME_RE.is_match(&decoded) {
-        return Err("Forbidden URL scheme detected".to_string());
+    if let Some(m) = DANGEROUS_SCHEME_RE.find(&decoded) {
+        return Err(format!("Forbidden URL scheme detected: {}", m.as_str()));
     }
 
     Ok(html.to_string())

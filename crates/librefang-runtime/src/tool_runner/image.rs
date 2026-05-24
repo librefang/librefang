@@ -143,6 +143,11 @@ pub(super) fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
             continue;
         }
         let marker = data[i + 1];
+        // Skip FF padding bytes (valid per JPEG spec between markers)
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
         // Marker-only types (no length field): stuffing, TEM, RST0-RST7, SOI, EOI
         if marker == 0x00 || marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
             i += 2;
