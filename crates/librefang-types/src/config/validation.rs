@@ -251,6 +251,57 @@ impl KernelConfig {
         unknown
     }
 
+    /// Detect `[agents.<name>.<override_key>]` blocks placed in
+    /// `config.toml` (#5476).
+    ///
+    /// `KernelConfig` has no `agents` field — per-agent overrides for
+    /// `proactive_memory`, `skill_workshop`, and `compaction` live in
+    /// each agent's own `agent.toml` (or the `[agents.<name>]` section
+    /// of a `HAND.toml`), not in `config.toml`. The original #4870
+    /// issue body proposed the `config.toml` syntax in error, and the
+    /// kernel silently accepted-and-ignored the block (the unknown
+    /// top-level `agents` key was warned about generically, but the
+    /// warning did not point at the correct surface). Operators
+    /// following the published syntax got a silent no-op.
+    ///
+    /// This helper walks the raw TOML for `[agents.<name>.<key>]`
+    /// sub-tables and returns one `(agent_name, override_key)` pair
+    /// per occurrence, sorted deterministically, so the caller can
+    /// emit a targeted warning that names the correct location. Only
+    /// the keys that are *actually* `agent.toml`-only overrides are
+    /// flagged — generic typos under `[agents]` fall through to the
+    /// existing unknown-top-level warning.
+    pub fn detect_misplaced_per_agent_overrides(raw: &toml::Value) -> Vec<(String, String)> {
+        // Keep this list in sync with the fields on `AgentManifest`
+        // that the kernel honours as per-agent overrides of a global
+        // `KernelConfig` section. Adding a new override here is a
+        // one-line update — the warning text below auto-includes it.
+        const PER_AGENT_OVERRIDE_KEYS: &[&str] =
+            &["proactive_memory", "skill_workshop", "compaction"];
+
+        let Some(agents_tbl) = raw
+            .as_table()
+            .and_then(|t| t.get("agents"))
+            .and_then(|v| v.as_table())
+        else {
+            return Vec::new();
+        };
+
+        let mut found = Vec::new();
+        for (agent_name, agent_value) in agents_tbl {
+            let Some(agent_tbl) = agent_value.as_table() else {
+                continue;
+            };
+            for key in PER_AGENT_OVERRIDE_KEYS {
+                if agent_tbl.contains_key(*key) {
+                    found.push((agent_name.clone(), (*key).to_string()));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
     /// Validate the configuration, returning a list of warnings.
     ///
     /// Checks for common misconfigurations such as missing API keys for

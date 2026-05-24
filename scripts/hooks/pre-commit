@@ -15,6 +15,22 @@
 
 set -eu
 
+# Portable sha256 shim. `shasum -a 256` ships on macOS by default
+# (perl-provided) but is absent on many Linux dev boxes (Debian /
+# Ubuntu / Alpine slim images) that only carry GNU coreutils'
+# `sha256sum`. Prefer `sha256sum` when available, fall back to
+# `shasum -a 256`, and let callers detect "neither installed" via
+# the helper's exit code. (#5664 sub-finding 2.)
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$@"
+    else
+        return 127
+    fi
+}
+
 # 1. Format check, staged Rust files only.
 #
 # `cargo fmt --check -- <paths>` silently ignores the path arguments and
@@ -22,12 +38,18 @@ set -eu
 # fmt drift in files the committer never touched. Invoke `rustfmt`
 # directly so the path scope actually sticks. Edition is hardcoded to
 # match `workspace.package.edition` in the root Cargo.toml.
-STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
-if [ -n "$STAGED_RS" ]; then
-    # shellcheck disable=SC2086 # intentional word splitting on file list
-    if ! rustfmt --check --edition 2021 $STAGED_RS >/dev/null 2>&1; then
+#
+# NUL-delimited pipeline so paths containing spaces, quotes, or shell
+# metacharacters (`with space.rs`, `weird $name.rs`) are passed as
+# single argv entries to rustfmt instead of being word-split by the
+# shell. (#5664 sub-finding 1.)
+if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
+    | grep -zq .; then
+    if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
+        | xargs -0 -r rustfmt --check --edition 2021 >/dev/null 2>&1; then
         echo "Error: staged Rust files are not rustfmt-clean."
-        echo "Run: rustfmt --edition 2021 $STAGED_RS"
+        echo "Run: git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \\"
+        echo "       | xargs -0 rustfmt --edition 2021"
         echo "Then re-stage and commit again."
         exit 1
     fi
@@ -94,14 +116,14 @@ fi
 # is too slow for a sub-2s pre-commit, so this hook does the same
 # single-line update via plain shasum.
 #
-# `shasum -a 256` is used (vs. sha256sum) because it ships by default
-# on both macOS and Linux (perl-provided), so contributors don't need
-# to install GNU coreutils.
+# Uses the `sha256` shim defined at the top of this file so Linux
+# dev boxes that only ship GNU coreutils' `sha256sum` (and not
+# `shasum`) are handled the same as macOS. (#5664 sub-finding 2.)
 if git diff --cached --name-only | grep -qx "openapi.json"; then
     BASELINE_FILE="xtask/baselines/openapi.sha256"
     if [ -f openapi.json ] && [ -f "$BASELINE_FILE" ]; then
-        if command -v shasum >/dev/null 2>&1; then
-            EXPECTED=$(shasum -a 256 openapi.json | awk '{print $1}')
+        if EXPECTED_LINE=$(sha256 openapi.json 2>/dev/null); then
+            EXPECTED=$(printf '%s' "$EXPECTED_LINE" | awk '{print $1}')
             RECORDED=$(awk '{print $1}' "$BASELINE_FILE")
             if [ "$EXPECTED" != "$RECORDED" ]; then
                 printf '%s  openapi.json\n' "$EXPECTED" > "$BASELINE_FILE"
@@ -109,7 +131,7 @@ if git diff --cached --name-only | grep -qx "openapi.json"; then
                 echo "info: auto-staged refreshed openapi.sha256 baseline (#4690)" >&2
             fi
         else
-            echo "warning: shasum not available; skipping openapi baseline sync." >&2
+            echo "warning: neither sha256sum nor shasum available; skipping openapi baseline sync." >&2
             echo "  CI openapi-drift gate may reject this commit." >&2
         fi
     fi

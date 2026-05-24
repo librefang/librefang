@@ -1420,6 +1420,13 @@ impl LibreFangKernel {
             pools
         };
 
+        // Capture the audit append-path soft-cap (#5665) before
+        // `config` is moved into the ArcSwap below — the value is then
+        // pushed into the freshly-constructed `AuditLog` via
+        // `set_max_in_memory_entries`. `None` / `0` leaves the default
+        // `MAX_AUDIT_ENTRIES` fallback in place.
+        let audit_soft_cap = config.audit.retention.max_in_memory_entries.unwrap_or(0);
+
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -1501,7 +1508,17 @@ impl LibreFangKernel {
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             metering: crate::kernel::subsystems::MeteringSubsystem::new(
-                Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
+                {
+                    let audit_log = AuditLog::with_db_anchored(memory.pool(), audit_anchor_path);
+                    // Project the operator-configured cap onto the
+                    // append-path soft ceiling (#5665) so the in-memory
+                    // window stays bounded between scheduled `trim()`
+                    // cycles, not just at trim-tick boundaries. `0`
+                    // (the `None` case) leaves the default
+                    // `MAX_AUDIT_ENTRIES` fallback in effect.
+                    audit_log.set_max_in_memory_entries(audit_soft_cap);
+                    Arc::new(audit_log)
+                },
                 metering,
                 initial_budget,
             ),

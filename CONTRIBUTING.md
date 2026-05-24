@@ -435,7 +435,7 @@ LibreFang is organized as a Cargo workspace with 14 crates:
 | `librefang-channels` | 40 channel adapters (Telegram, Discord, Slack, WhatsApp, and 36 more), formatter, rate limiter |
 | `librefang-wire` | OFP (LibreFang Protocol): TCP P2P networking with HMAC-SHA256 mutual authentication |
 | `librefang-cli` | Clap CLI with daemon auto-detect (HTTP mode vs. in-process fallback), MCP server |
-| `librefang-migrate` | Migration engine for importing from OpenClaw (and future frameworks) |
+| `librefang-import` | Import engine for migrating from OpenClaw (and future frameworks) |
 | `librefang-skills` | Skill system: 60 bundled skills, FangHub marketplace, OpenClaw compatibility, prompt injection scanning |
 | `librefang-desktop` | Tauri 2.0 native desktop app (WebView + system tray + single-instance + notifications) |
 | `xtask` | Build automation tasks |

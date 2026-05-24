@@ -1431,4 +1431,88 @@ admin_role = "admin"
         .expect("well-formed repeated tables must still parse with deny_unknown_fields");
         assert_eq!(cfg.mcp_servers.len(), 1);
     }
+
+    // ---------------------------------------------------------------
+    // #5476 — `[agents.<name>.<override_key>]` blocks in config.toml
+    // are silently ignored because `KernelConfig` has no `agents`
+    // field. The detector lists each (agent, key) pair so the kernel
+    // can emit a targeted warning pointing at agent.toml.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn detect_misplaced_per_agent_overrides_flags_proactive_memory_5476() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [proactive_memory]
+            enabled = true
+
+            [agents.my-agent.proactive_memory]
+            auto_memorize = true
+            "#,
+        )
+        .expect("toml parse");
+        let found = KernelConfig::detect_misplaced_per_agent_overrides(&raw);
+        assert_eq!(
+            found,
+            vec![("my-agent".to_string(), "proactive_memory".to_string())]
+        );
+    }
+
+    #[test]
+    fn detect_misplaced_per_agent_overrides_handles_multiple_agents_5476() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [agents.beta.skill_workshop]
+            enabled = true
+
+            [agents.alpha.proactive_memory]
+            auto_memorize = true
+
+            [agents.alpha.compaction]
+            keep_recent = 20
+            "#,
+        )
+        .expect("toml parse");
+        let found = KernelConfig::detect_misplaced_per_agent_overrides(&raw);
+        // Sorted: (alpha, compaction), (alpha, proactive_memory), (beta, skill_workshop)
+        assert_eq!(
+            found,
+            vec![
+                ("alpha".to_string(), "compaction".to_string()),
+                ("alpha".to_string(), "proactive_memory".to_string()),
+                ("beta".to_string(), "skill_workshop".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_misplaced_per_agent_overrides_empty_without_agents_section_5476() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            log_level = "debug"
+
+            [proactive_memory]
+            enabled = true
+            "#,
+        )
+        .expect("toml parse");
+        assert!(KernelConfig::detect_misplaced_per_agent_overrides(&raw).is_empty());
+    }
+
+    #[test]
+    fn detect_misplaced_per_agent_overrides_ignores_unrelated_agent_keys_5476() {
+        // Generic typos under `[agents.<name>]` should NOT be flagged
+        // by this detector — they're caught (less specifically) by
+        // the unknown-top-level pass. This detector exists only to
+        // give actionable guidance for the override keys operators
+        // actually try to set per-agent.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [agents.my-agent.some_random_typo]
+            value = 1
+            "#,
+        )
+        .expect("toml parse");
+        assert!(KernelConfig::detect_misplaced_per_agent_overrides(&raw).is_empty());
+    }
 }

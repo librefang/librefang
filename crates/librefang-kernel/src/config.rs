@@ -138,6 +138,26 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                         }
                     }
 
+                    // #5476: targeted warning for `[agents.<name>.<key>]`
+                    // blocks placed in `config.toml`. These look plausible
+                    // (the original #4870 issue body even published the
+                    // syntax) but `KernelConfig` has no `agents` field, so
+                    // the override silently no-ops. Point operators at
+                    // `agent.toml`'s top-level `[<key>]`, which is the
+                    // actual surface AgentManifest deserialises.
+                    for (agent, key) in
+                        KernelConfig::detect_misplaced_per_agent_overrides(&root_value)
+                    {
+                        tracing::warn!(
+                            agent = %agent,
+                            key = %key,
+                            "[agents.{agent}.{key}] in config.toml is ignored; \
+                             per-agent overrides live in {{workspace}}/agent.toml's \
+                             top-level [{key}] block (or the [agents.{agent}] \
+                             section of a HAND.toml), not in config.toml — see #5476"
+                        );
+                    }
+
                     match root_value.try_into::<KernelConfig>() {
                         Ok(config) => {
                             // Write migrated config back to disk so future loads skip migration
@@ -290,6 +310,21 @@ pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
         for field in &all_unknown {
             tracing::warn!(field, "Unknown config field (ignored on reload)");
         }
+    }
+
+    // #5476: same misplaced per-agent override warning as `load_config`,
+    // applied on hot-reload so an operator who tries to "fix" the
+    // override by editing config.toml + `POST /api/config/reload` still
+    // sees the actionable hint instead of silent no-op.
+    for (agent, key) in KernelConfig::detect_misplaced_per_agent_overrides(&root_value) {
+        tracing::warn!(
+            agent = %agent,
+            key = %key,
+            "[agents.{agent}.{key}] in config.toml is ignored on reload; \
+             per-agent overrides live in {{workspace}}/agent.toml's \
+             top-level [{key}] block (or the [agents.{agent}] section of \
+             a HAND.toml), not in config.toml — see #5476"
+        );
     }
 
     root_value
@@ -1183,5 +1218,86 @@ mod tests {
             .expect("unknown-field forward-compat path must still load successfully");
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.api_key, "secret");
+    }
+
+    /// Regression for #5476: a `[agents.<name>.proactive_memory]` block
+    /// in `config.toml` is silently ignored by the kernel (the actual
+    /// surface is `{workspace}/agent.toml`'s top-level
+    /// `[proactive_memory]`). Operators following the original #4870
+    /// issue body's published syntax used to get a silent no-op with
+    /// no log entry pointing at the correct location. Load must now
+    /// (a) still succeed and (b) emit a targeted WARN naming the
+    /// agent and the correct path.
+    #[test]
+    fn test_load_config_misplaced_per_agent_proactive_memory_warns() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "[proactive_memory]").unwrap();
+        writeln!(f, "enabled = true").unwrap();
+        writeln!(f, "auto_memorize = false").unwrap();
+        writeln!(f).unwrap();
+        // The misplaced override — published verbatim in the #4870
+        // issue description but silently no-ops in beta.12 (#5476).
+        writeln!(f, "[agents.lifeos-daily-brief.proactive_memory]").unwrap();
+        writeln!(f, "auto_memorize = true").unwrap();
+        drop(f);
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        // Must still load successfully — the misplaced block is a soft
+        // warning, not a hard error.
+        let config = load_config(Some(&root)).expect("misplaced block must not fail load");
+        assert_eq!(config.log_level, "debug");
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            captured.contains("lifeos-daily-brief"),
+            "warning must name the offending agent; captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("proactive_memory"),
+            "warning must name the offending override key; captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("agent.toml"),
+            "warning must point at the correct surface (agent.toml); captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("#5476"),
+            "warning must reference the tracking issue; captured: {captured:?}"
+        );
     }
 }

@@ -47,7 +47,11 @@ export function useSendCommsMessage() {
       message: string;
     }) => sendCommsMessage(payload),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: commsKeys.all });
+      // Sending a message changes the events feed and may shift the
+      // topology graph (new edge appears when two agents first
+      // converse). Both live under `commsKeys.lists()`; per-event
+      // detail caches are unaffected.
+      qc.invalidateQueries({ queryKey: commsKeys.lists() });
     },
   });
 }
@@ -61,7 +65,9 @@ export function usePostCommsTask() {
       assigned_to?: string;
     }) => postCommsTask(payload),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: commsKeys.all });
+      // Posting a task emits a comms event; same invalidation scope as
+      // useSendCommsMessage.
+      qc.invalidateQueries({ queryKey: commsKeys.lists() });
     },
   });
 }

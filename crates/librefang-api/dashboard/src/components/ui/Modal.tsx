@@ -33,6 +33,21 @@ interface ModalProps {
    *    or cancel before the rest of the page is interactive again. Visually
    *    consistent with drawer pages, behaviourally consistent with modals. */
   variant?: "modal" | "drawer-right" | "panel-right";
+  /** Where to put initial keyboard focus when the dialog opens. Keyboard
+   *  users lose context if the focus target is left to "whatever
+   *  `useFocusTrap` finds first", so panel-right / drawer surfaces with
+   *  long forms should pick deliberately.
+   *
+   *  - `"first"` (default for `modal`): focus the first focusable
+   *    descendant — typically a primary form input or action button.
+   *  - `"close"` (default for `panel-right` and `drawer-right`): focus
+   *    the close button. Right-docked surfaces are review / inspection
+   *    views first; focusing a destructive primary input by accident
+   *    (e.g. a "Save" button on Enter) is worse than the extra Tab.
+   *    Also applies when there are no focusable descendants at all —
+   *    the close button is always the safe fallback. Has no effect
+   *    when `hideCloseButton` is set. */
+  autoFocus?: "first" | "close";
   children: ReactNode;
 }
 
@@ -76,21 +91,75 @@ export const Modal = memo(function Modal({
   zIndex = 50,
   overflowVisible = false,
   variant = "modal",
+  autoFocus,
   children,
 }: ModalProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
   const isDrawer = variant === "drawer-right";
   const isPanel = variant === "panel-right";
   const isRightDocked = isDrawer || isPanel;
   const hasBackdrop = !isDrawer; // modal + panel-right have a dim backdrop
+  // Resolve initial-focus policy: explicit prop wins; otherwise
+  // right-docked variants default to `"close"` (avoids inadvertent
+  // primary-action activation on Enter for inspector / review surfaces
+  // — keyboard users expect a deterministic landing spot, not "whatever
+  // happens to be first in DOM order"), centred modals default to
+  // `"first"` (matches the existing behaviour of focusing the first
+  // form input — which is what dialog users expect).
+  const resolvedAutoFocus: "first" | "close" =
+    autoFocus ?? (isRightDocked ? "close" : "first");
   // Modal traps Tab inside the dialog (no escape from the focus loop).
   // Drawer leaves Tab free so keyboard users can hop back into the
   // underlying list (which is still interactive — see container's
   // pointer-events-none) without first hitting Esc.
   useFocusTrap(isOpen, dialogRef, true, !isDrawer);
+
+  // Apply the resolved autoFocus policy. `useFocusTrap` defaults to the
+  // first focusable descendant of the *whole* dialog — which, with the
+  // header rendered before children, is the close button. That's almost
+  // never what callers want for `"first"`; we explicitly look inside
+  // the body container so `"first"` reaches a form input. `"close"`
+  // re-focuses the close button after the trap's initial pass.
+  //
+  // requestAnimationFrame defers until after `useFocusTrap`'s effect
+  // runs in the same render, so we always win the focus race regardless
+  // of effect ordering.
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    const id = requestAnimationFrame(() => {
+      if (resolvedAutoFocus === "close" && !hideCloseButton) {
+        closeButtonRef.current?.focus();
+        return;
+      }
+      // `"first"` (or `"close"` falling through because the close
+      // button is hidden) → first focusable inside the body. We
+      // intentionally exclude the header so the close X doesn't win.
+      const body = bodyRef.current;
+      if (!body) return;
+      const focusable = body.querySelector<HTMLElement>(
+        [
+          "a[href]",
+          "button:not([disabled])",
+          "input:not([disabled])",
+          "select:not([disabled])",
+          "textarea:not([disabled])",
+          "[tabindex]:not([tabindex='-1'])",
+        ].join(", "),
+      );
+      if (focusable) {
+        focusable.focus();
+      } else if (!hideCloseButton) {
+        // Empty body → close button is the only safe target.
+        closeButtonRef.current?.focus();
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [isOpen, resolvedAutoFocus, hideCloseButton]);
 
   useLayoutEffect(() => {
     onCloseRef.current = onClose;
@@ -189,6 +258,7 @@ export const Modal = memo(function Modal({
                 ) : <span aria-hidden="true" />}
                 {!hideCloseButton && (
                   <button
+                    ref={closeButtonRef}
                     onClick={onClose}
                     className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     aria-label={t("common.close", { defaultValue: "Close" })}
@@ -204,7 +274,12 @@ export const Modal = memo(function Modal({
                 but the centred modal benefits too: a long modal pinned over
                 a long page used to scroll the page after the modal bottomed
                 out, which feels like the modal "leaks" the gesture. */}
-            <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin">{children}</div>
+            <div
+              ref={bodyRef}
+              className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
+            >
+              {children}
+            </div>
           </motion.div>
         </motion.div>
       )}

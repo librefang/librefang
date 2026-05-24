@@ -122,7 +122,7 @@ librefang-extensions        25 MCP テンプレート、AES-256-GCM ボールト
 librefang-wire              OFP P2P プロトコル、HMAC-SHA256 相互認証
 librefang-cli               CLI、デーモン管理、TUI ダッシュボード、MCP サーバーモード
 librefang-desktop           Tauri 2.0 ネイティブアプリ（トレイ、通知、ショートカット）
-librefang-migrate           OpenClaw、LangChain、AutoGPT マイグレーションエンジン
+librefang-import            OpenClaw、LangChain、AutoGPT インポート/マイグレーションエンジン
 librefang-http              共有HTTPクライアントビルダー、プロキシ、TLSフォールバック
 librefang-testing           テストインフラ：モックカーネル、モックLLMドライバー、APIルートテストユーティリティ
 librefang-telemetry         向けのOpenTelemetry + Prometheusメトリクス計装

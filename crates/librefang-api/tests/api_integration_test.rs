@@ -656,7 +656,7 @@ async fn test_run_migrate_rejects_target_dir_outside_home() {
     // /tmp/foo-<unique>: nonexistent path under /tmp, which is outside
     // home_dir. The validator walks up to /tmp (existing) and rejects.
     let pid = std::process::id();
-    let outside_target = format!("/tmp/librefang-migrate-outside-{pid}");
+    let outside_target = format!("/tmp/librefang-import-outside-{pid}");
 
     let mut request = Request::builder()
         .method("POST")
