@@ -292,6 +292,23 @@ impl Default for ProactiveMemoryConfig {
 /// [proactive_memory]
 /// auto_memorize = false
 /// ```
+///
+/// **The override surface is `{workspace}/agent.toml`, NOT `config.toml`** (#5476).
+/// A `[agents.<name>.proactive_memory]` block in `~/.librefang/config.toml`
+/// is silently ignored — `KernelConfig` has no `agents` field, so the
+/// block parses but never feeds into any `AgentManifest`. Since #5476
+/// the kernel emits a targeted `WARN` at boot (and on
+/// `POST /api/config/reload`) when this misplacement is detected, but
+/// the load-bearing path is still the agent's own manifest:
+/// ```toml
+/// # ~/.librefang/config.toml — kernel-global default
+/// [proactive_memory]
+/// auto_memorize = false
+///
+/// # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
+/// [proactive_memory]
+/// auto_memorize = true
+/// ```
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProactiveMemoryOverrides {
