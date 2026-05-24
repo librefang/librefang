@@ -1,1 +1,0 @@
-{"version":3,"file":"SafeFragment.js","names":[],"sources":["../../src/SafeFragment.tsx"],"sourcesContent":["import * as React from 'react'\n\nexport function SafeFragment(props: any) {\n  return <>{props.children}</>\n}\n"],"mappings":";;;AAEA,SAAgB,aAAa,OAAY;AACvC,QAAO,oBAAA,UAAA,EAAA,UAAG,MAAM,UAAY,CAAA"}

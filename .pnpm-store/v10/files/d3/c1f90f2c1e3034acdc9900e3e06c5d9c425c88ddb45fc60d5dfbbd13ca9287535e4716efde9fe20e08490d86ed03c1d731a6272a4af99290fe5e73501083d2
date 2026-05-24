@@ -1,1 +1,0 @@
-{"version":3,"file":"routerContext.cjs","names":[],"sources":["../../src/routerContext.tsx"],"sourcesContent":["import * as React from 'react'\nimport type { AnyRouter } from '@tanstack/router-core'\n\nexport const routerContext = React.createContext<AnyRouter>(null!)\n"],"mappings":";;;;AAGA,IAAa,gBAAgB,MAAM,cAAyB,KAAM"}

@@ -851,6 +851,7 @@ impl SemanticBackend for MemorySubstrate {
             scope,
             metadata,
             embedding.as_deref(),
+            None,
         )
         .await
     }

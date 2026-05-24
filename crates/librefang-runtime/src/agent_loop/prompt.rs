@@ -69,6 +69,7 @@ pub(super) async fn remember_interaction_best_effort(
     agent_id: librefang_types::agent::AgentId,
     interaction_text: &str,
     streaming: bool,
+    peer_id: Option<&str>,
 ) {
     if let Some(emb) = embedding_driver {
         match emb.embed_one(interaction_text).await {
@@ -81,6 +82,7 @@ pub(super) async fn remember_interaction_best_effort(
                         "episodic",
                         HashMap::new(),
                         Some(&vec),
+                        peer_id,
                     )
                     .await
                 {
@@ -104,6 +106,7 @@ pub(super) async fn remember_interaction_best_effort(
                         MemorySource::Conversation,
                         "episodic",
                         HashMap::new(),
+                        peer_id,
                     )
                     .await
                 {
@@ -122,6 +125,7 @@ pub(super) async fn remember_interaction_best_effort(
             MemorySource::Conversation,
             "episodic",
             HashMap::new(),
+            peer_id,
         )
         .await
     {
@@ -771,7 +775,7 @@ mod tests {
     use crate::context_engine::{ContextEngineConfig, DefaultContextEngine};
     use librefang_memory::MemorySubstrate;
     use librefang_types::agent::{AgentId, SessionId};
-    use librefang_types::memory::{MemorySource, CHAT_SCOPE_METADATA_KEY};
+    use librefang_types::memory::{MemoryFilter, MemorySource, CHAT_SCOPE_METADATA_KEY};
 
     fn empty_session(agent_id: AgentId) -> Session {
         Session {
@@ -833,6 +837,7 @@ mod tests {
                     MemorySource::Conversation,
                     librefang_types::memory::MemoryLevel::Session.scope_str(),
                     meta,
+                    None,
                     None,
                 )
                 .unwrap();
@@ -906,5 +911,91 @@ mod tests {
                 f.content
             );
         }
+    }
+
+    /// #5474: `remember_interaction_best_effort` must propagate `peer_id` so
+    /// that stored episodic memories carry the sender's user identity and are
+    /// reachable by per-user recall (which filters on `(agent_id, peer_id)`).
+    #[tokio::test]
+    async fn remember_interaction_best_effort_persists_peer_id() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+
+        // Write with a known peer_id, no embedding driver (hits the
+        // plain-memory fallback path).
+        remember_interaction_best_effort(
+            substrate.as_ref(),
+            None, // no embedding driver
+            agent_id,
+            "[Past exchange]\nThem: hello\nYou: hi",
+            false, // non-streaming
+            Some("user-42"),
+        )
+        .await;
+
+        // Recall with matching peer_id should find the row.
+        let results = substrate
+            .recall(
+                "hello",
+                10,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    peer_id: Some("user-42".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "peer-scoped recall must find the row");
+        assert!(results[0].content.contains("[Past exchange]"));
+
+        // Recall with a different peer_id should return nothing.
+        let other = substrate
+            .recall(
+                "hello",
+                10,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    peer_id: Some("other-user".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            other.len(),
+            0,
+            "peer-scoped recall must NOT leak across users"
+        );
+
+        // Write with None peer_id, then recall without peer filter should
+        // find it, but recall with a specific peer_id should not.
+        remember_interaction_best_effort(
+            substrate.as_ref(),
+            None,
+            agent_id,
+            "[Past exchange]\nThem: world\nYou: done",
+            false,
+            None,
+        )
+        .await;
+
+        let global = substrate
+            .recall(
+                "world",
+                10,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    peer_id: None,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            global.len(),
+            1,
+            "NULL-peer row must be findable without peer filter"
+        );
     }
 }

@@ -16,6 +16,7 @@
       ]
     }
   },
+  "//audit-ignores-doc": "Every GHSA listed under pnpm.auditConfig.ignoreGhsas MUST have a matching section in ./AUDIT_IGNORES.md explaining the trade-off and unlock condition (refs #5667).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

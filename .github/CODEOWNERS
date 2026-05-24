@@ -31,10 +31,10 @@ SECURITY.md @librefang/core
 crates/librefang-desktop/ @librefang/core
 crates/librefang-cli/ @librefang/core
 
-# ── Integrations (channels, skills, migrate, SDKs) ───────────────────
+# ── Integrations (channels, skills, import, SDKs) ────────────────────
 crates/librefang-channels/ @librefang/integrations
 crates/librefang-skills/ @librefang/integrations
-crates/librefang-migrate/ @librefang/integrations
+crates/librefang-import/ @librefang/integrations
 crates/librefang-hands/ @librefang/integrations
 sdk/javascript/ @librefang/integrations
 sdk/python/ @librefang/integrations

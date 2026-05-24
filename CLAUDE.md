@@ -52,9 +52,11 @@ giving defense in depth on top of the Claude Code PreToolUse layer.
   duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
   staged additions to `[Unreleased]` (#3400); `detect-secrets` scan against
   `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
-- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
-  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
-  generated SDKs are stale. Expected 30-90s on a warm cache.
+- `pre-push` — refuses direct pushes to `main` / `master` and exits in
+  &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
+  lives in CI rather than gating every push — see #4532 for the
+  rationale. Skip the branch guard for a maintainer hotfix with
+  `LIBREFANG_PREPUSH_SKIP=1`.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).
@@ -77,6 +79,125 @@ git config merge.ours.driver true
 and `.kbd-orchestrator/**/*.md` files. Without the driver registered, git
 falls back to manual conflict resolution on those files.
 
+## Process Discipline
+
+How you change code in this repo. Six principles synthesised from Andrej
+Karpathy's four behavioural rules and Boris Cherny's three principles +
+self-improvement loop, adapted to the tools actually available in this
+session (Plan/Explore agents, TaskCreate, auto-memory, Prometheus skill
+pack). These apply on top of the worktree / hook safety net above and
+the BossFang preservation rules below.
+
+### 1. Think Before Coding
+
+State assumptions explicitly. Don't hide confusion. Surface tradeoffs.
+
+- Before any non-trivial implementation, use the **Plan agent**
+  (`Agent(subagent_type="Plan")`) to design the approach, or write a
+  brief numbered plan with verify-steps inline before touching code.
+- For codebase research that will run >3 queries, use the **Explore
+  agent** (`Agent(subagent_type="Explore")`) instead of repeated greps —
+  it protects the main context window.
+- If multiple interpretations of the ask exist, present them. Don't pick
+  silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- Consult the relevant Prometheus skill BEFORE writing code. The
+  `coding-guidelines`, `rust-best-practices`, `error-handling`,
+  `async-patterns`, `m05-type-driven`, `m09-domain`, `m10-performance`,
+  `m12-lifecycle`, `m13-domain-error`, `m15-anti-pattern`, and
+  `axum-patterns` skills are installed and cover the recurring decision
+  points in this workspace.
+
+### 2. Simplicity First
+
+Minimum code that solves the problem. Nothing speculative.
+
+- No features beyond what was asked.
+- No abstractions for single-use code; three similar lines is better
+  than a premature trait.
+- No "flexibility" / "configurability" that wasn't requested.
+- No error handling for impossible scenarios — trust internal
+  invariants and only validate at boundaries (user input, external
+  APIs).
+- If you write 200 lines and it could be 50, rewrite it.
+- If you can delete lines instead of adding them, do that.
+- Ask: "Would a senior Rust engineer say this is overcomplicated?" If
+  yes, simplify.
+
+### 3. Surgical Changes (Minimal Impact)
+
+Touch only what you must. Clean up only your own mess.
+
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- Remove imports / variables / functions that YOUR changes orphaned.
+  Don't remove pre-existing dead code unless asked.
+- Every changed line should trace directly to the user's request.
+- If you spot unrelated dead code or a bug, mention it — don't fix
+  inline unless the user OKs. Use `mcp__ccd_session__spawn_task` for
+  high-confidence out-of-scope items, or surface them in the PR body
+  under "Out-of-scope follow-ups".
+
+### 4. Root-Cause Discipline (No Laziness)
+
+Find the underlying issue. No temporary fixes. No band-aids.
+
+- A failing test is information. Don't `#[ignore]` it. Don't widen a
+  tolerance. Don't `unwrap_or_default()` past the error. Fix what the
+  test caught.
+- If a clippy warning is hard to satisfy, the rule is "fix the code",
+  not "suppress the lint".
+- Never bypass git hooks (`--no-verify`, `--no-gpg-sign`) — the hook
+  catches what you missed; investigating is cheaper than the
+  cascading-failure debug session it prevents.
+- Hold yourself to senior-engineer standards: a fix is "done" when the
+  invariant it was meant to enforce can't be broken from the call
+  sites you can see.
+
+### 5. Goal-Driven Verification
+
+Define success criteria. Loop until verified.
+
+- Transform vague asks into verifiable goals:
+  - "Add validation" → "Write tests for invalid inputs, then make them
+    pass"
+  - "Fix the bug" → "Add an integration test in
+    `crates/librefang-api/tests/` that reproduces it, then make it pass"
+  - "Refactor X" → "Run scoped `cargo test -p <crate>` before and
+    after; both green"
+- For multi-step work, use **TaskCreate** to capture the plan and
+  **TaskUpdate** to flip states as you go. Mark a task `completed` the
+  moment it's done — never batch.
+- Strong success criteria let you loop independently. Weak criteria
+  ("make it work") force the user to clarify after mistakes have
+  landed.
+- Verify before claiming done: `cargo check --workspace --lib` AND
+  scoped `cargo test -p <crate>` AND
+  `python3 scripts/enforce-branding.py --check` AND any audit script
+  the change implicates. Code that compiles isn't code that works.
+
+### 6. Self-Improvement via Memory (replaces `lessons.md`)
+
+Boris Cherny's "anytime you do something wrong, add it to CLAUDE.md so
+you don't repeat it" rule maps to our **auto-memory system** at
+`/Users/gqadonis/.claude/projects/.../memory/` (see the "auto memory"
+section in the system prompt). When the user corrects you OR confirms
+a non-obvious approach worked, write a **feedback memory** with `Why:`
+and `How to apply:` fields. Feedback memories are auto-loaded into
+every future conversation in this repo, so the same mistake never
+costs the user a second correction.
+
+Do NOT create a `lessons.md` file — it would duplicate the memory
+system and stay un-loaded.
+
+### When to skip these rules
+
+For trivial tasks (typo fix, single-line obvious change), use
+judgement. These rules bias toward caution over speed. The bias is
+correct for any change that touches more than one file, modifies
+behaviour, or interacts with the BossFang preservation surface below.
+
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (31 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
@@ -86,7 +207,7 @@ LibreFang is an open-source Agent Operating System written in Rust (31 crates in
   matching `target/debug/` path)
 
 ### Crate map
-- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
+- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-import`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
 - **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`, `librefang-runtime-audit`, `librefang-runtime-media`, `librefang-runtime-sandbox-docker`
 - **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, uar, …)
@@ -234,6 +355,28 @@ The daemon command is `start` (not `daemon`).
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.
+- **Per-agent `proactive_memory` / `skill_workshop` / `compaction`
+  overrides live in `agent.toml`, NOT `config.toml`** (#5476).
+  `KernelConfig` has no `agents` field, so a block like:
+  ```toml
+  # ~/.librefang/config.toml — silently ignored, NOT honoured
+  [agents.my-agent.proactive_memory]
+  auto_memorize = true
+  ```
+  parses but never feeds into any `AgentManifest`. The kernel emits a
+  targeted `WARN` at boot and on `POST /api/config/reload` pointing
+  operators at the correct surface (see
+  `KernelConfig::detect_misplaced_per_agent_overrides`); the
+  load-bearing path is the agent's own manifest:
+  ```toml
+  # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
+  [proactive_memory]
+  auto_memorize = true
+  ```
+  Same shape for `[skill_workshop]` and `[compaction]`. Inside a
+  `HAND.toml` the override sits under `[agents.<name>.<key>]`, which
+  *is* read because `HandManifest` does have an `agents` table —
+  `config.toml` does not.
 - **Trigger dispatch concurrency** has three layered caps, scoped to
   the **trigger dispatcher only** (`agent_send`, channel bridges, and
   cron still serialize at the existing per-agent / per-session locks
@@ -408,6 +551,15 @@ SurrealDB-native memory substrate with semantic search, knowledge graphs, and ta
    → r2d2 `Pool`), update BossFang's surreal backend implementations to match
 2. Never remove the `surreal-backend` feature from `librefang-memory/Cargo.toml`
 3. The `embedded` feature on surreal-memory must remain — no external SurrealDB service needed
+4. Run `cargo update -p surreal-memory` to pull any new commits from `branch = "main"`
+   into `Cargo.lock`. surreal-memory's internal connection architecture changes
+   under us (most recently: 2026-05-24 ArcSwap rewrite + typed `RetryAction` +
+   `SURREAL_QUERY_TIMEOUT_MS` env var + embedded in-flight semaphore) but the
+   `MemoryStorage` trait surface is held stable — so picking up the latest is
+   typically zero-risk on our side. Two operational env vars surface from those
+   internals if you need them: `SURREAL_QUERY_TIMEOUT_MS` (per-query deadline,
+   default 10000 ms) and `SURREAL_EMBEDDED_MAX_INFLIGHT` (concurrent embedded
+   ops, default 16 = RocksDB default stripe count).
 
 ### 3. Universal Agent Runtime (UAR) as a Runtime Provider
 

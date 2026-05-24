@@ -15,9 +15,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Hard cap on the number of audit entries kept in memory.
+/// Default hard cap on the number of audit entries kept in memory when no
+/// operator-supplied `max_in_memory_entries` is configured.
 ///
 /// When `record_with_context` appends an entry that would push the in-memory
 /// buffer above this ceiling, the oldest entries are drained from the front so
@@ -26,7 +28,24 @@ use std::sync::Mutex;
 /// policy. The cap applies only to the in-memory window; entries have already
 /// been persisted to SQLite before the drain, so forensic completeness is
 /// preserved on disk.
+///
+/// When an operator sets `audit.retention.max_in_memory_entries`, that value
+/// (multiplied by `MAX_IN_MEMORY_SOFT_CAP_NUMERATOR / DENOMINATOR`, i.e.
+/// `× 1.5`) takes precedence — see [`AuditLog::set_max_in_memory_entries`]
+/// and `record_with_context`. This default exists only as a fallback for
+/// deployments that have not opted in to a configured cap.
 const MAX_AUDIT_ENTRIES: usize = 10_000;
+
+/// Numerator of the soft-cap multiplier applied to the configured
+/// `max_in_memory_entries`. The full ratio is
+/// `MAX_IN_MEMORY_SOFT_CAP_NUMERATOR / MAX_IN_MEMORY_SOFT_CAP_DENOMINATOR`,
+/// i.e. 1.5× by default. The soft cap is enforced inside
+/// `record_with_context` so memory stays bounded between scheduled trim
+/// cycles (#5665) — without it, an operator that sets
+/// `max_in_memory_entries = 5000` would still grow to the 10_000 hard
+/// default until the next `trim()` tick fired.
+const MAX_IN_MEMORY_SOFT_CAP_NUMERATOR: usize = 3;
+const MAX_IN_MEMORY_SOFT_CAP_DENOMINATOR: usize = 2;
 
 /// Categories of auditable actions within the agent runtime.
 ///
@@ -207,6 +226,19 @@ pub struct AuditLog {
     /// genesis sentinel, that `prev_hash` IS the anchor (it points at
     /// the dropped predecessor). No new schema column required.
     chain_anchor: Mutex<Option<String>>,
+    /// Soft ceiling on the in-memory entry count enforced inside
+    /// `record_with_context`, expressed as the operator's configured
+    /// `audit.retention.max_in_memory_entries` (#5665). `0` means
+    /// "not configured" and falls back to the hard `MAX_AUDIT_ENTRIES`
+    /// default. When non-zero, `record_with_context` drops the oldest
+    /// non-anchor prefix once `entries.len()` exceeds
+    /// `configured × MAX_IN_MEMORY_SOFT_CAP_NUMERATOR /
+    /// MAX_IN_MEMORY_SOFT_CAP_DENOMINATOR` so the in-memory window
+    /// stays bounded between scheduled `trim()` cycles. Atomic so
+    /// `set_max_in_memory_entries` can update it without taking the
+    /// `entries` mutex — important because the setter is called from
+    /// boot before any append-path contention exists.
+    max_in_memory_entries: AtomicUsize,
 }
 
 /// Per-trim summary returned by [`AuditLog::trim`].
@@ -253,6 +285,7 @@ impl AuditLog {
             db: None,
             anchor_path: None,
             chain_anchor: Mutex::new(None),
+            max_in_memory_entries: AtomicUsize::new(0),
         }
     }
 
@@ -378,6 +411,41 @@ impl AuditLog {
         log
     }
 
+    /// Update the soft cap on the in-memory window enforced inside
+    /// `record_with_context` (#5665).
+    ///
+    /// `entries` is the operator-supplied
+    /// `audit.retention.max_in_memory_entries` from `config.toml`. `0`
+    /// disables the configured cap and falls back to the hard
+    /// `MAX_AUDIT_ENTRIES` default. The effective ceiling enforced on
+    /// every append is `entries × MAX_IN_MEMORY_SOFT_CAP_NUMERATOR /
+    /// MAX_IN_MEMORY_SOFT_CAP_DENOMINATOR` (i.e. 1.5× by default), so
+    /// the buffer can grow that far between scheduled `trim()` cycles
+    /// before the append path itself drops the oldest non-anchor
+    /// prefix.
+    ///
+    /// Audit retention config does NOT hot-reload (see
+    /// `config_reload.rs: build_reload_plan`), so this is typically
+    /// called once at boot from `with_db_anchored`'s caller. It is
+    /// nonetheless atomic so a future hot-reload path or test
+    /// scaffolding can flip the cap mid-run safely.
+    pub fn set_max_in_memory_entries(&self, entries: usize) {
+        self.max_in_memory_entries.store(entries, Ordering::Relaxed);
+    }
+
+    /// Soft cap enforced inside `record_with_context`. Returns the
+    /// operator-configured value multiplied by the 1.5× safety
+    /// headroom, or [`MAX_AUDIT_ENTRIES`] when no cap is configured.
+    fn effective_soft_cap(&self) -> usize {
+        let configured = self.max_in_memory_entries.load(Ordering::Relaxed);
+        if configured == 0 {
+            MAX_AUDIT_ENTRIES
+        } else {
+            configured.saturating_mul(MAX_IN_MEMORY_SOFT_CAP_NUMERATOR)
+                / MAX_IN_MEMORY_SOFT_CAP_DENOMINATOR
+        }
+    }
+
     /// Creates an audit log backed by a database connection.
     ///
     /// On construction, loads all existing entries from the `audit_entries`
@@ -468,6 +536,7 @@ impl AuditLog {
             db: Some(pool),
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
+            max_in_memory_entries: AtomicUsize::new(0),
         };
 
         // Verify chain integrity on load. Logged at WARN: the message itself
@@ -680,16 +749,24 @@ impl AuditLog {
         entries.push(entry);
         *tip = hash.clone();
 
-        // Hard cap: if the in-memory buffer grew beyond MAX_AUDIT_ENTRIES,
-        // drain the oldest prefix.  Every entry in `entries` is now
-        // known to be persisted on disk (the only path that pushes is
-        // the success branch above), so dropping the prefix loses no
-        // forensic data — a restart would reload the same rows from
-        // SQLite anyway.  We update `chain_anchor` to the hash of the
-        // last dropped entry so `verify_integrity()` keeps working
-        // across the trim boundary.
-        if entries.len() > MAX_AUDIT_ENTRIES {
-            let overflow = entries.len() - MAX_AUDIT_ENTRIES;
+        // Soft cap: if the in-memory buffer grew beyond the configured
+        // ceiling (1.5× `max_in_memory_entries` when set, otherwise the
+        // hard `MAX_AUDIT_ENTRIES` default), drain the oldest prefix.
+        // This pins memory between scheduled `trim()` cycles (#5665) —
+        // without it, an operator that sets `max_in_memory_entries =
+        // 5000` would still grow to 10_000 (the old hard default)
+        // until the next `trim_interval_secs` tick fired.
+        //
+        // Every entry in `entries` is now known to be persisted on
+        // disk (the only path that pushes is the success branch
+        // above), so dropping the prefix loses no forensic data — a
+        // restart would reload the same rows from SQLite anyway. We
+        // update `chain_anchor` to the hash of the last dropped entry
+        // so `verify_integrity()` keeps working across the trim
+        // boundary.
+        let soft_cap = self.effective_soft_cap();
+        if entries.len() > soft_cap {
+            let overflow = entries.len() - soft_cap;
             let new_anchor = entries[overflow - 1].hash.clone();
             {
                 let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());

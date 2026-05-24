@@ -1,1 +1,0 @@
-{"version":3,"file":"client.js","names":[],"sources":["../../../src/isServer/client.ts"],"sourcesContent":["export const isServer = false\n"],"mappings":";AAAA,IAAa,WAAW"}

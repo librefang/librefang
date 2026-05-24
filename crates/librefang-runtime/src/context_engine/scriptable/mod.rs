@@ -1179,6 +1179,7 @@ impl ScriptableContextEngine {
                         // We want the Memory::remember (stores agent memory items) not
                         // SemanticBackend::remember (semantic-search embedding store).
                         // Use UFCS with `&*substrate` to deref Arc → &MemorySubstrate.
+                        // Last arg `None` is the per-agent memory isolation scope from #5071.
                         if let Err(e) = <librefang_memory::MemorySubstrate as librefang_types::memory::Memory>::remember(
                             &*substrate,
                             parsed_id,
@@ -1186,6 +1187,7 @@ impl ScriptableContextEngine {
                             librefang_types::memory::MemorySource::System,
                             &scope,
                             std::collections::HashMap::new(),
+                            None,
                         )
                         .await
                         {

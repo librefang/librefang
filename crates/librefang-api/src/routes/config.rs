@@ -1698,8 +1698,8 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
 )]
 pub async fn migrate_detect() -> impl IntoResponse {
     // Check OpenClaw first
-    if let Some(path) = librefang_migrate::openclaw::detect_openclaw_home() {
-        let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
+    if let Some(path) = librefang_import::openclaw::detect_openclaw_home() {
+        let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1814,7 +1814,7 @@ pub async fn migrate_scan(
         Err(e) => return ApiErrorResponse::bad_request(e.message).into_json_tuple(),
     };
 
-    let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
+    let scan = librefang_import::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
 }
 
@@ -1832,10 +1832,10 @@ pub async fn run_migrate(
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
     let source = match req.source.as_str() {
-        "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
-        "langchain" => librefang_migrate::MigrateSource::LangChain,
-        "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
-        "openfang" => librefang_migrate::MigrateSource::OpenFang,
+        "openclaw" => librefang_import::MigrateSource::OpenClaw,
+        "langchain" => librefang_import::MigrateSource::LangChain,
+        "autogpt" => librefang_import::MigrateSource::AutoGpt,
+        "openfang" => librefang_import::MigrateSource::OpenFang,
         other => {
             return ApiErrorResponse::bad_request(format!(
                 "Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'"
@@ -1887,14 +1887,14 @@ pub async fn run_migrate(
         }
     };
 
-    let options = librefang_migrate::MigrateOptions {
+    let options = librefang_import::MigrateOptions {
         source,
         source_dir,
         target_dir,
         dry_run: req.dry_run,
     };
 
-    match librefang_migrate::run_migration(&options) {
+    match librefang_import::run_migration(&options) {
         Ok(report) => {
             // Migrate writes agent manifests under `<target>/agents/<name>/`
             // (legacy schema). Relocate them into the canonical
