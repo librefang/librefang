@@ -1,0 +1,5 @@
+# Real, populated secrets must NEVER be committed.
+# Only the template at base/secrets.template.yaml is tracked.
+overlays/*/secrets.yaml
+overlays/*/sealed-secrets.yaml
+*.secret.yaml

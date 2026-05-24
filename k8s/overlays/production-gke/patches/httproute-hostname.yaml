@@ -1,0 +1,12 @@
+# Production hostname for the Envoy Gateway route.
+#
+# The base ships with `bossfang.prometheusags.ai` already — this patch
+# is a no-op identity patch that documents the intent and provides a
+# clear hook for staging/dev overlays to swap in a different hostname.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bossfang
+spec:
+  hostnames:
+    - "bossfang.prometheusags.ai"

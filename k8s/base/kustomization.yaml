@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base layer is namespace-pinned to `bossfang`. Overlays can override.
+namespace: bossfang
+
+# Shared labels everything in the base gets.
+# `includeSelectors: false` deliberately keeps these labels OUT of pod
+# selectors — Deployment/StatefulSet selectors are immutable post-create,
+# so any label that ends up in a selector becomes load-bearing forever.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: bossfang
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - storage-class.yaml
+  - service-account.yaml
+  - configmap.yaml
+  # secrets.template.yaml is NOT included here on purpose — the overlay
+  # adds a real `secrets.yaml` (gitignored) under its own resources list.
+  - surrealdb-statefulset.yaml
+  - surrealdb-service.yaml
+  - bossfang-deployment.yaml
+  - bossfang-service.yaml
+  - httproute.yaml
+  - network-policies.yaml

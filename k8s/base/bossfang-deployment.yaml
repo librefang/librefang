@@ -1,0 +1,171 @@
+# BossFang daemon Deployment.
+#
+# Single replica. The daemon takes an exclusive `daemon.lock` on its
+# data directory at boot (see crates/librefang-cli/src/main.rs); a
+# second replica would crash-loop on the lock contention. Multi-replica
+# HA is a separate effort (leader election or sharded sessions).
+#
+# Entrypoint is `librefang start --foreground` via the existing
+# Dockerfile + deploy/docker-entrypoint.sh. PORT env is honored by
+# the entrypoint shim and overrides `api_listen`; we leave PORT unset
+# and let the config.toml's api_listen drive things.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bossfang
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: app
+    app.kubernetes.io/part-of: bossfang
+spec:
+  replicas: 1
+  strategy:
+    # Recreate so the old pod releases daemon.lock before the new one
+    # tries to acquire it. RollingUpdate would deadlock on the lock.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bossfang
+      app.kubernetes.io/component: app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bossfang
+        app.kubernetes.io/component: app
+        app.kubernetes.io/part-of: bossfang
+    spec:
+      serviceAccountName: bossfang
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        # Wait for SurrealDB to be reachable before starting BossFang.
+        # Without this the daemon races against an empty Service
+        # endpoint at first boot and crash-loops twice before retries
+        # win.
+        - name: wait-for-surrealdb
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for surrealdb:8000..."
+              until nc -z surrealdb 8000; do
+                sleep 2
+              done
+              echo "SurrealDB reachable."
+      containers:
+        - name: bossfang
+          # Pinned in overlay. Build & push from this repo's root
+          # Dockerfile to your Artifact Registry path.
+          image: PLACEHOLDER_BOSSFANG_IMAGE
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 4545
+              protocol: TCP
+          env:
+            # Tell the daemon to put all of $HOME state here. The PVC
+            # mounts at /data, the projected ConfigMap puts config.toml
+            # at /data/config.toml.
+            - name: BOSSFANG_HOME
+              value: /data
+            # SurrealDB password the config.toml's password_env points at.
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: SURREAL_PASS
+            # Vault master key. Must base64-decode to 32 bytes.
+            - name: BOSSFANG_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: BOSSFANG_VAULT_KEY
+            # LLM provider keys — sourced from the same Secret. Missing
+            # keys are OK (the daemon just can't talk to those providers
+            # until they're set); kustomize won't error on a missing
+            # `optional: true` key reference.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: GROQ_API_KEY
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: GEMINI_API_KEY
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            # First boot runs SurrealDB migrations; allow time.
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /data/config.toml
+              subPath: config.toml
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: bossfang-data
+        - name: config
+          configMap:
+            name: bossfang-config
+            items:
+              - key: config.toml
+                path: config.toml
+---
+# Sibling PVC for BossFang's BOSSFANG_HOME. Kept in the Deployment file
+# rather than a separate `volumeClaimTemplates` because Deployment does
+# not support volumeClaimTemplates the way StatefulSet does.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bossfang-data
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: app
+    app.kubernetes.io/part-of: bossfang
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

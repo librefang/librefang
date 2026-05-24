@@ -1,0 +1,93 @@
+# SurrealDB 3.0.5 — single-instance StatefulSet backing BossFang.
+#
+# Image tag pinned to v3.0.5 to match the workspace `Cargo.toml` pin
+# (`surrealdb = "=3.0.5"`). Floating to :v3 risks server/client minor
+# drift. When you bump the workspace pin, bump this image too.
+#
+# RocksDB on a PVC. Single replica because RocksDB takes an exclusive
+# OS lock on its data directory.
+#
+# Root credentials are bootstrapped from the bossfang-secrets Secret.
+# The same Secret's SURREAL_USER / SURREAL_PASS are also injected into
+# the bossfang Deployment so it can authenticate.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: surrealdb
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: surrealdb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: bossfang
+spec:
+  serviceName: surrealdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: surrealdb
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: surrealdb
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: bossfang
+    spec:
+      containers:
+        - name: surrealdb
+          image: surrealdb/surrealdb:v3.0.5
+          args:
+            - start
+            - --log
+            - info
+            - "rocksdb:/data/surreal.db"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: SURREAL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: SURREAL_USER
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: bossfang-secrets
+                  key: SURREAL_PASS
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: surrealdb-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: surrealdb-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # Default StorageClass; overlay can swap to `bossfang-immediate`
+        # or any GKE-specific class.
+        resources:
+          requests:
+            storage: 20Gi

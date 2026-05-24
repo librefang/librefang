@@ -1,0 +1,109 @@
+# Minimal NetworkPolicies — default-deny ingress, then allow:
+#  1. envoy-gateway-system → bossfang Service (incoming HTTP traffic)
+#  2. bossfang pods → surrealdb Service (intra-namespace database access)
+#  3. DNS egress to kube-system (so the daemon can resolve external
+#     LLM provider APIs and the surrealdb Service name).
+#
+# These are conservative defaults. If your cluster has cluster-wide
+# NetworkPolicies (e.g. from a security baseline), they may already
+# cover some of this — review for redundancy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/part-of: bossfang
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bossfang-allow-gateway
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/part-of: bossfang
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bossfang
+      app.kubernetes.io/component: app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+      ports:
+        - protocol: TCP
+          port: 4545
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: surrealdb-allow-bossfang
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/part-of: bossfang
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: surrealdb
+      app.kubernetes.io/component: database
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bossfang
+              app.kubernetes.io/component: app
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# Allow egress from every pod in the namespace to:
+#   - kube-system DNS (so service name resolution works)
+#   - the rest of the world (LLM provider HTTPS APIs)
+# Without this, a default-deny-egress baseline would brick the daemon.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bossfang-allow-egress
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/part-of: bossfang
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-namespace (surrealdb)
+    - to:
+        - podSelector: {}
+    # External HTTPS (LLM providers, registries)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
