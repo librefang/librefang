@@ -1668,6 +1668,20 @@ pub trait CatalogQuery: Send + Sync {
     ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
+
+    /// Resolve the effective proactive-memory `extraction_model` for the
+    /// agent identified by `agent_id` (#5475). Looks at the agent's
+    /// manifest `[proactive_memory] extraction_model` and falls back to
+    /// the kernel-global `[proactive_memory] extraction_model`. Returns
+    /// `None` when neither is set — the extractor then uses whatever
+    /// model it was constructed with at boot.
+    ///
+    /// Default impl returns `None` so existing test stubs and tooling
+    /// don't have to opt in; the real kernel impl threads through the
+    /// agent registry + active `KernelConfig` to perform the lookup.
+    fn proactive_memory_extraction_model_for(&self, _agent_id: &str) -> Option<String> {
+        None
+    }
 }
 
 // ============================================================================
