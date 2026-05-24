@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="BossFang Logo" />
+  <img src="docs/branding/boss-libre.png" width="160" alt="BossFang Logo" />
 </p>
 
 <h1 align="center">BossFang</h1>
