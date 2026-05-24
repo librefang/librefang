@@ -400,19 +400,15 @@ fn assert_saved_max_tokens_session(
     );
     let texts = session_texts(&persisted);
     assert!(
-        texts
-            .iter()
-            .any(|text| *text == "Notify owner before hitting max tokens"),
+        texts.contains(&"Notify owner before hitting max tokens"),
         "{label}: persisted session lost original user message: {texts:?}"
     );
     assert!(
-        texts
-            .iter()
-            .any(|text| *text == "Partial after owner notice"),
+        texts.contains(&"Partial after owner notice"),
         "{label}: persisted session lost MaxTokens assistant partial: {texts:?}"
     );
     assert_eq!(
-        texts.iter().any(|text| *text == "Please continue."),
+        texts.contains(&"Please continue."),
         should_have_continue_prompt,
         "{label}: persisted session continuation prompt mismatch: {texts:?}"
     );
