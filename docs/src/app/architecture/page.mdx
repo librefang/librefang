@@ -83,7 +83,7 @@ librefang/
 │   ├── librefang-hands/       #   Autonomous Hands
 │   ├── librefang-wire/        #   OFP P2P protocol
 │   ├── librefang-extensions/  #   OAuth, credential vault, MCP setup
-│   ├── librefang-migrate/     #   Migration engine
+│   ├── librefang-import/      #   Framework-import (OpenClaw / OpenFang / LangChain / AutoGPT)
 │   ├── librefang-desktop/     #   Tauri desktop app
 │   ├── librefang-telemetry/   #   OpenTelemetry metrics & traces
 │   └── librefang-testing/     #   Test utilities
@@ -190,7 +190,7 @@ librefang-kernel         Kernel: assembles all subsystems, workflow engine, RBAC
     +-- librefang-runtime      Agent loop, 3 LLM drivers, 60 tools, WASM sandbox, MCP, A2A
     +-- librefang-channels     44 channel adapters, bridge, formatter, rate limiter
     +-- librefang-wire         OFP peer-to-peer networking with HMAC-SHA256 auth
-    +-- librefang-migrate      Migration engine (OpenClaw YAML->TOML)
+    +-- librefang-import       Framework-import engine (OpenClaw YAML->TOML, OpenFang, LangChain, AutoGPT)
     +-- librefang-skills       60 bundled skills, FangHub marketplace, ClawHub client
     +-- librefang-extensions   Extension & integration system (credential vault, OAuth2 PKCE, one-click MCP setup)
     +-- librefang-hands        Autonomous Hands system (15 hand agents from registry)
@@ -214,7 +214,7 @@ librefang-types          Shared types: Agent, Capability, Event, Memory, Message
 | **librefang-wire** | LibreFang Protocol (OFP) for peer-to-peer agent communication. JSON-framed messages over TCP with HMAC-SHA256 mutual authentication (nonce + constant-time verify via `subtle`). `PeerNode` listens for connections and manages peers. `PeerRegistry` tracks known remote peers and their agents. |
 | **librefang-cli** | Clap-based CLI. Supports all commands: `init`, `start`, `status`, `doctor`, `agent spawn/list/chat/kill`, `workflow list/create/run`, `trigger list/create/delete`, `migrate`, `skill install/list/remove/search/create`, `channel list/setup/test/enable/disable`, `config show/edit`, `chat`, `mcp`. Daemon auto-detect: checks `~/.librefang/daemon.json` and health pings; uses HTTP when a daemon is running, boots an in-process kernel as fallback. Built-in MCP server mode. |
 | **librefang-desktop** | Tauri 2.0 native desktop application. Boots the kernel in-process, runs the axum server on a background thread, and points a WebView at `http://127.0.0.1:{random_port}`. Features: system tray (Show/Browser/Status/Quit), single-instance enforcement, desktop notifications, hide-to-tray on close. IPC commands: `get_port`, `get_status`. Mobile-ready with `#[cfg(desktop)]` guards. |
-| **librefang-migrate** | Migration engine. Supports OpenClaw (`~/.openclaw/`). Converts YAML configs to TOML, maps tool names, maps provider names, imports agent manifests, copies memory files, converts channel configs. Produces a `MigrationReport` with imported items, skipped items, and warnings. |
+| **librefang-import** | Framework-import engine. Supports OpenClaw (`~/.openclaw/`), OpenFang, LangChain, AutoGPT. Converts YAML configs to TOML, maps tool names, maps provider names, imports agent manifests, copies memory files, converts channel configs. Produces a `MigrationReport` with imported items, skipped items, and warnings. (Renamed from `librefang-migrate` to disambiguate from `librefang-memory/src/migration.rs` which handles SQLite schema migrations.) |
 | **librefang-skills** | Skill system for pluggable tool bundles. 60 bundled skills compiled via `include_str!()`. Skills are `skill.toml` + Python/WASM/Node.js/PromptOnly code. `SkillManifest` defines metadata, runtime config, provided tools, and requirements. `SkillRegistry` manages installed and bundled skills. `FangHubClient` connects to FangHub marketplace. `ClawHubClient` connects to clawhub.ai for cross-ecosystem skill discovery. `SKILL.md` parser for OpenClaw compatibility (YAML frontmatter + Markdown body). `SkillVerifier` with SHA256 verification. Prompt injection scanner (`scan_prompt_content()`) detects override attempts, data exfiltration, and shell references. |
 | **librefang-extensions** | Extension and integration system. Provides a credential vault for securely storing third-party service credentials, OAuth2 PKCE flow for user-authorized integrations, and one-click MCP setup helpers for popular external services. |
 | **librefang-hands** | Autonomous Hands system. 15 hand agents from registry that operate independently with specialized domain expertise: analytics, apitester, browser, clip, collector, devops, lead, linkedin, predictor, reddit, researcher, strategist, trader, twitter. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
@@ -562,7 +562,7 @@ Each agent can override the kernel's default provider:
 [model]
 provider = "openai"                   # Different from kernel default
 model = "gpt-4o"
-api_key_env = "OPENAI_API_KEY"        # Custom key env var
+api_key_env = "OPENAI_API_KEY"        # Custom key env var  # pragma: allowlist secret
 base_url = "https://custom.api.com"   # Optional custom endpoint
 ```
 

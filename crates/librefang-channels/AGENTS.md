@@ -1,7 +1,7 @@
 # librefang-channels — agent notes
 
-> **This file is a stub.** The previous content listed a `commands`
-> module that does not exist, and the verbose webhook-security /
+> **This file is a stub.** The previous content drifted out of sync
+> with the live module layout, and the verbose webhook-security /
 > SSRF / sidecar-onboarding sections live in better-maintained form
 > elsewhere (`docs/architecture/sidecar-channels.md`, the SDK's
 > sidecar adapter docstrings, the top-level `CLAUDE.md` "channels"
@@ -20,11 +20,12 @@ shared HTTP client.
 ## Module map (verify against `src/` before relying on this)
 
 Every module compiles unconditionally — there are no `channel-*` /
-`all-channels` feature gates left. Modules currently present in
-`src/`: `attachment_enrich`, `bridge`, `embedded_sdk`, `formatter`,
-`group_history`, `http_client`, `message_journal`,
-`message_truncator`, `rate_limiter`, `roster`, `router`, `sanitizer`,
-**`sidecar`** (the trampoline), `thread_ownership`, `types`.
+`all-channels` feature gates left. Modules currently declared in
+`src/lib.rs`: `attachment_enrich`, `bridge`, `commands`,
+`embedded_sdk`, `formatter`, `group_history`, `http_client`,
+`message_journal`, `message_truncator`, `rate_limiter`, `roster`,
+`router`, `sanitizer`, **`sidecar`** (the trampoline),
+`thread_ownership`, `types`.
 
 ## Sidecar-only policy
 
