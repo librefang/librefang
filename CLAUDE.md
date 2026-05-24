@@ -52,9 +52,11 @@ giving defense in depth on top of the Claude Code PreToolUse layer.
   duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
   staged additions to `[Unreleased]` (#3400); `detect-secrets` scan against
   `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
-- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
-  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
-  generated SDKs are stale. Expected 30-90s on a warm cache.
+- `pre-push` — refuses direct pushes to `main` / `master` and exits in
+  &lt; 100ms. Heavy verification (clippy, openapi/SDK drift) intentionally
+  lives in CI rather than gating every push — see #4532 for the
+  rationale. Skip the branch guard for a maintainer hotfix with
+  `LIBREFANG_PREPUSH_SKIP=1`.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).
@@ -77,7 +79,7 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
   matching `target/debug/` path)
 
 ### Crate map
-- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
+- **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-import`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
 - **Runtime**: `librefang-runtime` (agent loop, tools, plugins, OAuth, WASM sandbox), `librefang-runtime-mcp`, `librefang-runtime-audit`, `librefang-runtime-media`, `librefang-runtime-sandbox-docker`
 - **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, …)
@@ -223,6 +225,28 @@ The daemon command is `start` (not `daemon`).
   `MIN_HISTORY_MESSAGES = 4` are clamped up with a warning.
   Resolution: agent override > kernel config > compiled default. See
   `docs/architecture/message-history-trimming.md`.
+- **Per-agent `proactive_memory` / `skill_workshop` / `compaction`
+  overrides live in `agent.toml`, NOT `config.toml`** (#5476).
+  `KernelConfig` has no `agents` field, so a block like:
+  ```toml
+  # ~/.librefang/config.toml — silently ignored, NOT honoured
+  [agents.my-agent.proactive_memory]
+  auto_memorize = true
+  ```
+  parses but never feeds into any `AgentManifest`. The kernel emits a
+  targeted `WARN` at boot and on `POST /api/config/reload` pointing
+  operators at the correct surface (see
+  `KernelConfig::detect_misplaced_per_agent_overrides`); the
+  load-bearing path is the agent's own manifest:
+  ```toml
+  # ~/.librefang/workspaces/agents/my-agent/agent.toml — per-agent override
+  [proactive_memory]
+  auto_memorize = true
+  ```
+  Same shape for `[skill_workshop]` and `[compaction]`. Inside a
+  `HAND.toml` the override sits under `[agents.<name>.<key>]`, which
+  *is* read because `HandManifest` does have an `agents` table —
+  `config.toml` does not.
 - **Trigger dispatch concurrency** has three layered caps, scoped to
   the **trigger dispatcher only** (`agent_send`, channel bridges, and
   cron still serialize at the existing per-agent / per-session locks

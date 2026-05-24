@@ -473,7 +473,7 @@ pub(crate) async fn dashboard_login(
             // Fix: write the upgrade hint to
             // `~/.librefang/dashboard-pass-hash.upgrade-hint` with
             // `chmod 0600` (same pattern as the secrets.env hardening
-            // at `librefang-migrate::openclaw.rs:655` and the sqlite
+            // at `librefang-import::openclaw.rs:655` and the sqlite
             // file-permissions fix). The log just SIGNALS that an
             // upgrade is available + points the operator at the file
             // — the verifier value never enters the log stream.

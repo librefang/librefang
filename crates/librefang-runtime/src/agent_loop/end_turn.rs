@@ -254,12 +254,24 @@ pub(super) async fn finalize_successful_end_turn(
         ) {
             let interaction_text =
                 format!("[Past exchange]\nThem: {user_clean}\nYou: {resp_clean}");
+            // `sender_user_id` (SenderContext.user_id) is the platform user
+            // identity — e.g. a Telegram user ID.  This differs from
+            // `sessions.peer_id` in the session-store layer (PR #5286),
+            // which uses `chat_id` for session-scope isolation.  The
+            // divergence is intentional: memory recall filters on
+            // `(agent_id, peer_id)` with `peer_id = sender_user_id` so that
+            // each user's episodic memories are isolated within a shared
+            // agent (per-user recall).  Session isolation (chat-scoped) is a
+            // separate concern and uses chat_id.  If both were collapsed to
+            // the same value a group-chat user's memory recall would be
+            // scoped to the chat rather than to the individual.
             remember_interaction_best_effort(
                 ctx.memory,
                 ctx.embedding_driver,
                 ctx.session.agent_id,
                 &interaction_text,
                 ctx.streaming,
+                ctx.sender_user_id,
             )
             .await;
         }
