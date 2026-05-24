@@ -1,1 +1,0 @@
-{"version":3,"file":"root.cjs","names":[],"sources":["../../src/root.ts"],"sourcesContent":["/** Stable identifier used for the root route in a route tree. */\nexport const rootRouteId = '__root__'\nexport type RootRouteId = typeof rootRouteId\n"],"mappings":";;AACA,IAAa,cAAc"}

@@ -1,1 +1,0 @@
-{"version":3,"file":"server.cjs","names":[],"sources":["../../../src/isServer/server.ts"],"sourcesContent":["export const isServer = process.env.NODE_ENV === 'test' ? undefined : true\n"],"mappings":";;AAAA,IAAa,WAAA,QAAA,IAAA,aAAoC,SAAS,KAAA,IAAY"}

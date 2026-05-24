@@ -1,1 +1,0 @@
-{"version":3,"file":"development.js","names":[],"sources":["../../../src/isServer/development.ts"],"sourcesContent":["// Development/test mode - returns undefined so fallback to router.isServer is used\nexport const isServer: boolean | undefined = undefined\n"],"mappings":";AACA,IAAa,WAAgC,KAAA"}

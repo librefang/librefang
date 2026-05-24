@@ -30,13 +30,21 @@ fn main() {
 
     // Escape hatch: set SKIP_DASHBOARD_BUILD=1 in CI jobs that pre-build
     // the dashboard in a separate step, or for `cargo check` workflows.
-    if std::env::var("SKIP_DASHBOARD_BUILD").as_deref() != Ok("1") {
+    // Soft-skip when pnpm is not on PATH so CI jobs that don't need a
+    // dashboard binary (Quality / unit tests / OpenAPI drift / etc.) don't
+    // have to install Node.js + pnpm just to compile-check the crate; the
+    // placeholder static/react directory created above keeps `include_dir!`
+    // happy. Real pnpm install/build failures still hard-fail.
+    'dashboard: {
+        if std::env::var("SKIP_DASHBOARD_BUILD").as_deref() == Ok("1") {
+            break 'dashboard;
+        }
         let dashboard_src = manifest_dir.join("dashboard");
 
         // Set CI=true so pnpm never prompts for TTY confirmation when it needs
         // to purge the node_modules directory (e.g. after a lockfile change).
         // The build script always runs in a non-interactive subprocess.
-        let status = Command::new("pnpm")
+        let install = Command::new("pnpm")
             .args([
                 "--dir",
                 dashboard_src.to_str().unwrap(),
@@ -44,15 +52,26 @@ fn main() {
                 "--frozen-lockfile",
             ])
             .env("CI", "true")
-            .status()
-            .expect("pnpm not found — install Node.js and pnpm");
-        assert!(status.success(), "pnpm install failed");
+            .status();
+        match install {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "cargo:warning=pnpm not found on PATH; skipping dashboard build \
+                     (placeholder static/react directory will be embedded). \
+                     Install pnpm or set SKIP_DASHBOARD_BUILD=1 to silence."
+                );
+                break 'dashboard;
+            }
+            Err(e) => panic!("failed to invoke `pnpm install`: {e}"),
+            Ok(status) if !status.success() => panic!("pnpm install failed"),
+            Ok(_) => {}
+        }
 
-        let status = Command::new("pnpm")
+        let build = Command::new("pnpm")
             .args(["--dir", dashboard_src.to_str().unwrap(), "run", "build"])
             .status()
-            .expect("pnpm run build failed");
-        assert!(status.success(), "pnpm run build failed");
+            .expect("`pnpm run build` failed to spawn");
+        assert!(build.success(), "pnpm run build failed");
     }
     // --------------------------------
 
