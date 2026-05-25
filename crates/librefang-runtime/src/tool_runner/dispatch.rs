@@ -1092,12 +1092,23 @@ pub async fn execute_tool_raw(
             .await
         }
 
-        // Persistent process tools
-        "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
-        "process_poll" => tool_process_poll(input, *process_manager).await,
-        "process_write" => tool_process_write(input, *process_manager).await,
-        "process_kill" => tool_process_kill(input, *process_manager).await,
-        "process_list" => tool_process_list(*process_manager, *caller_agent_id).await,
+        // Persistent process tools (#3576: return Result<String, ToolError>;
+        // narrow to Result<String, String> here at the boundary).
+        "process_start" => tool_process_start(input, *process_manager, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_poll" => tool_process_poll(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_write" => tool_process_write(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_kill" => tool_process_kill(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_list" => tool_process_list(*process_manager, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Hand tools (curated autonomous capability packages). #3576:
         // submodule returns Result<String, ToolError>; narrow here.
