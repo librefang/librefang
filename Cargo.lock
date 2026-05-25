@@ -7584,6 +7584,7 @@ dependencies = [
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
+ "librefang-storage",
  "librefang-types",
  "open",
  "opentelemetry 0.32.0",

@@ -11990,7 +11990,10 @@ fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
 fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, json: bool) {
     use librefang_storage::{StorageConfig, SurrealConnectionPool};
 
-    let kernel_config = load_config(config.as_deref());
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
     let storage_cfg: StorageConfig = kernel_config.storage.clone();
 
     // Mirror the SQLite reset's daemon-running guard so we never race
@@ -12088,7 +12091,10 @@ fn cmd_storage_migrate(config: Option<PathBuf>, dry_run: bool) {
     use librefang_storage::migrate::{migrate_sqlite_to_surreal, plan_sqlite, MigrationOptions};
     use librefang_storage::SurrealConnectionPool;
 
-    let kernel_config = load_config(config.as_deref());
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
     let sqlite_path = kernel_config
         .memory
         .sqlite_path

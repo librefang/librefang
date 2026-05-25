@@ -87,7 +87,7 @@ RUN --mount=type=ssh \
     # universal-agent-runtime) that are fetched over SSH during the build.
     SKIP_FRONTEND_BUILD=1 \
     SKIP_DASHBOARD_BUILD=1 \
-    cargo build --release --bin librefang --features telemetry && \
+    cargo build --release --bin librefang --features telemetry,surreal-backend && \
     cp target/release/librefang /usr/local/bin/librefang
 
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)

@@ -25,6 +25,13 @@ data:
     # Listen on all interfaces inside the pod; the Service routes ingress.
     api_listen = "0.0.0.0:4545"
 
+    # Trust Envoy Gateway's X-Forwarded-Proto header so session cookies
+    # get the Secure attribute under HTTPS. The GKE pod CIDR is not
+    # static, so we trust all cluster-internal peers; this is safe because
+    # the Service is only reachable through Envoy Gateway, not the internet.
+    trusted_proxies = ["0.0.0.0/0"]
+    trust_forwarded_for = true
+
     # Storage: remote SurrealDB in the same namespace.
     # Both librefang-storage and surreal-memory pick this up — they share
     # the same StorageConfig and route to different databases automatically
