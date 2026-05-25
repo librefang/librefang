@@ -1382,8 +1382,8 @@ pub async fn run_agent_loop_streaming(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
-                        owner_notice: None,
-                        actual_provider: None,
+                        owner_notice: std::mem::take(&mut pending_owner_notice),
+                        actual_provider: last_actual_provider.clone(),
                     });
                 }
                 let text = response.text();
@@ -1392,6 +1392,11 @@ pub async fn run_agent_loop_streaming(
                 session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit (streaming), continuing");
+                if !opts.is_fork && !opts.incognito {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on max tokens continuation: {e}");
+                    }
+                }
             }
             StopReason::ContentFiltered => {
                 // Streaming twin of the non-streaming refusal handler (#3450).

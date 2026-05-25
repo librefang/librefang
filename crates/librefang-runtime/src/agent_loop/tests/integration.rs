@@ -228,6 +228,237 @@ impl LlmDriver for DirectiveDriver {
     }
 }
 
+struct NotifyOwnerThenMaxTokensDriver {
+    call_count: AtomicU32,
+    final_tool_calls: bool,
+}
+
+impl NotifyOwnerThenMaxTokensDriver {
+    fn new(final_tool_calls: bool) -> Self {
+        Self {
+            call_count: AtomicU32::new(0),
+            final_tool_calls,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmDriver for NotifyOwnerThenMaxTokensDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+        match call {
+            0 => Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "notify_1".to_string(),
+                    name: "notify_owner".to_string(),
+                    input: serde_json::json!({
+                        "reason": "handoff_needed",
+                        "summary": "Fallback provider needs owner visibility."
+                    }),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ToolCall {
+                    id: "notify_1".to_string(),
+                    name: "notify_owner".to_string(),
+                    input: serde_json::json!({
+                        "reason": "handoff_needed",
+                        "summary": "Fallback provider needs owner visibility."
+                    }),
+                }],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                actual_provider: Some("fallback-a".to_string()),
+            }),
+            _ if self.final_tool_calls => Ok(CompletionResponse {
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Partial after owner notice".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: format!("continue_{call}"),
+                        name: "notify_owner".to_string(),
+                        input: serde_json::json!({
+                            "reason": "continuation_needed",
+                            "summary": "Max tokens branch is continuing."
+                        }),
+                        provider_metadata: None,
+                    },
+                ],
+                stop_reason: StopReason::MaxTokens,
+                tool_calls: vec![ToolCall {
+                    id: format!("continue_{call}"),
+                    name: "notify_owner".to_string(),
+                    input: serde_json::json!({
+                        "reason": "continuation_needed",
+                        "summary": "Max tokens branch is continuing."
+                    }),
+                }],
+                usage: TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 6,
+                    ..Default::default()
+                },
+                actual_provider: Some("fallback-b".to_string()),
+            }),
+            _ => Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "Partial after owner notice".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::MaxTokens,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 6,
+                    ..Default::default()
+                },
+                actual_provider: Some("fallback-b".to_string()),
+            }),
+        }
+    }
+}
+
+struct CascadeLeakTimedOutDriver;
+
+#[async_trait]
+impl LlmDriver for CascadeLeakTimedOutDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        unreachable!("streaming test must use stream")
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        tx.send(StreamEvent::TextDelta {
+            text: "User asked: hi\nI responded: secret".to_string(),
+        })
+        .await
+        .expect("proxy stream receiver should be alive");
+        Err(LlmError::TimedOut {
+            inactivity_secs: 30,
+            partial_text: Some(std::sync::Arc::<str>::from(
+                "User asked: hi\nI responded: timed out secret",
+            )),
+            partial_text_len: 43,
+            last_activity: "text_delta".to_string(),
+        })
+    }
+}
+
+fn fresh_session() -> librefang_memory::session::Session {
+    librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    }
+}
+
+fn notify_owner_tool_definition() -> ToolDefinition {
+    fake_tool("notify_owner")
+}
+
+fn session_texts(session: &librefang_memory::session::Session) -> Vec<&str> {
+    session
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            MessageContent::Text(text) => Some(text.as_str()),
+            MessageContent::Blocks(_) => None,
+        })
+        .collect()
+}
+
+fn assert_saved_max_tokens_session(
+    persisted: Option<librefang_memory::session::Session>,
+    should_persist: bool,
+    should_have_continue_prompt: bool,
+    label: &str,
+) {
+    let Some(persisted) = persisted else {
+        assert!(
+            !should_persist,
+            "{label}: session should have been persisted"
+        );
+        return;
+    };
+
+    assert!(
+        should_persist,
+        "{label}: session should not have been persisted"
+    );
+    let texts = session_texts(&persisted);
+    assert!(
+        texts.contains(&"Notify owner before hitting max tokens"),
+        "{label}: persisted session lost original user message: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"Partial after owner notice"),
+        "{label}: persisted session lost MaxTokens assistant partial: {texts:?}"
+    );
+    assert_eq!(
+        texts.contains(&"Please continue."),
+        should_have_continue_prompt,
+        "{label}: persisted session continuation prompt mismatch: {texts:?}"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_streaming_for_test(
+    manifest: &AgentManifest,
+    user_message: &str,
+    session: &mut librefang_memory::session::Session,
+    memory: &librefang_memory::MemorySubstrate,
+    driver: Arc<dyn LlmDriver>,
+    available_tools: &[ToolDefinition],
+    stream_tx: mpsc::Sender<StreamEvent>,
+    opts: &LoopOptions,
+) -> LibreFangResult<AgentLoopResult> {
+    run_agent_loop_streaming(
+        manifest,
+        user_message,
+        session,
+        memory,
+        driver,
+        available_tools,
+        None,
+        stream_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        opts,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn test_empty_response_after_tool_use_returns_fallback() {
     let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
@@ -531,6 +762,131 @@ async fn test_max_tokens_partial_response_preserves_reply_directives() {
     assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
     assert!(result.directives.current_thread);
     assert!(!result.directives.silent);
+}
+
+async fn run_max_tokens_owner_notice_case(
+    opts: LoopOptions,
+    final_tool_calls: bool,
+) -> (
+    librefang_memory::MemorySubstrate,
+    librefang_memory::session::Session,
+    AgentLoopResult,
+) {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> =
+        Arc::new(NotifyOwnerThenMaxTokensDriver::new(final_tool_calls));
+    let tool = notify_owner_tool_definition();
+
+    let result = run_agent_loop(
+        &manifest,
+        "Notify owner before hitting max tokens",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &opts,
+    )
+    .await
+    .expect("Loop should complete with max-tokens partial");
+
+    (memory, session, result)
+}
+
+#[tokio::test]
+async fn test_max_tokens_owner_notice_and_actual_provider_survive_non_streaming() {
+    let (_memory, _session, result) =
+        run_max_tokens_owner_notice_case(LoopOptions::default(), false).await;
+
+    assert_eq!(result.response, "Partial after owner notice");
+    assert_eq!(
+        result.owner_notice.as_deref(),
+        Some("🎩 handoff_needed: Fallback provider needs owner visibility.")
+    );
+    assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
+}
+
+#[tokio::test]
+async fn test_max_tokens_session_save_respects_ephemeral_options() {
+    for (label, opts, should_persist) in [
+        ("default", LoopOptions::default(), true),
+        (
+            "incognito",
+            LoopOptions {
+                incognito: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+        (
+            "fork",
+            LoopOptions {
+                is_fork: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+    ] {
+        let (memory, session, result) = run_max_tokens_owner_notice_case(opts, false).await;
+        assert_eq!(result.response, "Partial after owner notice", "{label}");
+        let persisted = memory
+            .get_session(session.id)
+            .expect("get_session must not error");
+        assert_saved_max_tokens_session(persisted, should_persist, false, label);
+    }
+}
+
+#[tokio::test]
+async fn test_max_tokens_session_save_respects_ephemeral_options_on_continuation() {
+    for (label, opts, should_persist) in [
+        ("default", LoopOptions::default(), true),
+        (
+            "incognito",
+            LoopOptions {
+                incognito: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+        (
+            "fork",
+            LoopOptions {
+                is_fork: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+    ] {
+        let (memory, session, result) = run_max_tokens_owner_notice_case(opts, true).await;
+        assert_eq!(result.response, "Partial after owner notice", "{label}");
+        assert_eq!(result.iterations, MAX_CONTINUATIONS + 1, "{label}");
+        let persisted = memory
+            .get_session(session.id)
+            .expect("get_session must not error");
+        assert_saved_max_tokens_session(persisted, should_persist, true, label);
+    }
 }
 
 // ── History-fold integration test ────────────────────────────────────────
@@ -1025,6 +1381,139 @@ async fn test_streaming_max_continuations_return_preserves_reply_directives() {
     assert!(!result.directives.silent);
 }
 
+#[tokio::test]
+async fn test_streaming_max_tokens_owner_notice_and_actual_provider_survive_result() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(NotifyOwnerThenMaxTokensDriver::new(false));
+    let tool = notify_owner_tool_definition();
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Notify owner before hitting max tokens",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool),
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete with max-tokens partial");
+
+    assert_eq!(result.response, "Partial after owner notice");
+    assert_eq!(
+        result.owner_notice.as_deref(),
+        Some("🎩 handoff_needed: Fallback provider needs owner visibility.")
+    );
+    assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    assert!(events.iter().any(
+        |event| matches!(event, StreamEvent::OwnerNotice { text } if text.contains("Fallback provider"))
+    ));
+}
+
+async fn run_streaming_max_tokens_owner_notice_case(
+    opts: LoopOptions,
+    final_tool_calls: bool,
+) -> (
+    librefang_memory::MemorySubstrate,
+    librefang_memory::session::Session,
+    AgentLoopResult,
+) {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> =
+        Arc::new(NotifyOwnerThenMaxTokensDriver::new(final_tool_calls));
+    let tool = notify_owner_tool_definition();
+    let (tx, _rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Notify owner before hitting max tokens",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool),
+        tx,
+        &opts,
+    )
+    .await
+    .expect("Streaming loop should complete with max-tokens partial");
+
+    (memory, session, result)
+}
+
+#[tokio::test]
+async fn test_streaming_max_tokens_session_save_respects_ephemeral_options() {
+    for (label, opts, should_persist) in [
+        ("default", LoopOptions::default(), true),
+        (
+            "incognito",
+            LoopOptions {
+                incognito: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+        (
+            "fork",
+            LoopOptions {
+                is_fork: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+    ] {
+        let (memory, session, result) =
+            run_streaming_max_tokens_owner_notice_case(opts, false).await;
+        assert_eq!(result.response, "Partial after owner notice", "{label}");
+        let persisted = memory
+            .get_session(session.id)
+            .expect("get_session must not error");
+        assert_saved_max_tokens_session(persisted, should_persist, false, label);
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_max_tokens_session_save_respects_ephemeral_options_on_continuation() {
+    for (label, opts, should_persist) in [
+        ("default", LoopOptions::default(), true),
+        (
+            "incognito",
+            LoopOptions {
+                incognito: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+        (
+            "fork",
+            LoopOptions {
+                is_fork: true,
+                ..LoopOptions::default()
+            },
+            false,
+        ),
+    ] {
+        let (memory, session, result) =
+            run_streaming_max_tokens_owner_notice_case(opts, true).await;
+        assert_eq!(result.response, "Partial after owner notice", "{label}");
+        assert_eq!(result.iterations, MAX_CONTINUATIONS + 1, "{label}");
+        let persisted = memory
+            .get_session(session.id)
+            .expect("get_session must not error");
+        assert_saved_max_tokens_session(persisted, should_persist, true, label);
+    }
+}
+
 /// Cascade-leak fixture: a fresh in-memory `MemorySubstrate` and a
 /// `Session` ready to drive a one-shot agent-loop turn. Both new
 /// integration tests below share this setup; only the loop entry
@@ -1068,25 +1557,25 @@ async fn cascade_leak_guard_drops_endturn_in_non_streaming_path() {
         &[],
         None,
         None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        None, // skill_registry
+        None, // mcp_connections
+        None, // web_ctx
+        None, // browser_ctx
+        None, // embedding_driver
+        None, // workspace_root
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // pending_messages
         &LoopOptions::default(),
     )
     .await
@@ -1171,35 +1660,14 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
     let manifest = test_manifest();
     let (tx, _rx) = mpsc::channel(64);
 
-    let result = run_agent_loop_streaming(
+    let result = run_streaming_for_test(
         &manifest,
         "\u{1F934}",
         &mut session,
         &memory,
         driver,
         &[], // no tools registered — ensures any tool execution would panic/err
-        None,
         tx,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None, // checkpoint_manager
-        None, // process_registry
-        None,
-        None,
-        None,
-        None,
         &LoopOptions::default(),
     )
     .await
@@ -1214,6 +1682,47 @@ async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
         result.response.is_empty(),
         "no text must reach the caller when cascade leak fires; got: {:?}",
         result.response
+    );
+}
+
+#[tokio::test]
+async fn cascade_leak_guard_suppresses_timeout_partial_text_delta_in_streaming_path() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(CascadeLeakTimedOutDriver);
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let err = run_streaming_for_test(
+        &manifest,
+        "hi",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect_err("timeout should propagate");
+
+    let events = {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    };
+
+    assert!(
+        err.to_string().contains("Task timed out after 30s"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, StreamEvent::TextDelta { .. })),
+        "cascade leak timeout partial text must not emit TextDelta events: {events:?}"
     );
 }
 

@@ -2,8 +2,9 @@ import { formatCompact, formatCost } from "../lib/format";
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
-import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
-import { useUpdateBudget } from "../lib/mutations/analytics";
+import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus, useProviderBudgets } from "../lib/queries/analytics";
+import { useUpdateBudget, useUpdateProviderBudget } from "../lib/mutations/analytics";
+import type { ProviderBudgetRow } from "../api";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 
@@ -38,6 +39,288 @@ interface BudgetForm {
   alert?: string;
 }
 
+// Render a single percent / progress-bar pair with green/yellow/red coloring
+// driven by the global `alert_threshold` echoed on `/api/budget/providers`.
+// 0-cap means "unlimited" — the bar collapses to a single em-dash so the
+// operator can tell at a glance there's no gate on that window.
+function ProviderCapBar({
+  spend,
+  cap,
+  alertThreshold,
+}: {
+  spend: number;
+  cap: number;
+  alertThreshold: number;
+}) {
+  if (cap <= 0) {
+    return <span className="text-[10px] text-text-dim/60 font-mono">—</span>;
+  }
+  const pct = Math.min(1, spend / cap);
+  const breached = pct >= alertThreshold;
+  const tone = breached
+    ? "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]"
+    : pct >= alertThreshold * 0.6
+    ? "bg-warning"
+    : "bg-brand";
+  return (
+    <div className="flex items-center gap-1.5 min-w-[80px]">
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-main/60">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${tone}`}
+          style={{ width: `${(pct * 100).toFixed(1)}%` }}
+        />
+      </div>
+      <span className={`text-[9px] font-mono ${breached ? "text-error font-bold" : "text-text-dim"}`}>
+        {(pct * 100).toFixed(0)}%
+      </span>
+    </div>
+  );
+}
+
+// #5650 — Per-provider budget table. Read surface (caps + current spend +
+// exhaustion state) plus inline edit form on each row that maps onto
+// `PUT /api/budget/providers/{provider_id}`. Pulled out of the main
+// component so the editor's `useState<editingProvider>` doesn't churn
+// the analytics page on every keystroke.
+function ProviderBudgetsCard({
+  rows,
+  alertThreshold,
+  isLoading,
+  mutation,
+}: {
+  rows: ProviderBudgetRow[];
+  alertThreshold: number;
+  isLoading: boolean;
+  mutation: ReturnType<typeof useUpdateProviderBudget>;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<{
+    max_cost_per_hour_usd: string;
+    max_cost_per_day_usd: string;
+    max_cost_per_month_usd: string;
+    max_tokens_per_hour: string;
+  }>({
+    max_cost_per_hour_usd: "0",
+    max_cost_per_day_usd: "0",
+    max_cost_per_month_usd: "0",
+    max_tokens_per_hour: "0",
+  });
+
+  const startEditing = (row: ProviderBudgetRow) => {
+    setEditingProvider(row.provider);
+    setEditForm({
+      max_cost_per_hour_usd: String(row.cap_hourly_usd ?? 0),
+      max_cost_per_day_usd: String(row.cap_daily_usd ?? 0),
+      max_cost_per_month_usd: String(row.cap_monthly_usd ?? 0),
+      max_tokens_per_hour: String(row.cap_tokens_per_hour ?? 0),
+    });
+  };
+
+  const submitEdit = (providerId: string) => {
+    const payload = {
+      max_cost_per_hour_usd: parseFloat(editForm.max_cost_per_hour_usd) || 0,
+      max_cost_per_day_usd: parseFloat(editForm.max_cost_per_day_usd) || 0,
+      max_cost_per_month_usd: parseFloat(editForm.max_cost_per_month_usd) || 0,
+      max_tokens_per_hour: parseInt(editForm.max_tokens_per_hour, 10) || 0,
+    };
+    for (const [k, v] of Object.entries(payload)) {
+      if (!Number.isFinite(v) || v < 0) {
+        addToast(
+          t("analytics.provider_budgets.bad_input", "{{field}} must be a non-negative number", {
+            field: k,
+          }),
+          "error",
+        );
+        return;
+      }
+    }
+    mutation.mutate(
+      { providerId, payload },
+      {
+        onSuccess: () => {
+          setEditingProvider(null);
+          addToast(
+            t("analytics.provider_budgets.saved", "Per-provider caps saved"),
+            "success",
+          );
+        },
+        onError: (err) =>
+          addToast(
+            toastErr(
+              err,
+              t("analytics.provider_budgets.save_failed", "Failed to save per-provider caps"),
+            ),
+            "error",
+          ),
+      },
+    );
+  };
+
+  return (
+    <Card padding="lg" hover>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-bold flex items-center gap-2">
+          <Shield className="w-4 h-4 text-brand" />
+          {t("analytics.provider_budgets.title", "Per-provider caps & spend")}
+        </h2>
+        <span className="text-[10px] uppercase tracking-wider text-text-dim font-mono">
+          {t("analytics.provider_budgets.row_count", "{{n}} providers", { n: rows.length })}
+        </span>
+      </div>
+      <p className="text-xs text-text-dim mb-4 leading-relaxed">
+        {t(
+          "analytics.provider_budgets.help",
+          "Each provider with a [budget.providers.<id>] entry or recent spend appears here. A cap of 0 means unlimited. Rows the LLM fallback chain is currently skipping (exhausted) carry a red badge.",
+        )}
+      </p>
+      {isLoading && rows.length === 0 ? (
+        <p className="text-xs text-text-dim italic">
+          {t("analytics.provider_budgets.loading", "Loading provider spend…")}
+        </p>
+      ) : rows.length === 0 ? (
+        <p className="text-xs text-text-dim italic">
+          {t(
+            "analytics.provider_budgets.empty",
+            "No providers configured and no recent spend recorded.",
+          )}
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-text-dim text-[10px] uppercase tracking-wider border-b border-border-subtle">
+                <th className="text-left py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_provider", "Provider")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_hourly", "Hourly")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_daily", "Daily")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_monthly", "Monthly")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_tokens", "Tokens/hr")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_state", "State")}</th>
+                <th className="text-right py-2 px-2 font-semibold">{t("analytics.provider_budgets.col_actions", "")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const isEditing = editingProvider === row.provider;
+                return (
+                  <tr
+                    key={row.provider}
+                    className="border-b border-border-subtle/50 hover:bg-brand/5 align-top"
+                  >
+                    <td className="py-2 px-2 font-mono font-medium">
+                      <div className="flex flex-col">
+                        <span>{row.provider}</span>
+                        {row.unconfigured && (
+                          <span className="text-[9px] uppercase tracking-wider text-warning font-bold">
+                            {t("analytics.provider_budgets.unconfigured", "set a cap")}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    {/* Spend / cap pairs — one cell per window. */}
+                    {([
+                      ["max_cost_per_hour_usd", row.spend_hourly_usd, row.cap_hourly_usd, "$"] as const,
+                      ["max_cost_per_day_usd", row.spend_daily_usd, row.cap_daily_usd, "$"] as const,
+                      ["max_cost_per_month_usd", row.spend_monthly_usd, row.cap_monthly_usd, "$"] as const,
+                    ]).map(([fieldKey, spend, cap, unit]) => (
+                      <td key={fieldKey} className="py-2 px-2 text-right font-mono">
+                        <div className="flex flex-col items-end gap-1">
+                          <span>
+                            {unit}{spend.toFixed(4)}
+                            <span className="text-text-dim/60"> / {cap > 0 ? `${unit}${cap.toFixed(2)}` : "∞"}</span>
+                          </span>
+                          <ProviderCapBar spend={spend} cap={cap} alertThreshold={alertThreshold} />
+                          {isEditing && (
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={editForm[fieldKey]}
+                              onChange={(e) =>
+                                setEditForm((f) => ({ ...f, [fieldKey]: e.target.value }))
+                              }
+                              className="w-20 rounded-md border border-border-subtle bg-main px-1.5 py-0.5 text-[10px] font-mono outline-none focus:border-brand"
+                            />
+                          )}
+                        </div>
+                      </td>
+                    ))}
+                    <td className="py-2 px-2 text-right font-mono">
+                      <div className="flex flex-col items-end gap-1">
+                        <span>
+                          {row.tokens_this_hour.toLocaleString()}
+                          <span className="text-text-dim/60">
+                            {" / "}
+                            {row.cap_tokens_per_hour > 0 ? row.cap_tokens_per_hour.toLocaleString() : "∞"}
+                          </span>
+                        </span>
+                        <ProviderCapBar
+                          spend={row.tokens_this_hour}
+                          cap={row.cap_tokens_per_hour}
+                          alertThreshold={alertThreshold}
+                        />
+                        {isEditing && (
+                          <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            value={editForm.max_tokens_per_hour}
+                            onChange={(e) =>
+                              setEditForm((f) => ({ ...f, max_tokens_per_hour: e.target.value }))
+                            }
+                            className="w-20 rounded-md border border-border-subtle bg-main px-1.5 py-0.5 text-[10px] font-mono outline-none focus:border-brand"
+                          />
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 px-2 text-right">
+                      {row.is_exhausted ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-error/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-error">
+                          {row.exhaustion_reason ?? "exhausted"}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-text-dim/60 uppercase tracking-wider">
+                          {t("analytics.provider_budgets.healthy", "healthy")}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-right">
+                      {isEditing ? (
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            disabled={mutation.isPending}
+                            onClick={() => submitEdit(row.provider)}
+                          >
+                            {mutation.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              t("common.save", "Save")
+                            )}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setEditingProvider(null)}>
+                            {t("common.cancel", "Cancel")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button size="sm" variant="ghost" onClick={() => startEditing(row)}>
+                          {t("analytics.provider_budgets.edit", "Edit caps")}
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function AnalyticsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -49,6 +332,10 @@ export function AnalyticsPage() {
   const budgetQuery = useBudgetStatus();
   const modelPerformanceQuery = useModelPerformance();
   const budgetMutation = useUpdateBudget();
+  // #5650 — per-provider snapshot + cap mutation. Lives alongside the
+  // global budget query so the two refresh in lock-step at 30s.
+  const providerBudgetsQuery = useProviderBudgets();
+  const providerBudgetMutation = useUpdateProviderBudget();
 
   const usage = usageQuery.data ?? null;
   const usageByAgent = useMemo<AnalyticsAgentRow[]>(
@@ -454,6 +741,16 @@ export function AnalyticsPage() {
             </div>
             {budgetMutation.isSuccess && <p className="text-xs text-success mt-2">{t("analytics.budget_saved")}</p>}
           </Card>
+
+          {/* #5650 — Per-provider caps + spend (the [budget.providers] surface). */}
+          <ProviderBudgetsCard
+            rows={providerBudgetsQuery.data?.providers ?? []}
+            alertThreshold={
+              providerBudgetsQuery.data?.alert_threshold ?? budgetQuery.data?.alert_threshold ?? 0.8
+            }
+            isLoading={providerBudgetsQuery.isLoading}
+            mutation={providerBudgetMutation}
+          />
         </>
       )}
     </div>
