@@ -1080,11 +1080,18 @@ pub async fn execute_tool_raw(
         "process_kill" => tool_process_kill(input, *process_manager).await,
         "process_list" => tool_process_list(*process_manager, *caller_agent_id).await,
 
-        // Hand tools (curated autonomous capability packages)
-        "hand_list" => tool_hand_list(*kernel).await,
-        "hand_activate" => tool_hand_activate(input, *kernel).await,
-        "hand_status" => tool_hand_status(input, *kernel).await,
-        "hand_deactivate" => tool_hand_deactivate(input, *kernel).await,
+        // Hand tools (curated autonomous capability packages). #3576:
+        // submodule returns Result<String, ToolError>; narrow here.
+        "hand_list" => tool_hand_list(*kernel).await.map_err(|e| e.to_string()),
+        "hand_activate" => tool_hand_activate(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "hand_status" => tool_hand_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "hand_deactivate" => tool_hand_deactivate(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // A2A outbound tools (cross-instance agent communication). #3576:
         // submodule returns Result<String, ToolError>; narrow at the boundary.
