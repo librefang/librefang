@@ -65,7 +65,13 @@ COPY sdk/python/librefang ./sdk/python/librefang
 COPY deploy ./deploy
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+# Add github.com to known_hosts so the SSH mount can fetch private git deps
+# (kreuzberg via universal-agent-runtime) without interactive host-key prompts.
+RUN mkdir -p -m 0700 /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+RUN --mount=type=ssh \
+    --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
     # `--features telemetry`: the published Docker image is the full
@@ -73,6 +79,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # out-of-process sidecars now (see #5408 / #5461), so the old
     # `all-channels` / `core-channels` aliases are gone — `telemetry` is
     # the whole opt-in surface left, matching the CLI's own `default`.
+    # `--mount=type=ssh` is required for private git deps (kreuzberg via
+    # universal-agent-runtime) that are fetched over SSH during the build.
     cargo build --release --bin librefang --features telemetry && \
     cp target/release/librefang /usr/local/bin/librefang
 
