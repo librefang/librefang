@@ -6,6 +6,9 @@
 # Track Node 20 LTS — CI's setup-node also uses node-version: 20
 # (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
 FROM node:20.20.2-alpine AS dashboard-builder
+# Required for pnpm to run non-interactively (no TTY in docker build).
+# Without this, `pnpm install` aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
+ENV CI=true
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
