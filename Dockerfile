@@ -48,6 +48,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY packages ./packages
+# librefang-channels embeds the Python SDK tree at compile time via
+# include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang") in
+# embedded_sdk.rs (added in #5472). Without this COPY the proc macro
+# panics with "sdk/python/librefang is not a directory". Only this one
+# subtree is needed — .dockerignore keeps the rest of sdk/ out.
+COPY sdk/python/librefang ./sdk/python/librefang
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the
@@ -59,12 +65,12 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    # `--features all-channels`: the published Docker image is the full
-    # daemon, so opt back in to every channel adapter. The CLI's `default`
-    # was slimmed to a "core-channels" subset (see #3655 / #3688) to keep
-    # developer cold-build time low; release/packaging pipelines re-enable
-    # the full set explicitly.
-    cargo build --release --bin librefang --features all-channels && \
+    # `--features telemetry`: the published Docker image is the full
+    # daemon, so it ships with telemetry on. Channel adapters all run as
+    # out-of-process sidecars now (see #5408 / #5461), so the old
+    # `all-channels` / `core-channels` aliases are gone — `telemetry` is
+    # the whole opt-in surface left, matching the CLI's own `default`.
+    cargo build --release --bin librefang --features telemetry && \
     cp target/release/librefang /usr/local/bin/librefang
 
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)
