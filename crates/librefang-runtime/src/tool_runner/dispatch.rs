@@ -1054,25 +1054,36 @@ pub async fn execute_tool_raw(
         // System time tool
         "system_time" => Ok(tool_system_time()),
 
-        // Skill file read tool
-        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills).await,
+        // Skill file read tool (#3576: return Result<String, ToolError>;
+        // narrow to Result<String, String> here at the boundary).
+        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Skill evolution tools
-        "skill_evolve_create" => {
-            tool_skill_evolve_create(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_update" => {
-            tool_skill_evolve_update(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_patch" => {
-            tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry).await,
+        "skill_evolve_create" => tool_skill_evolve_create(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_update" => tool_skill_evolve_update(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_patch" => tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
         "skill_evolve_rollback" => {
-            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id)
+                .await
+                .map_err(|e| e.to_string())
         }
-        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
-        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
+        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Cron scheduling tools — first slice of the #3576 typed-error
         // migration. The submodule now returns `Result<String, ToolError>`;
