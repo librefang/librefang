@@ -866,6 +866,7 @@ pub async fn execute_tool_raw(
                 interrupt.clone(),
             )
             .await
+            .map_err(|e| e.to_string()) // #3576: narrow ToolError at the boundary
         }
 
         // Inter-agent tools (require kernel handle)
