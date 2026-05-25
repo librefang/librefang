@@ -889,13 +889,26 @@ pub async fn execute_tool_raw(
         "wiki_search" => tool_wiki_search(input, *kernel, *sender_id, *channel),
         "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel),
 
-        // Collaboration tools
+        // Collaboration tools. task_* is the #3576 third slice: the submodule
+        // returns `Result<String, ToolError>`; arms narrow to
+        // `Result<String, String>` here at the boundary (same bridge as the
+        // cron / schedule slices) until the dispatch return type itself lifts.
         "agent_find" => tool_agent_find(input, *kernel),
-        "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
-        "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
-        "task_list" => tool_task_list(input, *kernel).await,
-        "task_status" => tool_task_status(input, *kernel).await,
+        "task_post" => tool_task_post(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_claim" => tool_task_claim(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_list" => tool_task_list(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_status" => tool_task_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
         "event_publish" => tool_event_publish(input, *kernel)
             .await
             .map_err(|e| e.to_string()),
