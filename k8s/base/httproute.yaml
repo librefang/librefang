@@ -1,15 +1,41 @@
-# HTTPRoute attached to the cluster's Envoy Gateway.
+# HTTPRoutes for BossFang.
 #
-# `parentRefs` points at `envoy-gateway` in `envoy-gateway-system`
-# (same parent that UAR and presumably candle-vllm use).
+# Two routes matching the cluster-wide pattern (see argocd, docuseal):
+#   1. HTTP -> HTTPS redirect on the `http` listener
+#   2. HTTPS backend proxy on the `https` listener
 #
-# The hostname is `bossfang.prometheusags.ai` — placeholder in base/,
-# patched to the real value in overlays/production-gke/. Same with
-# any path-prefix tweaks.
+# Both reference `bossfang-gateway` in `envoy-gateway-system`.
+# Cross-namespace attachment works because the Gateway's listeners use
+# `allowedRoutes.namespaces.from: All`.
 #
-# TLS termination is handled at the Gateway listener, not here. See
-# overlays/production-gke/tls/README.md for how the wildcard cert
-# for *.prometheusags.ai gets wired in.
+# TLS terminates at the Gateway listener using `prometheusags-wildcard-tls`
+# (already in envoy-gateway-system). No cert management needed here.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bossfang-http-redirect
+  namespace: bossfang
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/component: route
+    app.kubernetes.io/part-of: bossfang
+spec:
+  hostnames:
+    - "bossfang.prometheusags.ai"
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: bossfang-gateway
+      namespace: envoy-gateway-system
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -20,11 +46,14 @@ metadata:
     app.kubernetes.io/component: route
     app.kubernetes.io/part-of: bossfang
 spec:
-  parentRefs:
-    - name: envoy-gateway
-      namespace: envoy-gateway-system
   hostnames:
     - "bossfang.prometheusags.ai"
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: bossfang-gateway
+      namespace: envoy-gateway-system
+      sectionName: https
   rules:
     - matches:
         - path:

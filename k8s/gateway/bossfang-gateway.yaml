@@ -1,0 +1,39 @@
+# BossFang Gateway — lives in envoy-gateway-system alongside the
+# wildcard TLS secret (prometheusags-wildcard-tls).
+#
+# Pattern matches every other service on this cluster:
+# docuseal-gateway, document-designer-gateway, hotseaters-gateway.
+# Each service owns its own Gateway resource here; HTTPRoutes in the
+# bossfang namespace reference it cross-namespace via
+# `parentRef.namespace: envoy-gateway-system`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: bossfang-gateway
+  namespace: envoy-gateway-system
+  labels:
+    app.kubernetes.io/name: bossfang
+    app.kubernetes.io/part-of: bossfang
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: bossfang.prometheusags.ai
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: prometheusags-wildcard-tls
+            namespace: envoy-gateway-system

@@ -6,6 +6,9 @@
 # Track Node 20 LTS — CI's setup-node also uses node-version: 20
 # (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
 FROM node:20.20.2-alpine AS dashboard-builder
+# Required for pnpm to run non-interactively (no TTY in docker build).
+# Without this, `pnpm install` aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
+ENV CI=true
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
@@ -42,6 +45,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-dev \
     perl \
     ca-certificates \
+    openssh-client \
+    clang \
+    libclang-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
@@ -62,7 +69,13 @@ COPY sdk/python/librefang ./sdk/python/librefang
 COPY deploy ./deploy
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+# Add github.com to known_hosts so the SSH mount can fetch private git deps
+# (kreuzberg via universal-agent-runtime) without interactive host-key prompts.
+RUN mkdir -p -m 0700 /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+RUN --mount=type=ssh \
+    --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
     # `--features telemetry`: the published Docker image is the full
@@ -70,6 +83,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # out-of-process sidecars now (see #5408 / #5461), so the old
     # `all-channels` / `core-channels` aliases are gone — `telemetry` is
     # the whole opt-in surface left, matching the CLI's own `default`.
+    # `--mount=type=ssh` is required for private git deps (kreuzberg via
+    # universal-agent-runtime) that are fetched over SSH during the build.
+    SKIP_FRONTEND_BUILD=1 \
+    SKIP_DASHBOARD_BUILD=1 \
     cargo build --release --bin librefang --features telemetry,surreal-backend && \
     cp target/release/librefang /usr/local/bin/librefang
 
