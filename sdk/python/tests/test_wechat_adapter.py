@@ -814,8 +814,9 @@ async def test_on_command_typing_empty_user_drops(monkeypatch):
 # dashboard's `GET /api/channels/{name}/qr` projection. These tests
 # pin the contract: the right events fire on the right transitions,
 # with the right payloads (qrcode string surfaced, terminal failure
-# / expiry message populated, captured token logged at DEBUG only —
-# never on the protocol event, see `protocol.qr_status` docstring).
+# / expiry message populated, the raw token never on the protocol
+# event — only a short SHA-256 fingerprint is logged at DEBUG, see
+# `protocol.qr_status` docstring and issue #5543).
 
 
 def _make_qr_responses(*pairs):
@@ -918,6 +919,39 @@ def test_qr_login_emits_failed_on_qrcode_request_error(monkeypatch):
         f"got: {methods}"
     )
     assert captured[-1]["params"]["status"] == "failed"
+
+
+def test_qr_login_never_logs_full_bot_token(monkeypatch, capsys):
+    # Regression for #5543: the captured bot_token MUST NOT appear in
+    # any stderr log line (INFO or DEBUG). Only a short SHA-256
+    # fingerprint may surface for cross-session correlation.
+    import hashlib
+
+    secret = "tok_live_secret_value"
+    fp = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+    monkeypatch.setattr(
+        wc, "_http_request",
+        _make_qr_responses(
+            (200, {"qrcode": "opaque-token"}),
+            (200, {"status": "confirmed", "bot_token": secret}),
+        ),
+    )
+    a = _adapter(WECHAT_BOT_TOKEN="")
+    captured: list = []
+    token = a._qr_login(emit=captured.append)
+    assert token == secret  # in-process return path unchanged
+
+    err = capsys.readouterr().err
+    assert secret not in err, (
+        "full bot_token leaked into stderr logs — see issue #5543"
+    )
+    assert fp in err, (
+        "SHA-256 fingerprint missing from DEBUG log — operator loses "
+        "cross-session correlation signal"
+    )
+    # Protocol event is the second guardrail.
+    confirmed = next(e for e in captured if e["method"] == "qr_status")
+    assert secret not in json.dumps(confirmed)
 
 
 def test_qr_login_without_emit_still_returns_token(monkeypatch):

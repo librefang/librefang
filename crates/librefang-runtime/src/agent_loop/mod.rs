@@ -46,7 +46,7 @@ mod tool_resolution;
 mod types;
 mod web_augment;
 
-pub use self::history::DEFAULT_MAX_HISTORY_MESSAGES;
+pub use self::history::{DEFAULT_MAX_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES};
 pub use self::model::{apply_session_model_override_to_manifest, strip_provider_prefix};
 pub use self::run_streaming::run_agent_loop_streaming;
 pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase, PhaseCallback};
@@ -1610,8 +1610,8 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
-                        owner_notice: None,
-                        actual_provider: None,
+                        owner_notice: std::mem::take(&mut pending_owner_notice),
+                        actual_provider: last_actual_provider.clone(),
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1621,6 +1621,11 @@ pub async fn run_agent_loop(
                 session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit, continuing");
+                if !opts.is_fork && !opts.incognito {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on max tokens continuation: {e}");
+                    }
+                }
             }
             StopReason::ContentFiltered => {
                 // Provider refused / safety-filtered the response (#3450).

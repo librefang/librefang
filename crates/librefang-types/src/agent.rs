@@ -1230,9 +1230,10 @@ pub struct AgentManifest {
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
     /// Per-agent override for the message-history trim cap. When set,
     /// takes precedence over `KernelConfig.max_history_messages` and the
-    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
-    /// `None` means inherit from kernel config / default. Values below 4
-    /// are silently clamped at runtime with a warning log.
+    /// compiled-in default (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Runtime clamps values
+    /// below 4 up to the safe-trim floor and values above 500 down to the hard
+    /// ceiling, emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
     /// Trigger-dispatch-only: cap on concurrent invocations from the
