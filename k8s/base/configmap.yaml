@@ -33,13 +33,15 @@ data:
     trust_forwarded_for = true
 
     # Storage: remote SurrealDB in the same namespace.
-    # Both librefang-storage and surreal-memory pick this up — they share
-    # the same StorageConfig and route to different databases automatically
-    # (main + memory respectively under namespace `bossfang`).
+    # StorageBackendKind uses #[serde(tag = "kind")] so the backend variant
+    # and its fields must be in the same [storage.backend] table — not a
+    # separate [storage.remote] section and not a plain string.
     [storage]
-    backend = "remote"
+    namespace = "bossfang"
+    database = "main"
 
-    [storage.remote]
+    [storage.backend]
+    kind = "remote"
     url = "ws://surrealdb:8000"
     namespace = "bossfang"
     database = "main"
