@@ -1080,9 +1080,12 @@ pub async fn execute_tool_raw(
         "hand_status" => tool_hand_status(input, *kernel).await,
         "hand_deactivate" => tool_hand_deactivate(input, *kernel).await,
 
-        // A2A outbound tools (cross-instance agent communication)
-        "a2a_discover" => tool_a2a_discover(input).await,
-        "a2a_send" => tool_a2a_send(input, *kernel).await,
+        // A2A outbound tools (cross-instance agent communication). #3576:
+        // submodule returns Result<String, ToolError>; narrow at the boundary.
+        "a2a_discover" => tool_a2a_discover(input).await.map_err(|e| e.to_string()),
+        "a2a_send" => tool_a2a_send(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Goal tracking tool (#3576: sync tool now returns
         // Result<String, ToolError>; narrow to Result<String, String> here)
