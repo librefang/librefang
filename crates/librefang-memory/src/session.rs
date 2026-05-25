@@ -98,12 +98,17 @@ pub struct Session {
     /// repair pass. `None` means the session was cold-loaded or freshly
     /// constructed and must be repaired once before skip logic can apply.
     pub last_repaired_generation: Option<u64>,
-    /// Peer identifier (channel-specific user id / JID) when the session is
-    /// scoped to a single contact, e.g. the WhatsApp / Telegram `chat_id`
-    /// fed into `SessionId::for_sender_scope`. `None` for canonical /
-    /// auto-dream / cron / WebUI sessions that span all peers.
+    /// Conversation identifier (channel-specific chat id / JID) when the
+    /// session is scoped to a single contact — the WhatsApp or Telegram
+    /// `chat_id` fed into `SessionId::for_sender_scope`. This is the
+    /// *conversation* key, not the individual speaker; in group chats it
+    /// identifies the group, not a particular member. Differs from
+    /// `memories.peer_id`, which stores `sender_user_id` (the speaker)
+    /// — a future join across the two columns must account for this.
+    /// `None` for canonical / auto-dream / cron / fork / WebUI sessions
+    /// that span all peers.
     ///
-    /// Migration v16 (#3xxx) added the underlying `sessions.peer_id`
+    /// Migration v16 (#2015) added the underlying `sessions.peer_id`
     /// column plus an `idx_sessions_peer(agent_id, peer_id)` covering
     /// index, but `save_session` did not populate it; every row inserted
     /// since v16 carried `peer_id IS NULL`, leaving the index dead weight
@@ -1093,6 +1098,7 @@ impl SessionStore {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            // No sender context — admin / diagnostic / API path.
             peer_id: None,
         };
         self.save_session(&session)?;
@@ -1270,6 +1276,7 @@ impl SessionStore {
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
+            // No sender context — admin / diagnostic / API path.
             peer_id: None,
         };
         self.save_session(&session)?;

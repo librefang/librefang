@@ -4558,10 +4558,17 @@ fn test_execute_llm_agent_hardcodes_is_fork_false_for_peer_id_invariant() {
          `!loop_opts.is_fork` guard mirrored from send_message_full_inner."
     );
 
-    // Invariant 2: there must be no `is_fork: true` literal in this
-    // file. Forks belong on the messaging.rs path.
+    // Invariant 2: no *code* line must contain `is_fork: true` — forks
+    // belong on the messaging.rs path.  Comments are excluded so that
+    // the explanatory prose documenting the invariant does not trip the
+    // assertion (the very comment added in this PR mentions the literal
+    // `is_fork: true` when describing the fork dispatch path).
+    let code_has_is_fork_true = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .any(|l| l.contains("is_fork: true"));
     assert!(
-        !src.contains("is_fork: true"),
+        !code_has_is_fork_true,
         "execute_llm_agent must not construct a fork-shaped LoopOptions; \
          forks dispatch through send_message_streaming_with_sender_and_opts."
     );
