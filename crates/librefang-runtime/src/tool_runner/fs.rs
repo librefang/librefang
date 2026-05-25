@@ -304,9 +304,14 @@ pub(super) async fn tool_file_list(
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
 ) -> ToolResult {
-    let raw_path = input["path"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("path"))?;
+    // Keep the self-correction hint the pre-#3576 message carried: an LLM that
+    // calls file_list with no path recovers in one turn by re-calling with
+    // {"path": "."}. MissingParameter can't carry free text, so use
+    // InvalidParameter to preserve the guidance.
+    let raw_path = input["path"].as_str().ok_or(ToolError::InvalidParameter {
+        name: "path",
+        reason: "retry with {\"path\": \".\"} to list the workspace root".to_string(),
+    })?;
     let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
@@ -485,9 +490,17 @@ mod toolerror_tests {
     }
 
     #[tokio::test]
-    async fn file_list_missing_path_is_missing_parameter() {
+    async fn file_list_missing_path_is_invalid_parameter_with_hint() {
+        // file_list maps a missing path to InvalidParameter so it can carry the
+        // {"path": "."} self-correction hint (MissingParameter is name-only).
         let r = tool_file_list(&json!({}), None, &[]).await;
-        assert!(matches!(r, Err(ToolError::MissingParameter("path"))));
+        match r {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "path");
+                assert!(reason.contains("\"path\": \".\""), "got: {reason}");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
     }
 
     #[tokio::test]
