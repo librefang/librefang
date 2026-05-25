@@ -312,20 +312,18 @@ pub fn resolve_timezone(config: &KernelConfig) -> Tz {
 }
 
 /// Resolve the active [`RateLimitNotifyConfig`] for an agent. Per-agent
-/// override wins when its `enabled = true` OR its `template = Some(...)`;
-/// otherwise the kernel-global config is used. The bare-default
-/// (`enabled = false`, no template) on the manifest does *not* override
-/// a kernel-level `enabled = true`, because the manifest default is
-/// indistinguishable from "field not set" in TOML.
+/// override wins when `Some(…)` — even `Some(RateLimitNotifyConfig {
+/// enabled: false, .. })` explicitly disables the feature for that agent.
+/// `None` (field absent in `agent.toml`) falls through to the kernel-global
+/// config. This uses the `Option<T>` idiom (same as `compaction`) so TOML
+/// `enabled = false` is distinguishable from "field not set".
 pub fn resolve_config<'a>(
     manifest: &'a AgentManifest,
     kernel: &'a KernelConfig,
 ) -> &'a RateLimitNotifyConfig {
-    let per_agent = &manifest.rate_limit_notify;
-    if per_agent.enabled || per_agent.template.is_some() {
-        per_agent
-    } else {
-        &kernel.rate_limit_notify
+    match &manifest.rate_limit_notify {
+        Some(per_agent) => per_agent,
+        None => &kernel.rate_limit_notify,
     }
 }
 
@@ -428,9 +426,6 @@ pub async fn maybe_dispatch_owner_notify(
     // not a reply to any specific message; it surfaces in the active
     // chat at the top level so the owner can read it without having to
     // expand a thread.
-    let now_ts =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(reset_unix, 0).unwrap_or_else(Utc::now);
-    let _ = now_ts; // intentionally unused — kept for future log fields
     sender
         .send_channel_message(channel, recipient, &rendered, None, account_id)
         .await
@@ -469,13 +464,9 @@ pub async fn dispatch_via_kernel(
     let kernel_cfg = kernel.rate_limit_notify_config().unwrap_or_default();
     let tz_name = kernel.system_timezone();
 
-    // Resolve per-agent vs kernel-global config inline (mirrors
-    // `resolve_config` but without needing a full KernelConfig).
-    let per_agent = &manifest.rate_limit_notify;
-    let active = if per_agent.enabled || per_agent.template.is_some() {
-        per_agent
-    } else {
-        &kernel_cfg
+    let active = match &manifest.rate_limit_notify {
+        Some(per_agent) => per_agent,
+        None => &kernel_cfg,
     };
     if !active.enabled {
         debug!(
@@ -605,8 +596,8 @@ fn mirror_owner_notify_into_session(
     // injection through the body content.
     let mirror_text = format!(
         "{{\"mirror_from\":{},\"body\":{}}}",
-        serde_json::to_string(agent_name).unwrap_or_else(|_| "\"unknown\"".to_string()),
-        serde_json::to_string(body).unwrap_or_else(|_| "\"\"".to_string()),
+        serde_json::Value::String(agent_name.to_string()),
+        serde_json::Value::String(body.to_string()),
     );
 
     let msg = Message {
@@ -733,10 +724,10 @@ mod tests {
             template: Some("kernel-template".to_string()),
         };
         let mut manifest = AgentManifest::default();
-        manifest.rate_limit_notify = RateLimitNotifyConfig {
+        manifest.rate_limit_notify = Some(RateLimitNotifyConfig {
             enabled: true,
             template: Some("agent-template".to_string()),
-        };
+        });
         let resolved = resolve_config(&manifest, &kernel);
         assert_eq!(resolved.template.as_deref(), Some("agent-template"));
     }
@@ -752,6 +743,25 @@ mod tests {
         let resolved = resolve_config(&manifest, &kernel);
         assert_eq!(resolved.template.as_deref(), Some("kernel-template"));
         assert!(resolved.enabled);
+    }
+
+    #[test]
+    fn resolve_config_explicit_disable_overrides_kernel_enabled() {
+        let mut kernel = KernelConfig::default();
+        kernel.rate_limit_notify = RateLimitNotifyConfig {
+            enabled: true,
+            template: Some("kernel-template".to_string()),
+        };
+        let mut manifest = AgentManifest::default();
+        manifest.rate_limit_notify = Some(RateLimitNotifyConfig {
+            enabled: false,
+            template: None,
+        });
+        let resolved = resolve_config(&manifest, &kernel);
+        assert!(
+            !resolved.enabled,
+            "explicit per-agent false must override kernel true"
+        );
     }
 
     #[test]
@@ -830,7 +840,10 @@ mod tests {
     async fn dispatch_skipped_when_no_channel() {
         let mut manifest = AgentManifest::default();
         manifest.name = "dispatch_nochannel_agent".to_string();
-        manifest.rate_limit_notify.enabled = true;
+        manifest.rate_limit_notify = Some(RateLimitNotifyConfig {
+            enabled: true,
+            template: None,
+        });
         let kernel = KernelConfig::default();
         let stub = StubSender::default();
         let sent = maybe_dispatch_owner_notify(
@@ -853,10 +866,10 @@ mod tests {
     async fn dispatch_calls_sender_and_dedupes() {
         let mut manifest = AgentManifest::default();
         manifest.name = "dispatch_dedup_agent".to_string();
-        manifest.rate_limit_notify = RateLimitNotifyConfig {
+        manifest.rate_limit_notify = Some(RateLimitNotifyConfig {
             enabled: true,
             template: Some("⏸ resets {reset_time} ({reset_in_minutes}m)".into()),
-        };
+        });
         let mut kernel = KernelConfig::default();
         kernel.system.timezone = Some("Europe/Rome".into());
 
@@ -909,10 +922,10 @@ mod tests {
     async fn dispatch_falls_back_to_retry_after_when_reset_missing() {
         let mut manifest = AgentManifest::default();
         manifest.name = "dispatch_fallback_agent".to_string();
-        manifest.rate_limit_notify = RateLimitNotifyConfig {
+        manifest.rate_limit_notify = Some(RateLimitNotifyConfig {
             enabled: true,
             template: Some("reset in {reset_in_minutes}m".into()),
-        };
+        });
         let kernel = KernelConfig::default();
         let stub = StubSender::default();
         let sent = maybe_dispatch_owner_notify(

@@ -106,6 +106,11 @@
           "description": "Auto-approve in autonomous mode. Default: `false`.",
           "type": "boolean"
         },
+        "cache_approvals_per_session": {
+          "default": true,
+          "description": "Cache approvals within a chat session (#5600).\n\nWhen `true` (the default), the first time a user approves a tool inside a session, subsequent calls of the same tool name in that session auto-approve without re-prompting. This matches typical IDE / MCP-client behaviour (one approval per (session, tool) is enough). Set to `false` to require per-call approval — useful for compliance environments that need an explicit human decision on every tool execution.\n\nScope: in-memory only. Daemon restart clears the cache. The cache keys on `(session_id, tool_name)`; different sessions still each see one prompt per distinct tool.",
+          "type": "boolean"
+        },
         "channel_rules": {
           "default": [],
           "description": "Per-channel tool authorization rules.\n\nEach rule specifies allowed and/or denied tools for a specific channel. Rules are evaluated in order; the first matching rule wins.  If no rule matches the request's channel, the default `require_approval` list applies.",
@@ -5744,6 +5749,7 @@
         "audit_retention_days": 90,
         "auto_approve": false,
         "auto_approve_autonomous": false,
+        "cache_approvals_per_session": true,
         "channel_rules": [],
         "require_approval": [
           "shell_exec",
@@ -6380,7 +6386,7 @@
       "type": "integer"
     },
     "max_history_messages": {
-      "description": "Operator override for the agent message-history trim cap. When set, any agent without its own `max_history_messages` uses this value instead of the compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound per-turn token cost; raise it for long-context models. `None` means \"use the compiled-in default\". Values below 4 are silently clamped at runtime with a warning log.",
+      "description": "Operator override for the agent message-history trim cap. When set, any agent without its own `max_history_messages` uses this value instead of the compiled-in default (`agent_loop::history::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound per-turn token cost; raise it for long-context models. `None` means \"use the compiled-in default\". Runtime clamps values below 4 up to the safe-trim floor and values above 500 down to the hard ceiling, emitting a `warn!` log with `agent`, `requested`, and `applied`.",
       "format": "uint",
       "minimum": 0.0,
       "type": [

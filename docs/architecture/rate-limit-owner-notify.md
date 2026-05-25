@@ -194,7 +194,7 @@ template = "Signore, il maggiordomo è in permesso fino alle {reset_time} ({rese
 # ~/.librefang/agents/cron-worker/agent.toml
 [rate_limit_notify]
 enabled  = false
-# template intentionally absent — `enabled = false` is sufficient to skip
+# template intentionally absent — explicit `enabled = false` overrides the kernel default
 ```
 
 ## What this does NOT do

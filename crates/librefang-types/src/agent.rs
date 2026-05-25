@@ -1293,8 +1293,8 @@ pub struct AgentManifest {
     /// once retries are exhausted. See
     /// [`crate::config::RateLimitNotifyConfig`] for placeholders.
     /// Resolution order: per-agent > kernel-global > hardcoded fallback.
-    #[serde(default)]
-    pub rate_limit_notify: crate::config::RateLimitNotifyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_notify: Option<crate::config::RateLimitNotifyConfig>,
     /// Per-agent override for the kernel-global `[proactive_memory]`
     /// policy (#4870). Each field of
     /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
@@ -1554,7 +1554,7 @@ impl Default for AgentManifest {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
-            rate_limit_notify: crate::config::RateLimitNotifyConfig::default(),
+            rate_limit_notify: None,
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
             compaction: None,
             triggers: Vec::new(),
