@@ -48,6 +48,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY packages ./packages
+# librefang-channels embeds the Python SDK tree at compile time via
+# include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang") in
+# embedded_sdk.rs (added in #5472). Without this COPY the proc macro
+# panics with "sdk/python/librefang is not a directory". Only this one
+# subtree is needed — .dockerignore keeps the rest of sdk/ out.
+COPY sdk/python/librefang ./sdk/python/librefang
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the
