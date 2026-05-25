@@ -347,15 +347,24 @@ pub fn check_json_depth(
 /// oracle for arbitrary filesystem paths.
 ///
 /// Behaviour:
-/// - `require_exists = true` (source paths): the input MUST already exist on
-///   disk. We canonicalize it (resolving any `..` or symlink) and reject if
-///   the result is not a descendant of any allowed root.
-/// - `require_exists = false` (target paths): the input MAY be nonexistent
-///   because the migration will create it. We walk up to the nearest existing
-///   ancestor, canonicalize THAT, then re-append the unresolved suffix. The
-///   composed path must still be a descendant of an allowed root. This blocks
-///   `/etc/cron.d/foo` (no existing ancestor under home) and
+/// - The input is resolved the same way regardless of `require_exists`: we
+///   walk up to the nearest existing ancestor, canonicalize THAT, then
+///   re-append the unresolved suffix. For an input that already exists this
+///   collapses to a full `canonicalize()` (the leaf's symlinks are resolved
+///   because the leaf *is* the nearest existing ancestor). This blocks
+///   `/etc/cron.d/foo` (resolves to `/etc/...`, outside home) and
 ///   `~/.librefang/../etc/foo` (canonical ancestor is `/etc`, not home).
+/// - Containment is checked on the resolved path BEFORE any existence check,
+///   so a path outside the allowlist is rejected with the same message
+///   whether or not it exists. The earlier split — `canonicalize()`-failed
+///   for a nonexistent source vs `outside-roots` for an existing one — was a
+///   `.exists()` oracle, and on Windows a Unix-style absolute like `/etc`
+///   (nonexistent there) failed `canonicalize()` before the allowlist check
+///   ran at all, surfacing "could not be canonicalized" instead of the
+///   allowlist policy (#5716).
+/// - `require_exists = true` (source paths) additionally requires the
+///   resolved path to exist on disk; `require_exists = false` (target paths)
+///   may be nonexistent because the migration will create it.
 ///
 /// Returns the canonicalized path on success.
 pub fn validate_path_containment(
@@ -383,30 +392,35 @@ pub fn validate_path_containment(
         }
     }
 
-    let resolved = if require_exists {
-        input.canonicalize().map_err(|e| {
-            ValidationError::bad_request(format!(
-                "Field '{field_name}': path '{}' could not be canonicalized: {e}",
-                input.display()
-            ))
-        })?
-    } else {
-        canonicalize_nonexistent(input).map_err(|e| {
-            ValidationError::bad_request(format!(
-                "Field '{field_name}': path '{}' could not be resolved: {e}",
-                input.display()
-            ))
-        })?
-    };
+    // Resolve existing and nonexistent inputs identically (see doc comment):
+    // walk up to the nearest existing ancestor, canonicalize it, re-append the
+    // suffix. This keeps the containment check — and its rejection message —
+    // independent of whether the path exists, closing the `.exists()` oracle
+    // and the Windows `/etc` canonicalize-before-allowlist bug (#5716).
+    let resolved = canonicalize_nonexistent(input).map_err(|e| {
+        ValidationError::bad_request(format!(
+            "Field '{field_name}': path '{}' could not be resolved: {e}",
+            input.display()
+        ))
+    })?;
 
-    if canon_roots.iter().any(|root| resolved.starts_with(root)) {
-        Ok(resolved)
-    } else {
-        Err(ValidationError::bad_request(format!(
+    if !canon_roots.iter().any(|root| resolved.starts_with(root)) {
+        return Err(ValidationError::bad_request(format!(
             "Field '{field_name}': path '{}' is outside the allowed migration roots",
             input.display()
-        )))
+        )));
     }
+
+    // Containment satisfied. Source paths must additionally already exist;
+    // target paths may not (the migration creates them).
+    if require_exists && !resolved.exists() {
+        return Err(ValidationError::bad_request(format!(
+            "Field '{field_name}': path '{}' does not exist",
+            input.display()
+        )));
+    }
+
+    Ok(resolved)
 }
 
 /// Resolve a path that may not yet exist by canonicalizing the nearest
@@ -564,6 +578,61 @@ pub fn check_identifier(field_name: &str, value: &str) -> Result<(), ValidationE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #5716 regression: a nonexistent path that resolves OUTSIDE the allowed
+    /// roots must be rejected with the allowlist-policy message, never the
+    /// `canonicalize`-failed message — on every platform. The original code
+    /// ran `input.canonicalize()` before the containment check for source
+    /// paths, so on Windows a Unix-style absolute like `/etc` (nonexistent
+    /// there) died at canonicalization and surfaced "could not be
+    /// canonicalized", which both broke CI and leaked path existence.
+    #[test]
+    fn containment_rejects_nonexistent_path_outside_roots_with_allowlist_message() {
+        let allowed = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        // Existing dir, nonexistent leaf — outside the allowed root.
+        let input = other.path().join("does-not-exist-leaf");
+
+        let allowed_roots: [&std::path::Path; 1] = [allowed.path()];
+        let err = validate_path_containment("path", &input, &allowed_roots, true)
+            .expect_err("path outside allowed roots must be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("path") && err.message.contains("allowed"),
+            "must name the field and allowlist policy, got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("could not be canonicalized"),
+            "containment must be decided before any canonicalize/exists check, got: {}",
+            err.message
+        );
+    }
+
+    /// A path that IS contained but does not exist is rejected only when the
+    /// caller requires existence (source paths); target paths accept it.
+    #[test]
+    fn containment_existence_check_is_gated_on_require_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("to-be-created");
+        let allowed_roots: [&std::path::Path; 1] = [root.path()];
+
+        // require_exists = true → rejected as missing, NOT as out-of-bounds.
+        let err = validate_path_containment("source_dir", &inside, &allowed_roots, true)
+            .expect_err("missing source must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("does not exist"),
+            "got: {}",
+            err.message
+        );
+
+        // require_exists = false → accepted; migration will create it.
+        let resolved = validate_path_containment("target_dir", &inside, &allowed_roots, false)
+            .expect("nonexistent target under an allowed root is accepted");
+        assert!(resolved.ends_with("to-be-created"));
+    }
 
     #[test]
     fn test_check_string_length_within_limit() {
