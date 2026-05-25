@@ -69,6 +69,11 @@ spec:
             # at /data/config.toml.
             - name: BOSSFANG_HOME
               value: /data
+            # The pod is only reachable through Envoy Gateway, which
+            # enforces TLS and network-level access control. Skip the
+            # daemon's own no-auth guard so it can bind on 0.0.0.0:4545.
+            - name: LIBREFANG_ALLOW_NO_AUTH
+              value: "1"
             # SurrealDB password the config.toml's password_env points at.
             - name: SURREAL_PASS
               valueFrom:
