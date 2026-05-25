@@ -1,5 +1,6 @@
 import { formatTime, formatUptime } from "../lib/datetime";
 import { useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { type CommsEventItem } from "../api";
 import { useChannels, useCommsTopology, useCommsEvents } from "../lib/queries/channels";
@@ -102,6 +103,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
 
 export function CommsPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"channels" | "topology" | "events">("channels");
   const [search, setSearch] = useState("");
 
@@ -287,7 +289,20 @@ export function CommsPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
               {filteredChannels.map((c) => (
-                <Card key={c.name} hover padding="md">
+                <Card
+                  key={c.name}
+                  hover
+                  padding="md"
+                  onClick={() => navigate({ to: "/channels", search: { channel: c.name } })}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      navigate({ to: "/channels", search: { channel: c.name } });
+                    }
+                  }}
+                >
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
                       <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${c.configured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>

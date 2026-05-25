@@ -160,6 +160,11 @@ const providersRoute = createRoute({
 const channelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/channels",
+  validateSearch: (search: Record<string, unknown>): { channel?: string } => {
+    const out: { channel?: string } = {};
+    if (typeof search.channel === "string") out.channel = search.channel;
+    return out;
+  },
   component: () => <LazyRouteBoundary><ChannelsPage /></LazyRouteBoundary>
 });
 

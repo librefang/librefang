@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearch } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import type { ChannelItem } from "../api";
 import { useChannels, useChannelQr } from "../lib/queries/channels";
@@ -557,6 +558,7 @@ function SidecarForm({
 
 export function ChannelsPage() {
   const { t } = useTranslation();
+  const routeSearch = useSearch({ strict: false });
   const [search, setSearch] = useState("");
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -590,6 +592,15 @@ export function ChannelsPage() {
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
   const unconfiguredCount = channels.length - configuredCount;
+
+  // When navigated from CommsPage with ?channel=<name>, open that channel's
+  // details panel once the channel list has loaded.
+  useEffect(() => {
+    const openChannel = (routeSearch as { channel?: string }).channel;
+    if (!openChannel || channels.length === 0) return;
+    const match = channels.find(c => c.name === openChannel);
+    if (match) setDetailsChannel(match);
+  }, [channels, routeSearch]);
 
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.

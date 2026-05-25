@@ -255,3 +255,20 @@ input[type="number"] {
   appearance: textfield;
 }
 
+/* ── Interactive element cursors ──────────────────────────
+   Browsers reset cursor to `default` on many interactive
+   elements inside Tailwind's base reset. Force pointer on
+   everything a user would reasonably click, using !important
+   so utility classes cannot accidentally override it. */
+@layer base {
+  button:not([disabled]),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label[for],
+  select:not([disabled]),
+  summary,
+  [tabindex]:not([tabindex="-1"]) {
+    cursor: pointer !important;
+  }
+}
+

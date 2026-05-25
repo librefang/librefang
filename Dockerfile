@@ -106,6 +106,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 \
     gosu \
     && rm -rf /var/lib/apt/lists/*
+# Install the librefang Python SDK so sidecar adapters can run `--describe`
+# at daemon boot and populate the channel configuration schema cache.
+# Without this, populate_sidecar_schema_cache() caches empty fields[] for
+# every adapter and the channel config UI renders a blank form.
+COPY --from=builder /build/sdk/python /opt/librefang/sdk/python
+RUN python3 -m ensurepip && \
+    python3 -m pip install --no-cache-dir /opt/librefang/sdk/python
 RUN addgroup --system --gid 1001 librefang && \
     adduser --system --uid 1001 --ingroup librefang librefang
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
