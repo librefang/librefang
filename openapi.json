@@ -4322,6 +4322,92 @@
         }
       }
     },
+    "/api/budget/providers": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget/providers — Per-provider spend snapshot.",
+        "description": "Returns one row per provider that is either configured at\n`[budget.providers.<id>]` OR has emitted at least one usage event\nin the current month. Rows are ordered ascending by `provider` so\nthe response is deterministic across processes (#3298 — same\nrationale as `ExhaustionSnapshotRow`).\n\nEach row carries:\n  - The four configured caps (`cap_hourly_usd`, `cap_daily_usd`,\n    `cap_monthly_usd`, `cap_tokens_per_hour`) — `0` / `0.0` means\n    \"unlimited\", matching the on-disk `ProviderBudget` contract.\n  - The four current rollups (`spend_hourly_usd`, `spend_daily_usd`,\n    `spend_monthly_usd`, `tokens_this_hour`) aggregated from\n    `usage_events`.\n  - `is_exhausted` + `exhaustion_reason` + `exhaustion_remaining_ms`\n    from the live `ProviderExhaustionStore` so the operator can see\n    which slots the fallback chain is currently skipping.\n  - `unconfigured: bool` — `true` when the row only exists because\n    of an observed `usage_events.provider` but no\n    `[budget.providers.<id>]` entry. Lets the dashboard surface\n    a \"Set a cap\" CTA for the unattended provider.\n\nRead-only — no audit row. The PUT companion at\n`/api/budget/providers/{provider_id}` records its own ConfigChange\naudit entry on every mutation.",
+        "operationId": "provider_budget_list",
+        "responses": {
+          "200": {
+            "description": "Per-provider budget snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/budget/providers/{provider_id}": {
+      "put": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "PUT /api/budget/providers/{provider_id} — Upsert per-provider caps.",
+        "description": "Mutates `[budget.providers.<provider_id>]` on disk via the same\n`persist_budget` pipeline the global `PUT /api/budget` uses, then\ntriggers the kernel reload so the new caps reach\n`MeteringEngine::check_provider_budget` without a daemon restart.\n\nBody shape: `{ \"max_cost_per_hour_usd\": 1.0, \"max_cost_per_day_usd\": 10.0,\n               \"max_cost_per_month_usd\": 100.0, \"max_tokens_per_hour\": 1000000 }`\nMissing or `null` fields keep their prior value (partial PUT). Field\nvalidation mirrors `update_budget`: NaN, infinity, and negative\nnumbers are 400'd at the boundary so a bad input never gets burned\ninto `config.toml`.",
+        "operationId": "update_provider_budget",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "description": "Provider identifier (e.g. `openai`, `groq`, `anthropic`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Partial per-provider budget. Missing fields keep their prior value; 0 / 0.0 means unlimited.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated per-provider budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Submitted budget is malformed (NaN/infinity/negative cap, non-numeric type, blank provider id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Persist or reload failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/budget/users": {
       "get": {
         "tags": [

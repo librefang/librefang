@@ -14,6 +14,7 @@ librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 agent-client-protocol = { workspace = true }
 tokio-util = { workspace = true }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-channels = { path = "../librefang-channels", default-features = false }

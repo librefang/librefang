@@ -277,6 +277,8 @@ use crate::types;
         // ── Budget / Usage ──
         routes::budget_status,
         routes::update_budget,
+        routes::provider_budget_list,
+        routes::update_provider_budget,
         routes::agent_budget_status,
         routes::agent_budget_ranking,
         routes::update_agent_budget,

@@ -4130,6 +4130,7 @@ dependencies = [
  "librefang-import",
  "librefang-kernel",
  "librefang-kernel-handle",
+ "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
  "librefang-runtime",

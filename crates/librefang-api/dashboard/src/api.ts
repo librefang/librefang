@@ -3174,6 +3174,70 @@ export async function updateBudget(payload: Partial<BudgetStatus>): Promise<ApiA
   return put<ApiActionResponse>("/api/budget", payload);
 }
 
+// Per-provider budget snapshot (#5650). Mirrors the JSON envelope returned
+// by `GET /api/budget/providers` — see `crates/librefang-api/src/routes/
+// budget.rs::provider_budget_list`. Rows arrive pre-sorted ascending by
+// `provider`, so the dashboard table can render them as-is.
+export interface ProviderBudgetRow {
+  provider: string;
+  // `true` when the provider is observed in `usage_events` but has NO
+  // `[budget.providers.<id>]` entry. The dashboard surfaces a "Set a cap"
+  // CTA for these.
+  unconfigured: boolean;
+  // Configured caps — 0 / 0.0 means "unlimited", matching the on-disk
+  // `ProviderBudget` contract. Naming-wise these are deliberately
+  // distinct from the spend fields below so the wire is self-describing.
+  cap_hourly_usd: number;
+  cap_daily_usd: number;
+  cap_monthly_usd: number;
+  cap_tokens_per_hour: number;
+  // Current rollups from `usage_events`, aggregated server-side. UTC
+  // window boundaries (matches every other rollup in the budget surface).
+  spend_hourly_usd: number;
+  spend_daily_usd: number;
+  spend_monthly_usd: number;
+  tokens_this_hour: number;
+  // Live state from `ProviderExhaustionStore`. `is_exhausted=true` means
+  // the LLM fallback chain is currently skipping this provider; the
+  // reason and remaining auto-clear ms come straight from the store row.
+  is_exhausted: boolean;
+  exhaustion_reason: string | null;
+  exhaustion_remaining_ms: number | null;
+}
+
+export interface ProviderBudgetSnapshot {
+  providers: ProviderBudgetRow[];
+  // Echoed from the global `[budget]` table so the dashboard renders the
+  // green/yellow/red coloring against the same threshold the metering
+  // gate uses, without a second `/api/budget` roundtrip.
+  alert_threshold: number;
+}
+
+export async function getProviderBudgets(): Promise<ProviderBudgetSnapshot> {
+  return get<ProviderBudgetSnapshot>("/api/budget/providers");
+}
+
+/// Body shape for PUT /api/budget/providers/{provider_id}. All fields are
+/// optional — the handler does a partial update, so an unset field keeps
+/// its prior on-disk value. Set a field to 0 / 0.0 to explicitly clear a
+/// cap (the gate treats 0 as unlimited).
+export interface ProviderBudgetPayload {
+  max_cost_per_hour_usd?: number;
+  max_cost_per_day_usd?: number;
+  max_cost_per_month_usd?: number;
+  max_tokens_per_hour?: number;
+}
+
+export async function updateProviderBudget(
+  providerId: string,
+  payload: ProviderBudgetPayload,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/budget/providers/${encodeURIComponent(providerId)}`,
+    payload,
+  );
+}
+
 export async function suspendAgent(agentId: string): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/suspend`, {});
 }

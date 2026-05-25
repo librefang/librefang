@@ -284,6 +284,12 @@ export const usageKeys = {
 export const budgetKeys = {
   all: ["budget"] as const,
   status: () => [...budgetKeys.all, "status"] as const,
+  // Per-provider snapshot (#5650). Hierarchical under `budgetKeys.all`
+  // so `invalidateQueries({ queryKey: budgetKeys.all })` after a global
+  // `PUT /api/budget` (which can change `alert_threshold` and therefore
+  // the green/yellow/red coloring on each provider row) drops this cache
+  // too without a second `invalidateQueries` call.
+  providers: () => [...budgetKeys.all, "providers"] as const,
 };
 
 export const goalKeys = {
