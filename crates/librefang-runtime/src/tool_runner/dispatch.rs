@@ -1204,8 +1204,10 @@ pub async fn execute_tool_raw(
             tool_read_artifact(input, &artifact_dir).await
         }
 
-        // Canvas / A2UI tool
-        "canvas_present" => tool_canvas_present(input, *workspace_root).await,
+        // Canvas / A2UI tool (#3576: returns Result<String, ToolError>)
+        "canvas_present" => tool_canvas_present(input, *workspace_root)
+            .await
+            .map_err(|e| e.to_string()),
 
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
