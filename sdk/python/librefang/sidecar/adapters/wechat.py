@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import random
@@ -500,32 +501,40 @@ class WeChatAdapter(SidecarAdapter):
                     # The Rust adapter relied on the dashboard's
                     # /channels/wechat/qr/start + /qr/status endpoints
                     # to capture the token and write it to secrets.env.
-                    # Those routes are gone in the sidecar — surface
-                    # the token at DEBUG so an operator running the
-                    # sidecar at -v can copy it into
-                    # ~/.librefang/secrets.env as WECHAT_BOT_TOKEN to
-                    # skip QR login on subsequent restarts. INFO-level
-                    # message intentionally omits the token to keep
-                    # production logs free of secrets.
+                    # Those routes are gone in the sidecar. The token
+                    # is held in memory for the current session only;
+                    # we log a short SHA-256 fingerprint at DEBUG so
+                    # operators can correlate sessions across logs
+                    # without exposing the raw secret to any log
+                    # aggregator (fixes #5543 — previously logged the
+                    # full token, which is a strict regression vs the
+                    # original Rust-path leak audited under
+                    # docs/issues/wechat-bot-token-prefix-debug-log.md).
+                    token_fp = hashlib.sha256(
+                        token.encode("utf-8"),
+                    ).hexdigest()[:8]
                     log.info(
                         "wechat QR login successful — set WECHAT_BOT_TOKEN "
                         "in ~/.librefang/secrets.env to skip QR on next "
-                        "restart (token logged at DEBUG)",
+                        "restart (re-scan QR to retrieve the token; it is "
+                        "no longer logged in plaintext)",
                     )
-                    log.debug("wechat captured bot_token", bot_token=token)
+                    log.debug(
+                        "wechat captured bot_token",
+                        bot_token_fingerprint=token_fp,
+                    )
                     if emit is not None:
                         # Token is NOT in the protocol event — see
                         # `protocol.qr_status` docstring for why. The
-                        # dashboard surfaces this message verbatim;
-                        # the operator copies the token (logged at
-                        # DEBUG above) into secrets.env by hand.
+                        # dashboard surfaces this message verbatim.
                         emit(protocol.qr_status(
                             "confirmed",
                             message=(
                                 "Login successful. To skip QR on next "
                                 "restart, set WECHAT_BOT_TOKEN in "
-                                "~/.librefang/secrets.env (the token "
-                                "is logged at DEBUG by this sidecar)"
+                                "~/.librefang/secrets.env (re-scan QR "
+                                "to retrieve the token; the sidecar no "
+                                "longer logs it in plaintext)"
                             ),
                         ))
                     return token
