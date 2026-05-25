@@ -1,0 +1,90 @@
+name: Docker Publish
+
+# Builds and pushes the BossFang daemon image to GCR on every push to
+# main (and on workflow_dispatch for on-demand rebuilds). The image is
+# tagged with the short commit SHA and :latest.
+#
+# Authentication uses Workload Identity Federation — no long-lived SA
+# key stored as a secret. The SA (github-actions@prometheus-461323)
+# already has roles/storage.admin which covers GCR push.
+#
+# Private git deps (kreuzberg via universal-agent-runtime) are fetched
+# via SSH using a read-only deploy key stored as KREUZBERG_SSH_KEY.
+# See k8s/README.md for setup instructions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'crates/**/src/**'
+      - 'crates/librefang-api/dashboard/**'
+      - 'deploy/**'
+      - '.github/workflows/docker-publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for WIF token exchange
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: gcr.io/prometheus-461323/bossfang
+
+jobs:
+  build-push:
+    name: Build & push to GCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Load the deploy key for the private kreuzberg repo so cargo can
+      # fetch it over SSH during the docker build's --mount=type=ssh step.
+      - name: Load SSH key for private deps
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.KREUZBERG_SSH_KEY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/400143795490/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider
+          service_account: github-actions@prometheus-461323.iam.gserviceaccount.com
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker gcr.io --quiet
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          # ubuntu-latest is native amd64 — no QEMU needed.
+          platforms: linux/amd64
+          # SSH agent socket forwarded so --mount=type=ssh in the
+          # Dockerfile's cargo build step can fetch kreuzberg.
+          ssh: default=${{ env.SSH_AUTH_SOCK }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=docker-publish
+          cache-to: type=gha,mode=max,scope=docker-publish
+
+      - name: Update k8s deployment image tag
+        run: |
+          echo "Image pushed: ${{ env.IMAGE }}:${{ github.sha }}"
+          echo "To deploy: kubectl set image deployment/bossfang bossfang=${{ env.IMAGE }}:${{ github.sha }} -n bossfang"

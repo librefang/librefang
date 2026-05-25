@@ -8,14 +8,17 @@ hostname `bossfang.prometheusags.ai`.
 
 ```
 k8s/
+├── gateway/                    # bossfang-gateway in envoy-gateway-system (applied first)
 ├── base/                       # Generic, reusable manifests (no env-specifics)
 └── overlays/
-    └── production-gke/         # Cluster-specific tweaks + TLS wiring
+    └── production-gke/         # Cluster-specific tweaks
 ```
 
+The `gateway/` layer is applied once as a separate step because the
+Gateway resource must live in `envoy-gateway-system` alongside
+`prometheusags-wildcard-tls`, not in the `bossfang` namespace.
 The `base/` layer is portable. The `production-gke/` overlay supplies the
-namespace, the resource sizing, the GKE StorageClass mapping, and the
-wildcard-cert binding for `*.prometheusags.ai`.
+namespace, resource sizing, and GKE StorageClass mapping.
 
 ## Topology
 
@@ -30,13 +33,15 @@ wildcard-cert binding for `*.prometheusags.ai`.
   (`librefang start --foreground`). Port `4545`. Persistent volume at
   `/data` for `BOSSFANG_HOME` (config.toml, vault, logs, daemon.lock,
   registry cache). Probes `/api/health`.
-- **HTTPRoute**: attached to `envoy-gateway` in the `envoy-gateway-system`
-  namespace, hostname `bossfang.prometheusags.ai`, routes to the
-  BossFang service on port 4545.
-- **TLS**: handled at the Gateway listener level. The wildcard cert for
-  `*.prometheusags.ai` lives elsewhere on the cluster (was provisioned for
-  candle-vllm). See [`overlays/production-gke/tls/README.md`](overlays/production-gke/tls/README.md)
-  for how to wire it in during execution.
+- **Gateway**: `bossfang-gateway` in `envoy-gateway-system`, using the
+  existing `prometheusags-wildcard-tls` wildcard cert. Matches the cluster
+  pattern (docuseal-gateway, document-designer-gateway, etc.). Two listeners:
+  HTTP on 80 (redirect only) and HTTPS on 443 with TLS termination.
+- **HTTPRoutes**: two routes in the `bossfang` namespace. HTTP→HTTPS redirect
+  + HTTPS backend proxy to `bossfang:4545`. Both reference `bossfang-gateway`
+  cross-namespace (`allowedRoutes.namespaces.from: All` permits this).
+- **TLS**: terminates at the Gateway listener via `prometheusags-wildcard-tls`
+  already present in `envoy-gateway-system`. No cert provisioning needed.
 
 ## Quick start (assuming kubectl is wired to the right cluster)
 
@@ -72,9 +77,11 @@ docker push gcr.io/prometheus-461323/bossfang:$(git rev-parse --short HEAD)
 $EDITOR k8s/overlays/production-gke/kustomization.yaml   # under `images:`
 
 # 6. Server-side dry-run (no actual creates)
+kubectl apply -k k8s/gateway --dry-run=server
 kubectl apply -k k8s/overlays/production-gke --dry-run=server
 
-# 7. Apply
+# 7. Apply — two steps: gateway first, then the main overlay
+kubectl apply -k k8s/gateway
 kubectl apply -k k8s/overlays/production-gke
 kubectl -n bossfang rollout status statefulset/surrealdb --timeout=120s
 kubectl -n bossfang rollout status deployment/bossfang   --timeout=180s

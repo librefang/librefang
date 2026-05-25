@@ -166,6 +166,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: bossfang-immediate
   resources:
     requests:
       storage: 5Gi
