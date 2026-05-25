@@ -885,9 +885,15 @@ pub async fn execute_tool_raw(
         "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
-        "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),
-        "wiki_search" => tool_wiki_search(input, *kernel, *sender_id, *channel),
-        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel),
+        // #3576: submodule returns Result<String, ToolError>; narrow here.
+        "wiki_get" => {
+            tool_wiki_get(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
+        }
+        "wiki_search" => {
+            tool_wiki_search(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
+        }
+        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel)
+            .map_err(|e| e.to_string()),
 
         // Collaboration tools. task_* is the #3576 third slice: the submodule
         // returns `Result<String, ToolError>`; arms narrow to
