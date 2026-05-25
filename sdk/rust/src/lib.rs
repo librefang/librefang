@@ -1523,6 +1523,30 @@ impl BudgetResource {
         .await
     }
 
+    pub async fn provider_budget_list(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &"/api/budget/providers".to_string(),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_provider_budget(&self, provider_id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &format!("/api/budget/providers/{}", provider_id),
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn user_budget_ranking(&self, limit: Option<&str>) -> Result<Value> {
         do_req(
             &self.client,

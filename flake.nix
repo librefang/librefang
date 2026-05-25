@@ -74,6 +74,9 @@
             ./crates/librefang-desktop/capabilities
             ./crates/librefang-desktop/icons
             ./crates/librefang-desktop/gen
+            # librefang-channels embeds this tree via include_dir!
+            # at compile time (crates/librefang-channels/src/embedded_sdk.rs).
+            ./sdk/python/librefang
             ./packages/whatsapp-gateway
             ./deploy/docker-compose.observability.yml
             ./deploy/grafana
