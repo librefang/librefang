@@ -1010,11 +1010,11 @@ pub async fn execute_tool_raw(
             tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
         }
 
-        // Docker sandbox tool
+        // Docker sandbox tool (#3576: returns Result<String, ToolError>)
         #[cfg(feature = "docker-sandbox")]
-        "docker_exec" => {
-            tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
-        }
+        "docker_exec" => tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Location tool (#3576: returns Result<String, ToolError>; narrow here)
         "location_get" => tool_location_get().await.map_err(|e| e.to_string()),
