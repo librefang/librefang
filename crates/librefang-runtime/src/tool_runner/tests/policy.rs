@@ -1421,7 +1421,8 @@ fn test_goal_update_missing_kernel() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Kernel handle"));
+    // #3576: Err is now ToolError; assert via its Display.
+    assert!(result.unwrap_err().to_string().contains("Kernel handle"));
 }
 
 #[test]
@@ -1440,7 +1441,7 @@ fn test_goal_update_no_fields() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("At least one"));
+    assert!(result.unwrap_err().to_string().contains("At least one"));
 }
 
 #[test]
@@ -1451,7 +1452,7 @@ fn test_goal_update_invalid_status() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid status"));
+    assert!(result.unwrap_err().to_string().contains("Invalid status"));
 }
 
 /// Mock kernel that validates capability inheritance in spawn_agent_checked.

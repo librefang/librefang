@@ -896,7 +896,9 @@ pub async fn execute_tool_raw(
         "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
         "task_list" => tool_task_list(input, *kernel).await,
         "task_status" => tool_task_status(input, *kernel).await,
-        "event_publish" => tool_event_publish(input, *kernel).await,
+        "event_publish" => tool_event_publish(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
         "schedule_create" => {
@@ -1061,8 +1063,9 @@ pub async fn execute_tool_raw(
         "a2a_discover" => tool_a2a_discover(input).await,
         "a2a_send" => tool_a2a_send(input, *kernel).await,
 
-        // Goal tracking tool
-        "goal_update" => tool_goal_update(input, *kernel),
+        // Goal tracking tool (#3576: sync tool now returns
+        // Result<String, ToolError>; narrow to Result<String, String> here)
+        "goal_update" => tool_goal_update(input, *kernel).map_err(|e| e.to_string()),
 
         // Workflow tools
         "workflow_run" => tool_workflow_run(input, *kernel).await,
