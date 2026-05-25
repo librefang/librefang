@@ -92,6 +92,14 @@ i18n
 web
 *.md
 !crates/**/*.md
+# sdk/python/librefang is embedded into the binary at compile time by
+# librefang-channels (include_dir! in embedded_sdk.rs, #5472), so the
+# `sdk` exclusion above must let this one subtree back into the build
+# context. Placed after the *.md rule so the lone tracked Markdown file
+# (sidecar/template/README.md) survives — .dockerignore honors the last
+# matching pattern.
+!sdk/python/librefang
+!sdk/python/librefang/**
 LICENSE-*
 CLAUDE.md
 AGENTS.md
