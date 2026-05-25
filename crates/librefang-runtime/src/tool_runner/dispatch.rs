@@ -905,10 +905,18 @@ pub async fn execute_tool_raw(
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel).await,
 
-        // Knowledge graph tools
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel).await,
-        "knowledge_query" => tool_knowledge_query(input, *kernel).await,
+        // Knowledge graph tools (#3576 fourth slice: submodule returns
+        // Result<String, ToolError>; arms narrow to Result<String, String>
+        // here, same boundary bridge as the cron / schedule / task slices).
+        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "knowledge_query" => tool_knowledge_query(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Image analysis tool
         "image_analyze" => {
