@@ -410,11 +410,21 @@ pub async fn react_asset(
     State(state): State<Arc<crate::routes::AppState>>,
     Path(path): Path<String>,
 ) -> Response {
+    let asset_path = path.trim_start_matches('/');
+    // /dashboard/ with empty path = dashboard root; serve index.html directly.
+    // is_safe_asset_path("") returns false (empty string fails the saw_segment
+    // check), so we must handle this before the safety gate.
+    if asset_path.is_empty() {
+        let home_dir = Some(state.kernel.home_dir().to_path_buf());
+        if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+            return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
+                .into_response();
+        }
+        return (StatusCode::NOT_FOUND, "dashboard not available").into_response();
+    }
     if !is_safe_asset_path(&path) {
         return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
     }
-
-    let asset_path = path.trim_start_matches('/');
     let home_dir = Some(state.kernel.home_dir().to_path_buf());
     match resolve_dashboard_file(home_dir.as_deref(), asset_path) {
         Some(data) => (

@@ -1552,6 +1552,14 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        // /dashboard (no trailing slash) → redirect to /dashboard/ so the
+        // React Router's basepath: "/dashboard" sees the correct URL.
+        .route(
+            "/dashboard",
+            axum::routing::get(|| async {
+                axum::response::Redirect::permanent("/dashboard/")
+            }),
+        )
         .route(
             "/dashboard/{*path}",
             axum::routing::get(webchat::react_asset),
