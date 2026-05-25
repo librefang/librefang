@@ -589,7 +589,11 @@ async fn test_schedule_tools_without_kernel() {
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: schedule_* now goes through `require_kernel_typed`, which yields
+    // `ToolError::Unavailable("Kernel handle")` rendered as "Kernel handle
+    // unavailable" (the old `require_kernel` string was "Kernel handle not
+    // available ..."). shell.rs still asserts the old text until shell migrates.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 // ─── Canvas / A2UI tests ────────────────────────────────────────
