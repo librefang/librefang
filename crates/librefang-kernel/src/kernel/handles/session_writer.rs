@@ -134,7 +134,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
 
         // Defense-in-depth: verify the target session belongs to this agent.
         // Mirrors kernel/messaging.rs session_id_override ownership check.
-        if let Ok(Some(existing)) = self.memory.get_session(session_id) {
+        if let Ok(Some(existing)) = self.memory.substrate.get_session(session_id) {
             if existing.agent_id != agent_id {
                 tracing::warn!(
                     agent_id = ?agent_id,
