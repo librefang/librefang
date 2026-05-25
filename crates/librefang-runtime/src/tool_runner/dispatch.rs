@@ -952,7 +952,10 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_image_analyze(input, *workspace_root, &extra_refs).await
+            // #3576: tool returns Result<String, ToolError>; narrow here.
+            tool_image_analyze(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Media understanding tools
