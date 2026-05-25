@@ -444,6 +444,12 @@ class _BudgetResource(_Resource):
     def update_agent_budget(self, id: str, **data):
         return self._c._request("PUT", f"/api/budget/agents/{id}", data)
 
+    def provider_budget_list(self):
+        return self._c._request("GET", "/api/budget/providers")
+
+    def update_provider_budget(self, provider_id: str, **data):
+        return self._c._request("PUT", f"/api/budget/providers/{provider_id}", data)
+
     def user_budget_ranking(self, limit: Any = None):
         return self._c._request("GET", "/api/budget/users", None, query={"limit": limit})
 
