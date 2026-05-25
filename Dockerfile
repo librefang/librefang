@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     perl \
     ca-certificates \
     openssh-client \
+    clang \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
