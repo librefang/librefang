@@ -1725,13 +1725,28 @@ impl Default for SkillWorkshopConfig {
 /// envelope and the owner should be notified via the `notify_owner` tool
 /// before / instead of replying.
 ///
-/// Default disabled (opt-in). When enabled but no aux chain is configured
-/// for [`crate::config::AuxTask::OwnerNotifyTriage`] the gate inherits the
-/// primary driver; any failure path is silently no-op (the primary agent's
-/// existing behaviour is preserved bit-for-bit on the default skip).
+/// Default disabled (opt-in).
 ///
-/// Configurable in `agent.toml`:
+/// # Financial safety
+///
+/// **The gate is a no-op until a cheap-tier aux slot is wired.** When no
+/// explicit `[llm.auxiliary] owner_notify_triage` chain is configured,
+/// `AuxClient::resolve` returns the primary driver with
+/// `used_primary = true`. Because the gate fires on every inbound stranger
+/// message (an attacker-controllable path on a public receptionist agent),
+/// billing the primary provider here would be a financial-DoS amplifier.
+/// The gate mirrors the `SkillWorkshopReview` precedent (#3328) and returns
+/// `TriageVerdict::skip` when `used_primary` is true. **Operators must wire
+/// a cheap-tier slot before enabling the gate:**
+///
 /// ```toml
+/// # config.toml
+/// [llm.auxiliary]
+/// owner_notify_triage = ["anthropic:claude-haiku-4.5"]
+/// ```
+///
+/// ```toml
+/// # agent.toml
 /// [owner_notify_gate]
 /// enabled = true
 /// owner_user_ids = ["393511083257@s.whatsapp.net", "393511083257@lid"]

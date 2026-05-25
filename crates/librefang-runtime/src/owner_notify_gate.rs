@@ -14,21 +14,49 @@
 //!
 //! Any failure path (aux client unavailable, LLM call error, JSON parse
 //! failure, empty response) returns [`TriageVerdict::skip`] which yields
-//! `notify_owner = false` and no guidance block is injected. Operators
-//! can promote the gate by configuring `[llm.auxiliary]` with a cheap
-//! reliable model:
+//! `notify_owner = false` and no guidance block is injected.
+//!
+//! ## Financial safety: the gate is a no-op until a cheap-tier aux slot is wired
+//!
+//! When no explicit `[llm.auxiliary] owner_notify_triage` chain is
+//! configured, `AuxClient::resolve` returns the primary driver with
+//! `used_primary = true`. Because the gate fires on **every inbound
+//! stranger message** (an attacker-controllable path on a public
+//! receptionist agent), billing the primary provider here would be a
+//! financial-DoS amplifier. Following the `SkillWorkshopReview`
+//! precedent (#3328), `evaluate_stranger_request` returns
+//! `TriageVerdict::skip` when `resolution.used_primary` is true and
+//! emits a one-shot operator WARN pointing at the `[llm.auxiliary]`
+//! slug. **Operators must wire a cheap-tier slot before the gate
+//! becomes active:**
 //!
 //! ```toml
 //! [llm.auxiliary]
 //! owner_notify_triage = ["anthropic:claude-haiku-4.5"]
 //! ```
 //!
-//! Without explicit configuration the gate inherits the primary driver
-//! and still works, just at primary-tier cost.
+//! ## Escalation-miss-on-outage trade-off
+//!
+//! Failure paths collapse to `notify_owner = false` / no guidance
+//! block. This means an aux outage silently suppresses escalations
+//! (emergencies, scam/impersonation). This is a conscious "no
+//! behaviour change" design choice: the primary LLM still has access
+//! to `notify_owner` in its toolset and can call it based on its own
+//! judgement -- the gate is an optimisation hint, not a hard gate.
+//!
+//! ## Per-sender verdict caching
+//!
+//! A per-`(agent_id, sender_user_id)` cache with a configurable TTL
+//! (default 120s) prevents repeat strangers from re-triaging on every
+//! message. Spam bursts from the same sender reuse the cached verdict
+//! instead of synthesizing one aux call per message.
 //!
 //! [`notify_owner`]: https://librefang.ai/docs/tools#notify_owner
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use librefang_llm_driver::CompletionRequest;
 use librefang_types::config::AuxTask;
@@ -37,17 +65,24 @@ use tracing::{debug, warn};
 
 use crate::aux_client::AuxClient;
 
-/// System prompt for the triage gate. English-only — the model is asked
+/// Default TTL for cached triage verdicts (seconds).
+const DEFAULT_CACHE_TTL_SECS: u64 = 120;
+
+/// Maximum number of entries in the verdict cache before the oldest
+/// entries are evicted.
+const MAX_CACHE_ENTRIES: usize = 256;
+
+/// System prompt for the triage gate. English-only -- the model is asked
 /// to emit guidance text in the inbound message's language.
 const TRIAGE_SYSTEM_PROMPT: &str = "You are a triage assistant for a personal-assistant agent. \
 The agent's owner has set boundaries on when the agent may reply autonomously vs. when the \
 owner must be looped in. You receive a single inbound message from a NON-OWNER sender and \
 you decide whether the agent should notify the owner before answering.\n\n\
-OUTPUT FORMAT — respond with ONE LINE of valid JSON, no prose, no markdown fences:\n\
+OUTPUT FORMAT -- respond with ONE LINE of valid JSON, no prose, no markdown fences:\n\
 {\"notify_owner\": <true|false>, \"category\": \"<short_snake_case_category>\", \
 \"guidance\": \"<one short sentence in the same language as the inbound message that the \
 primary agent can echo back to the sender when notify_owner=true>\"}\n\n\
-DECISION RULES — set notify_owner=true ONLY if AT LEAST ONE of these applies:\n\
+DECISION RULES -- set notify_owner=true ONLY if AT LEAST ONE of these applies:\n\
 - The sender explicitly asks to be put in touch with the owner.\n\
 - The sender requests scheduling, calendar coordination, or any decision that requires the \
 owner's input.\n\
@@ -64,9 +99,9 @@ Otherwise set notify_owner=false:\n\
 - Topics the agent is configured to handle autonomously (delegated routines).\n\
 - Generic information requests that don't touch the owner's private life.\n\n\
 GUIDANCE FIELD:\n\
-- When notify_owner=false → guidance can be a short note like \"respond autonomously, no \
+- When notify_owner=false -> guidance can be a short note like \"respond autonomously, no \
 escalation needed\".\n\
-- When notify_owner=true → guidance is a SHORT sentence in the SENDER'S LANGUAGE that the \
+- When notify_owner=true -> guidance is a SHORT sentence in the SENDER'S LANGUAGE that the \
 primary agent may relay back to the sender. Match the inbound message's language.\n\n\
 Be conservative on the YES side: when in doubt, choose notify_owner=false. The agent will \
 still review the request itself before acting.";
@@ -84,7 +119,7 @@ pub struct TriageVerdict {
     /// One-short-sentence guidance for the primary LLM:
     ///   - when `notify_owner == true` this is a sender-facing
     ///     acknowledgement in the sender's language
-    ///     (e.g. *"Ho avvisato il Signore, Le farà sapere a breve"*);
+    ///     (e.g. *"Ho avvisato il Signore, Le fara sapere a breve"*);
     ///   - when `notify_owner == false` this is a short instruction
     ///     to the primary LLM (e.g. *"respond autonomously"*).
     pub guidance: String,
@@ -97,9 +132,11 @@ pub struct TriageVerdict {
 pub enum TriageOrigin {
     /// Aux LLM produced and parsed a verdict.
     AuxModel,
-    /// Gate fell back to a no-notify default — `notify_owner` is always
+    /// Gate fell back to a no-notify default -- `notify_owner` is always
     /// `false` on this path. `reason` is a short static string for logs.
     DefaultedNoNotify { reason: &'static str },
+    /// Verdict was served from the per-(agent, sender) cache.
+    CachedVerdict,
 }
 
 impl TriageVerdict {
@@ -119,15 +156,114 @@ impl TriageVerdict {
     pub fn is_from_aux(&self) -> bool {
         matches!(self.origin, TriageOrigin::AuxModel)
     }
+
+    /// `true` when the verdict should produce a guidance block (either
+    /// a fresh aux verdict or a cached one).
+    pub fn has_guidance(&self) -> bool {
+        matches!(
+            self.origin,
+            TriageOrigin::AuxModel | TriageOrigin::CachedVerdict
+        )
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Per-(agent, sender) verdict cache
+// ---------------------------------------------------------------------------
+
+/// A cached triage verdict entry.
+struct CacheEntry {
+    agent_id: String,
+    sender_user_id: String,
+    verdict: TriageVerdict,
+    inserted_at: Instant,
+}
+
+/// Process-wide verdict cache. Bounded LRU with TTL expiry.
+static VERDICT_CACHE: OnceLock<Mutex<VecDeque<CacheEntry>>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<VecDeque<CacheEntry>> {
+    VERDICT_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_CACHE_ENTRIES)))
+}
+
+/// Look up a cached verdict for `(agent_id, sender_user_id)`. Returns
+/// `None` when no entry exists or the entry has expired.
+pub fn lookup_cached_verdict(
+    agent_id: &str,
+    sender_user_id: &str,
+    ttl: Duration,
+) -> Option<TriageVerdict> {
+    let mut guard = cache().lock().ok()?;
+    // Evict expired entries from the front (oldest first).
+    let now = Instant::now();
+    while let Some(front) = guard.front() {
+        if now.duration_since(front.inserted_at) > ttl {
+            guard.pop_front();
+        } else {
+            break;
+        }
+    }
+    // Linear scan is fine for a small bounded cache.
+    guard
+        .iter()
+        .rev()
+        .find(|e| e.agent_id == agent_id && e.sender_user_id == sender_user_id)
+        .map(|e| {
+            let mut v = e.verdict.clone();
+            v.origin = TriageOrigin::CachedVerdict;
+            v
+        })
+}
+
+/// Insert a verdict into the cache. Evicts the oldest entry when full.
+pub fn insert_cached_verdict(agent_id: &str, sender_user_id: &str, verdict: &TriageVerdict) {
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
+    // Cap size.
+    while guard.len() >= MAX_CACHE_ENTRIES {
+        guard.pop_front();
+    }
+    guard.push_back(CacheEntry {
+        agent_id: agent_id.to_string(),
+        sender_user_id: sender_user_id.to_string(),
+        verdict: verdict.clone(),
+        inserted_at: Instant::now(),
+    });
+}
+
+/// Clear the verdict cache (used in tests).
+#[cfg(test)]
+fn clear_cache() {
+    if let Some(guard) = VERDICT_CACHE.get() {
+        if let Ok(mut g) = guard.lock() {
+            g.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core evaluation
+// ---------------------------------------------------------------------------
+
+/// One-shot flag to avoid spamming the operator WARN when no aux chain
+/// is configured. The warning fires once per process lifetime.
+static PRIMARY_WARN_FIRED: OnceLock<()> = OnceLock::new();
 
 /// Evaluate an inbound stranger message and return a [`TriageVerdict`].
 /// Never panics; always returns either an `AuxModel` verdict or a
 /// `DefaultedNoNotify` skip.
+///
+/// `agent_id` and `sender_user_id` are used for the per-(agent, sender)
+/// verdict cache. When a cached verdict exists within
+/// [`DEFAULT_CACHE_TTL_SECS`], it is returned without calling the aux
+/// model.
 pub async fn evaluate_stranger_request(
     user_message: &str,
     sender_display_name: Option<&str>,
     aux_client: &AuxClient,
+    agent_id: &str,
+    sender_user_id: &str,
 ) -> TriageVerdict {
     let trimmed = user_message.trim();
     if trimmed.is_empty() {
@@ -135,33 +271,67 @@ pub async fn evaluate_stranger_request(
         return TriageVerdict::skip("empty inbound message");
     }
 
+    // Check the per-(agent, sender) verdict cache first.
+    let ttl = Duration::from_secs(DEFAULT_CACHE_TTL_SECS);
+    if let Some(cached) = lookup_cached_verdict(agent_id, sender_user_id, ttl) {
+        debug!(
+            %agent_id, %sender_user_id,
+            "owner_notify_triage: returning cached verdict"
+        );
+        return cached;
+    }
+
     let resolution = aux_client.resolve(AuxTask::OwnerNotifyTriage);
+
+    // Financial-DoS guard: when no cheap-tier aux chain is configured,
+    // `AuxClient::resolve` returns the primary driver with
+    // `used_primary = true`. Billing the primary provider on every
+    // inbound stranger message is a DoS amplifier. Mirror the
+    // SkillWorkshopReview precedent (#3328) and skip.
+    if resolution.used_primary {
+        PRIMARY_WARN_FIRED.get_or_init(|| {
+            warn!(
+                "owner_notify_triage: no [llm.auxiliary] owner_notify_triage chain configured; \
+                 gate is a no-op to avoid billing the primary provider on every stranger message. \
+                 Wire a cheap-tier slot, e.g.: \
+                 [llm.auxiliary] owner_notify_triage = [\"anthropic:claude-haiku-4.5\"]"
+            );
+        });
+        return TriageVerdict::skip("no aux chain configured for owner_notify_triage");
+    }
+
     let driver = resolution.driver;
-    // When the chain resolved to the primary driver (no aux configured)
-    // the `resolved` list is empty and `model` must be left empty so the
-    // primary driver picks its own configured default.
     let model = resolution
         .resolved
         .first()
         .map(|(_, m)| m.clone())
         .unwrap_or_default();
 
-    let display = sender_display_name.unwrap_or("Unknown sender");
-    let user_payload = format!("Sender display name: {display}\n\nInbound message:\n{trimmed}");
+    // Build the user payload. Omit the display name line entirely when
+    // the sender is unknown, so the aux model is not biased by a
+    // synthetic placeholder.
+    let user_payload = match sender_display_name {
+        Some(name) => format!("Sender display name: {name}\n\nInbound message:\n{trimmed}"),
+        None => format!("Inbound message:\n{trimmed}"),
+    };
 
+    // Use only the dedicated `system` field for the system prompt --
+    // not both `system` AND `Message::system(...)` in messages. Every
+    // other aux caller in the repo (compactor, context_compressor,
+    // proactive_memory, history_fold) uses `system: Some(...)` only.
+    // Sending the prompt in both slots doubles billed input tokens and
+    // may cause provider errors on APIs that reject system messages in
+    // the messages array when a top-level `system` field is present.
     let request = CompletionRequest {
         model,
-        messages: Arc::new(vec![
-            Message::system(TRIAGE_SYSTEM_PROMPT),
-            Message::user(user_payload),
-        ]),
+        messages: Arc::new(vec![Message::user(user_payload)]),
         max_tokens: 512,
         temperature: 0.0,
         system: Some(TRIAGE_SYSTEM_PROMPT.to_string()),
         ..Default::default()
     };
 
-    match driver.complete(request).await {
+    let verdict = match driver.complete(request).await {
         Ok(resp) => parse_verdict(&resp.text()),
         Err(err) => {
             warn!(
@@ -170,7 +340,15 @@ pub async fn evaluate_stranger_request(
             );
             TriageVerdict::skip("aux LLM call failed")
         }
+    };
+
+    // Cache the verdict for this (agent, sender) pair so repeat
+    // messages within the TTL window don't re-triage.
+    if verdict.is_from_aux() {
+        insert_cached_verdict(agent_id, sender_user_id, &verdict);
     }
+
+    verdict
 }
 
 /// Parse the aux model's text response into a [`TriageVerdict`]. Tolerates
@@ -242,18 +420,18 @@ pub fn parse_verdict(raw: &str) -> TriageVerdict {
 
 /// Render a [`TriageVerdict`] into a markdown block suitable for
 /// injection into the primary turn's system prompt. Returns `None` when
-/// the verdict came from the default-skip path — callers should NOT
+/// the verdict came from the default-skip path -- callers should NOT
 /// inject anything in that case so the primary prompt stays clean and
 /// the agent's existing behaviour is preserved bit-for-bit.
 pub fn render_guidance_block(verdict: &TriageVerdict) -> Option<String> {
-    if !verdict.is_from_aux() {
+    if !verdict.has_guidance() {
         return None;
     }
     let action_line = if verdict.notify_owner {
-        "OWNER NOTIFICATION ADVISED — call `notify_owner(reason, summary)` to brief the owner, \
+        "OWNER NOTIFICATION ADVISED -- call `notify_owner(reason, summary)` to brief the owner, \
          then reply to the sender using the suggested acknowledgement below."
     } else {
-        "OWNER NOTIFICATION NOT NEEDED — reply to the sender autonomously without calling \
+        "OWNER NOTIFICATION NOT NEEDED -- reply to the sender autonomously without calling \
          `notify_owner`."
     };
     let guidance = if verdict.guidance.is_empty() {
@@ -297,6 +475,7 @@ mod tests {
             }
         ));
         assert!(!v.is_from_aux());
+        assert!(!v.has_guidance());
     }
 
     // ---------- parse_verdict ----------
@@ -435,8 +614,9 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_returns_skip_for_empty_message_without_calling_aux() {
+        clear_cache();
         let aux = aux_with("{\"notify_owner\": true, \"category\": \"c\", \"guidance\": \"g\"}");
-        let v = evaluate_stranger_request("", Some("Anyone"), &aux).await;
+        let v = evaluate_stranger_request("", Some("Anyone"), &aux, "agent-1", "sender-1").await;
         assert!(!v.notify_owner);
         assert_eq!(
             v.origin,
@@ -447,48 +627,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evaluate_returns_aux_verdict_when_mock_returns_notify_yes() {
+    async fn evaluate_skips_when_aux_resolved_to_primary() {
+        // AuxClient::with_primary_only always returns used_primary = true,
+        // so the financial-DoS guard should kick in.
+        clear_cache();
         let aux = aux_with(
             r#"{"notify_owner": true, "category": "planning_request",
-                "guidance": "Ho avvisato il Signore, Le farà sapere."}"#,
+                "guidance": "Ho avvisato il Signore, Le fara sapere."}"#,
         );
         let v = evaluate_stranger_request(
             "Ciao, dovrei coordinare un meeting con Federico domani.",
             Some("Marco"),
             &aux,
+            "agent-primary-guard",
+            "marco@lid",
         )
         .await;
-        assert!(v.notify_owner);
-        assert_eq!(v.category, "planning_request");
-        assert!(v.guidance.contains("Signore"));
-        assert!(v.is_from_aux());
-    }
-
-    #[tokio::test]
-    async fn evaluate_returns_aux_verdict_when_mock_returns_notify_no() {
-        let aux = aux_with(
-            r#"{"notify_owner": false, "category": "small_talk", "guidance": "rispondi"}"#,
-        );
-        let v = evaluate_stranger_request("buongiorno", Some("Federico stranger"), &aux).await;
+        // Must skip -- not call the primary LLM.
         assert!(!v.notify_owner);
-        assert_eq!(v.category, "small_talk");
-        assert!(v.is_from_aux());
+        assert_eq!(
+            v.origin,
+            TriageOrigin::DefaultedNoNotify {
+                reason: "no aux chain configured for owner_notify_triage"
+            }
+        );
+        assert!(!v.has_guidance());
     }
 
     #[tokio::test]
     async fn evaluate_returns_skip_when_aux_response_is_garbage() {
+        clear_cache();
         let aux = aux_with("not a json response at all, just prose.");
-        let v = evaluate_stranger_request("ciao", None, &aux).await;
+        let v =
+            evaluate_stranger_request("ciao", None, &aux, "agent-garbage", "sender-garbage").await;
         assert!(!v.notify_owner);
         assert!(!v.is_from_aux());
     }
 
-    #[tokio::test]
-    async fn evaluate_handles_missing_sender_display_name_gracefully() {
-        let aux = aux_with(r#"{"notify_owner": false, "category": "ok", "guidance": "g"}"#);
-        let v = evaluate_stranger_request("hello", None, &aux).await;
-        assert!(!v.notify_owner);
-        assert_eq!(v.category, "ok");
+    // ---------- verdict cache ----------
+
+    #[test]
+    fn cache_insert_and_lookup_within_ttl() {
+        clear_cache();
+        let v = TriageVerdict {
+            notify_owner: true,
+            category: "planning".to_string(),
+            guidance: "ok".to_string(),
+            origin: TriageOrigin::AuxModel,
+        };
+        insert_cached_verdict("agent-a", "sender-x", &v);
+        let ttl = Duration::from_secs(300);
+        let cached = lookup_cached_verdict("agent-a", "sender-x", ttl);
+        assert!(cached.is_some());
+        let cached = cached.unwrap();
+        assert!(cached.notify_owner);
+        assert_eq!(cached.origin, TriageOrigin::CachedVerdict);
+    }
+
+    #[test]
+    fn cache_miss_for_different_agent() {
+        clear_cache();
+        let v = TriageVerdict {
+            notify_owner: true,
+            category: "c".to_string(),
+            guidance: "g".to_string(),
+            origin: TriageOrigin::AuxModel,
+        };
+        insert_cached_verdict("agent-a", "sender-x", &v);
+        let ttl = Duration::from_secs(300);
+        assert!(lookup_cached_verdict("agent-b", "sender-x", ttl).is_none());
+    }
+
+    #[test]
+    fn cache_miss_for_different_sender() {
+        clear_cache();
+        let v = TriageVerdict {
+            notify_owner: true,
+            category: "c".to_string(),
+            guidance: "g".to_string(),
+            origin: TriageOrigin::AuxModel,
+        };
+        insert_cached_verdict("agent-a", "sender-x", &v);
+        let ttl = Duration::from_secs(300);
+        assert!(lookup_cached_verdict("agent-a", "sender-y", ttl).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_beyond_max_entries() {
+        clear_cache();
+        let v = TriageVerdict {
+            notify_owner: false,
+            category: "c".to_string(),
+            guidance: "g".to_string(),
+            origin: TriageOrigin::AuxModel,
+        };
+        // Fill beyond MAX_CACHE_ENTRIES.
+        for i in 0..MAX_CACHE_ENTRIES + 10 {
+            insert_cached_verdict("agent", &format!("sender-{i}"), &v);
+        }
+        let guard = cache().lock().unwrap();
+        assert!(guard.len() <= MAX_CACHE_ENTRIES);
     }
 
     // ---------- render_guidance_block ----------
@@ -539,5 +777,19 @@ mod tests {
         };
         let block = render_guidance_block(&v).unwrap();
         assert!(block.contains("(no specific guidance)"));
+    }
+
+    #[test]
+    fn render_guidance_block_works_for_cached_verdict() {
+        let v = TriageVerdict {
+            notify_owner: true,
+            category: "urgency".to_string(),
+            guidance: "Cached guidance".to_string(),
+            origin: TriageOrigin::CachedVerdict,
+        };
+        let block = render_guidance_block(&v).unwrap();
+        assert!(block.contains("OWNER NOTIFICATION ADVISED"));
+        assert!(block.contains("urgency"));
+        assert!(block.contains("Cached guidance"));
     }
 }

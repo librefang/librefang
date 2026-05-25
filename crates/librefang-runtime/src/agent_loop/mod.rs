@@ -554,7 +554,7 @@ pub async fn run_agent_loop(
         (None, None) => None,
     };
 
-    // #5471 — Owner-notification triage gate. When the agent opts in via
+    // #5471 -- Owner-notification triage gate. When the agent opts in via
     // `[owner_notify_gate]` in `agent.toml` AND the inbound message
     // arrived from a sender NOT in the configured owner list AND an
     // [`AuxClient`] is wired through `opts`, run a cheap pre-turn
@@ -564,27 +564,37 @@ pub async fn run_agent_loop(
     // sees it alongside the sender prefix; any failure path is a silent
     // no-op so the pre-#5471 behaviour is preserved bit-for-bit when
     // the gate is disabled or skipped.
-    let combined_prefix: Option<String> = if manifest
-        .owner_notify_gate
-        .should_evaluate(sender_user_id.as_deref())
-    {
-        if let Some(aux) = opts.aux_client.as_deref() {
-            let display = manifest
-                .metadata
-                .get("sender_display_name")
-                .and_then(|v| v.as_str());
-            let verdict =
-                crate::owner_notify_gate::evaluate_stranger_request(user_message, display, aux)
-                    .await;
-            match crate::owner_notify_gate::render_guidance_block(&verdict) {
-                Some(block) => Some(match combined_prefix {
-                    Some(prefix) => format!("{prefix}{block}\n\n"),
-                    None => format!("{block}\n\n"),
-                }),
-                None => combined_prefix,
-            }
-        } else {
-            combined_prefix
+    //
+    // The gate is a no-op when no cheap-tier `[llm.auxiliary]
+    // owner_notify_triage` slot is configured (financial-DoS guard
+    // matching the SkillWorkshopReview precedent from #3328).
+    // Per-(agent, sender) verdict caching prevents re-triage on repeat
+    // messages within the TTL window.
+    let combined_prefix: Option<String> = if let (true, Some(aux), Some(sender_id)) = (
+        manifest
+            .owner_notify_gate
+            .should_evaluate(sender_user_id.as_deref()),
+        opts.aux_client.as_deref(),
+        sender_user_id.as_deref(),
+    ) {
+        let display = manifest
+            .metadata
+            .get("sender_display_name")
+            .and_then(|v| v.as_str());
+        let verdict = crate::owner_notify_gate::evaluate_stranger_request(
+            user_message,
+            display,
+            aux,
+            &agent_id_str,
+            sender_id,
+        )
+        .await;
+        match crate::owner_notify_gate::render_guidance_block(&verdict) {
+            Some(block) => Some(match combined_prefix {
+                Some(prefix) => format!("{prefix}{block}\n\n"),
+                None => format!("{block}\n\n"),
+            }),
+            None => combined_prefix,
         }
     } else {
         combined_prefix
