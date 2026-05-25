@@ -176,6 +176,7 @@ fn oauth_template_to_config(t: &OAuthTemplate) -> McpOAuthConfig {
         auth_url: Some(t.auth_url.clone()),
         token_url: Some(t.token_url.clone()),
         client_id: None,
+        client_secret_env: None,
         scopes: t.scopes.clone(),
         user_scopes: Vec::new(),
     }
