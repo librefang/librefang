@@ -4,28 +4,9 @@
 //! (#3576) — third slice after `tool_runner::{cron, schedule}`.
 
 use super::error::{ToolError, ToolResult};
-use super::require_kernel_typed;
+use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
-
-/// `ToolError` for a `task_*` tool reached with no caller agent id. Same
-/// rationale as `tool_runner::cron::caller_agent_id_missing`: the MCP HTTP
-/// route legitimately passes `None`, which is user-recoverable input, so it
-/// surfaces as `MissingParameter` (→ 400) rather than `Internal`; the tool
-/// name is preserved on the tracing channel for operators.
-//
-// Note: cron, schedule (#5720), and task each carry a local copy of this
-// 6-line helper. Hoisting it to a shared `tool_runner` util is the obvious
-// dedup once those slices have all landed on `main`; doing it here would
-// conflict with the still-open #5720, so it is flagged for a follow-up rather
-// than deferred silently.
-fn caller_agent_id_missing(tool: &'static str) -> ToolError {
-    tracing::warn!(
-        tool,
-        "caller agent_id missing — surfaced as MissingParameter to the LLM"
-    );
-    ToolError::MissingParameter("agent_id")
-}
 
 pub(super) async fn tool_task_post(
     input: &serde_json::Value,

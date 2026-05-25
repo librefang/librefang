@@ -10,24 +10,9 @@
 //! are mapped to `ToolError::InvalidParameter` at the tool boundary.
 
 use super::error::{ToolError, ToolResult};
-use super::require_kernel_typed;
+use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
-
-/// `ToolError` for a `schedule_*` tool reached with no caller agent id.
-/// Mirrors `tool_runner::cron::caller_agent_id_missing`: the MCP HTTP route
-/// legitimately passes `None` (missing/unknown `X-LibreFang-Agent-Id`), which
-/// is user-recoverable input, so it surfaces as `MissingParameter` (→ 400)
-/// rather than `Internal`. The direct agent-loop dispatcher always attributes
-/// a caller, so `None` there is a wiring bug the LLM cannot patch either way;
-/// the tool name is preserved on the tracing channel for operators.
-fn caller_agent_id_missing(tool: &'static str) -> ToolError {
-    tracing::warn!(
-        tool,
-        "caller agent_id missing — surfaced as MissingParameter to the LLM"
-    );
-    ToolError::MissingParameter("agent_id")
-}
 
 /// Parse a natural language schedule into a cron expression.
 pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {

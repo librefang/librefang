@@ -20,8 +20,13 @@ pub(super) async fn tool_docker_exec(
 ) -> ToolResult {
     let config = docker_config.ok_or(ToolError::Unavailable("Docker sandbox"))?;
 
+    // `disabled` and `not-installed` carry an operator-actionable hint, so keep
+    // the full pre-#3576 message (via upstream_msg) rather than the bare
+    // `Unavailable` category — the hint is the point.
     if !config.enabled {
-        return Err(ToolError::Unavailable("Docker sandbox"));
+        return Err(ToolError::upstream_msg(
+            "Docker sandbox is disabled. Set docker.enabled=true in config.",
+        ));
     }
 
     let command = input["command"]
@@ -33,7 +38,9 @@ pub(super) async fn tool_docker_exec(
 
     // Check Docker availability
     if !crate::docker_sandbox::is_docker_available().await {
-        return Err(ToolError::Unavailable("Docker"));
+        return Err(ToolError::upstream_msg(
+            "Docker is not available on this system. Install Docker to use docker_exec.",
+        ));
     }
 
     // Create sandbox container
@@ -73,7 +80,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn docker_exec_disabled_is_unavailable() {
+    async fn docker_exec_disabled_returns_actionable_message() {
         let cfg = librefang_types::config::DockerSandboxConfig {
             enabled: false,
             ..Default::default()
@@ -85,6 +92,8 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(r, Err(ToolError::Unavailable("Docker sandbox"))));
+        // Disabled carries the actionable hint rather than a bare Unavailable.
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("docker.enabled=true"), "got: {msg}");
     }
 }

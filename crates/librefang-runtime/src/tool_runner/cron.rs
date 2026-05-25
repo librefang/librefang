@@ -7,32 +7,9 @@
 //! `docs/architecture/error-contracts.md` for the migration sequence.
 
 use super::error::{ToolError, ToolResult};
-use super::require_kernel_typed;
+use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
-
-/// Build the `ToolError` returned when no caller agent id reaches a cron tool.
-///
-/// Two legitimate dispatchers feed these tools:
-///   * The direct agent-loop dispatcher always attributes a caller — `None`
-///     here is a wiring bug, but the LLM cannot recover from it either way.
-///   * The MCP HTTP route (`/mcp`) intentionally passes `None` when the
-///     `X-LibreFang-Agent-Id` header is missing or names an unknown agent;
-///     external clients are expected to receive a user-recoverable error.
-///
-/// `MissingParameter("agent_id")` is the honest user-facing mapping for the
-/// second case (lifts to `LibreFangError::InvalidInput` → HTTP 400) and is
-/// not worse than `Internal` for the first: in both cases the immediate LLM
-/// turn cannot patch the wiring. The tool name (and the fact that it dropped
-/// attribution) is preserved on the operator-facing tracing channel so a
-/// real direct-loop regression can still be traced.
-fn caller_agent_id_missing(tool: &'static str) -> ToolError {
-    tracing::warn!(
-        tool,
-        "caller agent_id missing — surfaced as MissingParameter to the LLM"
-    );
-    ToolError::MissingParameter("agent_id")
-}
 
 pub(super) async fn tool_cron_create(
     input: &serde_json::Value,
