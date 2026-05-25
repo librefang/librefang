@@ -1158,15 +1158,24 @@ pub async fn execute_tool_raw(
         // Result<String, ToolError>; narrow to Result<String, String> here)
         "goal_update" => tool_goal_update(input, *kernel).map_err(|e| e.to_string()),
 
-        // Workflow tools
-        "workflow_run" => tool_workflow_run(input, *kernel).await,
-        "workflow_list" => tool_workflow_list(*kernel).await,
-        "workflow_describe" => tool_workflow_describe(input, *kernel).await,
-        "workflow_status" => tool_workflow_status(input, *kernel).await,
-        "workflow_start" => {
-            tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
-        }
-        "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
+        // Workflow tools (#3576: return Result<String, ToolError>; narrow
+        // to Result<String, String> here at the boundary).
+        "workflow_run" => tool_workflow_run(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_list" => tool_workflow_list(*kernel).await.map_err(|e| e.to_string()),
+        "workflow_describe" => tool_workflow_describe(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_status" => tool_workflow_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_start" => tool_workflow_start(input, *kernel, *caller_agent_id, *session_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_cancel" => tool_workflow_cancel(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Browser automation tools
         #[cfg(feature = "browser")]
