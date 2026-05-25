@@ -1988,7 +1988,7 @@ function CanvasPageInner() {
   // Dry-run: resolve agents and expand prompts without calling any LLMs
   const handleDryRun = useCallback(async (id?: string) => {
     setShowRunInput(false);
-    let workflowId = id || selectedWorkflow?.id;
+    const workflowId = id || selectedWorkflow?.id;
     if (!workflowId) {
       showError(t("canvas.no_agent_steps"));
       return;

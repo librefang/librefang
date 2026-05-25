@@ -173,10 +173,11 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel,
-        // Only consumed by `execute_tool` upstream to thread into
-        // `DeferredToolExecution.chat_id`; the raw-execution path
-        // (`execute_tool_raw`, this fn) doesn't reference it.
-        chat_id: _,
+        // Previously bound to `_` (only consumed by `execute_tool` upstream
+        // to thread into `DeferredToolExecution.chat_id`). Now also consumed
+        // by the MCP dispatch arm to populate `CallerContext.chat_id`
+        // (#5699), so it's a real binding.
+        chat_id,
         session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
@@ -1240,7 +1241,23 @@ pub async fn execute_tool_raw(
                                 server = server_name,
                                 "Dispatching to MCP server"
                             );
-                            match conn.call_tool(other, input).await {
+                            // #5699: propagate kernel-attested caller identity
+                            // (sender peer, channel, chat, session) to the MCP
+                            // server so it can authorise per-caller instead of
+                            // trusting whatever `user_id` value the agent
+                            // smuggled into `input`. The strip-then-set
+                            // contract inside `call_tool_with_caller` makes the
+                            // injected value tamper-evident.
+                            let caller_ctx = mcp::CallerContext::from_parts(
+                                *sender_id,
+                                *channel,
+                                *chat_id,
+                                *session_id,
+                            );
+                            match conn
+                                .call_tool_with_caller(other, input, caller_ctx.as_ref())
+                                .await
+                            {
                                 Ok(content) => Ok(content),
                                 Err(e) => Err(format!("MCP tool call failed: {e}")),
                             }

@@ -99,7 +99,7 @@ pub(super) fn is_no_reply(text: &str) -> bool {
 ///   clipping truncated abbreviations like `"See p.."`.
 pub(super) fn is_progress_text_leak(text: &str) -> bool {
     let t = text.trim();
-    if t.is_empty() || t.chars().count() > 120 {
+    if t.is_empty() || t.chars().nth(120).is_some() {
         return false;
     }
     t.ends_with("...") || t.ends_with("…")
@@ -343,10 +343,50 @@ pub(super) fn strip_processed_image_data(messages: &mut [Message]) -> bool {
 }
 
 pub(super) fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
-    total_usage.input_tokens += usage.input_tokens;
-    total_usage.output_tokens += usage.output_tokens;
-    total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens;
-    total_usage.cache_read_input_tokens += usage.cache_read_input_tokens;
+    total_usage.input_tokens = total_usage
+        .input_tokens
+        .checked_add(usage.input_tokens)
+        .unwrap_or_else(|| {
+            warn!(
+                existing = total_usage.input_tokens,
+                incoming = usage.input_tokens,
+                "input_tokens overflow, clamping to u64::MAX"
+            );
+            u64::MAX
+        });
+    total_usage.output_tokens = total_usage
+        .output_tokens
+        .checked_add(usage.output_tokens)
+        .unwrap_or_else(|| {
+            warn!(
+                existing = total_usage.output_tokens,
+                incoming = usage.output_tokens,
+                "output_tokens overflow, clamping to u64::MAX"
+            );
+            u64::MAX
+        });
+    total_usage.cache_creation_input_tokens = total_usage
+        .cache_creation_input_tokens
+        .checked_add(usage.cache_creation_input_tokens)
+        .unwrap_or_else(|| {
+            warn!(
+                existing = total_usage.cache_creation_input_tokens,
+                incoming = usage.cache_creation_input_tokens,
+                "cache_creation_input_tokens overflow, clamping to u64::MAX"
+            );
+            u64::MAX
+        });
+    total_usage.cache_read_input_tokens = total_usage
+        .cache_read_input_tokens
+        .checked_add(usage.cache_read_input_tokens)
+        .unwrap_or_else(|| {
+            warn!(
+                existing = total_usage.cache_read_input_tokens,
+                incoming = usage.cache_read_input_tokens,
+                "cache_read_input_tokens overflow, clamping to u64::MAX"
+            );
+            u64::MAX
+        });
 }
 
 /// Strip base64 data from image blocks in messages older than the last user
@@ -404,6 +444,7 @@ pub(super) fn sanitize_sender_label(name: &str) -> String {
     const MAX_LEN: usize = 64;
     let mut out = String::with_capacity(name.len().min(MAX_LEN));
     let mut last_space = false;
+    let mut char_count: usize = 0;
     for ch in name.chars() {
         let sanitized = match ch {
             '[' | ']' | ':' | '\n' | '\r' | '\t' => ' ',
@@ -419,7 +460,8 @@ pub(super) fn sanitize_sender_label(name: &str) -> String {
             last_space = false;
         }
         out.push(sanitized);
-        if out.chars().count() >= MAX_LEN {
+        char_count += 1;
+        if char_count >= MAX_LEN {
             break;
         }
     }

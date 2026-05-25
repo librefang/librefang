@@ -34,6 +34,7 @@ export {
   getUsageDaily,
   getUsageByModelPerformance,
   getBudgetStatus,
+  getProviderBudgets,
   // channels & comms
   listChannels,
   getCommsTopology,
@@ -165,6 +166,10 @@ export {
 } from "../../api";
 
 export type {
+  // per-provider budget (#5650)
+  ProviderBudgetRow,
+  ProviderBudgetSnapshot,
+  ProviderBudgetPayload,
   UserBudgetResponse,
   UserBudgetWindow,
   UserBudgetPayload,
@@ -209,6 +214,7 @@ export {
   resolveApproval,
   // analytics
   updateBudget,
+  updateProviderBudget,
   // channels & comms
   reloadChannels,
   saveSidecarConfig,

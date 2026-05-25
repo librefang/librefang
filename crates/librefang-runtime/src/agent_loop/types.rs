@@ -106,8 +106,9 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.max_history_messages` so
     /// operators can lower the default without recompiling or editing every
-    /// manifest. `None` → use the library fallback. Values below
-    /// `MIN_HISTORY_MESSAGES` are clamped up at resolution time.
+    /// manifest. `None` → use the library fallback. Values below the
+    /// supported floor are clamped up at resolution time; values above the
+    /// hard ceiling are clamped down.
     pub max_history_messages: Option<usize>,
     /// Auxiliary LLM client used for cheap-tier side tasks
     /// (context compression, title generation, search summarisation,
@@ -237,12 +238,12 @@ pub struct ExperimentContext {
     pub request_start: std::time::Instant,
 }
 
-impl Default for ExperimentContext {
-    fn default() -> Self {
+impl ExperimentContext {
+    pub fn new(experiment_id: uuid::Uuid, variant_id: uuid::Uuid, variant_name: String) -> Self {
         Self {
-            experiment_id: uuid::Uuid::default(),
-            variant_id: uuid::Uuid::default(),
-            variant_name: String::new(),
+            experiment_id,
+            variant_id,
+            variant_name,
             request_start: std::time::Instant::now(),
         }
     }

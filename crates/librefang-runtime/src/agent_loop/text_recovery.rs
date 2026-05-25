@@ -670,7 +670,7 @@ fn parse_arrow_syntax_tool_call(
     tool_names: &[&str],
 ) -> Option<(String, serde_json::Value)> {
     // Extract tool name: look for `tool => "name"` or `tool=>"name"`
-    let tool_marker_pos = text.find("tool")?;
+    let tool_marker_pos = text.find("tool =>").or_else(|| text.find("tool=>"))?;
     let after_tool = &text[tool_marker_pos + 4..];
     // Skip whitespace and `=>`
     let after_arrow = after_tool.trim_start();
@@ -694,7 +694,7 @@ fn parse_arrow_syntax_tool_call(
     }
 
     // Extract args: look for `args => {` or `args=>{`
-    let args_value = if let Some(args_pos) = text.find("args") {
+    let args_value = if let Some(args_pos) = text.find("args =>").or_else(|| text.find("args=>")) {
         let after_args = &text[args_pos + 4..];
         let after_args = after_args.trim_start();
         let after_args = after_args.strip_prefix("=>")?;
@@ -814,31 +814,47 @@ pub(super) fn parse_dash_dash_args(text: &str) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+pub(super) fn find_json_object_end(text: &str) -> Option<usize> {
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else {
+                match c {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        match c {
+            '"' => in_string = true,
+            '{' => depth = depth.checked_add(1)?,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 /// Try to parse a bare JSON object as a tool call.
 /// The JSON must have a "name"/"function"/"tool" field matching a known tool.
 fn try_parse_bare_json_tool_call(
     text: &str,
     tool_names: &[&str],
 ) -> Option<(String, serde_json::Value)> {
-    // Find the end of this JSON object by counting braces
-    let mut depth = 0;
-    let mut end = 0;
-    for (i, c) in text.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if end == 0 {
-        return None;
-    }
-
+    let end = find_json_object_end(text)?;
     parse_json_tool_call_object(&text[..end], tool_names)
 }

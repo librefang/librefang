@@ -133,20 +133,16 @@ pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<En
         }
     }
 
-    if !ctx.text.trim().is_empty()
+    let preconditions_met = !ctx.text.trim().is_empty()
         && ctx.response.tool_calls.is_empty()
         && !ctx.available_tools.is_empty()
-        && !ctx.any_tools_executed
-        && !ctx.hallucination_retried
-        && looks_like_hallucinated_action(ctx.text)
-    {
+        && !ctx.any_tools_executed;
+
+    if preconditions_met && !ctx.hallucination_retried && looks_like_hallucinated_action(ctx.text) {
         return Some(EndTurnRetry::HallucinatedAction);
     }
 
-    if !ctx.text.trim().is_empty()
-        && ctx.response.tool_calls.is_empty()
-        && !ctx.available_tools.is_empty()
-        && !ctx.any_tools_executed
+    if preconditions_met
         && !ctx.action_nudge_retried
         && !ctx.hallucination_retried
         && user_message_has_action_intent(ctx.user_message)
@@ -314,7 +310,7 @@ pub(super) async fn finalize_successful_end_turn(
         "prompt cache metrics for turn"
     );
 
-    if !ctx.opts.is_fork {
+    if !ctx.opts.is_fork && !ctx.opts.incognito {
         if let Some(pm_store) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
             let new_messages = &ctx.session.messages[end_turn.new_messages_start..];
@@ -332,12 +328,10 @@ pub(super) async fn finalize_successful_end_turn(
                     debug!(
                         memories = result.memories.len(),
                         relations = result.relations.len(),
-                        "{}",
-                        if ctx.streaming {
-                            "Proactive memory (streaming): stored {} memories, {} relations"
-                        } else {
-                            "Proactive memory: stored {} memories, {} relations"
-                        }
+                        "Proactive memory{}: stored {} memories, {} relations",
+                        if ctx.streaming { " (streaming)" } else { "" },
+                        result.memories.len(),
+                        result.relations.len(),
                     );
                     end_turn
                         .memories_saved
