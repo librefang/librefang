@@ -472,7 +472,10 @@ pub async fn execute_tool_raw(
                             spill_or_passthrough("web_fetch", body, threshold, max_artifact)
                         })
                 } else {
-                    tool_web_fetch_legacy(input, threshold, max_artifact).await
+                    // #3576: tool returns Result<String, ToolError>; narrow here.
+                    tool_web_fetch_legacy(input, threshold, max_artifact)
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             }
         },
@@ -577,9 +580,13 @@ pub async fn execute_tool_raw(
                         spill_or_passthrough("web_search", body, threshold, max_artifact)
                     })
                 } else {
-                    tool_web_search_legacy(input).await.map(|body| {
-                        spill_or_passthrough("web_search", body, threshold, max_artifact)
-                    })
+                    // #3576: tool returns Result<String, ToolError>; narrow here.
+                    tool_web_search_legacy(input)
+                        .await
+                        .map(|body| {
+                            spill_or_passthrough("web_search", body, threshold, max_artifact)
+                        })
+                        .map_err(|e| e.to_string())
                 }
             }
         },

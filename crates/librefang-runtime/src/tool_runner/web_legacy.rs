@@ -1,37 +1,60 @@
 //! Legacy `web_fetch` / `web_search` fallbacks used when the agent's
 //! `WebToolsContext` is unavailable (e.g. tests, REST/MCP bridges that
 //! don't thread one through).
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576). Missing params -> `MissingParameter`; the HTTP/transport
+//! (`reqwest::Error`) failures -> `ToolError::Upstream` via `fetch_err`, which
+//! keeps a stage-identifying prefix on the message AND the typed error on the
+//! `source()` chain; the 10 MB response cap -> `upstream_msg`.
 
+use super::error::{ToolError, ToolResult};
 use crate::web_search::parse_ddg_results;
 use tracing::debug;
+
+/// Wrap a transport failure in `ToolError::Upstream`, keeping a stage prefix on
+/// the rendered message and the typed error on the `source()` chain.
+fn fetch_err<E>(prefix: &str, e: E) -> ToolError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    ToolError::Upstream {
+        message: format!("{prefix}: {e}"),
+        source: Some(Box::new(e)),
+    }
+}
 
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 pub(super) async fn tool_web_fetch_legacy(
     input: &serde_json::Value,
     spill_threshold: u64,
     max_artifact_bytes: u64,
-) -> Result<String, String> {
-    let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
+) -> ToolResult {
+    let url = input["url"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("url"))?;
     let client = crate::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        .map_err(|e| fetch_err("Failed to create HTTP client", e))?;
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|e| fetch_err("HTTP request failed", e))?;
     let status = resp.status();
     // Reject responses larger than 10MB to prevent memory exhaustion
     if let Some(len) = resp.content_length() {
         if len > 10 * 1024 * 1024 {
-            return Err(format!("Response too large: {len} bytes (max 10MB)"));
+            return Err(ToolError::upstream_msg(format!(
+                "Response too large: {len} bytes (max 10MB)"
+            )));
         }
     }
     let body = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+        .map_err(|e| fetch_err("Failed to read response body", e))?;
     // Artifact spill: if the body exceeds the configured threshold, write it
     // to the artifact store and return a compact stub with a handle.  On write
     // failure (including per-artifact size cap exceeded), fall through to the
@@ -62,8 +85,10 @@ pub(super) async fn tool_web_fetch_legacy(
 }
 
 /// Legacy web search via DuckDuckGo HTML only. Used when WebToolsContext is unavailable.
-pub(super) async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<String, String> {
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
+pub(super) async fn tool_web_search_legacy(input: &serde_json::Value) -> ToolResult {
+    let query = input["query"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("query"))?;
     let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
 
     debug!(query, "Executing web search via DuckDuckGo HTML");
@@ -71,7 +96,7 @@ pub(super) async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<
     let client = crate::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        .map_err(|e| fetch_err("Failed to create HTTP client", e))?;
 
     let resp = client
         .get("https://html.duckduckgo.com/html/")
@@ -79,12 +104,12 @@ pub(super) async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<
         .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
         .send()
         .await
-        .map_err(|e| format!("Search request failed: {e}"))?;
+        .map_err(|e| fetch_err("Search request failed", e))?;
 
     let body = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read search response: {e}"))?;
+        .map_err(|e| fetch_err("Failed to read search response", e))?;
 
     // Parse DuckDuckGo HTML results
     let results = parse_ddg_results(&body, max_results);
@@ -105,4 +130,21 @@ pub(super) async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn web_fetch_legacy_missing_url_is_missing_parameter() {
+        let r = tool_web_fetch_legacy(&serde_json::json!({}), 0, 0).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("url"))));
+    }
+
+    #[tokio::test]
+    async fn web_search_legacy_missing_query_is_missing_parameter() {
+        let r = tool_web_search_legacy(&serde_json::json!({})).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("query"))));
+    }
 }
