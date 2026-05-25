@@ -86,6 +86,7 @@ RUN --mount=type=ssh \
     # `--mount=type=ssh` is required for private git deps (kreuzberg via
     # universal-agent-runtime) that are fetched over SSH during the build.
     SKIP_FRONTEND_BUILD=1 \
+    SKIP_DASHBOARD_BUILD=1 \
     cargo build --release --bin librefang --features telemetry && \
     cp target/release/librefang /usr/local/bin/librefang
 
