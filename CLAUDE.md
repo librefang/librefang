@@ -127,6 +127,38 @@ cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 cargo nextest run --workspace --no-fail-fast
 ```
 
+### Verifying without a native toolchain (Docker)
+
+When the host has no native `cargo` (e.g. a macOS box where Rust was never
+installed), do **not** declare a change unverified — run the build inside the
+repo's sanctioned dev image (`Dockerfile.rust-dev`, kept in sync with CI's
+Linux package set). It compiles into a **named volume**, never the host's
+shared `target/`, so it does not contend with the user's sessions and the
+"don't run cargo locally" rule still holds.
+
+```bash
+# 1. Build the dev image once (cached afterwards):
+docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
+
+# 2. Run any scoped cargo command through it. CARGO_HOME / CARGO_TARGET_DIR
+#    point at named volumes (isolated from the host); reuse them across runs
+#    so deps compile once. Set PATH explicitly — a login shell ('bash -l')
+#    drops the image's /usr/local/cargo/bin from PATH.
+docker run --rm \
+  -v "$(git rev-parse --show-toplevel)":/work \
+  -v librefang-cargo:/cargo -v librefang-target:/target \
+  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /work \
+  librefang-rust-dev:latest \
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test -p librefang-api --lib'
+```
+
+Scope is still mandatory: `-p <crate>` (or the `kind(lib)|kind(bin)` nextest
+filter), never the unscoped workspace form. The container runs **Linux only**
+— it cannot reproduce a Windows/macOS-specific failure, so for a
+platform-divergent bug write a platform-independent regression test (resolve a
+nonexistent path rather than relying on a host path like `/etc` existing — see
+#5716) or hand the exact command to the human for the missing OS.
+
 ## MANDATORY: Integration Testing (refs #3721)
 
 **Primary verification is automated.** The repo has comprehensive
