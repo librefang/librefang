@@ -5496,10 +5496,12 @@ async fn download_image_to_blocks(
 /// anchor tag.
 ///
 /// **Stub sentinel**: while `MediaEngine::describe_image` returns the
-/// `NOT_IMPLEMENTED_SENTINEL` Err string, the helper treats it the same as
-/// a provider 5xx — no prepend, image passes through. Once the real HTTP
-/// path lands, the sentinel disappears and the production path takes
-/// over with no change to this caller.
+/// `NOT_IMPLEMENTED_SENTINEL` Err string, the helper logs at `debug!`
+/// (not `warn!`, to avoid alarm fatigue on every inbound image) and
+/// passes the image through unannotated. Real provider errors (HTTP 5xx,
+/// timeouts, etc.) are logged at `warn!`. Once the real HTTP path lands,
+/// the sentinel disappears and the production path takes over with no
+/// change to this caller.
 ///
 /// The base64 `Image` fallback path (used when `tokio::fs::write` fails)
 /// is skipped on purpose: re-encoding a base64 payload back to a temp
@@ -5557,11 +5559,19 @@ async fn enrich_image_blocks_with_description(
             }
             Ok(_) => out.push(block),
             Err(reason) => {
-                tracing::warn!(
-                    error = %reason,
-                    path = %path,
-                    "Image auto-describe failed; passing image through unannotated"
-                );
+                if is_describe_stub_or_config_error(&reason) {
+                    tracing::debug!(
+                        error = %reason,
+                        path = %path,
+                        "Image auto-describe skipped (stub/unconfigured backend); passing image through unannotated"
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %reason,
+                        path = %path,
+                        "Image auto-describe failed; passing image through unannotated"
+                    );
+                }
                 out.push(block);
             }
         }
@@ -5593,6 +5603,20 @@ fn sanitize_describe_text(text: &str) -> String {
 /// enough to keep the per-(agent,channel) session from stalling behind a
 /// single hung vision call.
 const INBOUND_DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Mirror of `librefang_runtime_media::media_understanding::NOT_IMPLEMENTED_SENTINEL`.
+/// Kept as a literal because `librefang-channels` does not depend on
+/// `librefang-runtime-media`. Pinned by test in the media crate.
+const DESCRIBE_STUB_SENTINEL: &str = "describe_image: not yet implemented (stub)";
+
+/// Returns `true` when the error from `describe_inbound_image` indicates a
+/// stub backend or missing provider configuration — i.e. the operator has
+/// `image_description = true` but no real vision provider is wired yet.
+/// These are expected in a partially-configured deployment and should be
+/// logged at `debug!`, not `warn!`, to avoid alarm fatigue.
+fn is_describe_stub_or_config_error(reason: &str) -> bool {
+    reason == DESCRIBE_STUB_SENTINEL || reason.contains("No vision-capable LLM provider configured")
+}
 
 /// Dispatch a multimodal message (content blocks) to an agent, handling routing
 /// and RBAC the same way as the text path.
@@ -9566,6 +9590,43 @@ mod tests {
                 rec.calls.lock().unwrap().len(),
                 0,
                 "describe must NOT be invoked when no ImageFile is present"
+            );
+        }
+
+        #[tokio::test]
+        async fn stub_sentinel_passes_image_through_unannotated() {
+            // When the MediaEngine is a stub (no real vision provider wired),
+            // it returns Err(DESCRIBE_STUB_SENTINEL). The image must still
+            // pass through — same as a real provider failure — but the log
+            // level is debug!, not warn!, so operators don't see alarm noise
+            // on every inbound image.
+            let (h, _rec) = handle_with(Err(DESCRIBE_STUB_SENTINEL.to_string()));
+            let input = image_file_blocks();
+            let out = enrich_image_blocks_with_description(input.clone(), &h).await;
+            assert_eq!(out.len(), input.len(), "no Text prepend on stub Err path");
+            assert!(matches!(&out[0], ContentBlock::Text { text, .. } if text == "user caption"));
+            assert!(matches!(&out[1], ContentBlock::ImageFile { .. }));
+        }
+
+        #[test]
+        fn stub_and_config_errors_are_classified_correctly() {
+            assert!(
+                is_describe_stub_or_config_error(DESCRIBE_STUB_SENTINEL),
+                "stub sentinel must be classified as stub/config error"
+            );
+            assert!(
+                is_describe_stub_or_config_error(
+                    "No vision-capable LLM provider configured. Set [media] image_provider in config.toml."
+                ),
+                "missing-provider error must be classified as stub/config error"
+            );
+            assert!(
+                !is_describe_stub_or_config_error("gemini 503"),
+                "real provider error must NOT be classified as stub/config"
+            );
+            assert!(
+                !is_describe_stub_or_config_error("timeout after 30s"),
+                "timeout must NOT be classified as stub/config"
             );
         }
     }

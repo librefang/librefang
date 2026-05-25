@@ -1582,10 +1582,17 @@ pub async fn enrich_attachment_blocks_with_description(
                 }
                 Ok(Ok(_)) => out.push(block),
                 Ok(Err(reason)) => {
-                    tracing::warn!(
-                        error = %reason,
-                        "Attachment image auto-describe failed; passing image through unannotated"
-                    );
+                    if is_describe_stub_or_config_error(&reason) {
+                        tracing::debug!(
+                            error = %reason,
+                            "Attachment image auto-describe skipped (stub/unconfigured backend); passing image through unannotated"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = %reason,
+                            "Attachment image auto-describe failed; passing image through unannotated"
+                        );
+                    }
                     out.push(block);
                 }
                 Err(_) => {
@@ -1641,6 +1648,15 @@ fn is_describe_text_usable(text: &str) -> bool {
 /// The test below pins the two strings byte-for-byte so a drift surfaces
 /// as a test failure rather than a silent prompt-pollution regression.
 const STUB_SENTINEL: &str = "describe_image: not yet implemented (stub)";
+
+/// Returns `true` when the error from `MediaEngine::describe_image` indicates
+/// a stub backend or missing provider configuration rather than a real
+/// provider failure. Stub/config errors are logged at `debug!` to avoid
+/// alarm fatigue when `image_description = true` is set before a vision
+/// provider is wired.
+fn is_describe_stub_or_config_error(reason: &str) -> bool {
+    reason == STUB_SENTINEL || reason.contains("No vision-capable LLM provider configured")
+}
 
 /// Neutralise OCR text before wrapping it in `<image_description>` tags.
 ///
@@ -7647,6 +7663,28 @@ mod tests {
         // Body letters and word boundaries are otherwise untouched.
         assert!(clean.contains("image_description"));
         assert!(clean.contains("ignore prior"));
+    }
+
+    #[test]
+    fn stub_and_config_errors_are_classified_correctly() {
+        assert!(
+            super::is_describe_stub_or_config_error(super::STUB_SENTINEL),
+            "stub sentinel must be classified as stub/config error"
+        );
+        assert!(
+            super::is_describe_stub_or_config_error(
+                "No vision-capable LLM provider configured. Set [media] image_provider in config.toml."
+            ),
+            "missing-provider error must be classified as stub/config error"
+        );
+        assert!(
+            !super::is_describe_stub_or_config_error("gemini 503"),
+            "real provider error must NOT be classified as stub/config"
+        );
+        assert!(
+            !super::is_describe_stub_or_config_error("stat saved image failed: No such file"),
+            "filesystem error must NOT be classified as stub/config"
+        );
     }
 
     #[test]
