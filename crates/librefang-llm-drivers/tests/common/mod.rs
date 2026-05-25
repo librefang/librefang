@@ -205,6 +205,19 @@ pub fn openai_400_temperature_rejected() -> ResponseTemplate {
     }))
 }
 
+/// 400 variant where the parameter is accepted but only with value 1.
+/// Seen with gpt-5 and similar models: code="unsupported_value".
+pub fn openai_400_temperature_unsupported_value() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        "error": {
+            "message": "Unsupported value: 'temperature' does not support 0.5 with this model. Only the default (1) value is supported.",
+            "type": "invalid_request_error",
+            "param": "temperature",
+            "code": "unsupported_value"
+        }
+    }))
+}
+
 pub fn openai_400_max_tokens_unsupported() -> ResponseTemplate {
     ResponseTemplate::new(400).set_body_json(serde_json::json!({
         "error": {

@@ -201,6 +201,54 @@ async fn oc5_temperature_strip() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn oc5b_temperature_strip_unsupported_value() {
+    // Verifies the retry guard also fires for code="unsupported_value" (gpt-5 style),
+    // not just code="unsupported_parameter" (o-series style).
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_400_temperature_unsupported_value())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("no-temp")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let result = driver
+        .complete(request_with_temperature("gpt-test", 0.5))
+        .await;
+    assert!(
+        result.is_ok(),
+        "expected Ok after temperature strip, got {:?}",
+        result
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected 2 requests (1x400 + 1x200)");
+
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    assert!(
+        first.get("temperature").is_some(),
+        "first request should include temperature: {first}"
+    );
+    assert!(
+        second.get("temperature").is_none(),
+        "retry request should omit temperature: {second}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn oc6_toolless_retry_on_500() {
     let _env = isolated_env();
     let server = MockServer::start().await;
