@@ -1282,6 +1282,23 @@ export function AgentsPage() {
     const skillsMode = (agent as AgentDetail).skills_mode;
     const usesAllSkills = skillsMode === "all" && skills.length === 0;
     const skillsDisabled = skillsMode === "none";
+    const autoEvolve = agent.auto_evolve !== false;
+    const handleToggleAutoEvolve = () => {
+      if (!agent.id) return;
+      patchAgentMutation.mutate(
+        { agentId: agent.id, body: { auto_evolve: !autoEvolve } },
+        {
+          onSuccess: () => {
+            addToast(
+              t("agents.detail.auto_evolve_saved", {
+                defaultValue: !autoEvolve ? "Auto-evolve enabled" : "Auto-evolve disabled",
+              }),
+              "success",
+            );
+          },
+        },
+      );
+    };
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -1301,6 +1318,33 @@ export function AgentsPage() {
             {t("agents.detail.install_skill", { defaultValue: "Install" })}
           </Button>
         </div>
+
+        <div className="flex items-center justify-between px-3 py-2 rounded-md border border-border-subtle bg-main/40">
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-[12px] font-medium text-text-main">
+              {t("agents.detail.auto_evolve_label", { defaultValue: "Auto-evolve" })}
+            </div>
+            <div className="font-mono text-[10px] text-text-dim/70 mt-0.5">
+              {t("agents.detail.auto_evolve_desc", {
+                defaultValue: "Background skill evolution review after each turn",
+              })}
+            </div>
+          </div>
+          <button
+            onClick={handleToggleAutoEvolve}
+            disabled={patchAgentMutation.isPending}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+              autoEvolve ? "bg-brand" : "bg-text-dim/30"
+            } ${patchAgentMutation.isPending ? "opacity-50" : ""}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                autoEvolve ? "translate-x-4" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
         {skillsDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
