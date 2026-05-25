@@ -227,7 +227,8 @@ async fn test_tool_a2a_send_blocks_secret_in_message() {
     });
     let err = tool_a2a_send(&input, Some(&kernel))
         .await
-        .expect_err("a2a_send must reject tainted message");
+        .expect_err("a2a_send must reject tainted message")
+        .to_string(); // #3576: Err is now ToolError; assert via its Display.
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
