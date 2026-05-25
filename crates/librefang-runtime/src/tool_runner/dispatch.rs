@@ -884,11 +884,16 @@ pub async fn execute_tool_raw(
             .map_err(|e| e.to_string()) // #3576: narrow ToolError at the boundary
         }
 
-        // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
-        "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
-        "agent_list" => tool_agent_list(*kernel),
-        "agent_kill" => tool_agent_kill(input, *kernel),
+        // Inter-agent tools (require kernel handle). #3576: return
+        // Result<String, ToolError>; narrow to Result<String, String> here.
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools)
+            .await
+            .map_err(|e| e.to_string()),
+        "agent_list" => tool_agent_list(*kernel).map_err(|e| e.to_string()),
+        "agent_kill" => tool_agent_kill(input, *kernel).map_err(|e| e.to_string()),
 
         // Shared memory tools (peer-scoped when sender_id is present).
         // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
@@ -915,7 +920,7 @@ pub async fn execute_tool_raw(
         // returns `Result<String, ToolError>`; arms narrow to
         // `Result<String, String>` here at the boundary (same bridge as the
         // cron / schedule slices) until the dispatch return type itself lifts.
-        "agent_find" => tool_agent_find(input, *kernel),
+        "agent_find" => tool_agent_find(input, *kernel).map_err(|e| e.to_string()),
         "task_post" => tool_task_post(input, *kernel, *caller_agent_id)
             .await
             .map_err(|e| e.to_string()),
