@@ -935,12 +935,20 @@ pub async fn execute_tool_raw(
             .await
             .map_err(|e| e.to_string()),
 
-        // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => {
-            tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id).await
-        }
-        "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
-        "schedule_delete" => tool_schedule_delete(input, *kernel).await,
+        // Scheduling tools (delegate to CronScheduler via kernel handle).
+        // Second slice of the #3576 typed-error migration: the submodule now
+        // returns `Result<String, ToolError>`; the dispatch arms narrow it to
+        // `Result<String, String>` here at the boundary so the broader
+        // dispatch table stays uniform until every submodule has migrated.
+        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Knowledge graph tools (#3576 fourth slice: submodule returns
         // Result<String, ToolError>; arms narrow to Result<String, String>
