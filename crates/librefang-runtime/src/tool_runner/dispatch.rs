@@ -995,7 +995,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
         "media_transcribe" => {
@@ -1008,7 +1010,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Media generation tools (MediaDriver-based)
@@ -1017,19 +1021,29 @@ pub async fn execute_tool_raw(
             let upload_dir = kernel
                 .map(|k| k.effective_upload_dir())
                 .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
-            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir).await
+            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
-        "video_generate" => tool_video_generate(input, *media_drivers).await,
+        "video_generate" => tool_video_generate(input, *media_drivers)
+            .await
+            .map_err(|e| e.to_string()),
         #[cfg(feature = "media")]
-        "video_status" => tool_video_status(input, *media_drivers).await,
+        "video_status" => tool_video_status(input, *media_drivers)
+            .await
+            .map_err(|e| e.to_string()),
         #[cfg(feature = "media")]
-        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
+        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root)
+            .await
+            .map_err(|e| e.to_string()),
 
         // TTS/STT tools
         #[cfg(feature = "media")]
         "text_to_speech" => {
-            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
+            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
         "speech_to_text" => {
@@ -1039,7 +1053,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Docker sandbox tool (#3576: returns Result<String, ToolError>)
