@@ -249,6 +249,7 @@ pub async fn execute_tool_raw(
             let raw_input_path = input.get("path").and_then(|v| v.as_str());
             let resolved_for_dedup = raw_input_path
                 .and_then(|p| resolve_file_path_ext(p, *workspace_root, &extra_refs).ok());
+            // #3576: tool returns Result<String, ToolError>; narrow here.
             tool_file_read(input, *workspace_root, &extra_refs)
                 .await
                 .map(|content| match resolved_for_dedup {
@@ -257,6 +258,7 @@ pub async fn execute_tool_raw(
                     }
                     None => content,
                 })
+                .map_err(|e| e.to_string())
         }
         "file_write" => {
             // Enforce named workspace read-only restrictions before the sandbox resolves the path.
@@ -325,7 +327,9 @@ pub async fn execute_tool_raw(
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
-            tool_file_write(input, *workspace_root, &extra_refs).await
+            tool_file_write(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         "file_list" => {
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
@@ -334,7 +338,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_file_list(input, *workspace_root, &extra_refs).await
+            tool_file_list(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         "apply_patch" => {
             // SECURITY #3662: Enforce named workspace read-only restrictions
@@ -404,7 +410,9 @@ pub async fn execute_tool_raw(
             // set.
             let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
             let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
+            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
