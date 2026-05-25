@@ -7,16 +7,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [2026.5.25] - 2026-05-25
 
-_1 PR from 1 contributor since v2026.5.25-beta.13._
-
-### Highlights
-
-- **Python SDK in Nix flake** — the `sdk/python/librefang` package is now included in the Nix source filter, so Nix-based builds and derivations correctly pick up Python SDK changes without manual workarounds.
-
-### Fixed
-
-- Include sdk/python/librefang in flake source filter (#5714) (@houko)
-
+_No notable changes._
 
 ## [Unreleased]
 
