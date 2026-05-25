@@ -532,6 +532,14 @@ class BudgetResource {
     return this._c._request("PUT", `/api/budget/agents/${id}`, data, undefined);
   }
 
+  async providerBudgetList() {
+    return this._c._request("GET", "/api/budget/providers");
+  }
+
+  async updateProviderBudget(provider_id, data) {
+    return this._c._request("PUT", `/api/budget/providers/${provider_id}`, data, undefined);
+  }
+
   async userBudgetRanking(query) {
     return this._c._request("GET", "/api/budget/users", undefined, query);
   }
