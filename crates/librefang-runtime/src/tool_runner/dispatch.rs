@@ -987,8 +987,8 @@ pub async fn execute_tool_raw(
             tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
         }
 
-        // Location tool
-        "location_get" => tool_location_get().await,
+        // Location tool (#3576: returns Result<String, ToolError>; narrow here)
+        "location_get" => tool_location_get().await.map_err(|e| e.to_string()),
 
         // System time tool
         "system_time" => Ok(tool_system_time()),
