@@ -519,7 +519,9 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
          no named-workspace prefixes are provided, got: {:?}",
         denied
     );
-    let err = denied.unwrap_err();
+    // #3576: Err is now ToolError; assert via its Display (the sandbox reason
+    // is preserved inside InvalidParameter).
+    let err = denied.unwrap_err().to_string();
     assert!(
         err.contains("resolves outside workspace") || err.contains("Access denied"),
         "expected sandbox rejection, got: {err}"
