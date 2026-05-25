@@ -128,6 +128,20 @@ async fn list_tools_returns_builtins_with_total() {
         names.contains(&"file_read"),
         "expected `file_read` in builtin tools, got: {names:?}"
     );
+
+    // Every tool returned in the no-MCP boot has source="builtin" and must
+    // NOT carry an mcp_server field (that field is MCP-only).
+    for t in tools {
+        assert_eq!(
+            t["source"].as_str(),
+            Some("builtin"),
+            "builtin tool must have source=builtin: {t:?}"
+        );
+        assert!(
+            t.get("mcp_server").is_none() || t["mcp_server"].is_null(),
+            "builtin tool must not carry mcp_server: {t:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

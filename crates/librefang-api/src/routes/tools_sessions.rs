@@ -77,18 +77,22 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .collect();
 
     // Include MCP tools so they're visible in Settings -> Tools.
-    // MCP tool names follow the convention `mcp_{server}_{tool}`, so we
-    // derive the originating server name from the name prefix for grouping
-    // in the dashboard. The kernel stores tools flat (no server field on
-    // ToolDefinition), so prefix parsing is the only available signal.
+    // Use `resolve_mcp_server_from_known` to map tool names back to their
+    // originating server — this handles multi-word server names like
+    // `my-server` that the naive `split_once('_')` approach breaks.
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
+        let configured_servers: Vec<String> = state
+            .kernel
+            .effective_mcp_servers_ref()
+            .read()
+            .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         for t in mcp_tools.iter() {
-            // Extract server name: "mcp_filesystem_read_file" → "filesystem"
-            let mcp_server: Option<&str> = t
-                .name
-                .strip_prefix("mcp_")
-                .and_then(|rest| rest.split_once('_'))
-                .map(|(server, _tool)| server);
+            let mcp_server: Option<String> = librefang_kernel::mcp::resolve_mcp_server_from_known(
+                &t.name,
+                configured_servers.iter().map(String::as_str),
+            )
+            .map(|s| s.to_string());
             let mut entry = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
@@ -96,7 +100,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "source": "mcp",
             });
             if let Some(server) = mcp_server {
-                entry["mcp_server"] = serde_json::Value::String(server.to_string());
+                entry["mcp_server"] = serde_json::Value::String(server);
             }
             tools.push(entry);
         }
