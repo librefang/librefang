@@ -70,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # out-of-process sidecars now (see #5408 / #5461), so the old
     # `all-channels` / `core-channels` aliases are gone — `telemetry` is
     # the whole opt-in surface left, matching the CLI's own `default`.
-    cargo build --release --bin librefang --features telemetry && \
+    cargo build --release --bin librefang --features telemetry,surreal-backend && \
     cp target/release/librefang /usr/local/bin/librefang
 
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)

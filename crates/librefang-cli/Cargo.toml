@@ -31,6 +31,13 @@ default = ["telemetry"]
 # scaffolding cleanup PR that introduced this stub.
 mini = []
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+# BossFang-exclusive storage feature gates. librefang-cli/src/main.rs
+# gates storage administration commands (db-explorer, SQLite→Surreal
+# migrator, UAR namespace provisioning) on these. They must be declared
+# here to satisfy the Rust 1.80+ `unexpected_cfgs` lint, and forwarded
+# to librefang-storage so the underlying implementations compile.
+surreal-backend = ["dep:librefang-storage", "librefang-storage/surreal-backend", "librefang-api/surreal-backend"]
+sqlite-backend = ["dep:librefang-storage", "librefang-storage/sqlite-backend"]
 
 [[bin]]
 name = "librefang"
@@ -40,6 +47,7 @@ path = "src/main.rs"
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-api = { path = "../librefang-api", default-features = false }
+librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-import = { path = "../librefang-import" }
 librefang-skills = { path = "../librefang-skills" }
