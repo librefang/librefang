@@ -45,13 +45,21 @@ sha256() {
 # shell. (#5664 sub-finding 1.)
 if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
     | grep -zq .; then
-    if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-        | xargs -0 -r rustfmt --check --edition 2021 >/dev/null 2>&1; then
-        echo "Error: staged Rust files are not rustfmt-clean."
-        echo "Run: git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \\"
-        echo "       | xargs -0 rustfmt --edition 2021"
-        echo "Then re-stage and commit again."
-        exit 1
+    if command -v rustfmt >/dev/null 2>&1; then
+        if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
+            | xargs -0 -r rustfmt --check --edition 2021 >/dev/null 2>&1; then
+            echo "Error: staged Rust files are not rustfmt-clean."
+            echo "Run: git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \\"
+            echo "       | xargs -0 rustfmt --edition 2021"
+            echo "Then re-stage and commit again."
+            exit 1
+        fi
+    else
+        # Soft-skip when no native rustfmt is installed (e.g. a Docker-only
+        # host — see CLAUDE.md > Build & Verify). Mirrors the detect-secrets
+        # step below; verify formatting in the dev container instead.
+        echo "Warning: rustfmt not on PATH; skipping staged-Rust fmt check." >&2
+        echo "         Verify in the dev container (CLAUDE.md > Build & Verify)." >&2
     fi
 fi
 
