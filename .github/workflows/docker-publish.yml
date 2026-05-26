@@ -50,7 +50,7 @@ jobs:
       # Load the deploy key for the private kreuzberg repo so cargo can
       # fetch it over SSH during the docker build's --mount=type=ssh step.
       - name: Load SSH key for private deps
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: ${{ secrets.KREUZBERG_SSH_KEY }}
 
