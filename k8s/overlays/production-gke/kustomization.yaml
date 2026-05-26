@@ -22,7 +22,7 @@ labels:
 images:
   - name: PLACEHOLDER_BOSSFANG_IMAGE
     newName: gcr.io/prometheus-461323/bossfang
-    newTag: 39608c1f00af5a17f7f1f64d265add03eef56361
+    newTag: 2d7688b5cbde62adcf0c7a0b0abd2dcc8690025e
 
 patches:
   - path: patches/deployment-resources.yaml
