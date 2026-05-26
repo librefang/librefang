@@ -32,6 +32,11 @@ data:
     trusted_proxies = ["0.0.0.0/0"]
     trust_forwarded_for = true
 
+    # Agent WebSocket origin allowlist. Prevents cross-site WebSocket
+    # hijacking (#3731). Must include the dashboard hostname so the Chat
+    # page can upgrade to wss://bossfang.prometheusags.ai/api/agents/*/ws.
+    cors_origin = ["https://bossfang.prometheusags.ai"]
+
     # Storage: remote SurrealDB in the same namespace.
     # StorageBackendKind uses #[serde(tag = "kind")] so the backend variant
     # and its fields must be in the same [storage.backend] table — not a
