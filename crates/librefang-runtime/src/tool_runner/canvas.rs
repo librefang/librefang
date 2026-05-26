@@ -87,7 +87,7 @@ fn is_void_tag(name: &str) -> bool {
 }
 
 fn is_safe_url(url: &str) -> bool {
-    let trimmed = url.trim();
+    let trimmed = url.trim().trim_matches(|c| c == '"' || c == '\'');
     let lower = trimmed.to_lowercase();
     if lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
         return false;

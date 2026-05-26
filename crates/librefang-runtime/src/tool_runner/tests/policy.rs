@@ -628,23 +628,28 @@ fn test_sanitize_canvas_rejects_iframe() {
 fn test_sanitize_canvas_rejects_event_handler() {
     let html = "<div onclick=\"alert('xss')\">click me</div>";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("event handler"));
+    assert!(result.is_ok());
+    assert!(!result.unwrap().contains("onclick"));
 }
 
 #[test]
 fn test_sanitize_canvas_rejects_onload() {
     let html = "<img src='x' onerror = \"alert(1)\">";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
+    assert!(result.is_ok());
+    assert!(!result.unwrap().contains("onerror"));
 }
 
 #[test]
 fn test_sanitize_canvas_rejects_javascript_url() {
     let html = "<a href=\"javascript:alert('xss')\">click</a>";
     let result = sanitize_canvas_html(html, 512 * 1024);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("javascript:"));
+    assert!(result.is_ok());
+    let sanitized = result.unwrap();
+    assert!(
+        !sanitized.contains("javascript:"),
+        "dangerous javascript URL not stripped: {sanitized}"
+    );
 }
 
 #[test]
