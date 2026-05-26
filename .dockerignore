@@ -98,8 +98,12 @@ web
 # context. Placed after the *.md rule so the lone tracked Markdown file
 # (sidecar/template/README.md) survives — .dockerignore honors the last
 # matching pattern.
+# setup.py and pyproject.toml are also needed so the final image stage
+# can `pip install` the SDK for sidecar --describe at daemon boot.
 !sdk/python/librefang
 !sdk/python/librefang/**
+!sdk/python/setup.py
+!sdk/python/pyproject.toml
 LICENSE-*
 CLAUDE.md
 AGENTS.md
