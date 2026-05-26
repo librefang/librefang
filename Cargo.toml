@@ -285,7 +285,7 @@ smallvec = "1"
 # Build-script helpers — used by `crates/librefang-api/build.rs` and
 # `crates/librefang-cli/build.rs` to resolve `git` via PATH instead of
 # invoking it by bare name (refs #5667). Lightweight, well-maintained.
-which = { version = "7", default-features = false }
+which = { version = "8", default-features = false }
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
