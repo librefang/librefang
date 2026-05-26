@@ -882,7 +882,7 @@ pub async fn execute_tool_raw(
         "memory_recall" => {
             tool_memory_recall(input, *kernel, *caller_agent_id, *sender_id, *channel)
         }
-        "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
+        "memory_list" => tool_memory_list(input, *kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
         "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),

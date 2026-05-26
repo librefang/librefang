@@ -298,10 +298,13 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         },
         ToolDefinition {
             name: "memory_list".to_string(),
-            description: "List all keys in the agent's memory.".to_string(),
+            description: "List keys in the agent's memory with pagination.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
+                    "offset": { "type": "integer", "description": "Number of keys to skip" }
+                },
             }),
         },
         // --- Memory wiki tools (issue #3329) — return KernelOpError::unavailable
