@@ -495,7 +495,7 @@ async fn test_image_analyze_missing_file() {
     .await;
     assert!(result.is_error);
     assert!(
-        result.content.contains("Failed to read"),
+        result.content.contains("nonexistent_image.png"),
         "unexpected error content: {}",
         result.content
     );
