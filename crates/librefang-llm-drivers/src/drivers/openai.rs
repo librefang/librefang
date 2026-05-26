@@ -1,6 +1,8 @@
 //! OpenAI-compatible API driver.
 //!
 //! Works with OpenAI, Ollama, vLLM, and any other OpenAI-compatible endpoint.
+//! Handles provider-specific quirks such as the `unsupported_value` error for
+//! the `temperature` parameter returned by reasoning models (o-series, gpt-5).
 
 use crate::backoff::{standard_retry_delay, tool_use_retry_delay};
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
