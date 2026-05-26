@@ -81,16 +81,16 @@ RUN --mount=type=ssh \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    # `--features telemetry`: the published Docker image is the full
-    # daemon, so it ships with telemetry on. Channel adapters all run as
-    # out-of-process sidecars now (see #5408 / #5461), so the old
-    # `all-channels` / `core-channels` aliases are gone — `telemetry` is
-    # the whole opt-in surface left, matching the CLI's own `default`.
-    # `--mount=type=ssh` is required for private git deps (kreuzberg via
-    # universal-agent-runtime) that are fetched over SSH during the build.
+    # `--features telemetry,surreal-backend,uar-driver`: the published
+    # Docker image ships with telemetry, SurrealDB storage, and the UAR
+    # liter-llm driver all compiled in. `uar-driver` embeds the
+    # Universal Agent Runtime LLM routing layer so agents can use
+    # `provider = "uar"` to reach 142+ providers via a unified interface.
+    # `--mount=type=ssh` is required for kreuzberg (private transitive dep
+    # pulled in by universal-agent-runtime) fetched over SSH during build.
     SKIP_FRONTEND_BUILD=1 \
     SKIP_DASHBOARD_BUILD=1 \
-    cargo build --release --bin librefang --features telemetry,surreal-backend && \
+    cargo build --release --bin librefang --features telemetry,surreal-backend,uar-driver && \
     cp target/release/librefang /usr/local/bin/librefang
 
 # Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)

@@ -55,6 +55,19 @@ spec:
       namespace: envoy-gateway-system
       sectionName: https
   rules:
+    # WebSocket terminal — disable all timeouts so Envoy does not tear down
+    # the HTTP/1.1 Upgrade connection. Must appear before the catch-all rule.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/terminal/ws
+      backendRefs:
+        - name: bossfang
+          port: 4545
+      timeouts:
+        request: 0s
+        backendRequest: 0s
+    # All other routes (API, dashboard SPA)
     - matches:
         - path:
             type: PathPrefix
