@@ -1387,9 +1387,7 @@ pub async fn execute_tool_raw(
             else if let Some(registry) = skill_registry {
                 if let Some(skill) = registry.find_tool_provider(other) {
                     if let Some(allowed) = allowed_skills {
-                        if !allowed.is_empty()
-                            && !allowed.iter().any(|s| *s == skill.manifest.skill.name)
-                        {
+                        if !allowed.is_empty() && !allowed.contains(&skill.manifest.skill.name) {
                             warn!(tool = other, "Skill not in agent's allowed_skills list");
                             return ToolResult {
                                 tool_use_id: tool_use_id.to_string(),
