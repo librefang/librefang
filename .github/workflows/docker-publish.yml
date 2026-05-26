@@ -56,10 +56,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.KREUZBERG_SSH_KEY }}" > ~/.ssh/id_kreuzberg
           chmod 600 ~/.ssh/id_kreuzberg
-          eval $(ssh-agent -s) >> $GITHUB_ENV
+          eval $(ssh-agent -s)
           ssh-add ~/.ssh/id_kreuzberg
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
 
       # ubuntu-latest ships with docker buildx; just create a named builder
       # so --mount=type=cache works correctly.
