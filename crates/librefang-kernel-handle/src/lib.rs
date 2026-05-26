@@ -734,6 +734,7 @@ pub trait ChannelSender: Send + Sync {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<(), KernelOpError> {
         let _ = (
@@ -744,6 +745,7 @@ pub trait ChannelSender: Send + Sync {
             is_quiz,
             correct_option_id,
             explanation,
+            thread_id,
             account_id,
         );
         Err(KernelOpError::unavailable("Channel poll send"))
