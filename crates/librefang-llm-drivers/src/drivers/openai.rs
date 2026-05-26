@@ -572,8 +572,9 @@ fn uses_completion_tokens(model: &str) -> bool {
 
 /// Returns true if a model rejects the `temperature` parameter.
 ///
-/// OpenAI's o-series reasoning models and GPT-5-mini variants only accept
-/// `temperature=1` (the default). Sending any other value causes a 400 error.
+/// OpenAI's o-series reasoning models and all GPT-5 variants only accept
+/// `temperature=1` (the default). Sending any other value causes a 400 error
+/// with code `unsupported_parameter` or `unsupported_value`.
 /// We proactively omit `temperature` for these models to avoid wasting a retry.
 fn rejects_temperature(model: &str) -> bool {
     let m = model.to_lowercase();
@@ -581,9 +582,10 @@ fn rejects_temperature(model: &str) -> bool {
     m.starts_with("o1")
         || m.starts_with("o3")
         || m.starts_with("o4")
-        // GPT-5-mini is a reasoning model that rejects temperature
-        || m.starts_with("gpt-5-mini")
-        || m.starts_with("gpt5-mini")
+        // All gpt-5 variants (gpt-5, gpt-5-mini, gpt-5-turbo, …) reject non-default temperature.
+        // gpt-5 returns code="unsupported_value" with "Only the default (1) value is supported".
+        || m.starts_with("gpt-5")
+        || m.starts_with("gpt5")
         // Catch any model explicitly tagged as "reasoning"
         || m.contains("-reasoning")
 }
@@ -1233,10 +1235,14 @@ impl LlmDriver for OpenAIDriver {
                     }
                 }
 
-                // o-series / reasoning models: strip temperature if rejected
+                // o-series / reasoning models: strip temperature if rejected.
+                // Catches both error codes OpenAI uses:
+                //   "unsupported_parameter" — parameter not accepted at all
+                //   "unsupported_value"     — value not accepted (e.g. gpt-5: "Only the default (1) value is supported")
                 if status == 400
                     && body.contains("temperature")
-                    && body.contains("unsupported_parameter")
+                    && (body.contains("unsupported_parameter")
+                        || body.contains("unsupported_value"))
                     && oai_request.temperature.is_some()
                     && attempt < max_retries
                 {
@@ -1646,10 +1652,14 @@ impl LlmDriver for OpenAIDriver {
                     }
                 }
 
-                // o-series / reasoning models: strip temperature if rejected
+                // o-series / reasoning models: strip temperature if rejected.
+                // Catches both error codes OpenAI uses:
+                //   "unsupported_parameter" — parameter not accepted at all
+                //   "unsupported_value"     — value not accepted (e.g. gpt-5: "Only the default (1) value is supported")
                 if status == 400
                     && body.contains("temperature")
-                    && body.contains("unsupported_parameter")
+                    && (body.contains("unsupported_parameter")
+                        || body.contains("unsupported_value"))
                     && oai_request.temperature.is_some()
                     && attempt < max_retries
                 {
@@ -2608,11 +2618,16 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_temperature_gpt5_mini() {
+    fn test_rejects_temperature_gpt5() {
+        // All gpt-5 variants reject non-default temperature.
+        // gpt-5 (non-mini) returns code="unsupported_value"; gpt-5-mini returns code="unsupported_parameter".
+        assert!(rejects_temperature("gpt-5"));
+        assert!(rejects_temperature("gpt-5-2025-06-01"));
         assert!(rejects_temperature("gpt-5-mini"));
         assert!(rejects_temperature("gpt-5-mini-2025-08-07"));
         assert!(rejects_temperature("gpt5-mini"));
         assert!(rejects_temperature("GPT-5-MINI-2025-08-07"));
+        assert!(rejects_temperature("GPT-5"));
     }
 
     #[test]
@@ -2625,8 +2640,6 @@ mod tests {
     fn test_does_not_reject_temperature_normal_models() {
         assert!(!rejects_temperature("gpt-4o"));
         assert!(!rejects_temperature("gpt-4o-mini"));
-        assert!(!rejects_temperature("gpt-5"));
-        assert!(!rejects_temperature("gpt-5-2025-06-01"));
         assert!(!rejects_temperature("plain-model-placeholder"));
         assert!(!rejects_temperature("llama-3.3-70b-versatile"));
         assert!(!rejects_temperature("deepseek-chat"));

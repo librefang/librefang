@@ -159,3 +159,45 @@ async fn os4_temperature_strip_stream() {
         "retry request should omit temperature: {second}"
     );
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn os4b_temperature_strip_unsupported_value_stream() {
+    // Streaming variant: verifies the retry guard fires for code="unsupported_value".
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_400_temperature_unsupported_value())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_sse_body(&["hello"]))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let (result, _events) =
+        collect_stream(&driver, request_with_temperature("gpt-test", 0.5)).await;
+    assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected 2 requests (1x400 + 1x200)");
+
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    assert!(
+        first.get("temperature").is_some(),
+        "first request should include temperature: {first}"
+    );
+    assert!(
+        second.get("temperature").is_none(),
+        "retry request should omit temperature: {second}"
+    );
+}
