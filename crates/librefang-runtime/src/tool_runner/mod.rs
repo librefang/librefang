@@ -110,8 +110,6 @@ use self::workflow::{
     tool_workflow_start, tool_workflow_status,
 };
 
-pub(super) const MAX_AGENT_CALL_DEPTH: u32 = 5;
-
 tokio::task_local! {
     /// Tracks the current inter-agent call depth within a task.
     pub(super) static AGENT_CALL_DEPTH: std::cell::Cell<u32>;

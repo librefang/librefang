@@ -63,7 +63,7 @@ pub(super) fn tool_wiki_get(
         MemoryAclOp::Read,
         WIKI_NAMESPACE,
     )
-    .map_err(ToolError::PermissionDenied)?;
+    ?;
     let value = kh.wiki_get(topic).map_err(ToolError::upstream)?;
     Ok(format_output(&value))
 }
@@ -96,7 +96,7 @@ pub(super) fn tool_wiki_search(
         MemoryAclOp::Read,
         WIKI_NAMESPACE,
     )
-    .map_err(ToolError::PermissionDenied)?;
+    ?;
     let value = kh.wiki_search(query, limit).map_err(ToolError::upstream)?;
     Ok(format_output(&value))
 }
@@ -130,7 +130,7 @@ pub(super) fn tool_wiki_write(
         MemoryAclOp::Write,
         WIKI_NAMESPACE,
     )
-    .map_err(ToolError::PermissionDenied)?;
+    ?;
 
     // Provenance is constructed kernel-side rather than left to the LLM:
     // (1) every write is required to carry an agent attribution per #3329's
