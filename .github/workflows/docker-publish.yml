@@ -49,10 +49,17 @@ jobs:
 
       # Load the deploy key for the private kreuzberg repo so cargo can
       # fetch it over SSH during the docker build's --mount=type=ssh step.
+      # Using inline ssh-agent setup instead of webfactory/ssh-agent to avoid
+      # GitHub CDN archive availability issues with that action.
       - name: Load SSH key for private deps
-        uses: webfactory/ssh-agent@v0.9.1
-        with:
-          ssh-private-key: ${{ secrets.KREUZBERG_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.KREUZBERG_SSH_KEY }}" > ~/.ssh/id_kreuzberg
+          chmod 600 ~/.ssh/id_kreuzberg
+          eval $(ssh-agent -s) >> $GITHUB_ENV
+          ssh-add ~/.ssh/id_kreuzberg
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
