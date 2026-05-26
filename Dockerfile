@@ -59,8 +59,11 @@ COPY packages ./packages
 # include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang") in
 # embedded_sdk.rs (added in #5472). Without this COPY the proc macro
 # panics with "sdk/python/librefang is not a directory". Only this one
-# subtree is needed — .dockerignore keeps the rest of sdk/ out.
+# subtree is needed for compilation — .dockerignore keeps the rest of sdk/ out.
+# setup.py + pyproject.toml are also copied so the final image stage can
+# `pip install /build/sdk/python` to make sidecar --describe work at boot.
 COPY sdk/python/librefang ./sdk/python/librefang
+COPY sdk/python/setup.py sdk/python/pyproject.toml ./sdk/python/
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the
