@@ -52,3 +52,11 @@ data:
     # Optional: structured logging level. Default `info`.
     [telemetry]
     log_level = "info"
+
+    # Terminal WebSocket: allow remote connections from the dashboard origin.
+    # allow_unauthenticated_remote is required because no api_key is set —
+    # the operator accepted the risk via LIBREFANG_ALLOW_NO_AUTH=1.
+    [terminal]
+    allow_remote = true
+    allow_unauthenticated_remote = true
+    allowed_origins = ["https://bossfang.prometheusags.ai"]

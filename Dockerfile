@@ -109,6 +109,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu72 \
     libdbus-1-3 \
     gosu \
+    ncurses-term \
     && rm -rf /var/lib/apt/lists/*
 # Install the librefang Python SDK so sidecar adapters can run `--describe`
 # at daemon boot and populate the channel configuration schema cache.
