@@ -110,9 +110,7 @@ use self::workflow::{
     tool_workflow_start, tool_workflow_status,
 };
 
-/// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
-#[allow(dead_code)]
-const MAX_AGENT_CALL_DEPTH: u32 = 5;
+pub(super) const MAX_AGENT_CALL_DEPTH: u32 = 5;
 
 tokio::task_local! {
     /// Tracks the current inter-agent call depth within a task.
@@ -205,18 +203,15 @@ pub(super) fn enforce_memory_acl(
     channel: Option<&str>,
     op: MemoryAclOp,
     namespace: &str,
-) -> Result<(), String> {
-    let kh = match kernel {
-        Some(kh) => kh,
-        // No kernel handle (legacy / test call sites): nothing to enforce
-        // against. The substrate-boundary peer-key guards (#5119/#5120)
-        // still apply downstream.
-        None => return Ok(()),
-    };
-    let Some(acl) = kh.memory_acl_for_sender(sender_id, channel) else {
-        // RBAC disabled or sender unattributed — no per-user restriction.
-        return Ok(());
-    };
+) -> Result<(), ToolError> {
+    let kh = kernel.ok_or_else(|| {
+        ToolError::PermissionDenied("Kernel handle required for ACL enforcement".into())
+    })?;
+    let acl = kh
+        .memory_acl_for_sender(sender_id, channel)
+        .ok_or_else(|| {
+            ToolError::PermissionDenied("Sender attribution required for ACL enforcement".into())
+        })?;
     let guard = librefang_memory::namespace_acl::MemoryNamespaceGuard::new(acl);
     let gate = match op {
         MemoryAclOp::Read => guard.check_read(namespace),
@@ -224,10 +219,11 @@ pub(super) fn enforce_memory_acl(
     };
     match gate {
         librefang_memory::namespace_acl::NamespaceGate::Allow => Ok(()),
-        librefang_memory::namespace_acl::NamespaceGate::Deny(reason) => Err(format!(
-            "Access denied: your user policy does not permit this memory operation \
-             on namespace '{namespace}' ({reason})."
-        )),
+        librefang_memory::namespace_acl::NamespaceGate::Deny(_) => {
+            Err(ToolError::PermissionDenied(
+                "Access denied: your user policy does not permit this memory operation.".into(),
+            ))
+        }
     }
 }
 

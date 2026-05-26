@@ -59,7 +59,8 @@ pub(super) fn tool_memory_store(
         channel,
         MemoryAclOp::Write,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     kh.memory_store(key, value.clone(), caller_agent_id, peer_id)
         .map_err(|e| e.to_string())?;
     Ok(format!("Stored value under key '{key}'."))
@@ -80,7 +81,8 @@ pub(super) fn tool_memory_recall(
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     match kh
         .memory_recall(key, caller_agent_id, peer_id)
         .map_err(|e| e.to_string())?
@@ -107,7 +109,8 @@ pub(super) fn tool_memory_list(
         channel,
         MemoryAclOp::Read,
         &kv_acl_namespace(peer_id),
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     let limit = input
         .get("limit")
         .and_then(|v| v.as_u64())
