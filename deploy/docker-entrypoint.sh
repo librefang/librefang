@@ -92,4 +92,14 @@ if [ -n "$LIBREFANG_MODEL" ]; then
   chown librefang:librefang "$CONFIG"
 fi
 
+# Ensure the daemon user's home directory exists.
+# gosu sets $HOME from /etc/passwd; adduser --system does not create the
+# directory by default. The terminal handler sets the PTY shell's cwd to
+# $HOME — a missing directory causes ENOENT on every shell spawn.
+LIBREFANG_USER_HOME="$(getent passwd librefang | cut -d: -f6)"
+if [ -n "$LIBREFANG_USER_HOME" ] && [ ! -d "$LIBREFANG_USER_HOME" ]; then
+    mkdir -p "$LIBREFANG_USER_HOME"
+    chown librefang:librefang "$LIBREFANG_USER_HOME"
+fi
+
 exec gosu librefang "$@"
