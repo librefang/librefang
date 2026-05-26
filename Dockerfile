@@ -101,6 +101,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     python3 \
+    python3-pip \
     python3-venv \
     libicu72 \
     libdbus-1-3 \
@@ -110,9 +111,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # at daemon boot and populate the channel configuration schema cache.
 # Without this, populate_sidecar_schema_cache() caches empty fields[] for
 # every adapter and the channel config UI renders a blank form.
+# Uses --break-system-packages because Debian bookworm's PEP 668 guard
+# blocks pip installs into the system Python by default.
 COPY --from=builder /build/sdk/python /opt/librefang/sdk/python
-RUN python3 -m ensurepip && \
-    python3 -m pip install --no-cache-dir /opt/librefang/sdk/python
+RUN pip3 install --no-cache-dir --break-system-packages /opt/librefang/sdk/python
 RUN addgroup --system --gid 1001 librefang && \
     adduser --system --uid 1001 --ingroup librefang librefang
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
