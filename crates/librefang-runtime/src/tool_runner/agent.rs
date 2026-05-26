@@ -293,7 +293,7 @@ pub(super) fn tool_agent_list(kernel: Option<&Arc<dyn KernelHandle>>) -> ToolRes
         return Ok("No agents currently running.".to_string());
     }
     let mut output = String::with_capacity(64 + agents.len() * 128);
-    let _ = write!(output, "Running agents ({}):\n", agents.len());
+    let _ = writeln!(output, "Running agents ({}):", agents.len());
     for a in &agents {
         let _ = writeln!(
             output,
