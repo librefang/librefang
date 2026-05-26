@@ -1,0 +1,21 @@
+# Pin bossfang-data PVC to bossfang-immediate (pd-ssd, Immediate, Retain)
+# so /data (workspaces, vault, skills) lands on fast SSD storage that
+# binds without WaitForFirstConsumer zone-scheduling risk.
+# Size increased from 5Gi to 10Gi for workspace and skill growth.
+#
+# MIGRATION: If bossfang-data PVC already exists with a different storage
+# class, it cannot be changed in place. You must:
+#   1. kubectl scale deployment/bossfang --replicas=0 -n bossfang
+#   2. kubectl delete pvc bossfang-data -n bossfang
+#   3. kubectl apply -k k8s/overlays/production-gke
+#   4. kubectl scale deployment/bossfang --replicas=1 -n bossfang
+# Back up /data contents first if vault or agent state matters.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bossfang-data
+spec:
+  storageClassName: bossfang-immediate
+  resources:
+    requests:
+      storage: 10Gi

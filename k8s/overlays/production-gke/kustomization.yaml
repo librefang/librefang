@@ -22,13 +22,17 @@ labels:
 images:
   - name: PLACEHOLDER_BOSSFANG_IMAGE
     newName: gcr.io/prometheus-461323/bossfang
-    newTag: 0b0235529dc177a749f9d5a1e28f8df211a6c0aa
+    newTag: 39608c1f00af5a17f7f1f64d265add03eef56361
 
 patches:
   - path: patches/deployment-resources.yaml
     target:
       kind: Deployment
       name: bossfang
+  - path: patches/bossfang-pvc-storage.yaml
+    target:
+      kind: PersistentVolumeClaim
+      name: bossfang-data
   - path: patches/statefulset-storage.yaml
     target:
       kind: StatefulSet
