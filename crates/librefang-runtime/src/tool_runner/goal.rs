@@ -13,7 +13,21 @@ pub(super) fn tool_goal_update(
         .as_str()
         .ok_or("Missing 'goal_id' parameter")?;
     let status = input["status"].as_str();
-    let progress = input["progress"].as_u64().map(|p| p.min(100) as u8);
+    let progress = if input.get("progress").is_some() {
+        let raw = input["progress"]
+            .as_f64()
+            .ok_or("Parameter 'progress' must be a number".to_string())?;
+        if !(0.0..=100.0).contains(&raw) {
+            return Err(format!(
+                "Parameter 'progress' must be between 0 and 100, got {}",
+                raw
+            ));
+        }
+        let val = raw.round() as u8;
+        Some(val)
+    } else {
+        None
+    };
 
     if status.is_none() && progress.is_none() {
         return Err("At least one of 'status' or 'progress' must be provided".to_string());
