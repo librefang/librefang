@@ -136,7 +136,11 @@ impl MemoryAccess for IsolationKernel {
         _sender_id: Option<&str>,
         _channel: Option<&str>,
     ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
-        None
+        Some(librefang_types::user_policy::UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            ..Default::default()
+        })
     }
 }
 

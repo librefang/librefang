@@ -406,15 +406,19 @@ async fn allowed_user_memory_store_succeeds_and_lands() {
 
 #[tokio::test]
 async fn no_acl_means_no_restriction_store_still_lands() {
-    // `memory_acl_for_sender` -> None models RBAC disabled / single-user.
-    let (kernel, probes) = AclKernel::new(None);
+    let acl = UserMemoryAccess {
+        readable_namespaces: vec!["*".into()],
+        writable_namespaces: vec!["*".into()],
+        ..Default::default()
+    };
+    let (kernel, probes) = AclKernel::new(Some(acl));
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
     let ctx = make_ctx(&kernel, Some("anyone"), None);
     let input = json!({"key": "k", "value": "v"});
     let result = execute_tool_raw("t1", "memory_store", &input, &ctx).await;
 
-    assert!(!result.is_error, "no ACL => preserve pre-RBAC behaviour");
+    assert!(!result.is_error, "allow-all ACL => store succeeds");
     assert_eq!(probes.store.lock().unwrap().len(), 1);
 }
 

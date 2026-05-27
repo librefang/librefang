@@ -103,6 +103,17 @@ impl MemoryAccess for CapturingKernel {
             .push(peer_id.map(|s| s.to_string()));
         Ok(vec![])
     }
+    fn memory_acl_for_sender(
+        &self,
+        _sender_id: Option<&str>,
+        _channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        Some(librefang_types::user_policy::UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            ..Default::default()
+        })
+    }
 }
 
 impl WikiAccess for CapturingKernel {}
