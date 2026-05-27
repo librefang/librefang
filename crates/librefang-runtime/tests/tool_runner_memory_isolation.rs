@@ -436,7 +436,7 @@ async fn f4_auto_memorize_via_memory_list() {
     let store = execute_tool_raw(
         "t1",
         "memory_store",
-        &json!({"key": "auto::fact", "value": "the sky is blue"}),
+        &json!({"key": "auto.fact", "value": "the sky is blue"}),
         &ctx,
     )
     .await;
@@ -445,7 +445,7 @@ async fn f4_auto_memorize_via_memory_list() {
     let list = execute_tool_raw("t2", "memory_list", &json!({}), &ctx).await;
     assert!(!list.is_error, "list should succeed: {}", list.content);
     assert!(
-        list.content.contains("auto::fact"),
+        list.content.contains("auto.fact"),
         "auto_memorize key must appear in memory_list, got: {}",
         list.content
     );
