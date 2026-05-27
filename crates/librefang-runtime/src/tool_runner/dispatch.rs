@@ -936,7 +936,7 @@ pub async fn execute_tool_raw(
         "task_status" => tool_task_status(input, *kernel)
             .await
             .map_err(|e| e.to_string()),
-        "event_publish" => tool_event_publish(input, *kernel)
+        "event_publish" => tool_event_publish(input, *kernel, *caller_agent_id)
             .await
             .map_err(|e| e.to_string()),
 
