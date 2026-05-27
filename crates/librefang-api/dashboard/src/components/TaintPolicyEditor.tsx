@@ -91,6 +91,18 @@ export function TaintPolicyEditor({
     () => deepClone(server.taint_policy?.tools ?? {}),
   );
 
+  // Sync local draft state whenever the server identity changes (e.g. the
+  // parent swaps `server` without unmounting the component) or when fresh
+  // query data arrives after a mutation invalidation while the drawer is
+  // still open. Without this effect the `useState` initial values above
+  // become permanently stale — toggling one server's taint_scanning causes
+  // every subsequently opened editor to inherit the wrong starting value.
+  // Fixes #5799.
+  useEffect(() => {
+    setScanning(server.taint_scanning ?? true);
+    setTools(deepClone(server.taint_policy?.tools ?? {}));
+  }, [server.name, server.taint_scanning, server.taint_policy]);
+
   // ── tool-level helpers ────────────────────────────────────────────────
   const setToolField = useCallback(
     <K extends keyof McpTaintToolPolicy>(name: string, key: K, value: McpTaintToolPolicy[K]) => {
