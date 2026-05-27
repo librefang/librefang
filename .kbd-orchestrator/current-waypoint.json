@@ -1,8 +1,8 @@
 {
   "active_phase": "phase-3-upstream-sync-and-ci-hardening",
   "active_change": null,
-  "last_updated": "2026-05-23T00:00:00Z",
-  "last_updated_by": "kbd-execute",
+  "last_updated": "2026-05-27T00:00:00Z",
+  "last_updated_by": "kbd-reflect",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
@@ -17,5 +17,24 @@
   "decisions_recorded": {
     "upstream-merge-strategy": "proper-merge",
     "gitattributes-orchestrator": "YES-implement"
-  }
+  },
+  "queued_phases": [
+    {
+      "phase": "phase-4-multilang-wasm-toolchain",
+      "status": "complete",
+      "completed_at": "2026-05-27T00:00:00Z",
+      "changes_done": "9/9",
+      "reflection": ".kbd-orchestrator/phases/phase-4-multilang-wasm-toolchain/reflection.md",
+      "post_phase_action": "Commit + PR. C-007's prod Dockerfile end-to-end verified post-Phase-3-M1 in CI.",
+      "blocked_by_at_plan_time": "phase-3 M2 upstream merge (did NOT block execution — only blocks final-stage COPY verification in C-007)",
+      "summary": "Extend Dockerfile + Dockerfile.rust-dev with Rust nightly + Python 3.13 + Node 24 + Bun + TS6 + Go 1.26.3 + TinyGo + full WASM toolchain (wasmtime, wasm-tools, cargo-component, componentize-py, AssemblyScript, Javy, Emscripten, wasi-sdk, Binaryen). Production stays slim — runtime libs only.",
+      "first_change": "/kbd-execute C-001",
+      "decisions_baked": {
+        "D1": "Path 1 — runtime libs only in prod",
+        "D2": "Extend Dockerfile.rust-dev in place",
+        "D3": "Nightly alongside stable; default stable",
+        "D4": "Include all optional tools"
+      }
+    }
+  ]
 }
