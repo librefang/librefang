@@ -560,7 +560,9 @@ impl LibreFangKernel {
             "- The task required trial-and-error or changing course\n",
             "- A non-obvious workflow was discovered\n",
             "- The approach involved 5+ steps that could benefit future similar tasks\n",
-            "- The user's preferred method differs from the obvious approach\n\n",
+            "- The user's preferred method differs from the obvious approach\n",
+            "- The agent used 3+ different tools in a sequence to accomplish a goal\n",
+            "- The conversation involved a multi-step procedure that could be reused\n\n",
             "Choose exactly ONE of these JSON responses:\n",
             "```json\n",
             "{\"action\": \"create\", \"name\": \"skill-name\", \"description\": \"one-line desc\", ",
@@ -626,22 +628,24 @@ impl LibreFangKernel {
         // try again. The driver-side error string may contain "429",
         // "503", "overloaded", etc.; we also treat bare transport errors
         // ("connection refused", "tls handshake") as transient.
-        let response =
-            tokio::time::timeout(std::time::Duration::from_secs(30), driver.complete(request))
-                .await
-                .map_err(|_| {
-                    ReviewError::Transient("Background skill review timed out (30s)".to_string())
-                })?
-                .map_err(|e| {
-                    let msg = format!("LLM call failed: {e}");
-                    if Self::is_transient_review_error(&msg) {
-                        ReviewError::Transient(msg)
-                    } else {
-                        // Non-network driver errors (auth failure, invalid model)
-                        // won't resolve with a retry — surface as permanent.
-                        ReviewError::Permanent(msg)
-                    }
-                })?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            driver.complete(request),
+        )
+        .await
+        .map_err(|_| {
+            ReviewError::Transient("Background skill review timed out (120s)".to_string())
+        })?
+        .map_err(|e| {
+            let msg = format!("LLM call failed: {e}");
+            if Self::is_transient_review_error(&msg) {
+                ReviewError::Transient(msg)
+            } else {
+                // Non-network driver errors (auth failure, invalid model)
+                // won't resolve with a retry — surface as permanent.
+                ReviewError::Permanent(msg)
+            }
+        })?;
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let text = response.text();
@@ -868,48 +872,79 @@ impl LibreFangKernel {
                         "Missing 'prompt_context' in create response".to_string(),
                     )
                 })?;
-                let tags: Vec<String> = parsed["tags"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
+
+                // Route through pending/ instead of creating the skill directly.
+                // This puts the LLM-proposed skill in the same approval queue as
+                // workshop-captured candidates — a human reviews it before it is
+                // loaded into the active registry.
+                let kernel = kernel_weak
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| {
+                        ReviewError::Permanent("Kernel dropped before pending save".to_string())
+                    })?;
+
+                // Read the agent's workshop config for cap / TTL settings.
+                // Fall back to the struct defaults when the agent entry is gone.
+                let workshop_cfg = kernel
+                    .agents
+                    .registry
+                    .get(triggering_agent_id)
+                    .map(|e| e.manifest.skill_workshop)
                     .unwrap_or_default();
 
-                match librefang_skills::evolution::create_skill(
+                let candidate = crate::skill_workshop::candidate::CandidateSkill {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: triggering_agent_id.to_string(),
+                    session_id: None,
+                    captured_at: chrono::Utc::now(),
+                    source: crate::skill_workshop::candidate::CaptureSource::ExplicitInstruction {
+                        trigger: "auto_evolve_reviewer".to_string(),
+                    },
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    prompt_context: prompt_context.to_string(),
+                    provenance: crate::skill_workshop::candidate::Provenance {
+                        user_message_excerpt: safe_response_summary
+                            .chars()
+                            .take(crate::skill_workshop::candidate::PROVENANCE_EXCERPT_MAX_CHARS)
+                            .collect(),
+                        assistant_response_excerpt: None,
+                        turn_index: 0,
+                    },
+                };
+
+                match crate::skill_workshop::storage::save_candidate(
                     skills_dir,
-                    name,
-                    description,
-                    prompt_context,
-                    tags,
-                    Some(&review_author),
+                    &candidate,
+                    workshop_cfg.max_pending,
+                    workshop_cfg.max_pending_age_days,
                 ) {
-                    Ok(result) => {
+                    Ok(true) => {
                         tracing::info!(
                             skill = name,
-                            "💾 Background skill review: created skill '{}'",
-                            result.skill_name
+                            agent = %triggering_agent_id,
+                            "Background skill review: queued '{}' as pending draft for human approval",
+                            name
                         );
-                        do_reload();
                         Ok(())
                     }
-                    Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
-                        tracing::debug!(skill = name, "Skill already exists — skipping creation");
+                    Ok(false) => {
+                        tracing::debug!(
+                            skill = name,
+                            "Background skill review: pending save skipped (duplicate or max_pending=0)"
+                        );
                         Ok(())
                     }
-                    Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
-                        // Security-rejected content is a permanent failure —
-                        // the reviewer proposed something the scanner blocked.
-                        // Surface it without triggering retry.
+                    Err(crate::skill_workshop::storage::WorkshopError::SecurityBlocked(msg)) => {
                         Err(ReviewError::Permanent(format!("security_blocked: {msg}")))
                     }
-                    Err(librefang_skills::SkillError::Io(e)) => {
-                        Err(ReviewError::Transient(format!("create_skill io: {e}")))
+                    Err(crate::skill_workshop::storage::WorkshopError::Io(e)) => {
+                        Err(ReviewError::Transient(format!("save_candidate io: {e}")))
                     }
                     Err(e) => {
-                        tracing::debug!(skill = name, error = %e, "Background skill creation failed");
-                        Err(ReviewError::Permanent(format!("create_skill: {e}")))
+                        tracing::debug!(skill = name, error = %e, "Background skill review: pending save failed");
+                        Err(ReviewError::Permanent(format!("save_candidate: {e}")))
                     }
                 }
             }
