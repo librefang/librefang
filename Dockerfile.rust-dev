@@ -8,6 +8,13 @@
 # the slim runtime release image — that image deliberately strips out
 # anything not needed at runtime (no GUI libs, no source tree).
 #
+# Since phase-4 it is also the polyglot WASM compile host for librefang's
+# plugin model — bundles Rust nightly, Python 3.13, Node 24, Bun, Go,
+# TinyGo, wasi-sdk, Binaryen, Emscripten, and every WASM CLI a plugin
+# author might need. See docs/development/polyglot-dev-image.md for the
+# per-language recipes and the verification path
+# (scripts/test-wasm-toolchain.sh + .github/workflows/wasm-toolchain.yml).
+#
 # Build:
 #   docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
 #
@@ -59,7 +66,18 @@ FROM rust:1-trixie
 #                                     match CI exactly)
 #      librsvg2-dev          — SVG icon rasterisation in Tauri
 #      patchelf              — Tauri bundler post-processing step
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# BuildKit cache mounts on /var/cache/apt and /var/lib/apt/lists keep
+# downloaded .deb files across rebuilds. Pair with `rm -f
+# /etc/apt/apt.conf.d/docker-clean` so apt doesn't purge them after every
+# `apt-get install`. The `sharing=locked` mode avoids cache corruption when
+# multiple parallel build stages (introduced in C-002..C-006) install from
+# apt simultaneously.
+#   curl, xz-utils, unzip — needed by the toolchain installers below
+#   (cargo-binstall, wasi-sdk tarball extraction, Bun installer, etc.).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
@@ -67,13 +85,429 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsecret-1-dev \
     perl \
     ca-certificates \
+    curl \
+    xz-utils \
+    unzip \
     libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
     librsvg2-dev \
-    patchelf \
-    && rm -rf /var/lib/apt/lists/*
+    patchelf
+
+# cargo-binstall — pulls prebuilt binaries from GitHub releases instead of
+# compiling every CLI from source. Required infrastructure for C-002..C-006:
+# without it, the WASM CLI install layer takes 20+ minutes on a cold build
+# (every tool's full dep graph compiled with optimizations). With binstall,
+# the same install layer is ~2 minutes of downloads.
+#
+# Installed via the official script into $CARGO_HOME/bin (which is on PATH
+# from the base image). `BINSTALL_NO_CONFIRM=1` keeps the installer
+# non-interactive — Docker builds have no TTY.
+RUN curl -fsSL https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
+      | BINSTALL_NO_CONFIRM=1 bash
 
 # The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
 # via named volumes, so we don't pre-create anything here. `rustup` /
 # `cargo` are already on PATH from the base image.
+
+# ---------------------------------------------------------------------------
+# C-002: Rust nightly + WASM Rust toolchain
+# ---------------------------------------------------------------------------
+# Install the nightly channel ALONGSIDE stable (default stays stable to keep
+# CI parity for `cargo check --workspace --lib`). Plugin builds opt in via
+# `cargo +nightly`. Components: rust-src is required by `-Zbuild-std` size
+# experiments; rust-analyzer is useful for in-container LSP; clippy/rustfmt
+# match what stable ships so the toolchains feel identical.
+# `rustup toolchain install --component` only accepts a single component per
+# flag — subsequent bare args are parsed as additional toolchain names. Pass
+# each component as its own `--component` flag.
+RUN rustup toolchain install nightly \
+        --profile minimal \
+        --component rust-src \
+        --component rust-analyzer \
+        --component clippy \
+        --component rustfmt && \
+    rustup target add wasm32-unknown-unknown wasm32-wasip1 wasm32-wasip2 \
+        --toolchain stable && \
+    rustup target add wasm32-unknown-unknown wasm32-wasip1 wasm32-wasip2 \
+        --toolchain nightly
+
+# Rust WASM CLI suite. cargo-binstall pulls prebuilt binaries from each
+# crate's GitHub release, so this layer is download-bound (~2 min cold)
+# rather than compile-bound (~20 min cold). `--no-confirm` is the
+# non-interactive flag; `--locked` makes binstall respect the upstream
+# Cargo.lock so we don't silently pick up an incompatible dep tree.
+#
+# Tool roster — minimum viable for the polyglot plugin model:
+#   wasmtime-cli    AOT compile + execute WASM/WASI/Component Model
+#   wasm-tools      Inspect, validate, optimize, component-new
+#   cargo-component Build Rust crates → WASM components (modern path,
+#                   replaces hand-rolled wit-bindgen invocation)
+#   wit-bindgen-cli Generate language bindings from WIT
+#   wasm-bindgen-cli Browser-style JS interop bindings
+#   wasm-pack       npm-package WASM build helper
+#   cargo-wasi      Convenience wrapper for the wasm32-wasi target
+#   twiggy          WASM size profiling
+#   wasmer-cli      Alternative runtime — keep one for cross-runtime sanity
+#                   checks at CI time.
+RUN cargo binstall --no-confirm --locked \
+        wasmtime-cli \
+        wasm-tools \
+        cargo-component \
+        wit-bindgen-cli \
+        wasm-bindgen-cli \
+        wasm-pack \
+        cargo-wasi \
+        twiggy \
+        wasmer-cli
+
+# wasmtime C-API shared library (libwasmtime.so + wasmtime.h). The release
+# tarball is the canonical distribution channel for the C API. C-007 will
+# `COPY --from=builder` these artefacts into the slim production runtime
+# image; establishing the install pattern here keeps both Dockerfiles in
+# sync on the version pin.
+#
+# WASMTIME_VERSION is pinned to the same major as the cargo-installed
+# `wasmtime-cli` above. Bump in lock-step when upgrading.
+# Track the wasmtime release that `cargo binstall wasmtime-cli` resolves
+# to (45.x as of 2026-05). The C-API tarball and the CLI must share a
+# major version or the produced .cwasm AOT artefacts won't load.
+ARG WASMTIME_VERSION=45.0.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  wt_arch="x86_64" ;; \
+        aarch64) wt_arch="aarch64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-${wt_arch}-linux-c-api.tar.xz"; \
+    curl -fsSL "$url" -o /tmp/wasmtime-c-api.tar.xz; \
+    mkdir -p /tmp/wasmtime-c-api; \
+    tar -xJf /tmp/wasmtime-c-api.tar.xz -C /tmp/wasmtime-c-api --strip-components=1; \
+    cp -a /tmp/wasmtime-c-api/lib/. /usr/local/lib/; \
+    cp -a /tmp/wasmtime-c-api/include/. /usr/local/include/; \
+    rm -rf /tmp/wasmtime-c-api /tmp/wasmtime-c-api.tar.xz; \
+    ldconfig
+
+# ---------------------------------------------------------------------------
+# C-003: Python 3.13 + uv + pyo3 + Python→WASM toolchain
+# ---------------------------------------------------------------------------
+# uv (Astral) is the entry point for Python in this image. It replaces pip,
+# pyenv, and virtualenvwrapper for tool management while installing CPython
+# 3.13 alongside trixie's system python3 (which stays at the distro pin —
+# do not replace it; the existing keyring / dbus deps key off it).
+#
+# The official uv image (ghcr.io/astral-sh/uv) ships a static `uv` and
+# `uvx`; copy them in directly instead of running an installer script.
+# Pin a specific minor — uv has been stable on 0.8.x since early 2026.
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /usr/local/bin/
+
+# UV layout — every uv-managed artefact lands somewhere already on PATH /
+# LD_LIBRARY_PATH so plugin authors don't need shell shims:
+#   UV_PYTHON_INSTALL_DIR   where uv installs CPython interpreters
+#   UV_TOOL_DIR             where `uv tool install <name>` materialises envs
+#   UV_TOOL_BIN_DIR         where tool entry-point shims land (must be on PATH)
+#   UV_COMPILE_BYTECODE     pre-compile .pyc at install time → faster startup
+#   UV_LINK_MODE=copy       avoid hardlinks across BuildKit cache mount boundaries
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Install Python 3.13 (uv-managed) and expose it as `python3.13` on PATH.
+# Trixie's own `python3` is already 3.13.x but it tracks the distro pin and
+# can roll backward inside a minor on `apt upgrade`; the uv-managed 3.13
+# stays at whatever uv resolves and is what plugin tools target. Leave the
+# system `python3` alone — librefang's Rust deps (pyo3, libdbus-sys via
+# keyring) bind against the system python and a swap would re-link them.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install 3.13 && \
+    ln -sf "$(uv python find 3.13)" /usr/local/bin/python3.13
+
+# Plugin-author Python tooling. Each is uv-managed (own venv, own bin shim
+# at /usr/local/bin):
+#   maturin          builds pyo3 wheels — Rust ↔ Python FFI
+#   componentize-py  Python → WASI 0.2 Component (PRIMARY path for Python plugins;
+#                    targets the Component Model directly which fits the plugin
+#                    host model better than raw WASM modules)
+#   py2wasm          Nuitka-based AOT Python → WASM (~70% native speed; FALLBACK
+#                    when a plugin needs raw throughput and not Component Model)
+#   pyodide-cli      Build CPython + scientific stack to WASM. Heavy (~600 MB
+#                    of toolchain + sysroot) — kept per D4 "include all".
+#                    Useful for validating browser-target Python plugins.
+#                    NOTE: install the `pyodide-cli` package (provides the
+#                    `pyodide` binary). The `pyodide-build` package itself
+#                    has no console_scripts entry point so `uv tool install
+#                    pyodide-build` fails with "No executables are
+#                    provided"; pyodide-cli depends on pyodide-build so we
+#                    get the build toolchain transitively.
+#
+# `--python 3.13` pins each tool's interpreter to the freshly-installed
+# CPython so the system python3 stays unused by uv tools.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv tool install --python 3.13 maturin && \
+    uv tool install --python 3.13 componentize-py && \
+    uv tool install --python 3.13 py2wasm && \
+    uv tool install --python 3.13 pyodide-cli
+
+# ---------------------------------------------------------------------------
+# C-004: Node.js 24 LTS + pnpm + Bun + TypeScript 6 + JS/TS → WASM
+# ---------------------------------------------------------------------------
+# Node 24 is the current Active LTS (LTS through 2026-10-28, support through
+# 2028-04-30). Install from the upstream tarball into /opt/node24 — kept
+# separate from the production Dockerfile's Node 20 dashboard-builder so
+# the dev image's globals never leak into the dashboard bundle.
+#
+# `corepack` ships with Node 24; we use it to pin pnpm@10.x exactly as the
+# production Dockerfile does (parity with the dashboard build).
+ARG NODE_VERSION=24.10.0
+ARG PNPM_VERSION=10.33.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  node_arch="x64" ;; \
+        aarch64) node_arch="arm64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+        -o /tmp/node.tar.xz; \
+    mkdir -p /opt/node24; \
+    tar -xJf /tmp/node.tar.xz -C /opt/node24 --strip-components=1; \
+    rm /tmp/node.tar.xz; \
+    ln -sf /opt/node24/bin/node /usr/local/bin/node; \
+    ln -sf /opt/node24/bin/npm /usr/local/bin/npm; \
+    ln -sf /opt/node24/bin/npx /usr/local/bin/npx; \
+    ln -sf /opt/node24/bin/corepack /usr/local/bin/corepack; \
+    npm install -g "pnpm@${PNPM_VERSION}"; \
+    ln -sf /opt/node24/bin/pnpm /usr/local/bin/pnpm
+# Note: production `Dockerfile` uses `corepack prepare pnpm@... --activate`
+# to manage pnpm. We use a direct `npm install -g pnpm` here because Node
+# 24's corepack does NOT pre-populate /opt/node24/bin/pnpm on `enable`
+# (the shim is created lazily on first invocation, and our static symlink
+# resolves to nothing). `npm install -g pnpm` lands the binary deterministically
+# at /opt/node24/bin/pnpm so the symlink-onto-PATH pattern just works. The
+# production dashboard build is unaffected — that's a separate Dockerfile.
+
+# Bun 1.2.x — installed via the upstream installer into /root/.bun, then
+# copied onto PATH. Bun is self-contained (bundles its own JSC + SQLite),
+# so no apt deps. SHELL=bash satisfies the installer's setup probe even
+# though we discard its rc-file mutations.
+RUN curl -fsSL https://bun.sh/install | SHELL=bash bash && \
+    cp /root/.bun/bin/bun /usr/local/bin/bun
+
+# pnpm refuses `add -g` until PNPM_HOME is set to an on-PATH directory.
+# Using /usr/local/bin keeps the resulting shims discoverable without
+# adding yet another PATH entry. UV_LINK_MODE=copy from C-003 doesn't
+# conflict — pnpm uses its own store.
+ENV PNPM_HOME=/usr/local/bin
+
+# Global Node-side plugin-author tooling (npm package names):
+#   typescript@6           TS 6 GA (March 2026 — see release notes)
+#   tsx                    Run .ts files directly
+#   assemblyscript         TypeScript-like → WASM via Binaryen (PRIMARY TS→WASM)
+#   @bytecodealliance/jco  JS Component Model toolchain (componentize + transpile)
+#
+# Porffor is intentionally NOT in this list — it's pre-1.0 and the npm
+# package is not always installable globally; the plan flagged this as
+# "soft-fail acceptable". Re-add when 1.0 ships.
+# Javy is NOT on npm — it ships as a GitHub release binary (installed below).
+RUN pnpm add -g \
+        typescript@6 \
+        tsx \
+        assemblyscript \
+        @bytecodealliance/jco
+
+# Javy (Bytecode Alliance) — QuickJS + script → WASM. Distributed only as
+# a release binary from github.com/bytecodealliance/javy/releases. The
+# release artefact is gzipped and arch-specific.
+ARG JAVY_VERSION=5.0.4
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  jv_arch="x86_64-linux" ;; \
+        aarch64) jv_arch="arm-linux" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/javy/releases/download/v${JAVY_VERSION}/javy-${jv_arch}-v${JAVY_VERSION}.gz"; \
+    curl -fsSL "$url" -o /tmp/javy.gz; \
+    gunzip /tmp/javy.gz; \
+    install -m 0755 /tmp/javy /usr/local/bin/javy; \
+    rm -f /tmp/javy /tmp/javy.gz
+
+# ---------------------------------------------------------------------------
+# C-005: Go 1.26.3 + TinyGo 0.41.1 + Go → WASM
+# ---------------------------------------------------------------------------
+# Go 1.26.3 (released 2026-05-07 per go.dev/doc/devel/release) is the
+# current stable. Green Tea GC is on by default; cgo overhead ~30% lower
+# than 1.25. Install from the upstream tarball — debian's apt repo
+# tracks far behind.
+#
+# `GOOS=wasip1 GOARCH=wasm` is mainline Go's WASI target; `GOOS=js
+# GOARCH=wasm` is the browser target. Both produce larger binaries than
+# TinyGo but are the canonical choice when a plugin needs the full Go
+# stdlib + reflection.
+ARG GO_VERSION=1.26.3
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  go_arch="amd64" ;; \
+        aarch64) go_arch="arm64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz" \
+        -o /tmp/go.tar.gz; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
+    ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+# TinyGo 0.41.1 (released 2026-04-22) — PRIMARY Go→WASM path. Targets
+# `wasip1` and `wasip2` (Component Model), produces ~10x smaller binaries
+# than mainline Go, full LLVM optimizations. Bundles its own clang
+# toolchain so no host clang is needed.
+#
+# TinyGo's published .deb is built against trixie's libc and pulls
+# llvm-19 + lld-19 transitively (~600 MB combined). The .deb already
+# includes the wasi-libc sysroot.
+ARG TINYGO_VERSION=0.41.1
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  tg_arch="amd64" ;; \
+        aarch64) tg_arch="arm64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${tg_arch}.deb" \
+        -o /tmp/tinygo.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends /tmp/tinygo.deb; \
+    rm /tmp/tinygo.deb
+# The TinyGo .deb installs the `tinygo` binary directly to /usr/local/bin
+# — no symlinking required (a self-targeting `ln -sf` here turns the
+# binary into a symlink loop and breaks the next invocation).
+
+# Smoke-build a 5-line Go program in both wasip1 (mainline Go) and wasip2
+# (TinyGo Component Model) at image-build time. Catches silent toolchain
+# breakage on the very next `docker build` rather than on first use.
+RUN set -eux; \
+    mkdir -p /tmp/wasm-smoke; \
+    cd /tmp/wasm-smoke; \
+    printf 'package main\nfunc main() { println("hello-go-wasi") }\n' > main.go; \
+    GOOS=wasip1 GOARCH=wasm go build -o hello-go.wasm main.go; \
+    test -s hello-go.wasm; \
+    tinygo build -target=wasip2 -o hello-tinygo.wasm main.go; \
+    test -s hello-tinygo.wasm; \
+    rm -rf /tmp/wasm-smoke
+
+# ---------------------------------------------------------------------------
+# C-006: C/C++ → WASM (wasi-sdk + Binaryen + Emscripten)
+# ---------------------------------------------------------------------------
+# wasi-sdk: clang + libc + sysroot purpose-built for WASI targets. Lands at
+# /opt/wasi-sdk; the `wasi-clang` wrapper preselects the WASI sysroot so
+# plugin authors don't need to thread --sysroot manually. Sysroot also
+# satisfies py2wasm / Rust nightly experiments that bring their own clang
+# but need a separate WASI sysroot.
+ARG WASI_SDK_VERSION=25
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  ws_arch="x86_64-linux" ;; \
+        aarch64) ws_arch="arm64-linux" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-${ws_arch}.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/wasi-sdk.tar.gz; \
+    mkdir -p /opt/wasi-sdk; \
+    tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1; \
+    rm /tmp/wasi-sdk.tar.gz; \
+    printf '#!/bin/sh\nexec /opt/wasi-sdk/bin/clang --sysroot=/opt/wasi-sdk/share/wasi-sysroot --target=wasm32-wasi "$@"\n' \
+        > /usr/local/bin/wasi-clang; \
+    chmod +x /usr/local/bin/wasi-clang
+
+# Binaryen: wasm-opt / wasm-as / wasm-dis. The apt package in trixie lags;
+# install from the upstream release tarball instead. Lands binaries at
+# /opt/binaryen/bin and symlinks the core utilities onto PATH.
+ARG BINARYEN_VERSION=123
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  bn_arch="x86_64-linux" ;; \
+        aarch64) bn_arch="aarch64-linux" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${bn_arch}.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/binaryen.tar.gz; \
+    mkdir -p /opt/binaryen; \
+    tar -xzf /tmp/binaryen.tar.gz -C /opt/binaryen --strip-components=1; \
+    rm /tmp/binaryen.tar.gz; \
+    ln -sf /opt/binaryen/bin/wasm-opt /usr/local/bin/wasm-opt; \
+    ln -sf /opt/binaryen/bin/wasm-as /usr/local/bin/wasm-as; \
+    ln -sf /opt/binaryen/bin/wasm-dis /usr/local/bin/wasm-dis; \
+    ln -sf /opt/binaryen/bin/wasm-merge /usr/local/bin/wasm-merge
+
+# Emscripten via emsdk — C/C++ → browser WASM. Heavy (~400 MB after activation)
+# but kept per D4 "include all". The `emsdk` activation writes shims to
+# emsdk_env.sh; we eagerly resolve PATH so `emcc` etc. work without sourcing
+# that script at every shell entry.
+ARG EMSDK_VERSION=4.0.7
+RUN set -eux; \
+    git clone --depth 1 --branch "${EMSDK_VERSION}" https://github.com/emscripten-core/emsdk.git /opt/emsdk; \
+    /opt/emsdk/emsdk install "${EMSDK_VERSION}"; \
+    /opt/emsdk/emsdk activate "${EMSDK_VERSION}"; \
+    ln -sf /opt/emsdk/upstream/emscripten/emcc /usr/local/bin/emcc; \
+    ln -sf /opt/emsdk/upstream/emscripten/em++ /usr/local/bin/em++; \
+    ln -sf /opt/emsdk/upstream/emscripten/emar /usr/local/bin/emar; \
+    ln -sf /opt/emsdk/upstream/emscripten/emranlib /usr/local/bin/emranlib
+ENV EMSDK=/opt/emsdk \
+    EMSDK_NODE=/opt/node24/bin/node \
+    PATH=/opt/emsdk:/opt/emsdk/upstream/emscripten:/opt/emsdk/upstream/bin:${PATH}
+
+# Image-build-time smoke check: fail loudly if a prerequisite tool went
+# missing. This is the final install-layer smoke check (C-007 lives in the
+# production Dockerfile; C-008 is a separate script). Keep this RUN at the
+# END of every install layer.
+RUN set -eux; \
+    rustc --version; \
+    cargo --version; \
+    cargo +nightly --version; \
+    rustup target list --installed --toolchain stable | grep -E '^wasm32-' | sort; \
+    rustup target list --installed --toolchain nightly | grep -E '^wasm32-' | sort; \
+    cargo binstall -V; \
+    wasmtime --version; \
+    wasm-tools --version; \
+    cargo component --version; \
+    wit-bindgen --version; \
+    wasm-bindgen --version; \
+    wasm-pack --version; \
+    twiggy --version; \
+    wasmer --version; \
+    test -f /usr/local/lib/libwasmtime.so; \
+    test -f /usr/local/include/wasmtime.h; \
+    uv --version; \
+    python3.13 --version; \
+    python3 --version; \
+    maturin --version; \
+    componentize-py --version; \
+    py2wasm --help >/dev/null && echo "py2wasm: installed (argparse, no --version)"; \
+    pyodide --version; \
+    node --version; \
+    npm --version; \
+    pnpm --version; \
+    bun --version; \
+    tsc --version; \
+    tsx --version; \
+    asc --version; \
+    jco --version; \
+    javy --version; \
+    go version; \
+    tinygo version; \
+    /opt/wasi-sdk/bin/clang --version; \
+    wasi-clang --version; \
+    wasm-opt --version; \
+    wasm-as --version; \
+    wasm-dis --version; \
+    emcc --version | head -1; \
+    pkg-config --version

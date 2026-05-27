@@ -1,0 +1,50 @@
+name: WASM toolchain
+
+# Regression guard for the polyglot WASM dev image. Only runs when
+# `Dockerfile.rust-dev`, the smoke-test script, or this workflow itself
+# changes — the toolchain image is multi-GB and rebuilding on every PR
+# would dominate CI time for unrelated work.
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile.rust-dev'
+      - 'scripts/test-wasm-toolchain.sh'
+      - '.github/workflows/wasm-toolchain.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.rust-dev'
+      - 'scripts/test-wasm-toolchain.sh'
+      - '.github/workflows/wasm-toolchain.yml'
+
+jobs:
+  smoke:
+    name: WASM smoke (per language)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker BuildKit
+        uses: docker/setup-buildx-action@v3
+
+      # Build the dev image. No registry push — image stays in the runner's
+      # docker engine for the smoke step below.
+      - name: Build librefang-rust-dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.rust-dev
+          tags: librefang-rust-dev:ci
+          load: true
+          cache-from: type=gha,scope=wasm-toolchain
+          cache-to: type=gha,mode=max,scope=wasm-toolchain
+
+      - name: Run per-language WASM smoke tests
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}":/workspace \
+            -w /workspace \
+            librefang-rust-dev:ci \
+            /workspace/scripts/test-wasm-toolchain.sh
