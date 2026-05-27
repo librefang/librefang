@@ -182,8 +182,20 @@ psl = "2"
 # ping.
 tera = { version = "1", default-features = false }
 
-# WASM sandbox
-wasmtime = "44"
+# WASM sandbox — explicit features for the dynamic plugin model.
+# cranelift:            JIT + AOT compiler backend (included in default, but explicit)
+# component-model:      Multi-language WASM Component Model for plugin isolation
+# cache:                Cache compiled modules to disk for faster plugin startup
+# parallel-compilation: Multi-threaded AOT compilation
+# async:                Async host-function support (needed for non-blocking plugin calls)
+# WASI support is part of the wasmtime runtime by default; no separate feature flag needed.
+wasmtime = { version = "44", features = [
+    "cranelift",
+    "component-model",
+    "cache",
+    "parallel-compilation",
+    "async",
+] }
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }

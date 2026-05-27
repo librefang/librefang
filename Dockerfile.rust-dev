@@ -29,6 +29,11 @@
 # for the Linux Tauri build (.github/workflows/ci.yml,
 # .github/workflows/release-desktop.yml). Keep them in sync — if CI's GTK
 # package list grows, so should this image.
+#
+# Multi-runtime WASM plugin toolchain:
+#   This image also ships every tool needed to compile plugins to WebAssembly
+#   in any of the supported languages: Rust (stable + nightly), Go, Python,
+#   TypeScript/JavaScript, and C/C++. See the comments in each section below.
 
 # Base image: Debian **trixie** (not bookworm). The runtime Dockerfile
 # at the repo root uses `rust:1.94-slim-bookworm` because it links a
@@ -42,23 +47,19 @@
 #   /lib/.../libc.so.6: version `GLIBC_2.39' not found
 # Tracking trixie keeps the dev image forward-compatible with stable
 # rustup channel rolls.
+# Trixie also ships Python 3.13 natively in apt — no copy-stage workaround needed.
 FROM rust:1-trixie
 
-# System dependencies, in two groups:
-#   1. Core build deps (also present in the runtime Dockerfile):
-#      build-essential / pkg-config / libssl-dev / libdbus-1-dev — needed
-#      for the daemon binary itself (libdbus-1-dev is dragged in by
-#      `keyring`'s sync-secret-service feature, see top-level Dockerfile
-#      comment + #3180 / #3259).
-#   2. Tauri 2 Linux deps:
-#      libwebkit2gtk-4.1-dev — Tauri 2's wry webview backend
-#      libgtk-3-dev          — gdk-sys / gtk-sys
-#      libayatana-appindicator3-dev — system tray (gated behind the
-#                                     `linux-tray` Cargo feature, but the
-#                                     dev headers are cheap to ship and
-#                                     match CI exactly)
-#      librsvg2-dev          — SVG icon rasterisation in Tauri
-#      patchelf              — Tauri bundler post-processing step
+# ─────────────────────────────────────────────────────────────────────────────
+# System packages — three groups:
+#
+#   1. Core Rust build deps (mirrors the runtime Dockerfile builder stage)
+#   2. Tauri 2 Linux deps (see header comment above)
+#   3. WASM toolchain deps:
+#      python3.13 / python3.13-dev / python3.13-venv — Python 3.13 + pyo3 headers
+#      binaryen  — wasm-opt optimizer (Binaryen project)
+#      wabt      — WebAssembly Binary Toolkit (wat2wasm, wasm2wat, wasm-objdump)
+#      clang     — required by WASI-SDK build scripts and cargo-component
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -67,12 +68,105 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsecret-1-dev \
     perl \
     ca-certificates \
+    clang \
+    libclang-dev \
+    curl \
     libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
     librsvg2-dev \
     patchelf \
+    python3.13 \
+    python3.13-dev \
+    python3.13-venv \
+    binaryen \
+    wabt \
     && rm -rf /var/lib/apt/lists/*
+
+# ── pyo3 env: point cargo to Python 3.13 when building pyo3 crates ────────────
+ENV PYO3_PYTHON=/usr/bin/python3.13
+
+# ── uv (Python package manager) ───────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv  /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
+
+# ── Rust nightly + WASM targets ───────────────────────────────────────────────
+# rustup is provided by the rust:1-trixie base image.
+# Nightly is installed alongside stable (the default from rust-toolchain.toml).
+# Both toolchains get the three WASM targets so contributors can compile WASM
+# plugins with either the stable or nightly toolchain.
+RUN rustup toolchain install nightly \
+        --profile minimal \
+        --component rust-src \
+    && rustup target add \
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2 \
+    && rustup target add \
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2 \
+        --toolchain nightly
+
+# ── Cargo WASM tools ──────────────────────────────────────────────────────────
+#   wasm-pack          — Rust → WASM → npm workflow + wasm-bindgen glue
+#   wasm-bindgen-cli   — Rust ↔ JS interop codegen
+#   cargo-component    — WASM Component Model (.wit) project scaffold + build
+#   wit-bindgen-cli    — Generate host/guest bindings from .wit interfaces
+#   wasm-tools         — Merge/compose/validate/inspect WASM components
+#   wasmtime-cli       — Standalone WASM/WASI module runner
+#   wasm-opt           — Binaryen-based WASM binary optimizer (cargo variant)
+RUN cargo install \
+    wasm-pack \
+    wasm-bindgen-cli \
+    cargo-component \
+    wit-bindgen-cli \
+    wasm-tools \
+    wasmtime-cli \
+    wasm-opt
+
+# ── Go 1.26.3 ─────────────────────────────────────────────────────────────────
+# Exact version pin. Trixie's golang-go package may lag; use upstream tarball.
+RUN curl -fsSL https://go.dev/dl/go1.26.3.linux-amd64.tar.gz \
+    | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# ── TinyGo 0.41.1 (Go → WASM/WASI optimised compiler) ────────────────────────
+RUN curl -fsSL \
+    https://github.com/tinygo-org/tinygo/releases/download/v0.41.1/tinygo_0.41.1_amd64.deb \
+    -o /tmp/tinygo.deb \
+    && dpkg -i /tmp/tinygo.deb \
+    && rm /tmp/tinygo.deb
+
+# ── WASI-SDK 27.0 (C/C++ → WASM/WASI toolchain) ──────────────────────────────
+ENV WASI_SDK_PATH=/opt/wasi-sdk
+RUN curl -fsSL \
+    https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz \
+    | tar -xz -C /opt \
+    && mv /opt/wasi-sdk-27.0-x86_64-linux /opt/wasi-sdk
+ENV CC_wasm32_wasip1="${WASI_SDK_PATH}/bin/clang --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot"
+
+# ── Node.js 24 LTS + pnpm + bun + JS WASM tools ──────────────────────────────
+# NodeSource setup_24.x installs Node.js 24 LTS into the trixie image.
+#   assemblyscript          — TypeScript-subset → WASM (Binaryen backend)
+#   @bytecodealliance/componentize-js — ESM → WASM Component (SpiderMonkey AOT)
+#   wabt                    — npm-distributed WABT for browser/Node tooling
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global corepack@latest \
+    && corepack enable \
+    && corepack prepare pnpm@10.33.0 --activate \
+    && npm install -g \
+        assemblyscript \
+        @bytecodealliance/componentize-js \
+        wabt
+
+# ── bun ───────────────────────────────────────────────────────────────────────
+RUN curl -fsSL https://bun.sh/install | bash \
+    && mv /root/.bun/bin/bun /usr/local/bin/bun \
+    && chmod +x /usr/local/bin/bun \
+    && rm -rf /root/.bun
 
 # The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
 # via named volumes, so we don't pre-create anything here. `rustup` /
