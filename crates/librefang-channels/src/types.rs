@@ -941,6 +941,25 @@ pub trait ChannelAdapter: Send + Sync {
     fn account_id(&self) -> Option<&str> {
         None
     }
+
+    /// Whether this adapter owns Markdown→platform formatting internally.
+    ///
+    /// When `true`, `send_response` in the bridge forwards the raw agent
+    /// Markdown directly to the adapter without applying `format_for_channel`.
+    /// The adapter (or its sidecar process) is then solely responsible for
+    /// converting Markdown to the platform's native markup.
+    ///
+    /// Sidecar adapters (Telegram, Matrix, WeCom, …) return `true` because
+    /// their Python/JS process applies its own `markdown_to_*_html` pass.
+    /// Sending pre-converted HTML to the sidecar would cause double-escaping
+    /// (e.g. `<b>bold</b>` → `&lt;b&gt;bold&lt;/b&gt;`) and show literal
+    /// HTML tags to end users.
+    ///
+    /// In-process adapters (Slack, custom webhook adapters) return the default
+    /// `false` and receive formatted output from the bridge as before.
+    fn owns_formatting(&self) -> bool {
+        false
+    }
 }
 
 /// Split a message into chunks of at most `max_len` characters,

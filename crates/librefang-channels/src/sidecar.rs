@@ -1674,6 +1674,18 @@ impl ChannelAdapter for SidecarAdapter {
         self.has_cap("streaming")
     }
 
+    /// Sidecar adapters own Markdown→platform formatting internally.
+    ///
+    /// The Python/JS sidecar process applies its own `markdown_to_*_html`
+    /// conversion (e.g. `telegram.py:_format_and_sanitize`,
+    /// `matrix.py:markdown_to_matrix_html`). The daemon must forward raw
+    /// agent Markdown — not pre-converted HTML — to avoid double-escaping
+    /// (`<b>bold</b>` → `&lt;b&gt;bold&lt;/b&gt;` → literal tags rendered
+    /// by Telegram / Matrix). See issue #5795.
+    fn owns_formatting(&self) -> bool {
+        true
+    }
+
     async fn send_streaming(
         &self,
         user: &ChannelUser,
@@ -2804,6 +2816,14 @@ mod tests {
         // already taken.
         assert!(a.typing_events().is_some());
         assert!(a.typing_events().is_none(), "receiver handed out once");
+
+        // Regression: #5795 — sidecar adapters must own formatting so the
+        // bridge does not pre-convert Markdown to HTML before forwarding.
+        assert!(
+            a.owns_formatting(),
+            "SidecarAdapter must return owns_formatting() = true so send_response \
+             skips format_for_channel and forwards raw Markdown to the sidecar process"
+        );
     }
 
     #[tokio::test]

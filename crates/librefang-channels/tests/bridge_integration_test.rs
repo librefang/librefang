@@ -140,6 +140,89 @@ impl ChannelAdapter for MockAdapter {
 }
 
 // ---------------------------------------------------------------------------
+// Sidecar Mock Adapter — like MockAdapter but owns_formatting() = true
+//
+// Used by the #5795 regression test to verify that the bridge forwards
+// raw Markdown to sidecar adapters instead of pre-converting to HTML.
+// ---------------------------------------------------------------------------
+
+struct SidecarMockAdapter {
+    name: String,
+    channel_type: ChannelType,
+    rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
+    sent: Arc<Mutex<Vec<(String, String)>>>,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl SidecarMockAdapter {
+    fn new(name: &str, channel_type: ChannelType) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        let (tx, rx) = mpsc::channel(256);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let adapter = Arc::new(Self {
+            name: name.to_string(),
+            channel_type,
+            rx: Mutex::new(Some(rx)),
+            sent: Arc::new(Mutex::new(Vec::new())),
+            shutdown_tx,
+        });
+        (adapter, tx)
+    }
+
+    fn get_sent(&self) -> Vec<(String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for SidecarMockAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        self.channel_type.clone()
+    }
+
+    /// Sidecar adapters own Markdown→HTML formatting — the bridge must NOT
+    /// pre-convert before forwarding. See issue #5795.
+    fn owns_formatting(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let rx = self
+            .rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("start() called more than once");
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let ChannelContent::Text(t) = content {
+            self.sent.lock().unwrap().push((user.platform_id.clone(), t));
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = self.shutdown_tx.send(true);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock Kernel Handle — echoes messages, serves agent lists
 // ---------------------------------------------------------------------------
 
@@ -2546,6 +2629,110 @@ async fn test_approval_listener_binding_respects_account_id_scope() {
     assert!(
         sent_b.is_empty(),
         "bot-b has no matching binding (account_id mismatch); approval must not leak there, got: {sent_b:?}"
+    );
+
+    manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Regression: #5795 — double formatting on non-streaming sidecar paths
+// ---------------------------------------------------------------------------
+//
+// Before the fix, send_response always called format_for_channel regardless
+// of whether the adapter owned formatting.  For Telegram (TelegramHtml format),
+// "**bold**" was converted to "<b>bold</b>" before reaching the Python sidecar,
+// which then HTML-escaped it to "&lt;b&gt;bold&lt;/b&gt;" — making literal
+// HTML tags visible on the platform.
+//
+// The fix: ChannelAdapter::owns_formatting() (default false).  SidecarAdapter
+// overrides to true.  send_response forwards raw Markdown when true.
+//
+// These tests verify the end-to-end bridge dispatch path: inject a Markdown
+// message, let the MockHandle echo it back, and assert what the adapter receives.
+
+/// Sidecar adapter (owns_formatting = true, Telegram channel):
+/// the bridge must forward the raw Markdown echo — not pre-converted HTML.
+/// Regression guard for #5795.
+#[tokio::test]
+async fn test_bridge_sidecar_adapter_receives_raw_markdown_not_html() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::new(vec![(agent_id, "echo-bot".to_string())]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("tg-user".to_string(), agent_id);
+
+    // SidecarMockAdapter: owns_formatting() = true, Telegram channel type.
+    // The bridge picks TelegramHtml as the default format for "telegram",
+    // but must skip it because the adapter signals it owns formatting.
+    let (adapter, tx) = SidecarMockAdapter::new("telegram-sidecar", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    // Inject a message with Markdown bold syntax.
+    tx.send(make_text_msg(ChannelType::Telegram, "tg-user", "**bold**"))
+        .await
+        .unwrap();
+
+    wait_until("sidecar echo dispatched", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected one response from sidecar adapter");
+
+    let received_text = &sent[0].1;
+    // The MockHandle echoes: "Echo: **bold**"
+    // With the fix:    sidecar receives "Echo: **bold**" (raw Markdown)
+    // Without the fix: sidecar receives "Echo: <b>bold</b>" (pre-converted HTML)
+    assert!(
+        !received_text.contains("<b>"),
+        "sidecar adapter must not receive pre-converted HTML — double-formatting regression (#5795); got: {received_text:?}"
+    );
+    assert!(
+        received_text.contains("**bold**"),
+        "sidecar adapter must receive raw Markdown **bold** syntax; got: {received_text:?}"
+    );
+
+    manager.stop().await;
+}
+
+/// In-process adapter (owns_formatting = false, Slack channel):
+/// the bridge converts Markdown to Slack mrkdwn before sending.
+/// Verifies we did not regress in-process adapters while fixing #5795.
+#[tokio::test]
+async fn test_bridge_in_process_adapter_converts_markdown_to_channel_format() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::new(vec![(agent_id, "slack-bot".to_string())]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("slack-user".to_string(), agent_id);
+
+    // Standard MockAdapter: owns_formatting() = false (default), Slack channel.
+    // The bridge converts "**bold**" → "*bold*" (Slack mrkdwn) before sending.
+    let (adapter, tx) = MockAdapter::new("slack-adapter", ChannelType::Slack);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Slack, "slack-user", "**bold**"))
+        .await
+        .unwrap();
+
+    wait_until("slack echo dispatched", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected one response from in-process adapter");
+
+    let received_text = &sent[0].1;
+    // MockHandle echoes "Echo: **bold**"; Slack format converts ** → *
+    assert!(
+        !received_text.contains("**bold**"),
+        "in-process Slack adapter must not receive raw Markdown **; got: {received_text:?}"
     );
 
     manager.stop().await;

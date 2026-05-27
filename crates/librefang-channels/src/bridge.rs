@@ -2727,6 +2727,11 @@ async fn resolve_prefix_chunk(
 }
 
 /// Send a response, applying output formatting and optional threading.
+///
+/// Formatting is skipped when `adapter.owns_formatting()` returns `true` (e.g.
+/// sidecar adapters such as Telegram and Matrix). Those adapters apply their own
+/// Markdown→HTML conversion internally; pre-converting here would cause
+/// double-escaping and visible raw HTML tags on the platform. See issue #5795.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -2740,7 +2745,13 @@ async fn send_response(
         text_len = text.len(),
         "Sending response to channel"
     );
-    let formatted = formatter::format_for_channel(&text, output_format);
+    // Sidecar adapters own formatting — forward raw Markdown.
+    // In-process adapters receive the channel-converted form.
+    let formatted = if adapter.owns_formatting() {
+        text
+    } else {
+        formatter::format_for_channel(&text, output_format)
+    };
     let content = ChannelContent::Text(formatted);
 
     let result = if let Some(tid) = thread_id {
@@ -6940,6 +6951,12 @@ mod tests {
             OutputFormat::PlainText
         );
     }
+
+    // Regression tests for #5795 (double formatting on sidecar paths) live in
+    // crates/librefang-channels/tests/bridge_integration_test.rs — the
+    // channel-policy pre-commit hook scans src/*.rs and would flag a test-only
+    // adapter impl here as an in-process adapter violation.  The tests/ directory
+    // is outside src/ and is not subject to that policy check.
 
     #[test]
     fn test_apply_agent_prefix_off_is_identity() {
