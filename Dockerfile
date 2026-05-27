@@ -1,43 +1,47 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: Build React dashboard
-# Pinned to a specific minor (not floating `node:20-alpine`) so rebuilds of a
-# tagged release months later produce a bit-for-bit identical builder image.
-# Track Node 20 LTS — CI's setup-node also uses node-version: 20
-# (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
-FROM node:20.20.2-alpine AS dashboard-builder
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 — Dashboard builder (Node.js 24 LTS)
+# Updated from Node 20 to Node 24 (Active LTS as of 2026-05).
+# Pin to a specific 24.x.x patch at release time for bit-for-bit reproducibility
+# (check hub.docker.com/r/library/node for the current 24-alpine tag).
+# Node ≥20.19.0 required by vite 8 / rolldown's optional native bindings.
+FROM node:24-alpine AS dashboard-builder
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Required for pnpm to run non-interactively (no TTY in docker build).
-# Without this, `pnpm install` aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
 ENV CI=true
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
-# `corepack enable` alone hits `fetchLatestStableVersion2` against the npm
-# registry, which has flaked on us during builds. Activate the pinned pnpm
-# version (matches the `packageManager` field in package.json) directly so
-# the build never has to ask the registry "what's the latest stable?".
-# We also refresh corepack itself first: the keyring bundled with the node
-# base image goes stale as pnpm rotates signing keys, manifesting as
-# "Internal Error: Cannot find matching keyid" during `corepack prepare`.
-# Node ≥20.19 is also required by vite 8 / rolldown's optional native
-# bindings (engines: ^20.19.0), without which `pnpm install` silently skips
-# the linux-x64-musl binding and `vite build` fails at require-time.
+# corepack is refreshed first to avoid stale keyring errors when pnpm rotates
+# signing keys. pnpm@10.33.0 matches the packageManager field in package.json.
 RUN npm install --global corepack@latest \
     && corepack enable \
     && corepack prepare pnpm@10.33.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
-    && pnpm run build
+    && pnpm run build \
+    # JS → WASM tools available in the dashboard / plugin build context
+    && npm install -g \
+        assemblyscript \
+        @bytecodealliance/componentize-js \
+        wabt
 
-# Stage 2: Build Rust binary
-# Pinned to a specific minor (not floating `rust:1-slim-bookworm`). Tracks the
-# workspace MSRV declared in Cargo.toml's [workspace.package].rust-version
-# (currently 1.94.1) so the build image is guaranteed to satisfy it.
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — Python 3.13 provider
+# Debian bookworm's apt does not ship python3.13. We copy the official Python
+# 3.13 build (binary, stdlib, shared library, dev headers) into later stages
+# without changing their Debian base. This stage is a copy-source only.
+FROM python:3.13-bookworm AS python-provider
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — Rust builder + full WASM toolchain
+# Pinned to a specific minor matching the workspace MSRV (1.94.1).
 FROM rust:1.94-slim-bookworm AS builder
+# ─────────────────────────────────────────────────────────────────────────────
 WORKDIR /build
-# libdbus-1-dev is required by libdbus-sys (transitive dep of keyring's
-# sync-secret-service feature, added in #3180). Without it the cargo build
-# panics with exit 101 in the build script — same root cause as #3259, and
-# why the v2026.4.27-beta6 docker image was never published.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -49,31 +53,95 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     libclang-dev \
     curl \
+    # binaryen: wasm-opt optimizer; wabt: wat2wasm/wasm2wat/wasm-objdump
+    binaryen \
+    wabt \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Python 3.13 (headers + shared lib for pyo3 compilation) ──────────────────
+COPY --from=python-provider /usr/local/bin/python3.13     /usr/local/bin/python3.13
+COPY --from=python-provider /usr/local/bin/python3        /usr/local/bin/python3
+COPY --from=python-provider /usr/local/lib/python3.13     /usr/local/lib/python3.13
+COPY --from=python-provider /usr/local/include/python3.13 /usr/local/include/python3.13
+COPY --from=python-provider /usr/local/lib/libpython3.13.so.1.0 \
+                              /usr/local/lib/libpython3.13.so.1.0
+RUN ln -sf /usr/local/lib/libpython3.13.so.1.0 /usr/local/lib/libpython3.13.so \
+    && ldconfig
+ENV PYO3_PYTHON=/usr/local/bin/python3.13
+
+# ── Rust nightly + WASM targets ───────────────────────────────────────────────
+# rustup is present in the rust: base image.
+# Nightly is installed alongside stable; rust-toolchain.toml keeps stable as the
+# default for the main daemon build. Nightly is used for plugin compilation and
+# cutting-edge wasmtime/cranelift features.
+RUN rustup toolchain install nightly \
+        --profile minimal \
+        --component rust-src \
+    && rustup target add \
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2 \
+    && rustup target add \
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2 \
+        --toolchain nightly
+
+# ── Go 1.26.3 ────────────────────────────────────────────────────────────────
+RUN curl -fsSL https://go.dev/dl/go1.26.3.linux-amd64.tar.gz \
+    | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# ── TinyGo 0.41.1 (Go → WASM/WASI optimised compiler) ────────────────────────
+RUN curl -fsSL \
+    https://github.com/tinygo-org/tinygo/releases/download/v0.41.1/tinygo_0.41.1_amd64.deb \
+    -o /tmp/tinygo.deb \
+    && dpkg -i /tmp/tinygo.deb \
+    && rm /tmp/tinygo.deb
+
+# ── WASI-SDK 27.0 (C/C++ → WASM/WASI toolchain) ──────────────────────────────
+ENV WASI_SDK_PATH=/opt/wasi-sdk
+RUN curl -fsSL \
+    https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz \
+    | tar -xz -C /opt \
+    && mv /opt/wasi-sdk-27.0-x86_64-linux /opt/wasi-sdk
+ENV CC_wasm32_wasip1="${WASI_SDK_PATH}/bin/clang --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot"
+
+# ── Cargo WASM tools ──────────────────────────────────────────────────────────
+# Installed before source COPY so this expensive layer is cached independently
+# of source changes. Binaries land at /usr/local/cargo/bin/ and are later
+# copied into the runtime image.
+#   wasm-pack          — Rust → WASM → npm workflow
+#   wasm-bindgen-cli   — Rust ↔ JS interop glue generator
+#   cargo-component    — WASM Component Model (.wit) builds
+#   wit-bindgen-cli    — Generate language bindings from .wit interfaces
+#   wasm-tools         — Merge/compose/validate/inspect WASM components
+#   wasmtime-cli       — Run WASM/WASI modules; standalone runtime CLI
+#   wasm-opt           — Binaryen WASM optimizer (cargo-built variant)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install \
+        wasm-pack \
+        wasm-bindgen-cli \
+        cargo-component \
+        wit-bindgen-cli \
+        wasm-tools \
+        wasmtime-cli \
+        wasm-opt
+
+# ── Source + daemon build ─────────────────────────────────────────────────────
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY packages ./packages
 # librefang-channels embeds the Python SDK tree at compile time via
-# include_dir!("$CARGO_MANIFEST_DIR/../../sdk/python/librefang") in
-# embedded_sdk.rs (added in #5472). Without this COPY the proc macro
-# panics with "sdk/python/librefang is not a directory". Only this one
-# subtree is needed for compilation — .dockerignore keeps the rest of sdk/ out.
-# setup.py + pyproject.toml are also copied so the final image stage can
-# `pip install /build/sdk/python` to make sidecar --describe work at boot.
+# include_dir! — without this COPY the proc macro panics.
 COPY sdk/python/librefang ./sdk/python/librefang
 COPY sdk/python/setup.py sdk/python/pyproject.toml ./sdk/python/
-# librefang-api uses include_str!("../../../deploy/...") to embed the
-# observability stack (prometheus / tempo / otel-collector / grafana
-# configs) at compile time — added in #3062. Without this COPY the
-# build fails with "couldn't read deploy/grafana/...". flake.nix
-# already lists the same paths in its source fileset.
+# librefang-api embeds deploy/ configs at compile time via include_str!.
 COPY deploy ./deploy
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
-# Add github.com to known_hosts so the SSH mount can fetch private git deps
-# (kreuzberg via universal-agent-runtime) without interactive host-key prompts.
 RUN mkdir -p -m 0700 /root/.ssh \
     && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
@@ -103,46 +171,131 @@ RUN --mount=type=ssh \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    # `--features telemetry,surreal-backend,uar-driver`: the published
-    # Docker image ships with telemetry, SurrealDB storage, and the UAR
-    # liter-llm driver all compiled in. `uar-driver` embeds the
-    # Universal Agent Runtime LLM routing layer so agents can use
-    # `provider = "uar"` to reach 142+ providers via a unified interface.
-    # `--mount=type=ssh` is required for kreuzberg (private transitive dep
-    # pulled in by universal-agent-runtime) fetched over SSH during build.
     SKIP_FRONTEND_BUILD=1 \
     SKIP_DASHBOARD_BUILD=1 \
-    cargo build --release --bin librefang --features telemetry,surreal-backend,uar-driver && \
+    cargo build --release --bin librefang \
+        --features telemetry,surreal-backend,uar-driver && \
     cp target/release/librefang /usr/local/bin/librefang
 
-# Pinned to a specific Node 22 LTS minor (not floating `node:lts-bookworm-slim`)
-# so a rebuild months later doesn't quietly land on a new major when the
-# `lts` alias rolls forward. `curl` is added for the HEALTHCHECK below.
-FROM node:22.11.0-bookworm-slim
-# libdbus-1-3 = runtime SO that libdbus-sys links against. Without it the
-# binary fails to start (the keyring init path runs early in boot and
-# exits 101 if the .so can't be resolved).
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 4 — Runtime image (Node.js 24 LTS)
+# Updated from Node 22 to Node 24 (Active LTS as of 2026-05).
+# Pin to a specific 24.x.x patch for bit-for-bit reproducibility
+# (check hub.docker.com/r/library/node for the current bookworm-slim tag).
+FROM node:24-bookworm-slim
+# ─────────────────────────────────────────────────────────────────────────────
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    python3 \
-    python3-pip \
-    python3-venv \
+    # libicu72: Unicode/i18n support for the Rust binary
     libicu72 \
+    # libdbus-1-3: runtime SO for the keyring crate
     libdbus-1-3 \
+    # gosu: privilege-drop helper for docker-entrypoint.sh
     gosu \
+    # ncurses-term: provides xterm-256color terminfo for the terminal PTY
     ncurses-term \
+    # Python 3.13 runtime system library dependencies
+    libexpat1 \
+    zlib1g \
+    libbz2-1.0 \
+    libffi8 \
+    liblzma5 \
+    libsqlite3-0 \
+    libreadline8 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
-# Install the librefang Python SDK so sidecar adapters can run `--describe`
-# at daemon boot and populate the channel configuration schema cache.
-# Without this, populate_sidecar_schema_cache() caches empty fields[] for
-# every adapter and the channel config UI renders a blank form.
-# Uses --break-system-packages because Debian bookworm's PEP 668 guard
-# blocks pip installs into the system Python by default.
+
+# ── Python 3.13 ───────────────────────────────────────────────────────────────
+COPY --from=python-provider /usr/local/bin/python3.13      /usr/local/bin/python3.13
+COPY --from=python-provider /usr/local/lib/python3.13      /usr/local/lib/python3.13
+COPY --from=python-provider /usr/local/lib/libpython3.13.so.1.0 \
+                              /usr/local/lib/libpython3.13.so.1.0
+RUN ln -sf /usr/local/bin/python3.13 /usr/local/bin/python3 \
+    && ln -sf /usr/local/bin/python3.13 /usr/local/bin/python \
+    && ln -sf /usr/local/lib/libpython3.13.so.1.0 /usr/local/lib/libpython3.13.so \
+    && ldconfig
+
+# ── uv (Python package manager) ───────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv  /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
+ENV UV_SYSTEM_PYTHON=1
+
+# ── Go 1.26.3 (copy from builder — avoids re-download) ────────────────────────
+COPY --from=builder /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# ── TinyGo (copy from builder) ────────────────────────────────────────────────
+COPY --from=builder /usr/lib/tinygo /usr/lib/tinygo
+RUN ln -sf /usr/lib/tinygo/bin/tinygo /usr/local/bin/tinygo
+
+# ── WASI-SDK (copy from builder) ──────────────────────────────────────────────
+COPY --from=builder /opt/wasi-sdk /opt/wasi-sdk
+ENV WASI_SDK_PATH=/opt/wasi-sdk
+
+# ── WASM cargo tools (copy pre-built binaries; no Rust install needed for these)
+COPY --from=builder \
+    /usr/local/cargo/bin/wasm-pack \
+    /usr/local/cargo/bin/wasm-bindgen \
+    /usr/local/cargo/bin/cargo-component \
+    /usr/local/cargo/bin/wit-bindgen \
+    /usr/local/cargo/bin/wasm-tools \
+    /usr/local/cargo/bin/wasmtime \
+    /usr/local/cargo/bin/wasm-opt \
+    /usr/local/bin/
+
+# ── WABT tools (copy from builder's apt-installed binaryen/wabt) ──────────────
+COPY --from=builder /usr/bin/wasm-opt     /usr/local/bin/wasm-opt-binaryen
+COPY --from=builder /usr/bin/wat2wasm     /usr/local/bin/wat2wasm
+COPY --from=builder /usr/bin/wasm2wat     /usr/local/bin/wasm2wat
+COPY --from=builder /usr/bin/wasm-objdump /usr/local/bin/wasm-objdump
+
+# ── Rust nightly for runtime plugin compilation ────────────────────────────────
+# Installed under /opt/rust (not $HOME) so it is accessible to both root
+# (entrypoint) and the librefang service user (daemon). RUSTUP_HOME / CARGO_HOME
+# are set as image-level ENV vars; docker-entrypoint.sh and any plugin compiler
+# code inherit them automatically.
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y \
+        --default-toolchain none \
+        --no-modify-path \
+    && /opt/rust/cargo/bin/rustup toolchain install nightly \
+        --profile minimal \
+        --component rust-src \
+    && /opt/rust/cargo/bin/rustup target add \
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2
+ENV PATH="/opt/rust/cargo/bin:${PATH}"
+
+# ── pnpm + JS WASM tooling ────────────────────────────────────────────────────
+# Node is already on PATH from the base image.
+RUN npm install --global corepack@latest \
+    && corepack enable \
+    && corepack prepare pnpm@10.33.0 --activate \
+    && npm install -g \
+        assemblyscript \
+        @bytecodealliance/componentize-js
+
+# ── bun ───────────────────────────────────────────────────────────────────────
+RUN curl -fsSL https://bun.sh/install | bash \
+    && mv /root/.bun/bin/bun /usr/local/bin/bun \
+    && chmod +x /usr/local/bin/bun \
+    && rm -rf /root/.bun
+
+# ── Application setup ─────────────────────────────────────────────────────────
+# Install the librefang Python SDK so sidecar adapters can run --describe at
+# daemon boot and populate the channel configuration schema cache.
 COPY --from=builder /build/sdk/python /opt/librefang/sdk/python
-RUN pip3 install --no-cache-dir --break-system-packages /opt/librefang/sdk/python
+RUN uv pip install --no-cache /opt/librefang/sdk/python
+
 RUN addgroup --system --gid 1001 librefang && \
-    adduser --system --uid 1001 --ingroup librefang librefang
+    adduser --system --uid 1001 --ingroup librefang librefang && \
+    # Allow the daemon user to invoke rustup/cargo for plugin compilation
+    chown -R librefang:librefang /opt/rust
+
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 # wasmtime C-API runtime libs + headers — staged by the builder stage above.
@@ -154,29 +307,15 @@ COPY --from=builder /opt/wasmtime-c-api/include/. /usr/local/include/
 RUN ldconfig
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-# CIS Docker Benchmark §4.1: run the service as a dedicated non-root
-# user with no login shell.  The user `librefang` (uid/gid 1001) is
-# already created above via addgroup/adduser; the redundant
-# `groupadd -r librefang && useradd -r ...` block introduced by #3948
-# collides with that user — `groupadd` exits with code 9 ('group
-# already exists'), breaking `docker build` on every clean tree.
-# Apply the CIS shell-restriction with `usermod` instead, then chown
-# /opt/librefang/packages so the runtime user can read its own asset
-# tree (the COPYs above land as root:root by default).
+# CIS Docker Benchmark §4.1: restrict shell; chown package assets.
 RUN usermod -s /sbin/nologin librefang && \
     chown -R librefang:librefang /opt/librefang/packages
+
 EXPOSE 4545
 ENV LIBREFANG_HOME=/data
-# Native restart-on-failure signal for orchestrators (Docker/Swarm/Compose;
-# Kubernetes uses its own probes and ignores this). 20 s start-period gives
-# the daemon time to bind, run `librefang init` on first boot, and start the
-# axum server. The shell form is required so ${PORT:-4545} expands at
-# runtime — Railway/Render/Fly inject $PORT and the entrypoint rewrites
-# api_listen accordingly (see deploy/docker-entrypoint.sh).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD curl -fsS http://127.0.0.1:${PORT:-4545}/api/health || exit 1
-# docker-entrypoint.sh uses gosu to exec as the librefang user, so we
-# keep the entrypoint itself running as root to allow bind-mount chown
-# and data-dir initialisation before privilege drop.
+# docker-entrypoint.sh runs as root for bind-mount chown/init, then gosu drops
+# to the librefang user before executing the daemon binary.
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]

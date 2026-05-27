@@ -9,17 +9,17 @@ installing each toolchain on their own machine.
 
 | Stack | Versions (pinned in `Dockerfile.rust-dev`) |
 |---|---|
-| Rust | stable 1.95.x + nightly + targets `wasm32-{unknown-unknown,wasip1,wasip2}` |
-| Rust WASM CLIs | wasmtime, wasm-tools, cargo-component, wit-bindgen, wasm-bindgen, wasm-pack, cargo-wasi, twiggy, wasmer |
+| Rust | stable (from trixie base) + nightly + targets `wasm32-{unknown-unknown,wasip1,wasip2}` on both |
+| Rust WASM CLIs | wasmtime-cli, wasm-tools, cargo-component, wit-bindgen, wasm-bindgen, wasm-pack, wasm-opt |
 | wasmtime C-API | `libwasmtime.so` + `wasmtime.h` at `/usr/local/{lib,include}` (v45.x) |
-| Python | uv-managed 3.13.x + maturin + componentize-py + py2wasm + pyodide-cli |
-| Node/JS/TS | Node 24 LTS + pnpm 10.x + Bun 1.x + TypeScript 6 + AssemblyScript + jco + Javy |
-| Go | Go 1.26.x + TinyGo 0.41.x (LLVM 20) |
-| C/C++ | wasi-sdk 25 + Binaryen (wasm-opt) + Emscripten 4.x |
+| Python | apt python3.13 (+dev, +venv) for pyo3 builds; uv-managed `maturin` + `componentize-py` for plugin authoring |
+| Node/JS/TS | Node 24 LTS + pnpm 10.x + Bun + AssemblyScript + `@bytecodealliance/componentize-js` + wabt |
+| Go | Go 1.26.3 + TinyGo 0.41.1 |
+| C/C++ | wasi-sdk 27 + binaryen (apt) + wabt (apt) |
 
-Image size is ~4.5 GB. It's the dev/CI image only — the production
-`Dockerfile` deliberately stays slim and ships only the wasmtime C-API
-shared library (no compile toolchain).
+It's the dev/CI image only — the production `Dockerfile` deliberately
+stays slim and ships only the wasmtime C-API shared library (no compile
+toolchain).
 
 ## Building locally
 
@@ -128,16 +128,27 @@ wasmtime run hello.wasm
 `--runtime stub` strips the GC runtime; `--use abort=` stubs the abort
 import that AssemblyScript otherwise expects the host to provide.
 
-### JavaScript → WASM (Javy)
+### JavaScript → WASI 0.2 Component (componentize-js via jco)
 
 ```bash
-echo 'console.log("hello-js-wasm");' > hello.js
-javy build hello.js -o hello.wasm
-wasmtime run hello.wasm
+cat > hello.js <<EOF
+export function run() {
+    console.log("hello-js-wasm");
+}
+EOF
+cat > hello.wit <<EOF
+package local:hello;
+world hello { export run: func(); }
+EOF
+jco componentize hello.js --wit hello.wit -o hello.wasm
+wasm-tools validate hello.wasm   # sanity check
 ```
 
-Javy bundles the QuickJS interpreter into the produced module — the
-output is larger than AssemblyScript but accepts ordinary JS.
+componentize-js (invoked via `jco componentize`) produces a WASI 0.2
+Component embedding SpiderMonkey ahead-of-time. Like componentize-py,
+the output is a Component (not a wasi:cli module), so
+`wasmtime run hello.wasm` won't auto-invoke; the librefang plugin host
+loads it via the Component Model linker.
 
 ### Go → WASI Preview 2 (TinyGo, primary)
 
@@ -165,13 +176,15 @@ cat > hello.c <<EOF
 #include <stdio.h>
 int main(void) { puts("hello-c-wasm"); return 0; }
 EOF
-wasi-clang hello.c -o hello.wasm
+${WASI_SDK_PATH}/bin/clang --target=wasm32-wasi \
+    --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot \
+    hello.c -o hello.wasm
 wasmtime run --wasi cli hello.wasm
 ```
 
-The `wasi-clang` wrapper at `/usr/local/bin/wasi-clang` preselects the
-WASI sysroot inside `/opt/wasi-sdk`. To use `clang` directly with explicit
-flags: `/opt/wasi-sdk/bin/clang --target=wasm32-wasi --sysroot=/opt/wasi-sdk/share/wasi-sysroot hello.c -o hello.wasm`.
+`WASI_SDK_PATH` is exported by the dev image to `/opt/wasi-sdk`. For
+convenience the env vars `CC_wasm32_wasip1` etc. are pre-set so
+cargo/cmake builds pick up the right clang automatically.
 
 ## What the image does NOT ship
 

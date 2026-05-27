@@ -2,7 +2,7 @@
   "active_phase": "phase-3-upstream-sync-and-ci-hardening",
   "active_change": null,
   "last_updated": "2026-05-27T00:00:00Z",
-  "last_updated_by": "kbd-reflect",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
@@ -34,6 +34,20 @@
         "D2": "Extend Dockerfile.rust-dev in place",
         "D3": "Nightly alongside stable; default stable",
         "D4": "Include all optional tools"
+      }
+    },
+    {
+      "phase": "phase-5-plugin-host-crate",
+      "status": "plan_complete",
+      "soft_prerequisite": "phase-4 PR #56 merged to main",
+      "summary": "Modernize the existing in-process WASM plugin host inside librefang-runtime: wasmtime 44->45, Component Model side-by-side execute path, WIT host world at crates/librefang-skills/wit/, manifest capability declarations, AOT .cwasm cache. Additive-only edits for upstream-merge hygiene.",
+      "first_change": "/kbd-execute C-001",
+      "decisions_baked": {
+        "D1": "extend in place; additive-only; upstream-sync hygiene",
+        "D2": "side-by-side execute paths",
+        "D3": "wit at crates/librefang-skills/wit/",
+        "D4": "per-skill AOT cache",
+        "D5": "default compile_mode = auto"
       }
     }
   ]

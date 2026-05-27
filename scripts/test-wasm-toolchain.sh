@@ -132,19 +132,30 @@ EOF
     pass typescript "AssemblyScript $(asc --version)"
 }
 
-# ----- JavaScript (Javy) -----------------------------------------------------
+# ----- JavaScript (componentize-js) ------------------------------------------
 test_javascript() {
     local d="$work/javascript"
     mkdir -p "$d"
     cat > "$d/hello.js" <<'EOF'
-console.log("hello-javascript-wasm");
+export function run() {
+    console.log("hello-javascript-wasm");
+}
 EOF
-    (cd "$d" && javy build hello.js -o hello.wasm 2>/dev/null) \
-        || { fail javascript "javy build"; return; }
+    cat > "$d/hello.wit" <<'EOF'
+package local:hello;
+world hello { export run: func(); }
+EOF
+    # componentize-js produces a WASI 0.2 Component; like componentize-py
+    # the result isn't auto-invocable by `wasmtime run` — verify structure
+    # instead. The npm package ships a `componentize.js` CLI under jco.
+    (cd "$d" && jco componentize hello.js --wit hello.wit -o hello.wasm 2>/dev/null) \
+        || { fail javascript "jco componentize"; return; }
     [[ -s "$d/hello.wasm" ]] || { fail javascript "no output"; return; }
-    wasmtime run "$d/hello.wasm" 2>&1 | grep -q hello-javascript-wasm \
-        || { fail javascript "stdout mismatch"; return; }
-    pass javascript "javy $(javy --version | awk '{print $2}')"
+    wasm-tools validate "$d/hello.wasm" 2>/dev/null \
+        || { fail javascript "validate"; return; }
+    wasm-tools component wit "$d/hello.wasm" 2>/dev/null | grep -q 'export run' \
+        || { fail javascript "missing export"; return; }
+    pass javascript "componentize-js (via jco)"
 }
 
 # ----- Go (TinyGo) -----------------------------------------------------------
@@ -171,12 +182,17 @@ test_c() {
 #include <stdio.h>
 int main(void) { puts("hello-c-wasm"); return 0; }
 EOF
-    (cd "$d" && wasi-clang hello.c -o hello.wasm 2>/dev/null) \
-        || { fail c "wasi-clang"; return; }
+    # Use wasi-sdk's clang directly with its sysroot. WASI_SDK_PATH is
+    # exported by the dev image (Dockerfile.rust-dev) at /opt/wasi-sdk.
+    local clang="${WASI_SDK_PATH:-/opt/wasi-sdk}/bin/clang"
+    local sysroot="${WASI_SDK_PATH:-/opt/wasi-sdk}/share/wasi-sysroot"
+    (cd "$d" && "$clang" --target=wasm32-wasi --sysroot="$sysroot" \
+        hello.c -o hello.wasm 2>/dev/null) \
+        || { fail c "wasi-sdk clang"; return; }
     [[ -s "$d/hello.wasm" ]] || { fail c "no output"; return; }
     wasmtime run --wasi cli "$d/hello.wasm" 2>&1 | grep -q hello-c-wasm \
         || { fail c "stdout mismatch"; return; }
-    pass c "wasi-clang $(wasi-clang --version | head -1 | awk '{print $3}')"
+    pass c "wasi-sdk $("$clang" --version | head -1 | awk '{print $3}')"
 }
 
 note "Rust → wasm32-wasip2"
