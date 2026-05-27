@@ -156,9 +156,12 @@ pub(super) fn require_kernel_typed(
 /// `MissingParameter("agent_id")` is the honest mapping for the second case
 /// (lifts to `LibreFangError::InvalidInput` → HTTP 400) and no worse than
 /// `Internal` for the first. The tool name is preserved on the tracing channel
-/// so a real direct-loop regression can still be traced.
+/// at `debug!` so a real direct-loop regression can still be traced under
+/// `RUST_LOG=debug` without spamming `warn!` on every legitimate MCP-without-
+/// `X-LibreFang-Agent-Id` call — which would otherwise become the dominant
+/// signal on the warn channel for any deployment with MCP traffic.
 pub(super) fn caller_agent_id_missing(tool: &'static str) -> ToolError {
-    tracing::warn!(
+    tracing::debug!(
         tool,
         "caller agent_id missing — surfaced as MissingParameter to the LLM"
     );

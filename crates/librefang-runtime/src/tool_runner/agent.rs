@@ -76,11 +76,15 @@ pub(super) async fn tool_agent_send(
         )));
     }
 
-    // Check + increment inter-agent call depth
+    // Check + increment inter-agent call depth. Surfaced as
+    // `PermissionDenied` (→ `LibreFangError::CapabilityDenied` → HTTP 403),
+    // not `Upstream` (→ 5xx): this is a kernel-policy quota, not a downstream
+    // crash. Lifting to 5xx would mislead caller retry logic into treating a
+    // self-imposed limit as a transient infra failure.
     let max_depth = kh.max_agent_call_depth();
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
     if current_depth >= max_depth {
-        return Err(ToolError::upstream_msg(format!(
+        return Err(ToolError::PermissionDenied(format!(
             "Inter-agent call depth exceeded (max {max_depth}). \
              A->B->C chain is too deep. Use the task queue instead."
         )));
