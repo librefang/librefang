@@ -1,0 +1,41 @@
+{
+  "phase": "phase-5-plugin-host-crate",
+  "status": "plan_complete",
+  "assessment_complete": true,
+  "assessment_completed_at": "2026-05-27T00:00:00Z",
+  "plan_complete": true,
+  "plan_completed_at": "2026-05-27T00:00:00Z",
+  "planned_by": "claude-code /kbd-plan",
+  "execute_complete": false,
+  "reflect_complete": false,
+  "soft_prerequisite": "phase-4 PR #56 merged to main (provides scripts/test-wasm-toolchain.sh that C-007 extends)",
+  "decisions_baked": {
+    "D1_crate_placement": "in place inside librefang-runtime; additive-only edits (new files); preserve upstream-merge hygiene",
+    "D2_execute_path": "side-by-side: keep execute() for core, add execute_component() in new sandbox_component.rs",
+    "D3_wit_location": "crates/librefang-skills/wit/",
+    "D4_aot_cache_location": "~/.librefang/skills/<id>/<sha>.<wasmtime-version>.cwasm (per-skill)",
+    "D5_default_compile_mode": "auto (JIT first run, AOT thereafter)"
+  },
+  "ordered_changes": [
+    {"id": "C-001", "title": "wasmtime workspace bump 44 → 45", "depends_on": [], "effort": "S-M", "constraint": "must land alone"},
+    {"id": "C-002", "title": "WIT package for librefang:host@0.1.0", "depends_on": ["C-001"], "effort": "M", "constraint": "new files only — zero upstream conflict"},
+    {"id": "C-003", "title": "wit_host.rs shim → existing dispatch()", "depends_on": ["C-002"], "effort": "M"},
+    {"id": "C-004", "title": "WasmSandbox::execute_component() in new sandbox_component.rs", "depends_on": ["C-003"], "effort": "M-L"},
+    {"id": "C-005", "title": "SkillManifest.capabilities + link-time gating", "depends_on": ["C-004"], "effort": "M"},
+    {"id": "C-006", "title": ".cwasm AOT cache + JIT fallback", "depends_on": ["C-004"], "effort": "M"},
+    {"id": "C-007", "title": "Smoke extension: load + execute per language", "depends_on": ["C-004"], "effort": "S"},
+    {"id": "C-008", "title": "Docs + migration note", "depends_on": ["C-007"], "effort": "S"}
+  ],
+  "upstream_sync_hygiene": [
+    "New behavior in NEW files (sandbox_component.rs, wit_host.rs, aot_cache.rs)",
+    "Existing public types stay binary-stable",
+    "New methods via impl blocks in new files, not modifications to existing impls",
+    "WIT files net-new (zero conflict surface)",
+    "Manifest extensions use #[serde(default)] on new fields",
+    "Wasmtime version bump is the ONE unavoidable cross-cut — land it alone"
+  ],
+  "next_action": {
+    "command": "/kbd-execute C-001",
+    "prerequisite": "Phase-4 PR #56 merged to main"
+  }
+}

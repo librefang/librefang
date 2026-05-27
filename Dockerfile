@@ -145,6 +145,28 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN mkdir -p -m 0700 /root/.ssh \
     && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
+# wasmtime C-API shared library — staged here so the final runtime stage
+# can `COPY --from=builder` libwasmtime.so + wasmtime.h without pulling
+# the entire compile toolchain. Phase-4 (multilang plugin model) lands a
+# plugin host that may dlopen wasmtime at runtime; shipping the C-API
+# now means the artifact pattern is in place even though the librefang
+# binary statically links wasmtime via Cargo and doesn't need it yet.
+# Path 1 from D1 in the phase plan — wasmtime libs only, no CLI.
+# Track WASMTIME_VERSION in lock-step with Dockerfile.rust-dev's pin.
+ARG WASMTIME_VERSION=45.0.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  wt_arch="x86_64" ;; \
+        aarch64) wt_arch="aarch64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-${wt_arch}-linux-c-api.tar.xz"; \
+    curl -fsSL "$url" -o /tmp/wasmtime-c-api.tar.xz; \
+    mkdir -p /opt/wasmtime-c-api; \
+    tar -xJf /tmp/wasmtime-c-api.tar.xz -C /opt/wasmtime-c-api --strip-components=1; \
+    rm /tmp/wasmtime-c-api.tar.xz
+
 RUN --mount=type=ssh \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -276,6 +298,13 @@ RUN addgroup --system --gid 1001 librefang && \
 
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
+# wasmtime C-API runtime libs + headers — staged by the builder stage above.
+# Path 1 from the phase-4 plan: ship the shared lib + header so a future
+# plugin host can dlopen wasmtime, but DO NOT ship the wasmtime CLI or any
+# compile toolchain. Re-run ldconfig so the loader sees the new .so.
+COPY --from=builder /opt/wasmtime-c-api/lib/. /usr/local/lib/
+COPY --from=builder /opt/wasmtime-c-api/include/. /usr/local/include/
+RUN ldconfig
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # CIS Docker Benchmark §4.1: restrict shell; chown package assets.

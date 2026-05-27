@@ -168,6 +168,39 @@ RUN curl -fsSL https://bun.sh/install | bash \
     && chmod +x /usr/local/bin/bun \
     && rm -rf /root/.bun
 
+# ── Python WASM plugin authoring (uv-managed tools) ─────────────────────────
+# The Phase-5 plugin host needs `componentize-py` to produce WASI 0.2
+# Components from Python sources, and `maturin` to build pyo3 wheels that
+# librefang itself can embed. Both are installed via `uv tool install`
+# into /usr/local/bin (shims) so they're on PATH alongside the system
+# Python 3.13 from apt above.
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv tool install --python /usr/bin/python3.13 maturin \
+    && uv tool install --python /usr/bin/python3.13 componentize-py
+
+# ── wasmtime C-API shared library ────────────────────────────────────────────
+# Staged here so plugin-host code in librefang-runtime can link against
+# (or dlopen) libwasmtime.so directly when building / testing. Production
+# runtime image gets the same artefact via the production Dockerfile's
+# builder stage. Pin in lock-step with the production Dockerfile's
+# WASMTIME_VERSION arg.
+ARG WASMTIME_VERSION=45.0.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  wt_arch="x86_64" ;; \
+        aarch64) wt_arch="aarch64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-${wt_arch}-linux-c-api.tar.xz"; \
+    curl -fsSL "$url" -o /tmp/wasmtime-c-api.tar.xz; \
+    mkdir -p /tmp/wasmtime-c-api; \
+    tar -xJf /tmp/wasmtime-c-api.tar.xz -C /tmp/wasmtime-c-api --strip-components=1; \
+    cp -a /tmp/wasmtime-c-api/lib/. /usr/local/lib/; \
+    cp -a /tmp/wasmtime-c-api/include/. /usr/local/include/; \
+    rm -rf /tmp/wasmtime-c-api /tmp/wasmtime-c-api.tar.xz; \
+    ldconfig
+
 # The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
 # via named volumes, so we don't pre-create anything here. `rustup` /
 # `cargo` are already on PATH from the base image.
