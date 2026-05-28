@@ -3749,13 +3749,34 @@ pub async fn hand_send_message(
         );
     }
 
-    // Resolve file attachments
+    // Resolve file attachments. Hand/skill calls do not carry a channel
+    // sender context (the hand call is the channel from the kernel's
+    // POV), so we route the injection through the helper with
+    // `sender_context = None` and the agent's persistent registry
+    // session id as the fallback. This matches the
+    // `send_message_with_handle` path below, which is itself a
+    // `Persistent`-mode dispatch landing on `entry.session_id`. Without
+    // this signature change the helper would silently land on the same
+    // session anyway, but it would do so via the kernel's "agent
+    // default" branch — the very fallback we are removing for
+    // channel-scoped callers. Threading the explicit fallback keeps the
+    // hand path's behaviour byte-identical while closing the cross-chat
+    // leak on the agent message path.
     if !req.attachments.is_empty() {
         let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
+            let fallback_session_id = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.session_id)
+                .unwrap_or_else(librefang_types::agent::SessionId::new);
             super::agents::inject_attachments_into_session(
                 state.kernel.as_ref(),
                 agent_id,
+                None,
+                None,
+                fallback_session_id,
                 image_blocks,
             );
         }

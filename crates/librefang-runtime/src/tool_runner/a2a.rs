@@ -19,10 +19,10 @@ pub(super) async fn tool_a2a_discover(input: &serde_json::Value) -> ToolResult {
         .ok_or(ToolError::MissingParameter("url"))?;
 
     // SSRF protection: block private/metadata IPs
-    if crate::web_fetch::check_ssrf(url, &[]).is_err() {
+    if let Err(reason) = crate::web_fetch::check_ssrf(url, &[]) {
         return Err(ToolError::InvalidParameter {
             name: "url",
-            reason: "SSRF blocked: URL resolves to a private or metadata address".to_string(),
+            reason: format!("SSRF blocked for '{url}': {reason}"),
         });
     }
 
@@ -50,10 +50,10 @@ pub(super) async fn tool_a2a_send(
     // approve flow stored.
     let url = if let Some(raw) = input["agent_url"].as_str() {
         // SSRF protection
-        if crate::web_fetch::check_ssrf(raw, &[]).is_err() {
+        if let Err(reason) = crate::web_fetch::check_ssrf(raw, &[]) {
             return Err(ToolError::InvalidParameter {
                 name: "agent_url",
-                reason: "SSRF blocked: URL resolves to a private or metadata address".to_string(),
+                reason: format!("SSRF blocked for '{raw}': {reason}"),
             });
         }
         crate::a2a::canonicalize_a2a_url(raw).unwrap_or_else(|| raw.to_string())
@@ -88,14 +88,21 @@ pub(super) async fn tool_a2a_send(
     if let Some(violation) = check_taint_net_fetch(&url) {
         return Err(ToolError::PermissionDenied(violation));
     }
+    // Gate session_id — an LLM-controlled string that reaches the external
+    // peer unchecked. Without this, secrets smuggled in session_id bypass
+    // both the message and URL taint scans.
+    if let Some(sid) = input["session_id"].as_str() {
+        if let Some(violation) = check_taint_outbound_text(sid, &TaintSink::agent_message()) {
+            return Err(ToolError::PermissionDenied(violation));
+        }
+    }
 
     // SECURITY (Bug #3786): the HTTP route at `/api/a2a/send` enforces a
     // trust gate that requires the URL to live in `kernel.list_a2a_agents()`.
     // The agent-side tool path bypassed that gate entirely, so an LLM could
     // exfiltrate to any non-private URL the SSRF allowlist accepted. Mirror
     // the same check here.
-    let trusted_urls: Vec<String> = kh.list_a2a_agents().into_iter().map(|(_, u)| u).collect();
-    if !trusted_urls.iter().any(|u| u == &url) {
+    if !kh.list_a2a_agents().into_iter().any(|(_, u)| u == url) {
         return Err(ToolError::PermissionDenied(format!(
             "A2A target '{url}' is not on the trusted-agent list. Discover and have an operator approve it via POST /api/a2a/agents/{{url}}/approve before agents may send to it."
         )));
