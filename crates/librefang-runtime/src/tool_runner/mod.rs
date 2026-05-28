@@ -37,6 +37,7 @@ mod spill;
 mod system;
 mod taint;
 mod task;
+mod wasm_skill;
 mod web_legacy;
 mod wiki;
 mod workflow;
