@@ -7999,6 +7999,7 @@ dependencies = [
  "url",
  "uuid",
  "wasmtime",
+ "wat",
  "wiremock",
  "zeroize",
 ]

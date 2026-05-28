@@ -325,6 +325,43 @@ pub enum SandboxError {
 /// so the marginal overhead is small compared to the compilation step.
 pub struct WasmSandbox;
 
+/// Phase-5 additive helper: construct a fully-wired `GuestState` for
+/// use by the Component Model execute path in `sandbox_component.rs`.
+/// The private `limiter` / `start` / `timeout` fields are not
+/// accessible outside this module, so this constructor exists to let
+/// the new file build state without widening the field visibilities.
+///
+/// Purely additive — does not modify `execute_sync`'s existing inline
+/// construction. Future upstream changes to `GuestState` need to update
+/// this helper too, but the call-site count is small.
+pub(crate) fn new_guest_state(
+    config: &SandboxConfig,
+    kernel: Option<Arc<dyn KernelHandle>>,
+    agent_id: &str,
+    tokio_handle: tokio::runtime::Handle,
+) -> GuestState {
+    let timeout_secs = config.timeout_secs.unwrap_or(30);
+    GuestState {
+        capabilities: config.capabilities.clone(),
+        kernel,
+        agent_id: agent_id.to_string(),
+        tokio_handle,
+        limiter: MemoryLimiter {
+            max_bytes: config.max_memory_bytes,
+        },
+        start: std::time::Instant::now(),
+        timeout: std::time::Duration::from_secs(timeout_secs),
+    }
+}
+
+/// Phase-5 additive helper: expose the standard engine config builder
+/// so `sandbox_component.rs` can derive an async-enabled variant for
+/// `wasmtime::component::Component` loading without copy-pasting the
+/// fuel/epoch settings.
+pub(crate) fn engine_config() -> Config {
+    make_engine_config()
+}
+
 /// Build the standard Wasmtime `Config` used by every sandbox Engine.
 fn make_engine_config() -> Config {
     let mut config = Config::new();

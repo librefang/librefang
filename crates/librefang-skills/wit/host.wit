@@ -1,0 +1,128 @@
+package librefang:plugin@0.1.0;
+
+// File: host.wit
+// Typed Component Model interfaces exposing the librefang host's
+// capability-checked API surface to WASM plugins.
+//
+// Semver discipline (see wit/README.md for the full policy):
+//   - 0.1.x is additive-only — new functions / new variants on
+//     `host-error` and `plugin-error` are OK; renaming or removing
+//     anything requires a 0.2.0 bump and a deprecation window.
+//
+// Parameter shapes mirror the existing `host_functions::dispatch` JSON-RPC
+// surface in librefang-runtime exactly. Phase 5 deliberately does NOT
+// redesign the surface; the WIT layer is a typed shim over the existing
+// dispatch.
+//
+// Single-package layout: WIT requires every .wit file in a flat
+// directory to share one package identifier. The host interfaces and
+// the plugin world live under `librefang:plugin@0.1.0` together. A
+// future split into separate packages would require adopting the
+// `wit/deps/<owner>/<pkg>/...` layout.
+
+interface host-types {
+    /// A failure originating from the librefang host while servicing a
+    /// guest capability call. Variants align with `SandboxError` /
+    /// `host_functions::dispatch` error returns in librefang-runtime.
+    variant host-error {
+        /// The plugin's manifest did not declare this capability.
+        capability-denied(string),
+        /// The path argument escapes the plugin's permitted sandbox root
+        /// (path-traversal guard) or refers to a denied prefix.
+        path-denied(string),
+        /// The URL argument resolved to a blocked SSRF target
+        /// (loopback, link-local, RFC1918, metadata service).
+        ssrf-denied(string),
+        /// Operating-system-level I/O failure.
+        io(string),
+        /// Argument was structurally invalid (missing field, wrong type,
+        /// bad encoding).
+        invalid-argument(string),
+        /// The operation timed out before the host could complete it.
+        timeout,
+        /// Catch-all for host-internal failures the plugin should not
+        /// try to interpret.
+        internal(string),
+    }
+}
+
+interface fs {
+    use host-types.{host-error};
+
+    /// Read the entire contents of `path` as bytes. Subject to
+    /// path-traversal + capability checks.
+    read: func(path: string) -> result<list<u8>, host-error>;
+
+    /// Write `body` to `path`, replacing existing contents. Parent
+    /// directories are NOT created.
+    write: func(path: string, body: list<u8>) -> result<_, host-error>;
+
+    /// List the immediate children of `path`. Returns filenames only,
+    /// not full paths. Named `list-entries` rather than `list`
+    /// because `list` is a reserved keyword in WIT — collides with
+    /// the built-in list type constructor (`list<u8>` etc.) at parse
+    /// time.
+    list-entries: func(path: string) -> result<list<string>, host-error>;
+}
+
+interface net {
+    use host-types.{host-error};
+
+    /// Plain HTTP request. Subject to SSRF guards. Bodies are bytes;
+    /// structured types (JSON etc.) are the plugin's responsibility.
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    fetch: func(req: http-request) -> result<http-response, host-error>;
+}
+
+interface kv {
+    use host-types.{host-error};
+
+    /// Retrieve the value associated with `key`. `none` if the key is
+    /// not present.
+    get: func(key: string) -> result<option<string>, host-error>;
+
+    /// Set the value associated with `key`. Overwrites existing values.
+    set: func(key: string, value: string) -> result<_, host-error>;
+}
+
+interface agent {
+    use host-types.{host-error};
+
+    /// Send a message to another agent by id. Returns the host-issued
+    /// message id (opaque string).
+    send: func(target-agent: string, body: string) -> result<string, host-error>;
+
+    /// Spawn a child agent from a manifest reference. Returns the new
+    /// agent's id.
+    spawn: func(manifest-ref: string) -> result<string, host-error>;
+}
+
+interface env {
+    use host-types.{host-error};
+
+    /// Read an env var the plugin has been granted access to. Returns
+    /// `none` if not set; returns `capability-denied` if the var is
+    /// outside the allowlist.
+    read: func(name: string) -> result<option<string>, host-error>;
+}
+
+interface time {
+    /// Wall-clock now in SECONDS since the Unix epoch. Subject to
+    /// no capability gating — every plugin can read the clock.
+    /// (Matches the resolution of the underlying
+    /// `host_functions::time_now` dispatch — multiply by 1000 in the
+    /// plugin if you need millis.)
+    now: func() -> u64;
+}

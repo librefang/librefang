@@ -88,6 +88,9 @@ metrics-util = { version = "0.20", features = ["debugging"] }
 # transitive deps land in `Cargo.lock`.
 wiremock = "0.6"
 tracing-subscriber = { workspace = true }
+# Phase-5 C-006: aot_cache tests build an empty Component fixture from
+# `(component)` WAT. Standalone crate (no wasmtime feature flip needed).
+wat = "1"
 
 [features]
 default = ["surreal-backend", "media", "browser", "docker-sandbox"]
