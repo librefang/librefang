@@ -7553,6 +7553,31 @@ fn cmd_skill_create() {
 
     let tool_name = name.replace('-', "_");
 
+    // A Cargo package name must be `[A-Za-z0-9_-]+` and not start with a digit;
+    // a skill name can be anything the user typed. Derive a legal package name
+    // for the WASM scaffold's Cargo.toml. The artifact name is fixed to
+    // `skill` via `[lib] name`, so this only needs to be valid, not meaningful.
+    let pkg_name = {
+        let cleaned: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let cleaned = cleaned.trim_matches('-');
+        if cleaned.is_empty() {
+            "skill".to_string()
+        } else if cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("skill-{cleaned}")
+        } else {
+            cleaned.to_string()
+        }
+    };
+
     // Per-runtime scaffold: the manifest `entry` path, the files to write
     // (relative to the skill dir), and any extra build steps the author must
     // run before the entry exists.
@@ -7621,7 +7646,7 @@ process.stdin.on("end", () => {{
                     "Cargo.toml".to_string(),
                     format!(
                         r#"[package]
-name = "{name}"
+name = "{pkg_name}"
 version = "0.1.0"
 edition = "2021"
 
