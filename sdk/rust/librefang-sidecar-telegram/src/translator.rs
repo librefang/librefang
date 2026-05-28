@@ -589,8 +589,12 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
         return message_event(client, msg, true).await;
     }
     if let Some(cq) = &update.callback_query {
-        // Dismiss Telegram's inline-button spinner immediately. Without this, the user's UI shows a loading state for up to 30 seconds while waiting for our event to reach the agent and produce an outbound reply. We fire-and-forget — a 400 here doesn't block the event emit.
-        let _ = client.answer_callback_query(&cq.id).await;
+        // Dismiss Telegram's inline-button spinner immediately. Without this, the user's UI shows a loading state for up to 30 seconds while waiting for our event to reach the agent and produce an outbound reply. Spawn so a slow Telegram response (the API has been known to take seconds under load) does not push the event emit by the same delay — the ACK is purely best-effort UX cleanup, the event must reach the agent right away. `BotClient` is `Clone` (reqwest::Client is internally `Arc`, the strings are small); the JoinHandle is intentionally dropped.
+        let client = client.clone();
+        let cq_id = cq.id.clone();
+        tokio::spawn(async move {
+            let _ = client.answer_callback_query(&cq_id).await;
+        });
         return callback_event(cq);
     }
     if let Some(pa) = &update.poll_answer {

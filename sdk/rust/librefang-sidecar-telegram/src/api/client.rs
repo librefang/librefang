@@ -21,6 +21,7 @@ pub const RETRY_AFTER_DEFAULT_SECS: u64 = 5;
 /// Cap how long we will sleep on a 429 `retry_after` from Telegram. A flood-wait can return hours; sleeping that long stalls the entire produce loop with no cancellation. Anything above this is surfaced as an Error so the supervisor can choose to restart.
 pub const MAX_RETRY_AFTER_SECS: u64 = 300;
 
+#[derive(Clone)]
 pub struct BotClient {
     http: Client,
     api_root: String,
