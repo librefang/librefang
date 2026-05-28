@@ -20,6 +20,28 @@ const ALLOWED_UPDATES: &[&str] = &["message", "edited_message", "callback_query"
 const MAX_BACKOFF_SECS: u64 = 300;
 const STREAM_EDIT_INTERVAL_MS: u64 = 1000;
 
+/// Cached state of the `TELEGRAM_LOG` env var. When non-empty AND not `"off"` / `"0"`, the adapter emits one-line happy-path traces to stderr (which the supervisor captures into the daemon's main log) for every inbound update and every outbound command. Errors always log regardless.
+static HAPPY_PATH_LOG: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
+    std::env::var("TELEGRAM_LOG")
+        .ok()
+        .map(|v| {
+            let t = v.trim();
+            !t.is_empty() && t != "0" && !t.eq_ignore_ascii_case("off")
+        })
+        .unwrap_or(false)
+});
+
+/// Emit a one-line trace to stderr if `TELEGRAM_LOG` is enabled. Argument is a closure so the format work is skipped when logging is off.
+fn trace(args: std::fmt::Arguments<'_>) {
+    if *HAPPY_PATH_LOG {
+        eprintln!("[telegram] {args}");
+    }
+}
+
+macro_rules! tg_trace {
+    ($($arg:tt)*) => { trace(format_args!($($arg)*)) };
+}
+
 pub struct TelegramAdapter {
     client: Arc<BotClient>,
     allowlist: AllowList,
@@ -136,12 +158,21 @@ impl SidecarAdapter for TelegramAdapter {
         let thread_id = Self::parse_thread_id(cmd.thread_id.as_deref());
 
         if let Some(content) = cmd.content {
+            let tag = content
+                .as_object()
+                .and_then(|o| o.keys().next().cloned())
+                .unwrap_or_else(|| "?".into());
+            tg_trace!("on_send chat={chat_id} content={tag}");
             dispatch_content(&self.client, chat_id, &content, thread_id)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
             return Ok(());
         }
         // Legacy text-only fallback.
+        tg_trace!(
+            "on_send chat={chat_id} content=Text(legacy) len={}",
+            cmd.text.len()
+        );
         send_text(&self.client, chat_id, &cmd.text, thread_id)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
@@ -156,6 +187,7 @@ impl SidecarAdapter for TelegramAdapter {
             Command::Send(s) => self.on_send(s).await,
             Command::Typing(t) => {
                 if let Some(chat_id) = Self::parse_chat_id(&t.channel_id) {
+                    tg_trace!("on_command Typing chat={chat_id}");
                     let _ = self.client.send_chat_action(chat_id, "typing").await;
                 }
                 Ok(())
@@ -167,6 +199,10 @@ impl SidecarAdapter for TelegramAdapter {
                 let Ok(message_id) = r.message_id.parse::<i64>() else {
                     return Ok(());
                 };
+                tg_trace!(
+                    "on_command Reaction chat={chat_id} msg={message_id} reaction={}",
+                    r.reaction
+                );
                 let emojis = map_reaction(&r.reaction, self.clear_done_reaction);
                 let reactions: Vec<Value> = emojis
                     .into_iter()
@@ -182,6 +218,7 @@ impl SidecarAdapter for TelegramAdapter {
                 let Some(chat_id) = Self::parse_chat_id(&i.channel_id) else {
                     return Ok(());
                 };
+                tg_trace!("on_command Interactive chat={chat_id}");
                 let payload = serde_json::to_value(&i.message)?;
                 let content_value = json!({ "Interactive": payload });
                 dispatch_content(&self.client, chat_id, &content_value, None)
@@ -194,6 +231,10 @@ impl SidecarAdapter for TelegramAdapter {
                     return Ok(());
                 };
                 let thread_id = Self::parse_thread_id(s.thread_id.as_deref());
+                tg_trace!(
+                    "on_command StreamStart chat={chat_id} stream_id={}",
+                    s.stream_id
+                );
                 // Send an empty placeholder so we have a message_id to edit later. Telegram edits a message by id alone, so we don't carry thread_id on the state.
                 let res = self
                     .client
@@ -226,8 +267,10 @@ impl SidecarAdapter for TelegramAdapter {
                     let chat_id = state.chat_id;
                     let message_id = state.message_id;
                     let body = crate::format::format_and_sanitize(&state.buf);
+                    let buf_len = state.buf.len();
                     state.last_edit = Instant::now();
                     drop(map);
+                    tg_trace!("StreamDelta edit chat={chat_id} msg={message_id} buf_len={buf_len}");
                     Self::edit_with_fallback(&self.client, chat_id, message_id, &body).await;
                 }
                 Ok(())
@@ -237,6 +280,12 @@ impl SidecarAdapter for TelegramAdapter {
                 let Some(state) = map.remove(&e.stream_id) else {
                     return Ok(());
                 };
+                tg_trace!(
+                    "on_command StreamEnd chat={} msg={} buf_len={}",
+                    state.chat_id,
+                    state.message_id,
+                    state.buf.len()
+                );
                 let body = crate::format::format_and_sanitize(&state.buf);
                 let chat_id = state.chat_id;
                 let message_id = state.message_id;
@@ -261,8 +310,26 @@ impl SidecarAdapter for TelegramAdapter {
                 Ok(resp) => {
                     // Reset backoff on a successful round.
                     backoff = Duration::from_secs(1);
+                    if !resp.result.is_empty() {
+                        tg_trace!(
+                            "getUpdates -> {} updates (next offset {})",
+                            resp.result.len(),
+                            offset
+                        );
+                    }
                     for upd in &resp.result {
                         offset = upd.update_id + 1;
+                        let kind = if upd.message.is_some() {
+                            "message"
+                        } else if upd.edited_message.is_some() {
+                            "edited_message"
+                        } else if upd.callback_query.is_some() {
+                            "callback_query"
+                        } else if upd.poll_answer.is_some() {
+                            "poll_answer"
+                        } else {
+                            "unknown"
+                        };
                         // Access control — extract a sender for every update kind the adapter emits, including poll_answer (otherwise the allowlist would silently let any Telegram user vote in the bot's polls and have the PollAnswer event reach the agent).
                         let sender = if let Some(msg) = &upd.message {
                             Some(extract_sender(msg))
@@ -280,11 +347,22 @@ impl SidecarAdapter for TelegramAdapter {
                                 .allowlist
                                 .permits(&sender.user_id, sender.username.as_deref())
                             {
+                                tg_trace!(
+                                    "update {} {kind} dropped by allowlist user={}",
+                                    upd.update_id,
+                                    sender.user_id
+                                );
                                 continue;
                             }
                         }
                         if let Some(event) = update_to_event(&self.client, upd).await {
+                            tg_trace!("emit {kind} update_id={}", upd.update_id);
                             emit(event);
+                        } else {
+                            tg_trace!(
+                                "update {} {kind} produced no event (unsupported variant)",
+                                upd.update_id
+                            );
                         }
                     }
                 }
