@@ -184,34 +184,56 @@ clean-all *ARGS:
 doctor *ARGS:
     cargo xtask doctor {{ARGS}}
 
-# Start dev environment (daemon + dashboard hot reload)
-# Pass `--docker` to run daemon + sidecar binaries inside the librefang-rust-dev container with host ~/.librefang mounted in. Requires a host Rust toolchain (cargo + xtask). If the host has no Rust installed, use `just dev-docker` instead — it's a pure-shell wrapper around the same docker workflow.
+# Start dev environment.
+# Native mode (default):   builds librefang-cli on host, starts daemon + dashboard with cargo-watch hot-reload. Requires host Rust toolchain.
+# Docker mode (--docker):  builds daemon + Rust sidecar binaries inside the librefang-rust-dev container, mounts host ~/.librefang/ in, forwards port 4545. Requires NO host Rust toolchain. Pass `--docker --port 4646` to change the port.
 dev *ARGS:
-    cargo xtask dev {{ARGS}}
-
-# Pure-shell dev-in-docker entry point. Identical workflow to `just dev --docker` but requires NO host Rust toolchain — daemon and sidecar binaries are built and run entirely inside the librefang-rust-dev container, with host ~/.librefang/ bind-mounted in so config edits on the host are immediately visible. Use this on a fresh macOS / Linux host where `mise install rust` hasn't been run yet.
-#   PORT       daemon port (default 4545; also forwarded to host)
-#   IMAGE_TAG  override the dev image tag (default librefang-rust-dev:latest)
-dev-docker PORT="4545" IMAGE_TAG="librefang-rust-dev:latest":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Branch on --docker before the recipe tries to invoke cargo, so hosts without a Rust toolchain can still run the docker workflow.
+    for arg in {{ARGS}}; do
+      if [ "$arg" = "--docker" ]; then
+        exec just _dev-docker {{ARGS}}
+      fi
+    done
+    exec cargo xtask dev {{ARGS}}
+
+# Pure-shell docker workflow invoked from `just dev --docker`. Not meant to be called directly — use `just dev --docker` so the args parse the same way as the native path.
+# Builds daemon + Rust Telegram sidecar inside librefang-rust-dev:latest, bind-mounts host ~/.librefang/ at /root/.librefang/ for config persistence, forwards port 4545 (or the value of `--port <n>`) to the host. Dashboard / cargo-watch are not started — both belong on the host alongside the editor.
+_dev-docker *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=4545
+    IMAGE_TAG="librefang-rust-dev:latest"
+    # Strip --docker and parse --port <n> / --image <tag> if present.
+    args=({{ARGS}})
+    skip_next=0
+    for i in "${!args[@]}"; do
+      if [ "$skip_next" = "1" ]; then skip_next=0; continue; fi
+      case "${args[$i]}" in
+        --docker) ;;
+        --port)  PORT="${args[$((i+1))]}"; skip_next=1 ;;
+        --image) IMAGE_TAG="${args[$((i+1))]}"; skip_next=1 ;;
+        *) ;;
+      esac
+    done
     HOME_LIBREFANG="${HOME}/.librefang"
     mkdir -p "$HOME_LIBREFANG"
     REPO_ROOT="$(git rev-parse --show-toplevel)"
 
     # Build the dev image if it isn't on the host yet (one-time, ~5 minutes).
-    if ! docker image inspect {{IMAGE_TAG}} >/dev/null 2>&1; then
-      echo "Building {{IMAGE_TAG}} from Dockerfile.rust-dev (one-time, ~5 minutes)..."
-      docker build -t {{IMAGE_TAG}} -f "${REPO_ROOT}/Dockerfile.rust-dev" "${REPO_ROOT}"
+    if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+      echo "Building $IMAGE_TAG from Dockerfile.rust-dev (one-time, ~5 minutes)..."
+      docker build -t "$IMAGE_TAG" -f "${REPO_ROOT}/Dockerfile.rust-dev" "${REPO_ROOT}"
     fi
 
     # Compile daemon + Rust Telegram sidecar into the librefang-target named volume.
-    echo "Building librefang-cli + librefang-sidecar-telegram inside the container..."
+    echo "Building librefang-cli + librefang-sidecar-telegram inside the container (warm cache: ~30s, cold: ~10 min)..."
     docker run --rm \
       -v "${REPO_ROOT}:/work" \
       -v librefang-cargo:/cargo -v librefang-target:/target \
       -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
-      -w /work {{IMAGE_TAG}} \
+      -w /work "$IMAGE_TAG" \
       sh -c 'export PATH=/usr/local/cargo/bin:$PATH && \
              cargo build --release -p librefang-cli && \
              cargo build --release --manifest-path sdk/rust/librefang-sidecar-telegram/Cargo.toml'
@@ -223,44 +245,57 @@ dev-docker PORT="4545" IMAGE_TAG="librefang-rust-dev:latest":
         -v "${REPO_ROOT}:/work" \
         -v "${HOME_LIBREFANG}:/root/.librefang" \
         -v librefang-target:/target \
-        -w /work {{IMAGE_TAG}} \
+        -w /work "$IMAGE_TAG" \
         /target/release/librefang init --quick || \
         echo "warn: 'librefang init --quick' exited non-zero, continuing"
       cat <<'NOTE'
 
-      Edit ~/.librefang/config.toml to add the Rust Telegram sidecar:
+    Edit ~/.librefang/config.toml to add the Rust Telegram sidecar:
 
-        [[sidecar_channels]]
-        name = "telegram"
-        command = "/target/release/librefang-sidecar-telegram"
-        channel_type = "telegram"
-        [sidecar_channels.secrets]
-        TELEGRAM_BOT_TOKEN = "<your-token>"
+      [[sidecar_channels]]
+      name = "telegram"
+      command = "/target/release/librefang-sidecar-telegram"
+      channel_type = "telegram"
+      [sidecar_channels.secrets]
+      TELEGRAM_BOT_TOKEN = "<your-token>"
 
-      Note `command` is the in-container path; the binary lives in the
-      librefang-target named volume mounted at /target inside the daemon.
+    Note `command =` is the in-container path; the binary lives in the
+    librefang-target named volume mounted at /target inside the daemon.
 
-      Reference: https://docs.librefang.ai/architecture/rust-telegram-sidecar
+    Reference: https://docs.librefang.ai/architecture/rust-telegram-sidecar
     NOTE
     fi
 
     # Pre-clean any stale container (orphan from a previous `--rm` that didn't fire).
     docker rm -f librefang-dev >/dev/null 2>&1 || true
 
+    # Forward provider keys from the host environment if they're set, so the agent inside the container can answer.
+    HOST_ENV_ARGS=()
+    for k in OPENAI_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY GOOGLE_API_KEY GEMINI_API_KEY DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN; do
+      if [ -n "${!k:-}" ]; then
+        HOST_ENV_ARGS+=(-e "${k}")
+      fi
+    done
+
     echo
-    echo "Starting daemon in container on port {{PORT}}..."
+    echo "Starting daemon in container on port ${PORT}..."
     echo "  Host repo    ↔ /work"
     echo "  ~/.librefang ↔ /root/.librefang"
     echo "  binaries     ↔ named volume librefang-target (/target)"
+    if [ ${#HOST_ENV_ARGS[@]} -gt 0 ]; then
+      forwarded=$(printf ' %s' "${HOST_ENV_ARGS[@]}" | tr -s ' ' | sed 's/-e //g')
+      echo "  forwarding host env: ${forwarded}"
+    fi
     echo
     docker run -it --rm --name librefang-dev \
       -v "${REPO_ROOT}:/work" \
       -v "${HOME_LIBREFANG}:/root/.librefang" \
       -v librefang-cargo:/cargo -v librefang-target:/target \
       -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
-      -e LIBREFANG_PORT={{PORT}} \
-      -p {{PORT}}:{{PORT}} \
-      -w /work {{IMAGE_TAG}} \
+      -e LIBREFANG_PORT=${PORT} \
+      "${HOST_ENV_ARGS[@]}" \
+      -p ${PORT}:${PORT} \
+      -w /work "$IMAGE_TAG" \
       /target/release/librefang start --foreground
 
 # Database management (info, backup, reset)
