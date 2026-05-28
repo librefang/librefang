@@ -25,11 +25,16 @@
 # UID mapping (Linux only):
 #   On Linux hosts the container runs as the host uid:gid so generated files (CHANGELOG.md, Cargo.lock, openapi.json, …) end up owned by the contributor instead of root. The named volumes are chown'd once per host-uid the first time they're used (a marker file inside the volume avoids re-traversing on every run). On macOS Docker Desktop handles uid translation transparently, so the container keeps running as root and no chown is needed — same code path as before for that platform.
 #
-# Known gap not solved here:
+# Forcing the docker path:
+#   Set `LIBREFANG_RUST_FORCE_DOCKER=1` to skip the native `cargo` short-circuit even when a host toolchain is available. Useful for reproducing a contributor's container behaviour from a machine that has cargo installed.
+#
+# Known gaps not solved here:
 #   `gh` and `claude` are not in the dev image. `release.rs` guards `gh` with `gh --version` before use, so a missing `gh` skips the PR-create step and prints the command for the user to run on the host. `claude` is best-effort (release continues with the raw changelog).
+#   `ssh-agent` does not cross the container boundary. The wrapper mounts `~/.ssh` read-only so on-disk keys work, but `$SSH_AUTH_SOCK` points at a host unix socket the container can't see — passphrase-protected keys that rely on the agent will block `git push` from inside the container. Run with `ssh-add -l` working on the host and an unencrypted key on disk, or push from the host afterwards.
+#   Windows: this script is bash-only; the `justfile` exposes `release` as `[unix]` + `[windows]`, where the Windows variant keeps the original `cargo xtask release` call and therefore still requires a native Rust toolchain on Windows. There is no docker fallback for cmd.exe.
 set -euo pipefail
 
-if command -v cargo >/dev/null 2>&1; then
+if [[ "${LIBREFANG_RUST_FORCE_DOCKER:-}" != "1" ]] && command -v cargo >/dev/null 2>&1; then
     exec cargo xtask "$@"
 fi
 

@@ -115,8 +115,14 @@ sync-versions *ARGS:
     cargo xtask sync-versions {{ARGS}}
 
 # Cut a release (falls back to `librefang-rust-dev` container if cargo is missing)
+[unix]
 release *ARGS:
     scripts/run-xtask.sh release {{ARGS}}
+
+# Cut a release (Windows: requires a native Rust toolchain — the docker fallback used on Unix relies on bash, which cmd cannot exec)
+[windows]
+release *ARGS:
+    cargo xtask release {{ARGS}}
 
 # Generate CHANGELOG from merged PRs
 changelog *ARGS:
