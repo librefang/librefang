@@ -93,7 +93,11 @@ fn resolve_capabilities(manifest: &SkillManifest) -> Vec<Capability> {
 /// names the `.wasm` (or `.wat`) module relative to it. The module is run
 /// with the capabilities the manifest declares and the manifest's
 /// `timeout_secs` (falling back to the sandbox default when unset).
-pub(crate) async fn execute_wasm_skill(
+///
+/// Public so the CLI (`librefang skill test`) can run a WASM skill outside the
+/// kernel by passing `kernel = None` — pure-compute skills run; capability-
+/// bearing host calls return an error rather than crashing.
+pub async fn execute_wasm_skill(
     manifest: &SkillManifest,
     skill_dir: &Path,
     tool_name: &str,
