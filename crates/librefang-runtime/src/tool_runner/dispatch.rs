@@ -170,7 +170,7 @@ pub async fn execute_tool_raw(
         tts_engine,
         docker_config,
         process_manager,
-        process_registry: _,
+        process_registry,
         sender_id,
         channel,
         // Previously bound to `_` (only consumed by `execute_tool` upstream
@@ -222,8 +222,8 @@ pub async fn execute_tool_raw(
                         );
                     };
                     let path = std::path::PathBuf::from(path_str);
-                    let line = input["line"].as_u64().map(|v| v as u32);
-                    let limit = input["limit"].as_u64().map(|v| v as u32);
+                    let line = input["line"].as_u64().and_then(|v| u32::try_from(v).ok());
+                    let limit = input["limit"].as_u64().and_then(|v| u32::try_from(v).ok());
                     return match client.read_text_file(path.clone(), line, limit).await {
                         Ok(content) => {
                             // #4971: dedup repeated reads of the same buffer.
@@ -294,6 +294,7 @@ pub async fn execute_tool_raw(
             ) {
                 return ToolResult::error(tool_use_id.to_string(), violation);
             }
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             // ACP routing: if an editor is attached to this session,
             // route the write through `fs/write_text_file` so it goes
             // into the editor's buffer (with its own undo stack and
@@ -325,7 +326,6 @@ pub async fn execute_tool_raw(
                     };
                 }
             }
-            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
             tool_file_write(input, *workspace_root, &extra_refs)
                 .await
@@ -879,6 +879,8 @@ pub async fn execute_tool_raw(
                 *workspace_root,
                 *exec_policy,
                 interrupt.clone(),
+                *process_registry,
+                session_id.map(|s| s.to_string()),
             )
             .await
             .map_err(|e| e.to_string()) // #3576: narrow ToolError at the boundary
@@ -1349,6 +1351,8 @@ pub async fn execute_tool_raw(
                     }
                 }
                 if let Some(mcp_conns) = mcp_connections {
+                    let caller_ctx =
+                        mcp::CallerContext::from_parts(*sender_id, *channel, *chat_id, *session_id);
                     let mut conns = mcp_conns.lock().await;
                     let server_name =
                         mcp::resolve_mcp_server_from_known(other, conns.iter().map(|c| c.name()))
@@ -1361,19 +1365,6 @@ pub async fn execute_tool_raw(
                                 tool = other,
                                 server = server_name,
                                 "Dispatching to MCP server"
-                            );
-                            // #5699: propagate kernel-attested caller identity
-                            // (sender peer, channel, chat, session) to the MCP
-                            // server so it can authorise per-caller instead of
-                            // trusting whatever `user_id` value the agent
-                            // smuggled into `input`. The strip-then-set
-                            // contract inside `call_tool_with_caller` makes the
-                            // injected value tamper-evident.
-                            let caller_ctx = mcp::CallerContext::from_parts(
-                                *sender_id,
-                                *channel,
-                                *chat_id,
-                                *session_id,
                             );
                             match conn
                                 .call_tool_with_caller(other, input, caller_ctx.as_ref())
@@ -1395,6 +1386,19 @@ pub async fn execute_tool_raw(
             // Fallback 2: Skill registry tool providers
             else if let Some(registry) = skill_registry {
                 if let Some(skill) = registry.find_tool_provider(other) {
+                    if let Some(allowed) = allowed_skills {
+                        if !allowed.is_empty() && !allowed.contains(&skill.manifest.skill.name) {
+                            warn!(tool = other, "Skill not in agent's allowed_skills list");
+                            return ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: format!(
+                                    "Permission denied: skill tool '{other}' is not in the agent's allowed skills list"
+                                ),
+                                is_error: true,
+                                ..Default::default()
+                            };
+                        }
+                    }
                     debug!(tool = other, skill = %skill.manifest.skill.name, "Dispatching to skill");
                     let skill_dir = skill.path.clone();
                     let env_policy = kernel.and_then(|k| k.skill_env_passthrough_policy());
@@ -1491,6 +1495,8 @@ pub async fn execute_tool(
         &Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
     available_tools: Option<&[ToolDefinition]>,
+    spill_threshold_bytes: u64,
+    max_artifact_bytes: u64,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1513,6 +1519,26 @@ pub async fn execute_tool(
                 ..Default::default()
             };
         }
+    }
+
+    // Check for truncated tool call arguments from the LLM driver (#2027).
+    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
+    // driver marks the input with __args_truncated. Return a helpful error
+    // so the LLM can retry with smaller content.
+    if input
+        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let error_msg = input["__error"].as_str().unwrap_or(
+            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
+        );
+        return ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: error_msg.to_string(),
+            is_error: true,
+            ..Default::default()
+        };
     }
 
     let shell_exec_full_mode = tool_name == "shell_exec"
@@ -1652,26 +1678,6 @@ pub async fn execute_tool(
         }
     }
 
-    // Check for truncated tool call arguments from the LLM driver (#2027).
-    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
-    // driver marks the input with __args_truncated. Return a helpful error
-    // so the LLM can retry with smaller content.
-    if input
-        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let error_msg = input["__error"].as_str().unwrap_or(
-            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
-        );
-        return ToolResult {
-            tool_use_id: tool_use_id.to_string(),
-            content: error_msg.to_string(),
-            is_error: true,
-            ..Default::default()
-        };
-    }
-
     debug!(tool_name, "Executing tool");
     // `parsed_session_id` is computed once at the top of this fn so
     // both the deferred-approval payload (v36 H1 fix) and this
@@ -1699,8 +1705,8 @@ pub async fn execute_tool(
         channel,
         chat_id,
         session_id: parsed_session_id,
-        spill_threshold_bytes: 0,
-        max_artifact_bytes: 0,
+        spill_threshold_bytes,
+        max_artifact_bytes,
         checkpoint_manager,
         interrupt,
         dangerous_command_checker,
