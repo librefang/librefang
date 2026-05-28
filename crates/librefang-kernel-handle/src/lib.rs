@@ -1396,9 +1396,24 @@ pub trait ApiAuth: Send + Sync {
 // ============================================================================
 
 pub trait SessionWriter: Send + Sync {
-    /// Pre-insert `blocks` as a User-role message into the agent's current
-    /// session so the LLM sees the content in the next turn.  No-op (with a
-    /// `warn!`) when the agent is not found; best-effort on save failure.
+    /// Pre-insert `blocks` as a User-role message into the **specific**
+    /// session identified by `session_id` so the LLM sees the content in
+    /// the next turn.  No-op (with a `warn!`) when the agent is not found;
+    /// best-effort on save failure.
+    ///
+    /// **Session isolation invariant (2026-05-20 incident).** Callers MUST
+    /// derive `session_id` with the *same* resolver used by the matching
+    /// `send_message_*` call for this turn (see
+    /// `kernel::messaging::send_message_streaming_with_incognito` /
+    /// `send_message_with_incognito`): explicit override wins, otherwise
+    /// `SessionId::for_sender_scope(agent, channel, chat_id)` for
+    /// channel-scoped turns, otherwise the agent's persistent
+    /// `entry.session_id`. Passing the agent's default registry session
+    /// when the text part of the same request will land on a
+    /// channel-derived session causes a cross-chat leak — the bug fixed
+    /// alongside this signature change. The implementation MUST write into
+    /// the SPECIFIC `session_id` and must NOT silently fall back to
+    /// `entry.session_id` on its own.
     ///
     /// **Blocking I/O notice.**  The current production implementation
     /// (`LibreFangKernel`) calls `MemorySubstrate::save_session` synchronously,
@@ -1410,6 +1425,7 @@ pub trait SessionWriter: Send + Sync {
     fn inject_attachment_blocks(
         &self,
         agent_id: librefang_types::agent::AgentId,
+        session_id: librefang_types::agent::SessionId,
         blocks: Vec<librefang_types::message::ContentBlock>,
     );
 
@@ -1933,6 +1949,7 @@ mod tests {
         fn inject_attachment_blocks(
             &self,
             _agent_id: librefang_types::agent::AgentId,
+            _session_id: librefang_types::agent::SessionId,
             _blocks: Vec<librefang_types::message::ContentBlock>,
         ) {
         }

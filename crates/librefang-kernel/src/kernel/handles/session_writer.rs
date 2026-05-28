@@ -110,20 +110,41 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
     fn inject_attachment_blocks(
         &self,
         agent_id: librefang_types::agent::AgentId,
+        session_id: librefang_types::agent::SessionId,
         blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
         use librefang_types::message::{Message, MessageContent, Role};
 
-        let entry = match self.agents.registry.get(agent_id) {
-            Some(e) => e,
-            None => {
+        // Registry lookup is retained as an agent-existence guard so the
+        // caller can't synthesize attachments for an unknown agent id, but
+        // we deliberately do NOT use `entry.session_id` for the write —
+        // that's exactly the cross-chat-leak bug this signature change
+        // fixes (2026-05-20 incident: DM image landed in the agent's
+        // most-recent group session). The session the blocks go into is
+        // the explicit `session_id` chosen by the caller using the same
+        // resolver `send_message_*` uses.
+        if self.agents.registry.get(agent_id).is_none() {
+            tracing::warn!(
+                agent_id = ?agent_id,
+                session_id = ?session_id,
+                "inject_attachment_blocks: agent not found in registry"
+            );
+            return;
+        }
+
+        // Defense-in-depth: verify the target session belongs to this agent.
+        // Mirrors kernel/messaging.rs session_id_override ownership check.
+        if let Ok(Some(existing)) = self.memory.substrate.get_session(session_id) {
+            if existing.agent_id != agent_id {
                 tracing::warn!(
                     agent_id = ?agent_id,
-                    "inject_attachment_blocks: agent not found in registry"
+                    session_id = ?session_id,
+                    session_owner = ?existing.agent_id,
+                    "inject_attachment_blocks: session belongs to a different agent"
                 );
                 return;
             }
-        };
+        }
 
         // Serialize with any concurrent write to the same agent's session.
         // block_in_place is safe from both async worker threads and
@@ -152,10 +173,10 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
             Some(tokio::task::block_in_place(|| lock.blocking_lock_owned()))
         };
 
-        let mut session = match self.memory.substrate.get_session(entry.session_id) {
+        let mut session = match self.memory.substrate.get_session(session_id) {
             Ok(Some(s)) => s,
             _ => librefang_memory::session::Session {
-                id: entry.session_id,
+                id: session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -192,7 +213,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
         if let Err(e) = self.memory.substrate.save_session(&session) {
             tracing::warn!(
                 agent_id = ?agent_id,
-                session_id = ?entry.session_id,
+                session_id = ?session_id,
                 block_count,
                 error = %e,
                 "inject_attachment_blocks: failed to save session"
@@ -200,7 +221,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
         } else {
             tracing::info!(
                 agent_id = ?agent_id,
-                session_id = ?entry.session_id,
+                session_id = ?session_id,
                 block_count,
                 block_kinds = ?block_kinds,
                 total_messages_after,
