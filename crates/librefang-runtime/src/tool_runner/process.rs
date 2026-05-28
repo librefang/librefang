@@ -155,7 +155,7 @@ fn join_with_cap(lines: &[String], max_bytes: usize) -> CappedOutput {
             truncated = true;
             break;
         }
-        if line.len() + 1 <= remaining {
+        if line.len() < remaining {
             // Line fits entirely (including the newline separator).
             buf.push_str(line);
             buf.push('\n');
