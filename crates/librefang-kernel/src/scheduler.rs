@@ -986,9 +986,22 @@ mod tests {
         let agent_id = AgentId::new();
         scheduler.usage.insert(agent_id, UsageTracker::default());
         // Seed: 200 timestamps from 2 hours ago.
+        //
+        // `instant_now_minus` uses `checked_sub` internally and returns
+        // `Instant::now()` when the requested look-back exceeds system uptime
+        // (e.g. freshly-provisioned Windows CI runners). In that case
+        // the "stale" timestamps equal `now`, which is inside the eviction
+        // window, so the eviction assertion below would falsely fail (#5726).
+        // Skip the eviction sub-test when we can't materialize a truly stale
+        // instant; the bounded-deque invariant is covered by the sibling test
+        // `record_tool_calls_long_horizon_stays_bounded_without_quota`.
+        let two_hours = ONE_MINUTE * 120;
+        let stale = match Instant::now().checked_sub(two_hours) {
+            Some(t) => t,
+            None => return, // system uptime < 2 h — can't create stale timestamps
+        };
         {
             let mut tracker = scheduler.usage.get_mut(&agent_id).unwrap();
-            let stale = instant_now_minus(ONE_MINUTE * 120);
             for _ in 0..200 {
                 tracker.tool_call_timestamps.push_back(stale);
             }
