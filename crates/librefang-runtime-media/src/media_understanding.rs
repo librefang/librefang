@@ -111,9 +111,7 @@ impl MediaEngine {
         );
 
         let description = match provider {
-            "anthropic" => {
-                anthropic_describe_image(model, &image_bytes, mime_type).await?
-            }
+            "anthropic" => anthropic_describe_image(model, &image_bytes, mime_type).await?,
             "openai" | "groq" => {
                 let (api_url, api_key) = openai_vision_provider_config(provider)?;
                 openai_describe_image(&api_url, &api_key, model, &image_bytes, mime_type).await?
@@ -411,7 +409,9 @@ fn openai_vision_provider_config(provider: &str) -> Result<(String, String), Str
             "https://api.groq.com/openai/v1/chat/completions".into(),
             std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
         )),
-        other => Err(format!("No OpenAI-compatible vision config for provider: {other}")),
+        other => Err(format!(
+            "No OpenAI-compatible vision config for provider: {other}"
+        )),
     }
 }
 
@@ -426,8 +426,7 @@ async fn anthropic_describe_image(
 ) -> Result<String, String> {
     use base64::Engine;
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY not set")?;
+    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set")?;
 
     let image_b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
 
@@ -1282,7 +1281,10 @@ mod tests {
             "claude-sonnet-4-20250514"
         );
         assert_eq!(default_vision_model("openai"), "gpt-4o");
-        assert_eq!(default_vision_model("groq"), "meta-llama/llama-4-scout-17b-16e-instruct");
+        assert_eq!(
+            default_vision_model("groq"),
+            "meta-llama/llama-4-scout-17b-16e-instruct"
+        );
         assert_eq!(default_vision_model("gemini"), "gemini-2.5-flash");
         assert_eq!(default_vision_model("unknown"), "unknown");
     }
@@ -1330,7 +1332,9 @@ mod tests {
         let result = engine.describe_image(&attachment).await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("URL-based image source not supported"),
+            result
+                .unwrap_err()
+                .contains("URL-based image source not supported"),
             "URL source must be rejected"
         );
     }
