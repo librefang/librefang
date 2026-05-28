@@ -1,7 +1,8 @@
 //! Inter-agent tools: `agent_find`, `agent_send`, `agent_spawn`,
 //! `agent_list`, `agent_kill`.
 
-use super::{check_taint_outbound_text, require_kernel, AGENT_CALL_DEPTH};
+use super::error::{ToolError, ToolResult};
+use super::{check_taint_outbound_text, require_kernel_typed, AGENT_CALL_DEPTH};
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
 use std::sync::Arc;
@@ -9,9 +10,11 @@ use std::sync::Arc;
 pub(super) fn tool_agent_find(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let query = input["query"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("query"))?;
     let agents = kh.find_agents(query);
     if agents.is_empty() {
         return Ok(format!("No agents found matching '{query}'."));
@@ -30,21 +33,21 @@ pub(super) fn tool_agent_find(
             })
         })
         .collect();
-    serde_json::to_string_pretty(&result).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&result)?)
 }
 
 pub(super) async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     let agent_id = input["agent_id"]
         .as_str()
-        .ok_or("Missing 'agent_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("agent_id"))?;
     let message = input["message"]
         .as_str()
-        .ok_or("Missing 'message' parameter")?;
+        .ok_or(ToolError::MissingParameter("message"))?;
     let conversation_key = input["conversation_key"].as_str();
 
     // Self-send guard: sending a message to oneself would attempt to acquire
@@ -52,7 +55,10 @@ pub(super) async fn tool_agent_send(
     // turn, causing an unrecoverable deadlock (issue #3613).
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
-            return Err("agent_send: an agent cannot send a message to itself".to_string());
+            return Err(ToolError::InvalidParameter {
+                name: "agent_id",
+                reason: "agent_send: an agent cannot send a message to itself".to_string(),
+            });
         }
     }
 
@@ -65,18 +71,23 @@ pub(super) async fn tool_agent_send(
     // rejection message matches the shape documented in the taint
     // module.
     if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
-        return Err(format!("Taint violation: {violation}"));
+        return Err(ToolError::PermissionDenied(format!(
+            "Taint violation: {violation}"
+        )));
     }
 
-    // Check + increment inter-agent call depth
+    // Check + increment inter-agent call depth. Surfaced as
+    // `PermissionDenied` (→ `LibreFangError::CapabilityDenied` → HTTP 403),
+    // not `Upstream` (→ 5xx): this is a kernel-policy quota, not a downstream
+    // crash. Lifting to 5xx would mislead caller retry logic into treating a
+    // self-imposed limit as a transient infra failure.
     let max_depth = kh.max_agent_call_depth();
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
     if current_depth >= max_depth {
-        return Err(format!(
-            "Inter-agent call depth exceeded (max {}). \
-             A->B->C chain is too deep. Use the task queue instead.",
-            max_depth
-        ));
+        return Err(ToolError::PermissionDenied(format!(
+            "Inter-agent call depth exceeded (max {max_depth}). \
+             A->B->C chain is too deep. Use the task queue instead."
+        )));
     }
 
     AGENT_CALL_DEPTH
@@ -96,7 +107,7 @@ pub(super) async fn tool_agent_send(
             }
         })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(ToolError::upstream)
 }
 
 /// Build agent manifest TOML from parsed parameters.
@@ -187,13 +198,15 @@ pub(super) async fn tool_agent_spawn(
     kernel: Option<&Arc<dyn KernelHandle>>,
     parent_id: Option<&str>,
     parent_allowed_tools: Option<&[String]>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
 
-    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let name = input["name"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("name"))?;
     let system_prompt = input["system_prompt"]
         .as_str()
-        .ok_or("Missing 'system_prompt' parameter")?;
+        .ok_or(ToolError::MissingParameter("system_prompt"))?;
 
     let tools: Vec<String> = input["tools"]
         .as_array()
@@ -214,7 +227,8 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)?;
+    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
+        .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
@@ -236,14 +250,14 @@ pub(super) async fn tool_agent_spawn(
     let (id, agent_name) = kh
         .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))
 }
 
-pub(super) fn tool_agent_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+pub(super) fn tool_agent_list(kernel: Option<&Arc<dyn KernelHandle>>) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     let agents = kh.list_agents();
     if agents.is_empty() {
         return Ok("No agents currently running.".to_string());
@@ -261,11 +275,11 @@ pub(super) fn tool_agent_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<
 pub(super) fn tool_agent_kill(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     let agent_id = input["agent_id"]
         .as_str()
-        .ok_or("Missing 'agent_id' parameter")?;
-    kh.kill_agent(agent_id).map_err(|e| e.to_string())?;
+        .ok_or(ToolError::MissingParameter("agent_id"))?;
+    kh.kill_agent(agent_id).map_err(ToolError::upstream)?;
     Ok(format!("Agent {agent_id} killed successfully."))
 }

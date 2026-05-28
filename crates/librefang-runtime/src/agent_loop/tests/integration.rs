@@ -828,7 +828,7 @@ async fn test_max_tokens_owner_notice_and_actual_provider_survive_non_streaming(
     assert_eq!(result.response, "Partial after owner notice");
     assert_eq!(
         result.owner_notice.as_deref(),
-        Some("🎩 handoff_needed: Fallback provider needs owner visibility.")
+        Some("[NOTIFY] handoff_needed: Fallback provider needs owner visibility.")
     );
     assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
 }
@@ -1414,7 +1414,7 @@ async fn test_streaming_max_tokens_owner_notice_and_actual_provider_survive_resu
     assert_eq!(result.response, "Partial after owner notice");
     assert_eq!(
         result.owner_notice.as_deref(),
-        Some("🎩 handoff_needed: Fallback provider needs owner visibility.")
+        Some("[NOTIFY] handoff_needed: Fallback provider needs owner visibility.")
     );
     assert_eq!(result.actual_provider.as_deref(), Some("fallback-b"));
     let mut events = Vec::new();

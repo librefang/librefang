@@ -1,23 +1,22 @@
-//! `channel_send` — proactive outbound messaging via configured adapters
-//! (Telegram, Discord, email, …). Handles text, media (image/file URL or
-//! local file path), and Telegram-style polls. On success, mirrors the
-//! sent message back into the channel-owning agent's inbound session so
-//! the model retains context for the user's reply (issue #4824).
-
 use super::{check_taint_outbound_text, require_kernel, resolve_file_path_ext};
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Parse and validate `poll_options` for the `channel_send` tool.
-///
-/// Telegram requires 2–10 string options per poll. A previous version used
-/// `filter_map(as_str)` which silently dropped non-string entries — e.g.
-/// `["a", 42, "c"]` became `["a", "c"]`, slipped past the min-2 check, and
-/// sent a poll missing the user's third option. This helper fails fast
-/// when any entry is the wrong type so the agent can surface the mistake
-/// instead of producing a malformed poll.
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+fn validate_email(email: &str) -> Result<(), String> {
+    static EMAIL_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$").unwrap()
+    });
+    if EMAIL_RE.is_match(email) {
+        Ok(())
+    } else {
+        Err(format!("Invalid email address: '{email}'"))
+    }
+}
+
 pub(super) fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
     let arr = raw
         .and_then(|v| v.as_array())
@@ -50,19 +49,6 @@ pub(super) fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<
     Ok(out)
 }
 
-/// Mirror a successfully-sent `channel_send` message into the inbound-routing
-/// session of the channel-owning agent so it has context for the user's reply.
-///
-/// This is **best-effort**: any failure is logged at `warn!` level and does NOT
-/// propagate — the platform send already succeeded.
-///
-/// Decision summary (issue #4824):
-/// 1. Mirror unconditionally — even when caller == channel owner.
-/// 2. Role = `user` with a JSON envelope `{"mirror_from":"<agent>","body":"<text>"}` so
-///    the block is visible in prompt context without polluting the system role.
-///    JSON escaping prevents prompt-injection via crafted body content.
-/// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
-/// 4. Written directly to session storage; no adapter re-emit.
 async fn mirror_channel_send_to_session(
     kh: &Arc<dyn KernelHandle>,
     caller_agent_id: Option<&str>,
@@ -78,7 +64,6 @@ async fn mirror_channel_send_to_session(
     let owner = match owner_id {
         Some(id) => id,
         None => {
-            // No channel-owning agent configured — nothing to mirror.
             tracing::debug!(
                 channel,
                 recipient,
@@ -88,12 +73,8 @@ async fn mirror_channel_send_to_session(
         }
     };
 
-    // session_id mirrors the inbound-routing path in messaging.rs:
-    // `SessionId::for_sender_scope(owner, channel, Some(recipient))`
     let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
 
-    // LOW: skip the mirror entirely when the caller is anonymous — an
-    // "unknown" sender carries no useful context and could mislead the agent.
     let from = match caller_agent_id {
         Some(id) => id,
         None => {
@@ -108,9 +89,6 @@ async fn mirror_channel_send_to_session(
 
     let sent_at = chrono::Utc::now();
 
-    // Stable data contract (#4824): JSON envelope prevents prompt-injection
-    // via crafted body text (e.g. `]: <injected>` or embedded newlines).
-    // Both fields are JSON-string-escaped by serde_json::to_string.
     let mirror_text = format!(
         "{{\"mirror_from\":{},\"body\":{}}}",
         serde_json::to_string(from).unwrap_or_else(|_| "\"unknown\"".to_string()),
@@ -124,10 +102,25 @@ async fn mirror_channel_send_to_session(
         timestamp: Some(sent_at),
     };
 
-    // `append_to_session` uses `block_in_place` internally so it is safe
-    // to call directly from an async context. Mirror is best-effort by
-    // design (#4824 decision 3) — errors are logged inside the impl.
     kh.append_to_session(session_id, owner, msg);
+}
+
+async fn mirror_on_success(
+    kh: &Arc<dyn KernelHandle>,
+    caller_agent_id: Option<&str>,
+    channel: &str,
+    recipient: &str,
+    mirror_body: &str,
+    send_result: Result<String, String>,
+) -> Result<String, String> {
+    if send_result.is_ok() {
+        mirror_channel_send_to_session(kh, caller_agent_id, channel, recipient, mirror_body).await;
+    }
+    send_result
+}
+
+fn trim_opt_string(val: Option<&str>) -> Option<&str> {
+    val.map(str::trim).filter(|s| !s.is_empty())
 }
 
 pub(super) async fn tool_channel_send(
@@ -146,9 +139,6 @@ pub(super) async fn tool_channel_send(
         .trim()
         .to_lowercase();
 
-    // Use recipient from input, or fall back to sender_id from context
-    // This allows agents to reply to the original sender without explicitly
-    // knowing the platform-specific ID (e.g., Telegram chat_id)
     let recipient = input["recipient"]
         .as_str()
         .map(str::trim)
@@ -161,10 +151,9 @@ pub(super) async fn tool_channel_send(
         return Err("Recipient cannot be empty".to_string());
     }
 
-    let thread_id = input["thread_id"].as_str().filter(|s| !s.is_empty());
-    let account_id = input["account_id"].as_str().filter(|s| !s.is_empty());
+    let thread_id = trim_opt_string(input["thread_id"].as_str());
+    let account_id = trim_opt_string(input["account_id"].as_str());
 
-    // Check for media content (image_url, file_url, or file_path)
     let image_url = input["image_url"].as_str().filter(|s| !s.is_empty());
     let file_url = input["file_url"].as_str().filter(|s| !s.is_empty());
     let file_path = input["file_path"].as_str().filter(|s| !s.is_empty());
@@ -176,17 +165,19 @@ pub(super) async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        let result = kh
-            .send_channel_media(
+        return mirror_on_success(
+            kh,
+            caller_agent_id,
+            &channel,
+            recipient,
+            caption.unwrap_or(url),
+            kh.send_channel_media(
                 &channel, recipient, "image", url, caption, None, thread_id, account_id,
             )
             .await
-            .map_err(|e| e.to_string());
-        if result.is_ok() {
-            let body = caption.unwrap_or(url);
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
-        }
-        return result;
+            .map_err(|e| e.to_string()),
+        )
+        .await;
     }
 
     if let Some(url) = file_url {
@@ -197,29 +188,40 @@ pub(super) async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        let result = kh
-            .send_channel_media(
+        return mirror_on_success(
+            kh,
+            caller_agent_id,
+            &channel,
+            recipient,
+            caption.unwrap_or(url),
+            kh.send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id, account_id,
             )
             .await
-            .map_err(|e| e.to_string());
-        if result.is_ok() {
-            let body = caption.unwrap_or(url);
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
-        }
-        return result;
+            .map_err(|e| e.to_string()),
+        )
+        .await;
     }
 
-    // Local file attachment: read from disk and send as FileData. Honor named
-    // workspace prefixes so agents can attach files that live under declared
-    // `[workspaces]` mounts.
     if let Some(raw_path) = file_path {
         let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+
+        let meta = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|e| format!("Failed to stat file '{}': {e}", resolved.display()))?;
+        if meta.len() > MAX_FILE_SIZE {
+            return Err(format!(
+                "File '{}' is too large ({} bytes, max {} bytes)",
+                resolved.display(),
+                meta.len(),
+                MAX_FILE_SIZE
+            ));
+        }
+
         let data = tokio::fs::read(&resolved)
             .await
             .map_err(|e| format!("Failed to read file '{}': {e}", resolved.display()))?;
 
-        // Derive filename from the path if not explicitly provided
         let filename = input["filename"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -232,7 +234,6 @@ pub(super) async fn tool_channel_send(
                     .to_string()
             });
 
-        // Determine MIME type from extension
         let ext = resolved
             .extension()
             .and_then(|e| e.to_str())
@@ -254,9 +255,6 @@ pub(super) async fn tool_channel_send(
             "tar" => "application/x-tar",
             "mp3" => "audio/mpeg",
             "wav" => "audio/wav",
-            // OGG / Opus voice payloads — channel adapters (e.g. Telegram)
-            // use this MIME to route to native voice-memo endpoints rather
-            // than generic file send (#4959).
             "ogg" | "oga" | "opus" => "audio/ogg",
             "mp4" => "video/mp4",
             "doc" => "application/msword",
@@ -266,11 +264,13 @@ pub(super) async fn tool_channel_send(
             _ => "application/octet-stream",
         };
 
-        // `Bytes::from(Vec<u8>)` is O(1) — it takes ownership of the
-        // Vec's allocation without copying. Subsequent clones (retry,
-        // metering wrappers, fan-out) become refcount bumps. See #3553.
-        let result = kh
-            .send_channel_file_data(
+        return mirror_on_success(
+            kh,
+            caller_agent_id,
+            &channel,
+            recipient,
+            &filename,
+            kh.send_channel_file_data(
                 &channel,
                 recipient,
                 bytes::Bytes::from(data),
@@ -280,12 +280,9 @@ pub(super) async fn tool_channel_send(
                 account_id,
             )
             .await
-            .map_err(|e| e.to_string());
-        if result.is_ok() {
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &filename)
-                .await;
-        }
-        return result;
+            .map_err(|e| e.to_string()),
+        )
+        .await;
     }
 
     if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
@@ -322,7 +319,12 @@ pub(super) async fn tool_channel_send(
         let correct_option_id = input
             .get("poll_correct_option")
             .and_then(|v| v.as_u64())
-            .map(|n| n as u8);
+            .map(|n| {
+                u8::try_from(n).map_err(|_| {
+                    format!("poll_correct_option {n} exceeds u8 range (must be 0-255)")
+                })
+            })
+            .transpose()?;
         let explanation = input.get("poll_explanation").and_then(|v| v.as_str());
         if let Some(exp) = explanation {
             if let Some(violation) = check_taint_outbound_text(exp, &TaintSink::agent_message()) {
@@ -330,7 +332,6 @@ pub(super) async fn tool_channel_send(
             }
         }
 
-        // Validate quiz mode requirements
         if is_quiz {
             let id = correct_option_id.ok_or_else(|| {
                 "poll_correct_option is required when poll_is_quiz is true".to_string()
@@ -352,6 +353,7 @@ pub(super) async fn tool_channel_send(
             is_quiz,
             correct_option_id,
             explanation,
+            thread_id,
             account_id,
         )
         .await
@@ -367,7 +369,6 @@ pub(super) async fn tool_channel_send(
         return Ok(result);
     }
 
-    // Text-only message
     let message = input["message"]
         .as_str()
         .ok_or("Missing 'message' parameter (required for text messages)")?;
@@ -376,11 +377,8 @@ pub(super) async fn tool_channel_send(
         return Err("Message cannot be empty".to_string());
     }
 
-    // For email channels, validate email format and prepend subject
     let final_message = if channel == "email" {
-        if !recipient.contains('@') || !recipient.contains('.') {
-            return Err(format!("Invalid email address: '{recipient}'"));
-        }
+        validate_email(recipient)?;
         if let Some(subject) = input["subject"].as_str() {
             if !subject.is_empty() {
                 format!("Subject: {subject}\n\n{message}")
@@ -399,13 +397,15 @@ pub(super) async fn tool_channel_send(
         return Err(violation);
     }
 
-    let result = kh
-        .send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
-        .await
-        .map_err(|e| e.to_string());
-    if result.is_ok() {
-        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &final_message)
-            .await;
-    }
-    result
+    mirror_on_success(
+        kh,
+        caller_agent_id,
+        &channel,
+        recipient,
+        &final_message,
+        kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
+            .await
+            .map_err(|e| e.to_string()),
+    )
+    .await
 }
