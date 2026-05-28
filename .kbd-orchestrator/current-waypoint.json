@@ -1,54 +1,12 @@
 {
-  "active_phase": "phase-3-upstream-sync-and-ci-hardening",
+  "active_phase": "phase-5-plugin-host-crate",
   "active_change": null,
   "last_updated": "2026-05-27T00:00:00Z",
-  "last_updated_by": "kbd-plan",
+  "last_updated_by": "kbd-reflect",
   "backend": "native-tool",
-  "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
+  "phase_progress": "Phase 5: 8/8 changes done; reflection written.",
   "next_action": {
-    "command": "/kbd-execute m2-upstream-merge-224-commits",
-    "description": "M1+M3 in progress. After PR-A lands, execute M2: git merge upstream/main + SurrealDB v030 + golden regen."
-  },
-  "phase_progress": "Phase 3: 0/2 changes done. Executing M1+M3 (PR-A) first.",
-  "assessment_complete": true,
-  "assessment_completed_at": "2026-05-23T00:00:00Z",
-  "plan_complete": true,
-  "plan_completed_at": "2026-05-23T00:00:00Z",
-  "decisions_recorded": {
-    "upstream-merge-strategy": "proper-merge",
-    "gitattributes-orchestrator": "YES-implement"
-  },
-  "queued_phases": [
-    {
-      "phase": "phase-4-multilang-wasm-toolchain",
-      "status": "complete",
-      "completed_at": "2026-05-27T00:00:00Z",
-      "changes_done": "9/9",
-      "reflection": ".kbd-orchestrator/phases/phase-4-multilang-wasm-toolchain/reflection.md",
-      "post_phase_action": "Commit + PR. C-007's prod Dockerfile end-to-end verified post-Phase-3-M1 in CI.",
-      "blocked_by_at_plan_time": "phase-3 M2 upstream merge (did NOT block execution — only blocks final-stage COPY verification in C-007)",
-      "summary": "Extend Dockerfile + Dockerfile.rust-dev with Rust nightly + Python 3.13 + Node 24 + Bun + TS6 + Go 1.26.3 + TinyGo + full WASM toolchain (wasmtime, wasm-tools, cargo-component, componentize-py, AssemblyScript, Javy, Emscripten, wasi-sdk, Binaryen). Production stays slim — runtime libs only.",
-      "first_change": "/kbd-execute C-001",
-      "decisions_baked": {
-        "D1": "Path 1 — runtime libs only in prod",
-        "D2": "Extend Dockerfile.rust-dev in place",
-        "D3": "Nightly alongside stable; default stable",
-        "D4": "Include all optional tools"
-      }
-    },
-    {
-      "phase": "phase-5-plugin-host-crate",
-      "status": "plan_complete",
-      "soft_prerequisite": "phase-4 PR #56 merged to main",
-      "summary": "Modernize the existing in-process WASM plugin host inside librefang-runtime: wasmtime 44->45, Component Model side-by-side execute path, WIT host world at crates/librefang-skills/wit/, manifest capability declarations, AOT .cwasm cache. Additive-only edits for upstream-merge hygiene.",
-      "first_change": "/kbd-execute C-001",
-      "decisions_baked": {
-        "D1": "extend in place; additive-only; upstream-sync hygiene",
-        "D2": "side-by-side execute paths",
-        "D3": "wit at crates/librefang-skills/wit/",
-        "D4": "per-skill AOT cache",
-        "D5": "default compile_mode = auto"
-      }
-    }
-  ]
+    "command": "Commit + PR",
+    "description": "Suggested split: feat(runtime,skills): WIT + wit_host + sandbox_component; feat(runtime): AOT cache + capabilities; chore(kbd): record phase-5 + docs"
+  }
 }

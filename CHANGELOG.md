@@ -7,6 +7,10 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [Unreleased]
 
+### Added
+
+- **runtime(plugin-host): Component Model execute path for WASM plugins (@GQAdonis)** — Phase-5 lands a typed-WIT Component Model execute path on `WasmSandbox`, side-by-side with the existing core-module `execute()`. New `WasmSandbox::execute_component()` loads a `.wasm` Component via `wasmtime::component::Component::from_binary`, binds the host interfaces declared in `SkillManifest.host_capabilities` via per-interface `add_to_linker`, and invokes the exported `run` function. WIT package `librefang:plugin@0.1.0` (`crates/librefang-skills/wit/`) declares six host interfaces (`fs`, `net`, `kv`, `agent`, `env`, `time`) modeling the existing `host_functions::dispatch` surface — typed bindings shim through to the same dispatcher so capability checks stay in one place. New `HostCapability` enum on `SkillManifest` gates which interfaces are bound at link time; importing an undeclared interface fails at instantiation. AOT `.cwasm` cache (`aot_cache.rs`) speeds re-runs: `Auto` (default) compiles JIT on first run and writes the cache opportunistically, subsequent runs deserialize the pre-compiled artefact in milliseconds. Cache key embeds wasmtime version + sha256 of source so both kinds of drift cleanly miss the cache. Existing core-module Wasm skills are unaffected. Per-language plugin authoring recipes (Rust via cargo-component, Python via componentize-py, JS via jco, Go via TinyGo wasip2, C via wit-bindgen) at `docs/development/plugin-host.md`. Smoke harness `cargo run --example load_and_run -- <wasm>` for validating Components produced by external authors. 30 new unit tests (wit_host 17, sandbox_component 6, aot_cache 7) — all green.
+
 ### Changed
 
 - **BREAKING: rename crate `librefang-migrate` → `librefang-import`** (@houko) — the framework-import tool shared the word "migration" with `librefang-memory/src/migration.rs` (SQLite schema migrations), so grepping for "migration" returned the wrong file and forced every reader to disambiguate. The crate is renamed to `librefang-import`, which is what it actually does: import agents / memory / sessions / skills / channel configs from other frameworks (OpenClaw, OpenFang, LangChain, AutoGPT). Directory moved `crates/librefang-migrate/` → `crates/librefang-import/`; package name in `Cargo.toml` flipped; the three consumers (`librefang-api`, `librefang-cli`, `xtask`) updated to depend on `librefang-import` and reference `librefang_import::` in source. Public API (`MigrateSource`, `MigrateOptions`, `run_migration`, `report::MigrationReport`, `openclaw::*`, `openfang::*`) is preserved verbatim — only the crate name and import path change. The user-facing CLI command (`librefang migrate ...`) is unchanged. Workspace `members = [...]` and the doc references in `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` / `README.md` + the 7 i18n READMEs (zh / es / fr / ko / de / ja / pl) also updated. **Operator action required**: out-of-tree consumers that declared `librefang-migrate = { path = "...", ... }` in their `Cargo.toml` must update both the dep name and any `use librefang_migrate::...` paths to `librefang_import`. Closes #5668.
@@ -1151,9 +1155,7 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 </details>
 
 
-## [Unreleased]
-
-### Upcoming Breaking Changes
+## Upcoming Breaking Changes
 
 - **`librefang-api-key` localStorage key removed (v2026.8.x)**. The dashboard
   migrated to `bossfang-api-key` in an earlier release and has been writing the

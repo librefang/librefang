@@ -186,6 +186,16 @@ wasmtime run --wasi cli hello.wasm
 convenience the env vars `CC_wasm32_wasip1` etc. are pre-set so
 cargo/cmake builds pick up the right clang automatically.
 
+## Loading the compiled `.wasm` via librefang
+
+This doc covers **compile**. The next step — loading a `.wasm` and
+binding it to librefang's typed host interfaces — is the Phase-5
+Component Model plugin host. See
+[`docs/development/plugin-host.md`](plugin-host.md) for the WIT
+contract (`librefang:plugin@0.1.0`), the `HostCapability` link-time
+gate, AOT cache, and per-language authoring recipes that turn each
+hello-world above into a real librefang plugin.
+
 ## What the image does NOT ship
 
 These belong in the production runtime image, not the dev image:
