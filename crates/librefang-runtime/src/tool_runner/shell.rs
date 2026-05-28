@@ -23,6 +23,8 @@ pub(super) async fn tool_shell_exec(
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
+    session_id: Option<String>,
 ) -> ToolResult {
     let command = input["command"]
         .as_str()
@@ -140,6 +142,13 @@ pub(super) async fn tool_shell_exec(
         }
     };
 
+    // Register the spawned child in the process registry so external
+    // consumers (e.g. `ps`-style tooling, session cleanup) can track it.
+    let child_pid = child.id();
+    if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
+        reg.register(pid, command.to_string(), session_id);
+    }
+
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     // Drive `wait_with_output()` directly: it owns the stdout/stderr pipes and
@@ -189,6 +198,11 @@ pub(super) async fn tool_shell_exec(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
+
+            // Mark the process as finished in the registry.
+            if let (Some(reg), Some(pid)) = (process_registry, child_pid) {
+                reg.mark_finished(pid, exit_code);
+            }
 
             // Truncate very long outputs to prevent memory issues
             let max_output = 100_000;
