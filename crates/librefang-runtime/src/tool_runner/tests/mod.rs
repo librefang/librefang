@@ -227,7 +227,8 @@ async fn test_tool_a2a_send_blocks_secret_in_message() {
     });
     let err = tool_a2a_send(&input, Some(&kernel))
         .await
-        .expect_err("a2a_send must reject tainted message");
+        .expect_err("a2a_send must reject tainted message")
+        .to_string(); // #3576: Err is now ToolError; assert via its Display.
     assert!(
         err.contains("taint") || err.contains("violation"),
         "expected taint violation, got: {err}"
@@ -684,6 +685,56 @@ async fn agent_send_distinct_keys_produce_isolated_dispatch() {
         &*calls,
         &["as_with_key:key-alpha", "as_with_key:key-beta"],
         "distinct keys must produce distinct dispatch entries"
+    );
+}
+
+/// Inter-agent call-depth quota maps to `PermissionDenied`, not `Upstream`.
+/// `Upstream` lifts to `LibreFangError::ToolExecution` (HTTP 5xx) which would
+/// mislead caller retry/circuit-break logic into treating a self-imposed
+/// kernel-policy quota as a transient infra crash; `PermissionDenied` lifts
+/// to `CapabilityDenied` (HTTP 403), which is the honest semantic for a
+/// "you can't go any deeper" limit. The rendered message and the
+/// `Use the task queue instead.` recovery hint are preserved on the wire.
+#[tokio::test]
+async fn agent_send_depth_exceeded_is_permission_denied() {
+    use super::error::ToolError;
+    use super::AGENT_CALL_DEPTH;
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let input = serde_json::json!({ "agent_id": "target", "message": "hi" });
+
+    // DispatchCapture::max_agent_call_depth() returns 10; setting the
+    // task-local depth to 10 reaches the `>= max_depth` branch.
+    let result = AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(10), async {
+            super::agent::tool_agent_send(&input, Some(&kernel), Some("parent-agent")).await
+        })
+        .await;
+
+    let err = result.expect_err("depth >= max must short-circuit before dispatch");
+    match &err {
+        ToolError::PermissionDenied(msg) => {
+            assert!(
+                msg.contains("Inter-agent call depth exceeded"),
+                "message text must survive (LLM relies on the recovery hint), got: {msg}"
+            );
+            assert!(
+                msg.contains("task queue"),
+                "recovery hint must survive, got: {msg}"
+            );
+        }
+        other => panic!(
+            "expected PermissionDenied (→ HTTP 403 CapabilityDenied), got {other:?} \
+             — Upstream would map to 5xx and mislead retry logic"
+        ),
+    }
+
+    // Dispatch must NOT have been reached.
+    let calls = cap.calls.lock().unwrap();
+    assert!(
+        calls.is_empty(),
+        "depth-exceeded must short-circuit before any send_to_agent_* arm, got: {calls:?}"
     );
 }
 

@@ -631,3 +631,85 @@ async fn test_cron_cancel_missing_job_id_renders_as_missing_parameter() {
 fn cancel_was_never_called(calls: &CapturedCalls) -> bool {
     calls.cron_cancel.lock().unwrap().is_empty()
 }
+
+// schedule_delete ownership coverage (#3576 second-slice migration). The
+// natural-language `schedule_delete` shares `KernelHandle::cron_cancel` with
+// `cron_cancel`, which cancels by UUID with no ownership filtering. These pin
+// that `schedule_delete` enforces the same tool-layer ownership guard as
+// `cron_cancel` — previously it did not, so it was a bypass.
+
+#[tokio::test]
+async fn test_schedule_delete_succeeds_when_caller_owns_the_job() {
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "sched-99"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("s1", "schedule_delete", &json!({"id": "sched-99"}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "schedule_delete should succeed when caller owns the job: {}",
+        result.content
+    );
+    let cancel_calls = calls.cron_cancel.lock().unwrap();
+    assert_eq!(cancel_calls.len(), 1);
+    assert_eq!(cancel_calls[0], "sched-99");
+}
+
+#[tokio::test]
+async fn test_schedule_delete_unowned_job_renders_as_not_found() {
+    // Regression: before #3576's second slice, schedule_delete called
+    // cron_cancel directly with no ownership check, so any agent could delete
+    // another agent's job by UUID. It must now collapse unowned/missing into
+    // NotFound and never reach the kernel.
+    let (kernel, calls) = CapturingKernel::new();
+    kernel.set_cron_list_response(vec![json!({"id": "sched-mine"})]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw(
+        "s2",
+        "schedule_delete",
+        &json!({"id": "sched-other-agents"}),
+        &ctx,
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "schedule_delete on unowned job must error: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Schedule 'sched-other-agents' not found"),
+        "expected NotFound display, got: {}",
+        result.content
+    );
+    assert!(
+        cancel_was_never_called(&calls),
+        "schedule_delete must NOT reach the kernel when the caller doesn't own the job"
+    );
+}
+
+#[tokio::test]
+async fn test_schedule_delete_missing_id_renders_as_missing_parameter() {
+    let (kernel, _calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let result = execute_tool_raw("s3", "schedule_delete", &json!({}), &ctx).await;
+
+    assert!(
+        result.is_error,
+        "schedule_delete without id must error: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Missing required parameter 'id'"),
+        "expected MissingParameter display, got: {}",
+        result.content
+    );
+}
