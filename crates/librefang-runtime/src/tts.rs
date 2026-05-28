@@ -506,16 +506,18 @@ mod tests {
     #[test]
     fn tts_config_round_trips_custom() {
         use librefang_types::config::CustomTtsConfig;
-        let mut config = TtsConfig::default();
-        config.enabled = true;
-        config.provider = Some("local-piper".to_string());
-        config.custom = CustomTtsConfig {
-            base_url: "http://localhost:5000/v1/audio/speech".to_string(),
-            api_key_env: String::new(),
-            key_required: false,
-            model: "tts-1".to_string(),
-            voice: "en_US-lessac-medium".to_string(),
-            format: "mp3".to_string(),
+        let config = TtsConfig {
+            enabled: true,
+            provider: Some("local-piper".to_string()),
+            custom: CustomTtsConfig {
+                base_url: "http://localhost:5000/v1/audio/speech".to_string(),
+                api_key_env: String::new(),
+                key_required: false,
+                model: "tts-1".to_string(),
+                voice: "en_US-lessac-medium".to_string(),
+                format: "mp3".to_string(),
+            },
+            ..TtsConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: TtsConfig = serde_json::from_str(&json).unwrap();

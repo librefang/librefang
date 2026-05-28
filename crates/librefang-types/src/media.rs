@@ -79,7 +79,7 @@ pub struct MediaUnderstanding {
 /// key_required = false
 /// model = "large-v3"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CustomSttConfig {
     /// Full URL of the OpenAI-compatible transcription endpoint.
@@ -99,17 +99,6 @@ pub struct CustomSttConfig {
     /// default (typically `whisper-1` for OpenAI-compatible servers) is used.
     #[serde(default)]
     pub model: Option<String>,
-}
-
-impl Default for CustomSttConfig {
-    fn default() -> Self {
-        Self {
-            base_url: String::new(),
-            api_key_env: String::new(),
-            key_required: false,
-            model: None,
-        }
-    }
 }
 
 /// Configuration for media understanding.
