@@ -65,7 +65,7 @@ impl SidecarAdapter for EchoAdapter {
             .as_ref()
             .expect("wait_for predicate guarantees Some")
             .clone();
-        // Drop the watch borrow before invoking the closure so the closure can also touch the watch if it wants to.
+        // Release the watch read-borrow before invoking `emit` so a copy-pasted adapter whose emit closure mutates `self.emit_tx` or any other watch state cannot deadlock — echo itself only writes through the mpsc inside `emit`, so the borrow could outlive this call without harm, but the example sets the pattern.
         drop(guard);
         emit(
             MessageBuilder::new("echo-user", "Echo")
@@ -94,5 +94,6 @@ impl SidecarAdapter for EchoAdapter {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // `run_stdio_main` handles the daemon's `--describe` discovery contract (emit schema JSON + return) before touching any platform-side state, and only constructs the adapter via the builder closure when not in discovery mode — important for adapters whose `new()` reads env vars that are not yet configured at boot.
-    run_stdio_main(EchoAdapter::schema, EchoAdapter::new).await
+    // The builder closure returns `Result<EchoAdapter, DynError>` so a real adapter that validates env vars in `new()` can fail cleanly with a structured error instead of `expect()`-panicking; echo has nothing to fail on so it just wraps in `Ok`.
+    run_stdio_main(EchoAdapter::schema, || Ok(EchoAdapter::new())).await
 }
