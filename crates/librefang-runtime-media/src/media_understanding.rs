@@ -159,9 +159,18 @@ impl MediaEngine {
 
         // Resolution order for model:
         // 1. Explicit [media] audio_model (per-provider override)
-        // 2. [media.custom_stt] model (for custom providers only)
+        // 2. [media.custom_stt] model — for custom / self-hosted providers only
+        //    (the `_other` dispatch arm below). Must NOT leak into built-in
+        //    providers (groq/openai/minimax/fireworks/together/siliconflow/
+        //    gemini/elevenlabs); otherwise an operator who sets
+        //    `[media.custom_stt] model = "large-v3"` accidentally overrides
+        //    Groq/etc.'s default model on every transcription call.
         // 3. Built-in default for the selected provider
-        let custom_stt_model_ref: Option<&str> = self.config.custom_stt.model.as_deref();
+        let custom_stt_model_ref: Option<&str> = match provider {
+            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow"
+            | "gemini" | "elevenlabs" => None,
+            _ => self.config.custom_stt.model.as_deref(),
+        };
         let model = self
             .config
             .audio_model
