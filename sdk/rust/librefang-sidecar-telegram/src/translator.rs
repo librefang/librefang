@@ -244,7 +244,7 @@ pub fn apply_reply(content: TgContent, msg: &Message) -> TgContent {
             url,
             caption: Some(match caption {
                 Some(c) => format!("{prefix}{c}"),
-                None => prefix.clone(),
+                None => prefix,
             }),
             mime_type,
         },
