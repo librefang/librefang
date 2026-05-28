@@ -577,10 +577,7 @@ pub async fn populate_sidecar_schema_cache() {
                         fields = fallback.fields.len(),
                         "sidecar --describe failed; using compile-time fallback schema"
                     );
-                    schema_cache()
-                        .write()
-                        .unwrap()
-                        .insert(entry.name, fallback);
+                    schema_cache().write().unwrap().insert(entry.name, fallback);
                 } else {
                     tracing::warn!(
                         adapter = entry.name,
