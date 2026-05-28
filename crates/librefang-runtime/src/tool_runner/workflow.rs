@@ -308,7 +308,7 @@ pub(super) async fn tool_workflow_cancel(
             } else {
                 "error"
             };
-            Err(ToolError::upstream(format!(
+            Err(ToolError::upstream_msg(format!(
                 "cancel failed ({state}): {msg}"
             )))
         }
