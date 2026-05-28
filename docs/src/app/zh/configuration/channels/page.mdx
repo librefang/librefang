@@ -33,6 +33,11 @@ TELEGRAM_BOT_TOKEN = "..."
 
 Sidecar 适配器保留了与原内置适配器相同的运行语义：`TELEGRAM_BOT_TOKEN` 环境变量、可选的 `ALLOWED_USERS` 允许列表、`channel_type = "telegram"` 以及 `channel_role_mapping.telegram` 的 RBAC 映射。详见下方 [`[[sidecar_channels]]`](#sidecar_channels) 章节。
 
+**Rust 版本（自 #5831 起）。** Telegram sidecar 的第一方 Rust 移植在 `sdk/rust/librefang-sidecar-telegram/`——下列场景适合选 Rust 版：不想在宿主装 Python 运行时、关心 supervisor 每次重启的启动延迟、~3 MB 的剥离后二进制能省下足够镜像体积来抵掉多一步构建。
+Wire 形状与访问控制语义与 Python 版字节等价，supervisor 区分不出来。
+配置时把 `command` 换成 `/abs/path/to/target/release/librefang-sidecar-telegram`，复用同一套 `TELEGRAM_BOT_TOKEN` / `ALLOWED_USERS` 环境变量。
+完整参考见 [Rust Telegram sidecar 适配器](/zh/architecture/rust-telegram-sidecar)。
+
 #### Discord（sidecar）
 
 Discord 已于 v2026.5 迁移为进程外 sidecar 适配器，请改用 `[[sidecar_channels]]` 配置。Sidecar 保留原内置适配器的运行语义：`DISCORD_BOT_TOKEN` 环境变量、Gateway Intents、`allowed_guilds` / `allowed_users` 过滤，以及通过 `channel_role_mapping.discord` 的 RBAC 映射。
