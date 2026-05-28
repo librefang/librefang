@@ -39,6 +39,7 @@ pub struct Message {
     pub from: Option<User>,
     pub sender_chat: Option<Chat>,
     pub date: i64,
+    pub edit_date: Option<i64>,
     pub chat: Chat,
     pub reply_to_message: Option<Box<Message>>,
     pub text: Option<String>,

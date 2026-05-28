@@ -8,7 +8,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Escape `&`, `<`, `>` for HTML.
+/// Escape `&`, `<`, `>` for HTML, and pre-emptively strip the Private-Use sentinels that `render_inline_markdown` uses for inline-code placeholders. Without the strip, adversarial input containing those code points would survive escape_html and collide with a real placeholder during the restore pass, letting the attacker inject `<code>` via `sanitize_telegram_html`'s allowlist.
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -16,11 +16,16 @@ pub fn escape_html(s: &str) -> String {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            CODE_PLACEHOLDER_OPEN | CODE_PLACEHOLDER_CLOSE => {}
             other => out.push(other),
         }
     }
     out
 }
+
+/// Private-Use Area code points used as inline-code placeholder bookends. These survive `escape_html` only because `escape_html` strips them on input — see the doc comment on `escape_html`.
+const CODE_PLACEHOLDER_OPEN: char = '\u{E000}';
+const CODE_PLACEHOLDER_CLOSE: char = '\u{E001}';
 
 static RE_LINK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("link regex"));
@@ -35,12 +40,12 @@ fn render_inline_markdown(text: &str) -> String {
     let escaped = escape_html(text);
 
     // Inline code first so its content is opaque to bold/italic scanning.
-    // We do this by substituting `\u{0000}<n>\u{0000}` placeholders, replacing in a second pass.
+    // Placeholders use Private-Use Area sentinels which `escape_html` strips from input, so adversarial text cannot collide with this scheme.
     let mut placeholders: Vec<String> = Vec::new();
     let with_codes = RE_CODE.replace_all(&escaped, |caps: &regex::Captures<'_>| {
         let idx = placeholders.len();
         placeholders.push(format!("<code>{}</code>", &caps[1]));
-        format!("\x00C{idx}\x00")
+        format!("{CODE_PLACEHOLDER_OPEN}C{idx}{CODE_PLACEHOLDER_CLOSE}")
     });
 
     // Bold next (double-star).
@@ -89,7 +94,7 @@ fn render_inline_markdown(text: &str) -> String {
     // Restore code placeholders.
     let mut restored = with_links;
     for (i, html) in placeholders.iter().enumerate() {
-        let placeholder = format!("\x00C{i}\x00");
+        let placeholder = format!("{CODE_PLACEHOLDER_OPEN}C{i}{CODE_PLACEHOLDER_CLOSE}");
         restored = restored.replace(&placeholder, html);
     }
     restored

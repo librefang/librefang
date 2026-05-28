@@ -57,56 +57,47 @@ fn sender_from_chat(chat: &Chat) -> Sender {
 }
 
 /// Parse a leading bot-command entity (e.g. `/start arg1 arg2`).
-/// Returns `(name, args)` when the message text starts with a slash command, `None` otherwise.
+/// Returns `(name, args)` when the message text starts with a `bot_command` at offset 0, `None` otherwise.
+///
+/// Bot API documents `MessageEntity.length` as a UTF-16 code-unit count, so to slice `text` correctly we walk Unicode scalars accumulating their `len_utf16()` until we've consumed `cmd_len` code units. This is correct for ASCII (the only kind Telegram currently emits for bot_command) AND survives any future extension to non-BMP characters. After the slice, the trailing text (everything past the entity, NOT past the first whitespace) is split into args by whitespace.
 fn parse_command(msg: &Message) -> Option<(String, Vec<String>)> {
     let text = msg.text.as_deref()?;
     let first = msg.entities.first()?;
     if first.entity_type != "bot_command" || first.offset != 0 {
         return None;
     }
-    let cmd_len = first.length.max(0) as usize;
-    let mut chars = text.chars();
-    let mut cmd: String = String::new();
-    let mut taken = 0;
-    while taken < cmd_len {
-        if let Some(c) = chars.next() {
-            cmd.push(c);
-            taken += 1;
-        } else {
+    let cmd_len_u16 = usize::try_from(first.length).ok()?;
+    let mut units = 0usize;
+    let mut byte_end = 0usize;
+    for ch in text.chars() {
+        if units >= cmd_len_u16 {
             break;
         }
+        units += ch.len_utf16();
+        byte_end += ch.len_utf8();
     }
-    let cmd_trimmed = cmd.trim_start_matches('/').to_string();
-    // Strip `@botname` suffix if present.
-    let bare = match cmd_trimmed.find('@') {
-        Some(at) => cmd_trimmed[..at].to_string(),
-        None => cmd_trimmed,
+    let head = &text[..byte_end];
+    let rest = &text[byte_end..];
+    let cmd_raw = head.strip_prefix('/')?;
+    let bare = match cmd_raw.find('@') {
+        Some(at) => &cmd_raw[..at],
+        None => cmd_raw,
     };
-    let rest: String = chars.collect();
+    if bare.is_empty() {
+        return None;
+    }
     let args: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
-    Some((bare, args))
+    Some((bare.to_string(), args))
 }
 
-fn mime_from_filename(name: &str) -> Option<String> {
-    let lower = name.to_ascii_lowercase();
-    let dot = lower.rfind('.')?;
-    let ext = &lower[dot + 1..];
-    Some(
-        match ext {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "mp4" => "video/mp4",
-            "mov" => "video/quicktime",
-            "mp3" => "audio/mpeg",
-            "ogg" | "oga" => "audio/ogg",
-            "opus" => "audio/opus",
-            "pdf" => "application/pdf",
-            _ => return None,
-        }
-        .to_string(),
-    )
+/// Build a `[Kind received: optional caption]` text placeholder. Used when getFile fails so the user's caption (often the actual question) survives even though the media URL is unavailable.
+fn media_placeholder(kind: &str, caption: Option<&str>) -> TgContent {
+    let cap = caption
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| format!(": {c}"))
+        .unwrap_or_default();
+    TgContent::Text(format!("[{kind} received{cap}]"))
 }
 
 /// Best-effort file-id → public URL. Returns None on lookup failure (the caller falls back to a text placeholder).
@@ -118,6 +109,8 @@ pub async fn file_url(client: &BotClient, file_id: &str) -> Option<String> {
 }
 
 /// Map a Telegram `Message` to a single `TgContent`. Returns None for unsupported variants (the caller drops the message).
+///
+/// When `getFile` fails on a media payload (transient CDN blip, expired file_id), we fall back to a `[Kind received: <caption>]` text placeholder rather than dropping the whole update — the user's caption is often the actual question.
 pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgContent> {
     if msg.text.is_some() {
         if let Some((name, args)) = parse_command(msg) {
@@ -126,61 +119,79 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
         return msg.text.clone().map(TgContent::Text);
     }
     if let Some(photos) = msg.photo.last() {
-        let url = file_url(client, &photos.file_id).await?;
         let caption = msg.caption.clone();
-        return Some(TgContent::Image {
-            url,
-            caption,
-            mime_type: Some("image/jpeg".into()),
+        return Some(match file_url(client, &photos.file_id).await {
+            Some(url) => TgContent::Image {
+                url,
+                caption,
+                mime_type: Some("image/jpeg".into()),
+            },
+            None => media_placeholder("Photo", caption.as_deref()),
         });
     }
     if let Some(doc) = &msg.document {
-        let url = file_url(client, &doc.file_id).await?;
         let filename = doc.file_name.clone().unwrap_or_else(|| "document".into());
-        return Some(TgContent::File { url, filename });
+        return Some(match file_url(client, &doc.file_id).await {
+            Some(url) => TgContent::File { url, filename },
+            None => {
+                // Prefer the user's caption over the filename — captions usually carry the question; the filename is best-effort.
+                let cap = msg.caption.as_deref().or(Some(&filename));
+                media_placeholder("Document", cap)
+            }
+        });
     }
     if let Some(audio) = &msg.audio {
-        let url = file_url(client, &audio.file_id).await?;
-        return Some(TgContent::Audio {
-            url,
-            caption: msg.caption.clone(),
-            duration_seconds: audio.duration,
-            title: audio.title.clone(),
-            performer: audio.performer.clone(),
+        return Some(match file_url(client, &audio.file_id).await {
+            Some(url) => TgContent::Audio {
+                url,
+                caption: msg.caption.clone(),
+                duration_seconds: audio.duration,
+                title: audio.title.clone(),
+                performer: audio.performer.clone(),
+            },
+            None => media_placeholder("Audio", msg.caption.as_deref()),
         });
     }
     if let Some(voice) = &msg.voice {
-        let url = file_url(client, &voice.file_id).await?;
-        return Some(TgContent::Voice {
-            url,
-            caption: msg.caption.clone(),
-            duration_seconds: voice.duration,
+        return Some(match file_url(client, &voice.file_id).await {
+            Some(url) => TgContent::Voice {
+                url,
+                caption: msg.caption.clone(),
+                duration_seconds: voice.duration,
+            },
+            None => media_placeholder("Voice", msg.caption.as_deref()),
         });
     }
     if let Some(anim) = &msg.animation {
-        let url = file_url(client, &anim.file_id).await?;
-        return Some(TgContent::Animation {
-            url,
-            caption: msg.caption.clone(),
-            duration_seconds: anim.duration,
+        return Some(match file_url(client, &anim.file_id).await {
+            Some(url) => TgContent::Animation {
+                url,
+                caption: msg.caption.clone(),
+                duration_seconds: anim.duration,
+            },
+            None => media_placeholder("Animation", msg.caption.as_deref()),
         });
     }
     if let Some(video) = &msg.video {
-        let url = file_url(client, &video.file_id).await?;
-        return Some(TgContent::Video {
-            url,
-            caption: msg.caption.clone(),
-            duration_seconds: video.duration,
-            filename: video.file_name.clone(),
+        return Some(match file_url(client, &video.file_id).await {
+            Some(url) => TgContent::Video {
+                url,
+                caption: msg.caption.clone(),
+                duration_seconds: video.duration,
+                filename: video.file_name.clone(),
+            },
+            None => media_placeholder("Video", msg.caption.as_deref()),
         });
     }
     if let Some(vn) = &msg.video_note {
-        let url = file_url(client, &vn.file_id).await?;
-        return Some(TgContent::Video {
-            url,
-            caption: None,
-            duration_seconds: vn.duration,
-            filename: None,
+        return Some(match file_url(client, &vn.file_id).await {
+            Some(url) => TgContent::Video {
+                url,
+                caption: None,
+                duration_seconds: vn.duration,
+                filename: None,
+            },
+            None => media_placeholder("VideoNote", None),
         });
     }
     if let Some(loc) = &msg.location {
@@ -194,25 +205,15 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
             file_id: sticker.file_id.clone(),
         });
     }
-    if let Some(_contact) = &msg.contact {
-        // No TgContent variant for contact yet — surface as text.
-        let label = msg
-            .contact
-            .as_ref()
-            .map(|c| {
-                let mut s = format!("Contact: {}", c.first_name);
-                if let Some(l) = &c.last_name {
-                    s.push(' ');
-                    s.push_str(l);
-                }
-                s.push_str(&format!(" ({})", c.phone_number));
-                s
-            })
-            .unwrap_or_else(|| "Contact".into());
-        return Some(TgContent::Text(label));
+    if let Some(c) = &msg.contact {
+        let mut s = format!("Contact: {}", c.first_name);
+        if let Some(l) = &c.last_name {
+            s.push(' ');
+            s.push_str(l);
+        }
+        s.push_str(&format!(" ({})", c.phone_number));
+        return Some(TgContent::Text(s));
     }
-    // Bots send Empty/other types — produce a placeholder so downstream can ignore.
-    let _ = mime_from_filename;
     None
 }
 
@@ -262,7 +263,7 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn build_metadata(msg: &Message, sender: &Sender) -> serde_json::Map<String, Value> {
+fn build_metadata(msg: &Message, sender: &Sender, edited: bool) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
     m.insert("chat_id".into(), json!(msg.chat.id.to_string()));
     m.insert("platform".into(), json!("telegram"));
@@ -274,20 +275,25 @@ fn build_metadata(msg: &Message, sender: &Sender) -> serde_json::Map<String, Val
         m.insert("sender_username".into(), json!(uname));
     }
     m.insert("sender_user_id".into(), json!(sender.user_id.clone()));
+    // edited_message reuses the original message_id; without `edited: true` (and `edit_date` when Telegram provides it) the supervisor cannot distinguish an edit from a fresh turn.
+    if edited {
+        m.insert("edited".into(), json!(true));
+        if let Some(ts) = msg.edit_date {
+            m.insert("edit_date".into(), json!(ts));
+        }
+    }
     m
 }
 
-/// Build a message-event Value from a Telegram `Message`.
-pub async fn message_event(client: &BotClient, msg: &Message) -> Option<Value> {
+/// Build a message-event Value from a Telegram `Message`. `edited=true` for `update.edited_message`.
+pub async fn message_event(client: &BotClient, msg: &Message, edited: bool) -> Option<Value> {
     let content = extract_content(client, msg).await?;
     let content = apply_reply(content, msg);
     let sender = extract_sender(msg);
     let chat_id = msg.chat.id.to_string();
-    let is_group = matches!(
-        msg.chat.chat_type.as_str(),
-        "group" | "supergroup" | "channel"
-    );
-    let metadata = build_metadata(msg, &sender);
+    // `channel` posts have separate semantics (no sender user, broadcast-only); treat them as DM-like for routing, matching the Python adapter.
+    let is_group = matches!(msg.chat.chat_type.as_str(), "group" | "supergroup");
+    let metadata = build_metadata(msg, &sender, edited);
     let mut builder = MessageBuilder::new(chat_id.clone(), sender.name.clone())
         .content(content_to_value(&content))
         .channel_id(chat_id)
@@ -459,6 +465,12 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .as_ref()
         .map(|m| m.chat.id.to_string())
         .unwrap_or_default();
+    // Without is_group, a group-button callback looks like a DM and mis-routes the agent reply (DM session instead of group session).
+    let is_group = cq
+        .message
+        .as_ref()
+        .map(|m| matches!(m.chat.chat_type.as_str(), "group" | "supergroup"))
+        .unwrap_or(false);
     let mut metadata = serde_json::Map::new();
     metadata.insert("chat_id".into(), json!(chat_id.clone()));
     metadata.insert("platform".into(), json!("telegram"));
@@ -474,6 +486,7 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
         .content(content_to_value(&content))
         .channel_id(chat_id)
         .platform("telegram")
+        .is_group(is_group)
         .metadata(metadata);
     if let Some(uname) = sender.username {
         builder = builder.username(uname);
@@ -481,7 +494,7 @@ pub fn callback_event(cq: &CallbackQuery) -> Option<Value> {
     Some(builder.build())
 }
 
-fn sender_from_user(user: &User) -> Sender {
+pub(crate) fn sender_from_user(user: &User) -> Sender {
     let mut name = user.first_name.clone();
     if let Some(last) = &user.last_name {
         if !last.is_empty() {
@@ -531,10 +544,10 @@ pub fn poll_answer_event(pa: &PollAnswer) -> Option<Value> {
 /// Top-level: dispatch by update kind. Returns a `Value` per emitted event, or None if the update is a no-op for us.
 pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Value> {
     if let Some(msg) = &update.message {
-        return message_event(client, msg).await;
+        return message_event(client, msg, false).await;
     }
     if let Some(msg) = &update.edited_message {
-        return message_event(client, msg).await;
+        return message_event(client, msg, true).await;
     }
     if let Some(cq) = &update.callback_query {
         return callback_event(cq);
@@ -543,4 +556,92 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
         return poll_answer_event(pa);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::MessageEntity;
+
+    fn cmd_msg(text: &str, length: i64) -> Message {
+        Message {
+            message_id: 1,
+            text: Some(text.into()),
+            entities: vec![MessageEntity {
+                entity_type: "bot_command".into(),
+                offset: 0,
+                length,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parse_command_basic() {
+        let msg = cmd_msg("/start", 6);
+        assert_eq!(parse_command(&msg), Some(("start".into(), vec![])));
+    }
+
+    #[test]
+    fn parse_command_with_args() {
+        let msg = cmd_msg("/echo hello world", 5);
+        assert_eq!(
+            parse_command(&msg),
+            Some(("echo".into(), vec!["hello".into(), "world".into()]))
+        );
+    }
+
+    #[test]
+    fn parse_command_with_botname_suffix() {
+        // `/help@my_bot` is 12 UTF-16 units; ` please` is the trailing argument.
+        let msg = cmd_msg("/help@my_bot please", 12);
+        assert_eq!(
+            parse_command(&msg),
+            Some(("help".into(), vec!["please".into()]))
+        );
+    }
+
+    #[test]
+    fn parse_command_uses_entity_length_not_whitespace() {
+        // Regression: an earlier impl split on whitespace and folded `:foo` into the command name. Bot API entity.length=5 says the command is `/help`; trailing `:foo` is non-args text (no whitespace separator) and ends up as a single arg token via split_whitespace.
+        let msg = cmd_msg("/help:foo", 5);
+        assert_eq!(
+            parse_command(&msg),
+            Some(("help".into(), vec![":foo".into()]))
+        );
+    }
+
+    #[test]
+    fn parse_command_handles_unicode_command_name() {
+        // Non-BMP characters count as 2 UTF-16 code units. Verify we don't mis-slice if Telegram ever permits non-ASCII in bot_command entities.
+        // `/🦀` = `/` (1 unit) + 🦀 U+1F980 (2 units) = 3 UTF-16 units total.
+        let msg = cmd_msg("/🦀 hello", 3);
+        assert_eq!(
+            parse_command(&msg),
+            Some(("🦀".into(), vec!["hello".into()]))
+        );
+    }
+
+    #[test]
+    fn parse_command_rejects_bare_slash() {
+        let msg = cmd_msg("/", 1);
+        assert_eq!(parse_command(&msg), None);
+    }
+
+    #[test]
+    fn parse_command_rejects_bare_at() {
+        let msg = cmd_msg("/@my_bot", 8);
+        assert_eq!(parse_command(&msg), None);
+    }
+
+    #[test]
+    fn parse_command_returns_none_without_bot_command_entity() {
+        let msg = Message {
+            message_id: 1,
+            text: Some("/start".into()),
+            entities: vec![],
+            ..Default::default()
+        };
+        assert_eq!(parse_command(&msg), None);
+    }
 }

@@ -1,7 +1,7 @@
 //! Outbound dispatch: SDK `Content` value → Telegram Bot API call.
 //!
 //! Mirrors the Python adapter's `_dispatch_content` / `_send_*` family.
-//! All text routes go through `format_and_sanitize` → `split_to_utf16_chunks` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text.
+//! All text routes go through `format_and_sanitize` → `split_to_utf16_chunks` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
 
 use crate::api::types::InlineKeyboardButton as TgButton;
 use crate::api::{BotClient, Error, Result};
@@ -9,6 +9,31 @@ use crate::format::{format_and_sanitize, split_to_utf16_chunks, TELEGRAM_MSG_LIM
 use serde_json::{json, Value};
 
 const PARSE_MODE_HTML: &str = "HTML";
+/// Bot API caption hard limit (per <https://core.telegram.org/bots/api#sendphoto>). Captions longer than this are truncated to fit before we hit the wire — Telegram rejects oversize captions with `MESSAGE_CAPTION_TOO_LONG` and there is no graceful fallback.
+const CAPTION_LIMIT_UTF16: usize = 1024;
+
+/// Telegram returned `400 Bad Request: can't parse entities ...`. Used by every HTML-parse-mode call to decide whether to fall back to plain text.
+pub(crate) fn is_parse_entities_error(e: &Error) -> bool {
+    matches!(e, Error::Api { description, .. } if description.contains("can't parse entities"))
+}
+
+/// Telegram returned `400 Bad Request: message is not modified`. Common during streaming-edit debounce ticks where no new content has actually accumulated; treat as success rather than spamming the log.
+pub(crate) fn is_message_not_modified(e: &Error) -> bool {
+    matches!(e, Error::Api { code, description, .. } if *code == 400 && description.contains("message is not modified"))
+}
+
+/// Prepare a caption for sending: format → sanitize → truncate to the caption limit. Returns `None` for None/empty input.
+fn prepare_caption(raw: Option<&str>) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    let formatted = format_and_sanitize(raw);
+    Some(crate::format::truncate_to_utf16_limit(&formatted, CAPTION_LIMIT_UTF16).to_string())
+}
+
+/// Truncate a raw (un-formatted) caption to the Bot API limit for the plain-text fallback.
+fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(crate::format::truncate_to_utf16_limit(raw, CAPTION_LIMIT_UTF16).to_string())
+}
 
 /// Send a text message (formatted + sanitised + chunked).
 pub async fn send_text(
@@ -24,16 +49,31 @@ pub async fn send_text(
             .await
         {
             Ok(_) => {}
-            Err(Error::Api { description, .. }) if description.contains("can't parse entities") => {
-                // Plain-text fallback so a malformed sanitiser output never blocks a user message.
+            Err(e) if is_parse_entities_error(&e) => {
+                // Plain-text fallback: strip the HTML markup we added so the user sees readable prose rather than literal `<b>foo</b>` tags. Without the strip, the fallback "succeeds" at delivery but leaks our markup.
+                let plain = html_to_plain(&chunk);
                 client
-                    .send_message(chat_id, &chunk, None, thread_id, None)
+                    .send_message(chat_id, &plain, None, thread_id, None)
                     .await?;
             }
             Err(e) => return Err(e),
         }
     }
     Ok(())
+}
+
+static RE_HTML_TAG: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"<[^>]+>").expect("html-strip tag regex"));
+
+/// Strip HTML tags and decode the small set of entities our markdown pipeline ever emits. Used by the plain-text fallback when Telegram rejects our HTML — we want the user to see readable text, not the raw markup. Entity-decode order matters: replace `&lt;` / `&gt;` / `&quot;` / `&#39;` before `&amp;` so a literal `&amp;lt;` round-trips back to `&lt;` rather than collapsing to `<`.
+fn html_to_plain(s: &str) -> String {
+    let no_tags = RE_HTML_TAG.replace_all(s, "");
+    no_tags
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 fn build_inline_keyboard(message: &Value) -> Value {
@@ -111,10 +151,27 @@ pub async fn dispatch_content(
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Image.url missing".into()))?;
-            let caption = payload.get("caption").and_then(Value::as_str);
-            client
-                .send_photo_url(chat_id, url, caption, thread_id)
-                .await?;
+            let raw_caption = payload.get("caption").and_then(Value::as_str);
+            let formatted = prepare_caption(raw_caption);
+            match client
+                .send_photo_url(
+                    chat_id,
+                    url,
+                    formatted.as_deref(),
+                    Some(PARSE_MODE_HTML),
+                    thread_id,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = truncate_raw_caption(raw_caption);
+                    client
+                        .send_photo_url(chat_id, url, plain.as_deref(), None, thread_id)
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "File" => {
             let url = payload
@@ -126,10 +183,12 @@ pub async fn dispatch_content(
                 .and_then(Value::as_str)
                 .unwrap_or("file");
             if is_voice_filename(filename) {
-                client.send_voice_url(chat_id, url, None, thread_id).await?;
+                client
+                    .send_voice_url(chat_id, url, None, None, thread_id)
+                    .await?;
             } else {
                 client
-                    .send_document_url(chat_id, url, None, thread_id)
+                    .send_document_url(chat_id, url, None, None, thread_id)
                     .await?;
             }
         }
@@ -158,42 +217,120 @@ pub async fn dispatch_content(
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Voice.url missing".into()))?;
-            let caption = payload.get("caption").and_then(Value::as_str);
-            client
-                .send_voice_url(chat_id, url, caption, thread_id)
-                .await?;
+            let raw_caption = payload.get("caption").and_then(Value::as_str);
+            let formatted = prepare_caption(raw_caption);
+            match client
+                .send_voice_url(
+                    chat_id,
+                    url,
+                    formatted.as_deref(),
+                    Some(PARSE_MODE_HTML),
+                    thread_id,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = truncate_raw_caption(raw_caption);
+                    client
+                        .send_voice_url(chat_id, url, plain.as_deref(), None, thread_id)
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "Video" => {
             let url = payload
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Video.url missing".into()))?;
-            let caption = payload.get("caption").and_then(Value::as_str);
-            client
-                .send_video_url(chat_id, url, caption, thread_id)
-                .await?;
+            let raw_caption = payload.get("caption").and_then(Value::as_str);
+            let formatted = prepare_caption(raw_caption);
+            match client
+                .send_video_url(
+                    chat_id,
+                    url,
+                    formatted.as_deref(),
+                    Some(PARSE_MODE_HTML),
+                    thread_id,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = truncate_raw_caption(raw_caption);
+                    client
+                        .send_video_url(chat_id, url, plain.as_deref(), None, thread_id)
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "Audio" => {
             let url = payload
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Audio.url missing".into()))?;
-            let caption = payload.get("caption").and_then(Value::as_str);
+            let raw_caption = payload.get("caption").and_then(Value::as_str);
+            let formatted = prepare_caption(raw_caption);
             let title = payload.get("title").and_then(Value::as_str);
             let performer = payload.get("performer").and_then(Value::as_str);
-            client
-                .send_audio_url(chat_id, url, caption, title, performer, thread_id)
-                .await?;
+            match client
+                .send_audio_url(
+                    chat_id,
+                    url,
+                    formatted.as_deref(),
+                    Some(PARSE_MODE_HTML),
+                    title,
+                    performer,
+                    thread_id,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = truncate_raw_caption(raw_caption);
+                    client
+                        .send_audio_url(
+                            chat_id,
+                            url,
+                            plain.as_deref(),
+                            None,
+                            title,
+                            performer,
+                            thread_id,
+                        )
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "Animation" => {
             let url = payload
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("Animation.url missing".into()))?;
-            let caption = payload.get("caption").and_then(Value::as_str);
-            client
-                .send_animation_url(chat_id, url, caption, thread_id)
-                .await?;
+            let raw_caption = payload.get("caption").and_then(Value::as_str);
+            let formatted = prepare_caption(raw_caption);
+            match client
+                .send_animation_url(
+                    chat_id,
+                    url,
+                    formatted.as_deref(),
+                    Some(PARSE_MODE_HTML),
+                    thread_id,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = truncate_raw_caption(raw_caption);
+                    client
+                        .send_animation_url(chat_id, url, plain.as_deref(), None, thread_id)
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "Sticker" => {
             let file_id = payload
@@ -261,11 +398,10 @@ pub async fn dispatch_content(
                 .await
             {
                 Ok(_) => {}
-                Err(Error::Api { description, .. })
-                    if description.contains("can't parse entities") =>
-                {
+                Err(e) if is_parse_entities_error(&e) => {
+                    let plain = html_to_plain(&formatted);
                     client
-                        .edit_message_text(chat_id, message_id, &formatted, None, Some(keyboard))
+                        .edit_message_text(chat_id, message_id, &plain, None, Some(keyboard))
                         .await?;
                 }
                 Err(e) => return Err(e),
@@ -284,8 +420,27 @@ pub async fn dispatch_content(
                 .get("items")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("MediaGroup.items missing".into()))?;
-            let media = build_media_group(items_array)?;
-            client.send_media_group(chat_id, media, thread_id).await?;
+            // Bot API requires 2..=10 items per sendMediaGroup. Outside that range, fall back to per-item dispatch (1 item → single send; >10 → chunk into batches of 10) so the user's media still ships.
+            if items_array.len() == 1 {
+                Box::pin(dispatch_content(
+                    client,
+                    chat_id,
+                    &items_array[0],
+                    thread_id,
+                ))
+                .await?;
+            } else if items_array.is_empty() {
+                // Nothing to send — no-op.
+            } else {
+                for batch in items_array.chunks(10) {
+                    if batch.len() == 1 {
+                        Box::pin(dispatch_content(client, chat_id, &batch[0], thread_id)).await?;
+                    } else {
+                        let media = build_media_group(batch)?;
+                        client.send_media_group(chat_id, media, thread_id).await?;
+                    }
+                }
+            }
         }
         "Poll" => {
             let question = payload
@@ -356,16 +511,14 @@ fn build_media_group(items: &[Value]) -> Result<Value> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let caption = payload
-            .get("caption")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let raw_caption = payload.get("caption").and_then(Value::as_str);
+        let formatted_caption = prepare_caption(raw_caption);
         let duration = payload
             .get("duration_seconds")
             .and_then(Value::as_u64)
             .map(|n| n as u32);
         let mut entry = json!({ "type": kind, "media": media });
-        if let Some(c) = caption {
+        if let Some(c) = formatted_caption {
             entry["caption"] = json!(c);
             entry["parse_mode"] = json!("HTML");
         }

@@ -43,7 +43,8 @@ impl std::error::Error for Error {
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
-        Error::Http(e)
+        // Strip the URL — reqwest's Display includes it verbatim, and our URLs embed the bot token in the path (`/bot<TOKEN>/method`). Leaking it through logs / protocol error events would compromise the bot.
+        Error::Http(e.without_url())
     }
 }
 

@@ -14,15 +14,17 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 pub const DEFAULT_LONGPOLL_TIMEOUT_SECS: u64 = 30;
-pub const LONGPOLL_CLIENT_TIMEOUT_SECS: u64 = 35;
 pub const SEND_TIMEOUT_SECS: u64 = 30;
+/// Extra buffer added to the long-poll server-side timeout to derive the reqwest per-request deadline. Telegram sometimes returns a few hundred milliseconds after the server timeout elapses.
+pub const LONGPOLL_CLIENT_BUFFER_SECS: u64 = 5;
 pub const RETRY_AFTER_DEFAULT_SECS: u64 = 5;
+/// Cap how long we will sleep on a 429 `retry_after` from Telegram. A flood-wait can return hours; sleeping that long stalls the entire produce loop with no cancellation. Anything above this is surfaced as an Error so the supervisor can choose to restart.
+pub const MAX_RETRY_AFTER_SECS: u64 = 300;
 
 pub struct BotClient {
     http: Client,
     api_root: String,
     file_root: String,
-    #[allow(dead_code)]
     token: String,
 }
 
@@ -49,6 +51,14 @@ impl BotClient {
         format!("{}/{file_path}", self.file_root)
     }
 
+    /// Replace the bot token with `[REDACTED]` in any string about to be exposed via Display / logs / protocol-error events. Use before constructing an `Error::Api { description }` from a response body — proxies and some Bot API error paths echo the request URL back into the body, which contains `bot<TOKEN>` in the path.
+    fn redact(&self, s: String) -> String {
+        if self.token.is_empty() {
+            return s;
+        }
+        s.replace(&self.token, "[REDACTED]")
+    }
+
     /// Low-level long-poll GET for `getUpdates` — separate from `call` so the per-request timeout can be longer than the default.
     pub async fn get_updates(
         &self,
@@ -66,7 +76,9 @@ impl BotClient {
                 ("timeout", timeout_secs.to_string()),
                 ("allowed_updates", allowed_json),
             ])
-            .timeout(Duration::from_secs(timeout_secs + 5))
+            .timeout(Duration::from_secs(
+                timeout_secs + LONGPOLL_CLIENT_BUFFER_SECS,
+            ))
             .send()
             .await?;
         let status = resp.status();
@@ -75,7 +87,7 @@ impl BotClient {
             return Err(Error::Api {
                 method: "getUpdates".into(),
                 code: status.as_u16() as i32,
-                description: body,
+                description: self.redact(body),
             });
         }
         let parsed: UpdatesResponse = serde_json::from_str(&body)?;
@@ -83,7 +95,7 @@ impl BotClient {
             return Err(Error::Api {
                 method: "getUpdates".into(),
                 code: parsed.error_code.unwrap_or(0),
-                description: parsed.description.clone().unwrap_or_default(),
+                description: self.redact(parsed.description.clone().unwrap_or_default()),
             });
         }
         Ok(parsed)
@@ -110,29 +122,41 @@ impl BotClient {
                     .as_ref()
                     .and_then(|p| p.retry_after)
                     .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
-                if attempt == 0 && parsed.error_code == Some(429) {
+                if attempt == 0
+                    && parsed.error_code == Some(429)
+                    && retry_after <= MAX_RETRY_AFTER_SECS
+                {
                     tokio::time::sleep(Duration::from_secs(retry_after)).await;
                     continue;
                 }
                 return Err(Error::Api {
                     method: method.into(),
                     code: parsed.error_code.unwrap_or(0),
-                    description: parsed.description.unwrap_or_default(),
+                    description: self.redact(parsed.description.unwrap_or_default()),
                 });
             } else if status.as_u16() == 429 && attempt == 0 {
-                // Some 429s come back with non-2xx HTTP status; honour Retry-After header or fall back to default.
+                // Some 429s come back with non-2xx HTTP status; honour Retry-After header or fall back to default — but cap so a multi-hour flood-wait doesn't stall the loop.
                 let retry_after = resp_retry_after_default(body.as_str());
+                if retry_after > MAX_RETRY_AFTER_SECS {
+                    return Err(Error::Api {
+                        method: method.into(),
+                        code: 429,
+                        description: self.redact(format!("retry_after={retry_after}s exceeds cap")),
+                    });
+                }
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
                 continue;
             } else {
                 return Err(Error::Api {
                     method: method.into(),
                     code: status.as_u16() as i32,
-                    description: body,
+                    description: self.redact(body),
                 });
             }
         }
-        Err(Error::Other(format!("{method}: retries exhausted")))
+        unreachable!(
+            "call_json loop body either returns or `continue`s; the for-2 range cannot exhaust"
+        )
     }
 
     pub async fn call_typed<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
@@ -200,11 +224,13 @@ impl BotClient {
         chat_id: i64,
         photo_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML",
-        });
+        let mut payload = json!({ "chat_id": chat_id, "photo": photo_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -219,9 +245,13 @@ impl BotClient {
         chat_id: i64,
         document_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
         let mut payload = json!({ "chat_id": chat_id, "document": document_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -236,11 +266,13 @@ impl BotClient {
         chat_id: i64,
         voice_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "chat_id": chat_id, "voice": voice_url, "parse_mode": "HTML",
-        });
+        let mut payload = json!({ "chat_id": chat_id, "voice": voice_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -250,18 +282,21 @@ impl BotClient {
         self.call_json("sendVoice", &payload).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_audio_url(
         &self,
         chat_id: i64,
         audio_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         title: Option<&str>,
         performer: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "chat_id": chat_id, "audio": audio_url, "parse_mode": "HTML",
-        });
+        let mut payload = json!({ "chat_id": chat_id, "audio": audio_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -282,11 +317,13 @@ impl BotClient {
         chat_id: i64,
         video_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "chat_id": chat_id, "video": video_url, "parse_mode": "HTML",
-        });
+        let mut payload = json!({ "chat_id": chat_id, "video": video_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -301,11 +338,13 @@ impl BotClient {
         chat_id: i64,
         animation_url: &str,
         caption: Option<&str>,
+        parse_mode: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<Value> {
-        let mut payload = json!({
-            "chat_id": chat_id, "animation": animation_url, "parse_mode": "HTML",
-        });
+        let mut payload = json!({ "chat_id": chat_id, "animation": animation_url });
+        if let Some(pm) = parse_mode {
+            payload["parse_mode"] = json!(pm);
+        }
         if let Some(c) = caption {
             payload["caption"] = json!(c);
         }
@@ -414,7 +453,7 @@ impl BotClient {
         self.call_typed("getFile", &payload).await
     }
 
-    /// Multi-part upload for inline file bytes. Used by Content::FileData and the private-URL fetch-and-upload paths.
+    /// Multi-part upload for inline file bytes. Used by Content::FileData and the private-URL fetch-and-upload paths. Honours the same single 429 retry the module doc-comment promises.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_multipart(
         &self,
@@ -428,40 +467,69 @@ impl BotClient {
         thread_id: Option<i64>,
     ) -> Result<Value> {
         let url = format!("{}/{method}", self.api_root);
-        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
-        if let Some(mt) = mime_type {
-            part = part
-                .mime_str(&mt)
-                .map_err(|e| Error::Other(format!("multipart mime: {e}")))?;
+        // reqwest::multipart::Form consumes its parts when sent. To support the rare 429 retry without keeping a streamable body, we clone `bytes` for each attempt; the trade-off is ~1 extra Vec<u8> heap copy on the happy path in exchange for a working retry path without async-body rewinding.
+        for attempt in 0..2 {
+            let mut part =
+                reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+            if let Some(mt) = mime_type.as_ref() {
+                part = part
+                    .mime_str(mt)
+                    .map_err(|e| Error::Other(format!("multipart mime: {e}")))?;
+            }
+            let mut form = reqwest::multipart::Form::new()
+                .text("chat_id", chat_id.to_string())
+                .part(file_field.to_string(), part);
+            for (k, v) in &extra {
+                form = form.text(k.to_string(), v.clone());
+            }
+            if let Some(t) = thread_id {
+                form = form.text("message_thread_id", t.to_string());
+            }
+            let resp = self.http.post(&url).multipart(form).send().await?;
+            let status = resp.status();
+            let body = resp.text().await?;
+            if status.is_success() {
+                let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
+                if parsed.ok {
+                    return Ok(parsed.result.unwrap_or(Value::Null));
+                }
+                let retry_after = parsed
+                    .parameters
+                    .as_ref()
+                    .and_then(|p| p.retry_after)
+                    .unwrap_or(RETRY_AFTER_DEFAULT_SECS);
+                if attempt == 0
+                    && parsed.error_code == Some(429)
+                    && retry_after <= MAX_RETRY_AFTER_SECS
+                {
+                    tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                    continue;
+                }
+                return Err(Error::Api {
+                    method: method.into(),
+                    code: parsed.error_code.unwrap_or(0),
+                    description: self.redact(parsed.description.unwrap_or_default()),
+                });
+            } else if status.as_u16() == 429 && attempt == 0 {
+                let retry_after = resp_retry_after_default(body.as_str());
+                if retry_after > MAX_RETRY_AFTER_SECS {
+                    return Err(Error::Api {
+                        method: method.into(),
+                        code: 429,
+                        description: self.redact(format!("retry_after={retry_after}s exceeds cap")),
+                    });
+                }
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                continue;
+            } else {
+                return Err(Error::Api {
+                    method: method.into(),
+                    code: status.as_u16() as i32,
+                    description: self.redact(body),
+                });
+            }
         }
-        let mut form = reqwest::multipart::Form::new()
-            .text("chat_id", chat_id.to_string())
-            .part(file_field.to_string(), part);
-        for (k, v) in extra {
-            form = form.text(k.to_string(), v);
-        }
-        if let Some(t) = thread_id {
-            form = form.text("message_thread_id", t.to_string());
-        }
-        let resp = self.http.post(&url).multipart(form).send().await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-        if !status.is_success() {
-            return Err(Error::Api {
-                method: method.into(),
-                code: status.as_u16() as i32,
-                description: body,
-            });
-        }
-        let parsed: ApiResponse<Value> = serde_json::from_str(&body)?;
-        if !parsed.ok {
-            return Err(Error::Api {
-                method: method.into(),
-                code: parsed.error_code.unwrap_or(0),
-                description: parsed.description.unwrap_or_default(),
-            });
-        }
-        Ok(parsed.result.unwrap_or(Value::Null))
+        unreachable!("send_multipart loop body either returns or `continue`s; the for-2 range cannot exhaust")
     }
 }
 

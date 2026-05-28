@@ -9,7 +9,7 @@ pub mod chunk;
 pub mod markdown;
 pub mod sanitize;
 
-pub use chunk::{split_to_utf16_chunks, TELEGRAM_MSG_LIMIT};
+pub use chunk::{split_to_utf16_chunks, truncate_to_utf16_limit, TELEGRAM_MSG_LIMIT};
 pub use markdown::markdown_to_telegram_html;
 pub use sanitize::sanitize_telegram_html;
 
