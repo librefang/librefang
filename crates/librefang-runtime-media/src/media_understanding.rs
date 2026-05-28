@@ -245,16 +245,11 @@ impl MediaEngine {
         //    `[media.custom_stt] model = "large-v3"` accidentally overrides
         //    Groq/etc.'s default model on every transcription call.
         // 3. Built-in default for the selected provider
-        let custom_stt_model_ref: Option<&str> = match provider {
-            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" | "gemini"
-            | "elevenlabs" => None,
-            _ => self.config.custom_stt.model.as_deref(),
-        };
         let model = self
             .config
             .audio_model
             .as_deref()
-            .or(custom_stt_model_ref)
+            .or(custom_stt_model_ref(provider, &self.config.custom_stt))
             .unwrap_or_else(|| default_audio_model(provider));
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
@@ -1022,6 +1017,21 @@ fn default_vision_model(provider: &str) -> &str {
     }
 }
 
+/// Resolve the `[media.custom_stt] model` override, but ONLY for custom /
+/// self-hosted providers (the `_other` dispatch arm). Returns `None` for every
+/// built-in provider so that an operator setting `custom_stt.model` cannot
+/// accidentally override a built-in provider's default transcription model.
+fn custom_stt_model_ref<'a>(
+    provider: &str,
+    custom_stt: &'a librefang_types::media::CustomSttConfig,
+) -> Option<&'a str> {
+    match provider {
+        "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" | "gemini"
+        | "elevenlabs" => None,
+        _ => custom_stt.model.as_deref(),
+    }
+}
+
 /// Get the default audio model for a provider.
 ///
 /// For custom providers the model configured in `[media.custom_stt]` takes
@@ -1583,6 +1593,39 @@ mod tests {
             .unwrap_or_else(|| default_audio_model("local-whisper"));
         // Unknown provider should return the OpenAI-compatible default
         assert_eq!(resolved, "whisper-1");
+    }
+
+    #[test]
+    fn custom_stt_model_ref_does_not_leak_into_builtin_providers() {
+        use librefang_types::media::CustomSttConfig;
+        // Operator set a custom_stt.model — it must NOT override a built-in
+        // provider's default model. Exercises the production guard directly
+        // (not a reconstructed copy), so deleting the guard fails this test.
+        let custom_stt = CustomSttConfig {
+            model: Some("large-v3".to_string()),
+            ..Default::default()
+        };
+        for builtin in [
+            "groq",
+            "openai",
+            "minimax",
+            "fireworks",
+            "together",
+            "siliconflow",
+            "gemini",
+            "elevenlabs",
+        ] {
+            assert_eq!(
+                custom_stt_model_ref(builtin, &custom_stt),
+                None,
+                "custom_stt.model must not leak into built-in provider {builtin}"
+            );
+        }
+        // A custom / self-hosted provider DOES pick up custom_stt.model.
+        assert_eq!(
+            custom_stt_model_ref("local-whisper", &custom_stt),
+            Some("large-v3")
+        );
     }
 
     #[test]
