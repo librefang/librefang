@@ -124,8 +124,15 @@ pub async fn execute_wasm_skill(
     };
 
     let config = SandboxConfig {
-        // None → sandbox applies its own 30s default.
-        timeout_secs: manifest.requirements.timeout_secs,
+        // Clamp to the same ceiling the subprocess runtimes enforce
+        // (MAX_SKILL_TIMEOUT_SECS) so an installed manifest cannot request an
+        // unbounded wall-clock budget. Treat 0 as unset (→ sandbox's own 30s
+        // default) rather than a 0s instant timeout. None → sandbox default.
+        timeout_secs: manifest
+            .requirements
+            .timeout_secs
+            .filter(|&t| t != 0)
+            .map(|t| t.min(librefang_skills::loader::MAX_SKILL_TIMEOUT_SECS)),
         capabilities: resolve_capabilities(manifest),
         ..Default::default()
     };
@@ -147,9 +154,19 @@ pub async fn execute_wasm_skill(
         .await
         .map_err(|e| SkillError::ExecutionFailed(format!("WASM execution failed: {e}")))?;
 
+    // The WASM SDK turns a handler `Err` into a *successful* `execute` that
+    // returns `{"error": ...}` (mirroring how a non-zero subprocess exit
+    // surfaces for the Python/Node runtimes). Detect that envelope so the
+    // shared dispatch arm reports it to the agent as an error rather than a
+    // success — keeping `is_error` consistent across all skill runtimes.
+    let is_error = result
+        .output
+        .get("error")
+        .is_some_and(|v| !v.is_null());
+
     Ok(SkillToolResult {
         output: result.output,
-        is_error: false,
+        is_error,
     })
 }
 
@@ -272,6 +289,47 @@ capabilities = ["NetConnect(*)", "definitely-not-a-cap", "ToolAll", "NetListen(b
         // Echo returns the full envelope the host fed the guest.
         assert_eq!(result.output["tool"], "do_echo");
         assert_eq!(result.output["input"], input);
+    }
+
+    // A module that ignores its input and returns the SDK error envelope
+    // `{"error":"boom"}` (16 bytes) preloaded at offset 1024.
+    const ERROR_WAT: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (data (i32.const 1024) "{\"error\":\"boom\"}")
+            (global $bump (mut i32) (i32.const 2048))
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $ptr i32)
+                (local.set $ptr (global.get $bump))
+                (global.set $bump (i32.add (global.get $bump) (local.get $size)))
+                (local.get $ptr))
+            (func (export "execute") (param $ptr i32) (param $len i32) (result i64)
+                (i64.or
+                    (i64.shl (i64.extend_i32_u (i32.const 1024)) (i64.const 32))
+                    (i64.extend_i32_u (i32.const 16)))))
+    "#;
+
+    #[tokio::test]
+    async fn wasm_skill_error_envelope_sets_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("skill.wasm"), ERROR_WAT).unwrap();
+        let manifest = wasm_manifest("skill.wasm");
+
+        let result = execute_wasm_skill(
+            &manifest,
+            dir.path(),
+            "do_fail",
+            &serde_json::json!({}),
+            None,
+            "test-agent",
+        )
+        .await
+        .expect("wasm skill executes (error is in-band, not an Err)");
+
+        // A guest that returns `{"error": ...}` must surface as a tool error,
+        // matching how the subprocess runtimes report a non-zero exit.
+        assert!(result.is_error, "error envelope must set is_error = true");
+        assert_eq!(result.output["error"], "boom");
     }
 
     #[tokio::test]
