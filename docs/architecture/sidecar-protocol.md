@@ -18,14 +18,17 @@ There are three independent implementations of this protocol today:
   (`parse_command`, the event builders + `MessageBuilder`, its own
   `cargo test`). Produces events, consumes commands.
 
-All three are kept honest against each other by a single shared corpus,
-`conformance/sidecar/corpus/`. Each implementation has its own
-conformance test that asserts against the corpus in the direction it
-participates in
-(`crates/librefang-channels/tests/sidecar_protocol_conformance.rs`,
-`sdk/python/tests/test_sidecar_conformance.py`, and
-`sdk/rust/librefang-sidecar/tests/conformance.rs`). The corpus — not
-this prose — is the executable contract; this document explains it.
+All three are kept honest against each other by a single shared
+corpus, `conformance/sidecar/corpus/`. Each implementation carries
+its own conformance test that asserts against the corpus in the
+direction it participates in:
+
+- `crates/librefang-channels/tests/sidecar_protocol_conformance.rs`
+- `sdk/python/tests/test_sidecar_conformance.py`
+- `sdk/rust/librefang-sidecar/tests/conformance.rs`
+
+The corpus — not this prose — is the executable contract; this
+document explains it.
 
 ## Transport
 
