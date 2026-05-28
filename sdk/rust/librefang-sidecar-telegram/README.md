@@ -5,6 +5,8 @@ Long-polls the Bot API, translates inbound updates into LibreFang `message` even
 
 Feature-parity with `sdk/python/librefang/sidecar/adapters/telegram.py` — same wire shape, same `Schema`, same access-control semantics, same emoji-reaction map.
 
+The canonical reference is [`docs/architecture/rust-telegram-sidecar.md`](../../../docs/architecture/rust-telegram-sidecar.md) (text-rendering pipeline, security model, Python-parity deltas, dev-container verification recipe); this README is the quick-start.
+
 ## Build
 
 ```bash
