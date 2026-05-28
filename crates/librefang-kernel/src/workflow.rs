@@ -5310,6 +5310,7 @@ impl WorkflowEngine {
                             Self::expand_variables(&step.prompt_template, input, &variables);
                         step_prompts.push(prompt.clone());
                         let timeout_dur = clamp_timeout_duration(step.timeout_secs);
+                        let step_timeout_secs = step.timeout_secs;
                         let err_mode = step.error_mode.clone();
                         let step_name = step.name.clone();
                         let step_session_mode = step.session_mode;
@@ -5331,9 +5332,10 @@ impl WorkflowEngine {
                                     _ => Ok(None),
                                 },
                                 Err(_) => match err_mode {
-                                    ErrorMode::Fail => {
-                                        Err(format!("Step '{}' timed out", step_name))
-                                    }
+                                    ErrorMode::Fail => Err(format!(
+                                        "Step '{}' timed out after {}s; LLM steps generating long output often need more time — raise `timeout_secs` for this step in your workflow definition or switch to a faster model",
+                                        step_name, step_timeout_secs
+                                    )),
                                     _ => Ok(None),
                                 },
                             };
@@ -12222,6 +12224,85 @@ name = "topic"
             result,
             Ok(None),
             "Skip-mode timeout must return Ok(None) so the workflow continues"
+        );
+    }
+
+    /// #5743 regression: a step that times out in the DAG concurrent path
+    /// (any step reached via `depends_on`, e.g. the brainstorm template's
+    /// `evaluator`) must surface the SAME actionable error as the sequential
+    /// path. #5806 fixed the sequential / FanOut / retry sites but missed the
+    /// inline DAG-layer closure, which emitted a bare `Step 'x' timed out`
+    /// with no `timeout_secs` and no remediation hint.
+    #[tokio::test]
+    async fn dag_step_timeout_fail_message_is_actionable() {
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "brainstorm-like".to_string(),
+            description: "".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "ideate".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "ideate:{{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+                WorkflowStep {
+                    name: "evaluator".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "b".to_string(),
+                    },
+                    prompt_template: "evaluate".to_string(),
+                    mode: StepMode::Sequential,
+                    // 1s so the test completes quickly.
+                    timeout_secs: 1,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    // Non-empty depends_on routes the workflow into the DAG executor.
+                    depends_on: vec!["ideate".to_string()],
+                    session_mode: None,
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "topic".to_string()).await.unwrap();
+
+        // `ideate` succeeds immediately; `evaluator` hangs forever so its
+        // 1s per-step timeout fires.
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            if msg.contains("evaluate") {
+                std::future::pending::<Result<(String, u64, u64), String>>().await
+            } else {
+                Ok((format!("ack:{msg}"), 1u64, 1u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        let err = result.expect_err("the hanging evaluator step must time out");
+        assert!(
+            err.contains("evaluator"),
+            "DAG timeout error must name the failing step; got: {err:?}"
+        );
+        assert!(
+            err.contains("timeout_secs"),
+            "DAG timeout error must mention `timeout_secs` so operators know the knob to raise; got: {err:?}"
+        );
+        assert!(
+            err.contains("1s"),
+            "DAG timeout error must include the step's timeout value; got: {err:?}"
         );
     }
 }

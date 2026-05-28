@@ -296,6 +296,8 @@ export const goalKeys = {
   all: ["goals"] as const,
   lists: () => [...goalKeys.all, "list"] as const,
   templates: () => [...goalKeys.all, "templates"] as const,
+  runs: () => [...goalKeys.all, "run"] as const,
+  run: (id: string) => [...goalKeys.runs(), id] as const,
 };
 
 export const networkKeys = {
