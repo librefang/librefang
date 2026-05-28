@@ -355,6 +355,8 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: "安全", href: withPrefix("/zh/architecture/security") },
 			{ title: "OFP 链路加密", href: withPrefix("/zh/architecture/ofp-wire") },
 			{ title: "Manifest 与 MCP 注册表", href: withPrefix("/zh/architecture/manifest-mcp") },
+			{ title: "Rust sidecar SDK", href: withPrefix("/zh/architecture/rust-sidecar-sdk") },
+			{ title: "Rust Telegram sidecar", href: withPrefix("/zh/architecture/rust-telegram-sidecar") },
 		],
 	},
 	{
@@ -458,6 +460,8 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "Security", href: withPrefix("/architecture/security") },
 			{ title: "OFP Wire Encryption", href: withPrefix("/architecture/ofp-wire") },
 			{ title: "Manifest & MCP Registry", href: withPrefix("/architecture/manifest-mcp") },
+			{ title: "Rust Sidecar SDK", href: withPrefix("/architecture/rust-sidecar-sdk") },
+			{ title: "Rust Telegram Sidecar", href: withPrefix("/architecture/rust-telegram-sidecar") },
 		],
 	},
 	{

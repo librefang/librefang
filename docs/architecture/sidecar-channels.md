@@ -45,6 +45,7 @@ Two first-party SDKs against the same conformance corpus (`conformance/sidecar/c
 - **Rust** — `sdk/rust/librefang-sidecar/`.
   For adapters that need a stdlib-shaped binary, want type-safe access to the inbound command set without going through `serde_json::Value` by hand, or want to reuse a Rust transport crate that an external ecosystem has already hardened.
   Inherits every architectural property above without paying the Python interpreter's startup or memory cost.
+  See [`rust-sidecar-sdk.md`](./rust-sidecar-sdk.md) for the SDK reference and [`rust-telegram-sidecar.md`](./rust-telegram-sidecar.md) for the first first-party adapter built against it.
 
 Both SDKs cover the same protocol surface and pin themselves to the same conformance corpus from both directions (producer of events, consumer of commands).
 The supervisor does not care which side an adapter comes from — `command = "python3 -m my_adapter"` and `command = "/usr/local/bin/my-rust-adapter"` are equally valid `[[sidecar_channels]]` entries, as is anything else that speaks the protocol.
