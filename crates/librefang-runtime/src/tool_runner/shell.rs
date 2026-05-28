@@ -6,7 +6,15 @@
 //! upstream in the dispatcher and `tool_runner::{taint, shell_safety}`;
 //! by the time we reach this function the command has already been
 //! cleared for execution.
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576). Command-parse failures -> `InvalidParameter`; the two `io::Error`
+//! sites (spawn / collect) -> `ToolError::Upstream` keeping the prefix message
+//! AND the source; the interrupt / timeout control strings -> `upstream_msg`
+//! so their exact wire text (`[interrupted]`, `Command timed out …`) is
+//! preserved.
 
+use super::error::{ToolError, ToolResult};
 use std::path::Path;
 
 pub(super) async fn tool_shell_exec(
@@ -15,10 +23,10 @@ pub(super) async fn tool_shell_exec(
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
-) -> Result<String, String> {
+) -> ToolResult {
     let command = input["command"]
         .as_str()
-        .ok_or("Missing 'command' parameter")?;
+        .ok_or(ToolError::MissingParameter("command"))?;
     // Use LLM-specified timeout, or fall back to exec policy timeout, or default 30s
     let policy_timeout = exec_policy.map(|p| p.timeout_secs).unwrap_or(30);
     let timeout_secs = input["timeout_seconds"].as_u64().unwrap_or(policy_timeout);
@@ -38,11 +46,15 @@ pub(super) async fn tool_shell_exec(
     let mut cmd = if use_direct_exec {
         // SAFE PATH: Split command into argv using POSIX shell lexer rules,
         // then execute the binary directly — no shell interpreter involved.
-        let argv = shlex::split(command).ok_or_else(|| {
-            "Command contains unmatched quotes or invalid shell syntax".to_string()
+        let argv = shlex::split(command).ok_or(ToolError::InvalidParameter {
+            name: "command",
+            reason: "Command contains unmatched quotes or invalid shell syntax".to_string(),
         })?;
         if argv.is_empty() {
-            return Err("Empty command after parsing".to_string());
+            return Err(ToolError::InvalidParameter {
+                name: "command",
+                reason: "Empty command after parsing".to_string(),
+            });
         }
         let mut c = tokio::process::Command::new(&argv[0]);
         if argv.len() > 1 {
@@ -103,7 +115,7 @@ pub(super) async fn tool_shell_exec(
     // Check for interrupt before we even launch the subprocess — the user may
     // have hit /stop while approval was pending or while a prior tool was running.
     if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
-        return Err("[interrupted before execution]".to_string());
+        return Err(ToolError::upstream_msg("[interrupted before execution]"));
     }
 
     // Capture piped output so we can collect it after the process exits.
@@ -120,7 +132,12 @@ pub(super) async fn tool_shell_exec(
     // never be observed mid-execution — the whole point of this feature.
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Err(format!("Failed to execute command: {e}")),
+        Err(e) => {
+            return Err(ToolError::Upstream {
+                message: format!("Failed to execute command: {e}"),
+                source: Some(Box::new(e)),
+            })
+        }
     };
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -148,15 +165,20 @@ pub(super) async fn tool_shell_exec(
         tokio::select! {
             biased;
             // Process exited (with pipes drained — that's the bug fix). Take the result.
-            res = &mut wait_fut => break res.map_err(|e| format!("Failed to collect output: {e}")),
+            res = &mut wait_fut => break res.map_err(|e| ToolError::Upstream {
+                message: format!("Failed to collect output: {e}"),
+                source: Some(Box::new(e)),
+            }),
             // Periodic interrupt + deadline check. We drop wait_fut on either,
             // which kills the child via kill_on_drop.
             _ = interrupt_tick.tick() => {
                 if interrupt_clone.as_ref().is_some_and(|i| i.is_cancelled()) {
-                    return Err("[interrupted]".to_string());
+                    return Err(ToolError::upstream_msg("[interrupted]"));
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(format!("Command timed out after {timeout_secs}s"));
+                    return Err(ToolError::upstream_msg(format!(
+                        "Command timed out after {timeout_secs}s"
+                    )));
                 }
             }
         }
@@ -194,5 +216,38 @@ pub(super) async fn tool_shell_exec(
             ))
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn shell_exec_missing_command_is_missing_parameter() {
+        let r = tool_shell_exec(&json!({}), &[], None, None, None).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("command"))));
+    }
+
+    #[tokio::test]
+    async fn shell_exec_unmatched_quotes_is_invalid_parameter() {
+        // Default policy (None) uses the safe argv path, which rejects bad
+        // shell syntax before spawning anything.
+        let r = tool_shell_exec(
+            &json!({"command": "echo \"unterminated"}),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter {
+                name: "command",
+                ..
+            })
+        ));
     }
 }

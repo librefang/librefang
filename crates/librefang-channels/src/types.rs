@@ -880,6 +880,15 @@ pub trait ChannelAdapter: Send + Sync {
         self.send(user, content).await
     }
 
+    /// Whether this adapter owns message formatting (Markdown → platform-native).
+    ///
+    /// Sidecar adapters return `true` because the Python sidecar process
+    /// applies its own `markdown_to_*` conversion. The Rust bridge must
+    /// send raw Markdown to avoid double-formatting.
+    fn owns_formatting(&self) -> bool {
+        false
+    }
+
     /// Whether this adapter supports streaming output (progressive message updates).
     ///
     /// When true, the bridge will use `send_streaming()` instead of `send()` for

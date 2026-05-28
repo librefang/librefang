@@ -1,7 +1,15 @@
 //! `image_analyze` — read an image from the agent's workspace sandbox,
 //! identify its format and dimensions, and return a JSON description plus
 //! a base64 preview the LLM can hand to a vision-capable provider.
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576). The shared `resolve_file_path_ext` (sandbox path resolver, still
+//! `Result<_, String>`) maps to `InvalidParameter { name: "path" }` with its
+//! message preserved; the file read (`io::Error`) maps to `ToolError::Upstream`
+//! keeping the prefix message and the source. The format/dimension helpers are
+//! infallible and unchanged.
 
+use super::error::{ToolError, ToolResult};
 use super::resolve_file_path_ext;
 use std::path::Path;
 
@@ -9,18 +17,29 @@ pub(super) async fn tool_image_analyze(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+) -> ToolResult {
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
     let prompt = input["prompt"].as_str().unwrap_or("");
     // Route through the workspace sandbox so user-supplied paths cannot
     // escape to arbitrary filesystem locations (e.g. /etc/passwd). Named
     // workspace prefixes are honored via `additional_roots` so agents can
     // analyze images that live under declared `[workspaces]` mounts.
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+    let resolved =
+        resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(|reason| {
+            ToolError::InvalidParameter {
+                name: "path",
+                reason,
+            }
+        })?;
 
     let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read image '{raw_path}': {e}"))?;
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to read image '{raw_path}': {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
     let file_size = data.len();
 
@@ -67,7 +86,7 @@ pub(super) async fn tool_image_analyze(
 
     result["base64_preview"] = serde_json::json!(base64_preview);
 
-    serde_json::to_string_pretty(&result).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&result)?)
 }
 
 /// Detect image format from magic bytes.
@@ -166,5 +185,26 @@ pub(super) fn format_file_size(bytes: usize) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn image_analyze_missing_path_is_missing_parameter() {
+        let r = tool_image_analyze(&serde_json::json!({}), None, &[]).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("path"))));
+    }
+
+    #[tokio::test]
+    async fn image_analyze_without_workspace_is_invalid_parameter() {
+        // resolve_file_path_ext rejects when no workspace sandbox is configured.
+        let r = tool_image_analyze(&serde_json::json!({"path": "x.png"}), None, &[]).await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter { name: "path", .. })
+        ));
     }
 }
