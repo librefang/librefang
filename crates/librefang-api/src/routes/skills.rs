@@ -6427,12 +6427,23 @@ mod tests {
             mcp_servers: Vec<McpServerConfigEntry>,
         }
         let raw = std::fs::read_to_string(&config_path).unwrap();
-        let parsed: Wrapper =
-            toml::from_str(&raw).expect("round-tripped TOML must parse cleanly");
-        assert_eq!(parsed.mcp_servers.len(), 2, "must still have exactly 2 servers");
+        let parsed: Wrapper = toml::from_str(&raw).expect("round-tripped TOML must parse cleanly");
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            2,
+            "must still have exactly 2 servers"
+        );
 
-        let a = parsed.mcp_servers.iter().find(|s| s.name == "server-a").expect("server-a missing");
-        let b = parsed.mcp_servers.iter().find(|s| s.name == "server-b").expect("server-b missing");
+        let a = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-a")
+            .expect("server-a missing");
+        let b = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-b")
+            .expect("server-b missing");
 
         assert!(
             !a.taint_scanning,
