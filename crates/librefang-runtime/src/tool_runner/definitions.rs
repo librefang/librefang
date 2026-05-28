@@ -241,20 +241,20 @@ Same SSRF protection, DNS pinning, and redirect re-validation as web_fetch, but 
 never enters the agent context — only a short summary (path, byte count, sha256, content-type, \
 status) is returned. Use this when downloading documents, papers, or other artifacts for later \
 use instead of web_fetch + file_write (which round-trips the entire body through the model)."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "url": { "type": "string", "description": "The URL to fetch (http/https only)" },
-                        "dest_path": { "type": "string", "description": "Workspace-relative or absolute path to write to. Absolute paths must stay inside the agent workspace or a read-write named workspace." },
-                        "method": { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "description": "HTTP method (default: GET)" },
-                        "headers": { "type": "object", "description": "Custom HTTP headers as key-value pairs" },
-                        "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" },
-                        "max_bytes": { "type": "integer", "description": "Optional per-call cap; clamped down to the configured max_file_bytes" }
-                    },
-                    "required": ["url", "dest_path"]
-                }),
-            },
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The URL to fetch (http/https only)" },
+                    "dest_path": { "type": "string", "description": "Workspace-relative or absolute path to write to. Absolute paths must stay inside the agent workspace or a read-write named workspace." },
+                    "method": { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "description": "HTTP method (default: GET)" },
+                    "headers": { "type": "object", "description": "Custom HTTP headers as key-value pairs" },
+                    "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" },
+                    "max_bytes": { "type": "integer", "description": "Optional per-call cap; clamped down to the configured max_file_bytes" }
+                },
+                "required": ["url", "dest_path"]
+            }),
+        },
             ToolDefinition {
                 name: tool_name::WEB_SEARCH.to_string(),
                 description: "Search the web using multiple providers (Tavily, Brave, Perplexity, DuckDuckGo) with automatic fallback. Returns structured results with titles, URLs, and snippets.".to_string(),
@@ -389,10 +389,13 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::MEMORY_LIST.to_string(),
-                description: "List all keys in the agent's memory.".to_string(),
+                description: "List keys in the agent's memory with pagination.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
+                        "offset": { "type": "integer", "description": "Number of keys to skip" }
+                    },
                 }),
             },
             ToolDefinition {
@@ -1306,4 +1309,18 @@ use instead of web_fetch + file_write (which round-trips the entire body through
 
         tools
     }).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_duplicate_tool_names() {
+        let defs = builtin_tool_definitions();
+        let mut seen = std::collections::HashSet::new();
+        for def in &defs {
+            assert!(seen.insert(&def.name), "duplicate tool: {}", def.name);
+        }
+    }
 }

@@ -39,6 +39,8 @@ TELEGRAM_BOT_TOKEN = "..."
 
 The in-process `[channels.telegram]` block is no longer accepted. Declare Telegram as a `[[sidecar_channels]]` entry as shown above.
 
+**Rust alternative (since #5831).** A first-party Rust Telegram sidecar binary at `sdk/rust/librefang-sidecar-telegram/` is wire-equivalent to the Python adapter — same `TELEGRAM_BOT_TOKEN` / `ALLOWED_USERS` env, same Markdown → Telegram-HTML rendering, same allowed-update set. Pick it when you do not want a Python runtime on the host, when per-respawn startup latency matters, or when the ~3 MB stripped binary beats a Python image. Build with `cargo build --release -p librefang-sidecar-telegram` and swap the `command` line above for `/abs/path/to/target/release/librefang-sidecar-telegram`. Full reference: [Rust Telegram sidecar adapter](/architecture/rust-telegram-sidecar).
+
 6. Restart the daemon:
 
 ```bash
