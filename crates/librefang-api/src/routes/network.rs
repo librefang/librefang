@@ -1525,6 +1525,8 @@ pub async fn mcp_http(
             None, // session_id (MCP HTTP is not tied to a live session)
             None, // dangerous_command_checker (no session-scoped checker here)
             None, // available_tools (lazy-load pool not applicable to MCP bridge)
+            cfg.tool_results.spill_threshold_bytes,
+            cfg.tool_results.max_artifact_bytes,
         )
         .await;
 
