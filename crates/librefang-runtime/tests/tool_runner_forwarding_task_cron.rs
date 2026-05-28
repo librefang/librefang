@@ -273,6 +273,7 @@ impl librefang_kernel_handle::SessionWriter for CapturingKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
@@ -376,7 +377,7 @@ async fn test_cron_create_injects_sender_peer_id() {
 }
 
 #[tokio::test]
-async fn test_cron_create_preserves_existing_peer_id() {
+async fn test_cron_create_overrides_explicit_peer_id_with_sender() {
     let (kernel, calls) = CapturingKernel::new();
     let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
 
@@ -392,7 +393,7 @@ async fn test_cron_create_preserves_existing_peer_id() {
     let cron_calls = calls.cron_create.lock().unwrap();
     assert_eq!(cron_calls.len(), 1);
     let job_json = &cron_calls[0].1;
-    assert_eq!(job_json["peer_id"], "existing");
+    assert_eq!(job_json["peer_id"], "peer-xyz");
 }
 
 #[tokio::test]
