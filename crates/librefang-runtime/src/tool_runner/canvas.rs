@@ -202,6 +202,13 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
     if html.is_empty() {
         return Err("Empty HTML content".to_string());
     }
+    if html.len() > max_bytes {
+        return Err(format!(
+            "HTML too large: {} bytes (max {})",
+            html.len(),
+            max_bytes
+        ));
+    }
 
     let lower = html.to_lowercase();
     let dangerous_tags = [
@@ -265,29 +272,36 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
             continue;
         }
         if bytes[pos] == b'&' {
-            let after = &html[pos..];
-            if after.starts_with('&') && !after.starts_with("&#") && !after.starts_with("&") {
-                let semi = after[1..].find(';');
-                if let Some(si) = semi {
-                    let entity = &after[..si + 2];
-                    if entity.starts_with('&')
-                        && entity[1..]
-                            .chars()
-                            .take(si)
-                            .all(|c| c.is_alphanumeric() || c == '#')
-                    {
-                        result.push_str(entity);
-                        pos += si + 2;
-                        continue;
-                    }
+            if let Some(semi) = html[pos + 1..].find(';') {
+                let content = &html[pos + 1..pos + 1 + semi];
+                let valid = if content.is_empty() {
+                    false
+                } else if content.as_bytes()[0] == b'#' {
+                    let num = &content[1..];
+                    !num.is_empty()
+                        && (num.bytes().all(|b| b.is_ascii_digit())
+                            || (num.len() > 1
+                                && (num.as_bytes()[0] == b'x' || num.as_bytes()[0] == b'X')
+                                && num[1..].bytes().all(|b| b.is_ascii_hexdigit())))
+                } else {
+                    content.bytes().all(|b| b.is_ascii_alphabetic())
+                };
+                if valid {
+                    let entity = &html[pos..pos + 2 + semi];
+                    result.push_str(entity);
+                    pos += 2 + semi;
+                    continue;
                 }
             }
             result.push_str("&amp;");
             pos += 1;
             continue;
         }
-        result.push(bytes[pos] as char);
-        pos += 1;
+        let start = pos;
+        while pos < bytes.len() && bytes[pos] != b'<' && bytes[pos] != b'>' && bytes[pos] != b'&' {
+            pos += 1;
+        }
+        result.push_str(&html[start..pos]);
     }
 
     if result.len() > max_bytes {

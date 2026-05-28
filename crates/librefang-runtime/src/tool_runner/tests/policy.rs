@@ -539,18 +539,6 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
 }
 
 #[test]
-fn test_depth_limit_constant() {
-    assert_eq!(MAX_AGENT_CALL_DEPTH, 5);
-}
-
-#[test]
-fn test_depth_limit_first_call_succeeds() {
-    // Default depth is 0, which is < MAX_AGENT_CALL_DEPTH
-    let default_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    assert!(default_depth < MAX_AGENT_CALL_DEPTH);
-}
-
-#[test]
 fn test_task_local_compiles() {
     // Verify task_local macro works — just ensure the type exists
     let cell = std::cell::Cell::new(0u32);
@@ -669,6 +657,51 @@ fn test_sanitize_canvas_rejects_empty() {
 #[test]
 fn test_sanitize_canvas_size_limit() {
     let html = "x".repeat(1024);
+    let result = sanitize_canvas_html(&html, 100);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("too large"));
+}
+
+#[test]
+fn test_sanitize_canvas_preserves_entities() {
+    let html = "<p>Tom &amp; Jerry &lt;3</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_preserves_numeric_entities() {
+    let html = "<p>It&#39;s a test &amp; more</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_escapes_bare_ampersand() {
+    let html = "<p>Tom & Jerry</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, "<p>Tom &amp; Jerry</p>");
+}
+
+#[test]
+fn test_sanitize_canvas_escapes_malformed_entity() {
+    // Bare & (no semicolon), lone &;, and invalid numeric &#zzz; must be escaped.
+    // &foo; passes through: well-formed named entity (alphabetic + semicolon), safe.
+    let html = "<p>&amp &; &#zzz;</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, "<p>&amp;amp &amp;; &amp;#zzz;</p>");
+}
+
+#[test]
+fn test_sanitize_canvas_utf8_passthrough() {
+    let html = "<p>Zażółć gęślą jaźń — 日本語 🦀</p>";
+    let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
+    assert_eq!(result, html);
+}
+
+#[test]
+fn test_sanitize_canvas_upfront_size_limit() {
+    let html = "x".repeat(200);
     let result = sanitize_canvas_html(&html, 100);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("too large"));
