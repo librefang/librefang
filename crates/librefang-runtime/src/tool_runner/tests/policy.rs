@@ -723,8 +723,6 @@ fn test_sanitize_canvas_escapes_bare_ampersand() {
 
 #[test]
 fn test_sanitize_canvas_escapes_malformed_entity() {
-    // Bare & (no semicolon), lone &;, and invalid numeric &#zzz; must be escaped.
-    // &foo; passes through: well-formed named entity (alphabetic + semicolon), safe.
     let html = "<p>&amp &; &#zzz;</p>";
     let result = sanitize_canvas_html(html, 512 * 1024).unwrap();
     assert_eq!(result, "<p>&amp;amp &amp;; &amp;#zzz;</p>");
