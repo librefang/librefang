@@ -1,22 +1,54 @@
 # Sidecar channel adapters
 
-LibreFang is **sidecar-first** for channels. A channel adapter is an
-out-of-process subprocess in any language that speaks newline-delimited
-JSON-RPC over stdin/stdout; the daemon supervises it. New channels are
-written this way — the ~46 in-process Rust adapters that predate the
-policy are grandfathered and frozen (see "Policy gate" below).
+LibreFang is **sidecar-first** for channels.
+A channel adapter is an out-of-process subprocess in any language that speaks newline-delimited JSON-RPC over stdin/stdout; the daemon supervises it.
+The in-process Rust adapters that predated the policy have all been migrated or removed — `crates/librefang-channels/src/channels-allowlist.txt` permits only the `sidecar` trampoline itself today (see "Policy gate" below).
 
-Why: a channel adapter is high-churn, low-risk integration glue. As an
-in-process Rust module a bad adapter could panic the daemon, leak, or
-drag a supply-chain dependency into the kernel process, and every new
-one raised the contributor bar to "writes Rust + passes clippy +
-rebuilds the workspace". As a supervised subprocess it is isolated
-(a crash is not a daemon crash), restartable, and writable in ~40
-lines of Python against a documented protocol.
+Why: a channel adapter is high-churn, low-risk integration glue across ~28 platforms with independent dependency trees and shifting APIs.
+As an in-process Rust module each one would panic the daemon on failure, drag its supply chain into the kernel's trust boundary, and require a full workspace rebuild + daemon restart to iterate on.
+As a supervised subprocess each adapter is isolated (a crash is a `waitpid` event, not a daemon outage), its dependency tree is sealed away from the kernel, and the iteration loop is a subprocess restart.
+The contributor-bar benefit — writable in ~40 lines against a documented protocol — is real but no longer load-bearing on its own; the architectural case that survives AI codegen is in *Why subprocess, not in-process Rust?* below.
 
 This was delivered across the #5219 (protocol + supervision + config),
 #5220 (Python SDK), #5221 (policy gate), and #5224 (ntfy migration)
 series.
+
+## Why subprocess, not in-process Rust?
+
+AI codegen has narrowed the practical gap between writing Python and writing Rust, which weakens — but does not remove — the case for the sidecar boundary.
+The contributor-ergonomics argument ("anyone can write a ~40-line Python adapter against a documented protocol") is real but no longer load-bearing on its own: a model that writes Python against this protocol can also write Rust against it.
+So why keep the process boundary?
+
+Three properties survive when the language gap closes:
+
+1. **Crash isolation.**
+   An in-process `ChannelAdapter` that panics, deadlocks, or trips an integer overflow ends the entire daemon process — every other adapter, every active agent session, every HTTP route.
+   A sidecar crash is a `waitpid` event; the supervisor restarts it under exponential backoff with a circuit-breaker, and the rest of the daemon never notices.
+   This property is independent of who wrote the adapter and in what language.
+
+2. **Supply-chain confinement.**
+   Each platform SDK (telegram bot client, discord gateway, slack socket-mode handshake, whatsapp business API, …) is its own dependency tree.
+   In-process they would compose into the kernel binary's transitive dependency set, and every `cargo audit` finding in any one of ~28 platform SDKs would become a finding on the kernel itself.
+   As subprocesses they are sealed: a vulnerability in the WhatsApp adapter's HTTP client cannot reach the memory layer, the LLM driver keys, or another channel.
+
+3. **Iteration loop.**
+   Channel APIs change with the platform.
+   A sidecar adapter is one file to edit, then a subprocess restart — seconds.
+   An in-process adapter requires `cargo build` against the full workspace and a daemon restart that drops every active agent session.
+   The same edit at the same quality bar costs substantially more wall-clock time when it is in-tree, regardless of who wrote the code.
+
+The wire protocol (see [`sidecar-protocol.md`](./sidecar-protocol.md)) is newline-delimited JSON over stdio; nothing in it is Python-specific.
+Two first-party SDKs against the same conformance corpus (`conformance/sidecar/corpus/`) ship today:
+
+- **Python** — `sdk/python/librefang/sidecar/`.
+  The lowest-friction substrate for the ~28 in-process adapters that were migrated through the #5219 → #5459 series.
+- **Rust** — `sdk/rust/librefang-sidecar/`.
+  For adapters that need a stdlib-shaped binary, want type-safe access to the inbound command set without going through `serde_json::Value` by hand, or want to reuse a Rust transport crate that an external ecosystem has already hardened.
+  Inherits every architectural property above without paying the Python interpreter's startup or memory cost.
+
+Both SDKs cover the same protocol surface and pin themselves to the same conformance corpus from both directions (producer of events, consumer of commands).
+The supervisor does not care which side an adapter comes from — `command = "python3 -m my_adapter"` and `command = "/usr/local/bin/my-rust-adapter"` are equally valid `[[sidecar_channels]]` entries, as is anything else that speaks the protocol.
+New languages (Go, JS, …) can be added the same way; each new SDK adds an entry to the corpus's coverage matrix.
 
 ## Process model
 
