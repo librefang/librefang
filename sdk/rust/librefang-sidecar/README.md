@@ -18,7 +18,7 @@ The Python SDK at `sdk/python/librefang/sidecar/` remains the lowest-friction su
 ```rust,no_run
 use async_trait::async_trait;
 use librefang_sidecar::{
-    events, run_stdio, EmitFn, MessageBuilder, SidecarAdapter, Send as SendCmd,
+    run_stdio, EmitFn, MessageBuilder, SendCommand, SidecarAdapter,
 };
 
 struct EchoAdapter;
@@ -29,12 +29,18 @@ impl SidecarAdapter for EchoAdapter {
         vec!["typing".into()]
     }
 
-    async fn on_send(&self, _cmd: SendCmd) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn on_send(
+        &self,
+        _cmd: SendCommand,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // deliver cmd.text / cmd.content to your real platform
         Ok(())
     }
 
-    async fn produce(&self, emit: EmitFn) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn produce(
+        &self,
+        emit: EmitFn,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // emit one synthetic message and exit cleanly
         emit(
             MessageBuilder::new("42", "Alice")

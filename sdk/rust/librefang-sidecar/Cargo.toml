@@ -20,13 +20,9 @@ rust-version = "1.80"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Conservative tokio feature set — only what the runtime actually uses.
-# io-std + io-util: stdin/stdout reader + write_all. rt + macros: spawn +
-# tokio::select!. sync: mpsc/watch/Mutex. time: sleep for backoff and the
-# ready re-announce interval. No `signal` (no signal handling in this
-# SDK), no `rt-multi-thread` (the SDK runs on whichever runtime the
-# adapter's #[tokio::main] picks — features union across the dep graph).
-tokio = { version = "1", features = ["io-std", "io-util", "rt", "macros", "sync", "time"] }
+# Tokio feature set the runtime actually uses.
+# io-std + io-util: stdin/stdout reader + write_all. rt + rt-multi-thread + macros: spawn + tokio::select! + the `#[tokio::main]` default flavor (downstream adapters copying the README example use the unattributed `#[tokio::main]`, which expands to `flavor = "multi_thread"` and refuses to compile without the feature unified into their build). sync: mpsc / watch / Mutex / Notify. time: sleep for backoff and the ready re-announce interval. No `signal` (no signal handling in this SDK).
+tokio = { version = "1", features = ["io-std", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 
 [dev-dependencies]

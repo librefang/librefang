@@ -181,10 +181,15 @@ where
     // Refuse the inputs that turn this loop into a CPU spin or a converging delay.
     // factor < 1.0 makes the delay shrink toward zero on every failure (silent rate-limit / IP-ban escalation against the remote).
     // factor <= 0.0 + non-finite values produce a zero or NaN delay that becomes a tight retry spin.
+    // initial == ZERO is a degenerate seed because `0.0 * factor == 0.0`, so the multiplicative growth never escapes zero — every failure becomes a tight retry spin even when `factor >= 1.0` would otherwise grow the delay correctly.
     // initial > maximum is a configuration typo — the loop would honor `initial` on iteration 0 then clamp later, masking the typo.
     assert!(
         factor.is_finite() && factor >= 1.0,
         "with_backoff: factor must be finite and >= 1.0 (got {factor})"
+    );
+    assert!(
+        initial > Duration::ZERO,
+        "with_backoff: initial must be > Duration::ZERO (got {initial:?}) — a zero seed means delay * factor stays zero forever, turning the retry loop into a tight CPU spin against a failing remote"
     );
     assert!(
         initial <= maximum,
@@ -299,6 +304,7 @@ pub async fn run<A: SidecarAdapter + 'static>(
     // Producer task — adapter's inbound stream.
     // Only an ERROR or PANIC from `produce` terminates the run (via `producer_done_tx`); a clean `Ok(())` return is a legitimate "emit-once-and-exit" adapter and must not kill the command loop.
     // produce() is spawned as its own child task so a panic inside the user's `produce` impl surfaces as `JoinError::is_panic()` instead of silently aborting the future and leaving the main loop blocked forever waiting for a wake-up that never comes.
+    // The inner JoinHandle is polled by-reference (`&mut inner`) inside the select so the stop-arm can call `inner.abort()` afterward — dropping a JoinHandle in tokio detaches the task (leaving the user's produce running past shutdown holding Arc<A> and emit-sender clones), abort actually cancels it.
     let producer_handle = {
         let adapter = adapter.clone();
         let emit = emit.clone();
@@ -308,9 +314,9 @@ pub async fn run<A: SidecarAdapter + 'static>(
         tokio::spawn(async move {
             let inner_adapter = adapter.clone();
             let inner_emit = emit.clone();
-            let inner = tokio::spawn(async move { inner_adapter.produce(inner_emit).await });
+            let mut inner = tokio::spawn(async move { inner_adapter.produce(inner_emit).await });
             tokio::select! {
-                join_result = inner => {
+                join_result = &mut inner => {
                     let to_record: Option<DynError> = match join_result {
                         Ok(Ok(())) => None,
                         Ok(Err(e)) => Some(e),
@@ -319,14 +325,18 @@ pub async fn run<A: SidecarAdapter + 'static>(
                             let msg = panic_payload_message(payload);
                             Some(format!("produce panicked: {msg}").into())
                         }
-                        Err(_) => None, // cancelled
+                        Err(_) => None, // cancelled — only reachable if `inner` was externally aborted (today only the stop-arm below does that, which exits the select via a different branch)
                     };
                     if let Some(e) = to_record {
                         *producer_err.lock().await = Some(e);
                         let _ = producer_done_tx.send(true);
                     }
                 }
-                _ = stop_rx.changed() => {}
+                _ = stop_rx.changed() => {
+                    // Stop fired; cancel the inner produce future to prevent task leak.
+                    inner.abort();
+                    let _ = inner.await;
+                }
             }
         })
     };
@@ -351,10 +361,23 @@ pub async fn run<A: SidecarAdapter + 'static>(
                                 let _ = acked_tx.send(true);
                             }
                             Ok(cmd) => {
-                                if let Err(e) = adapter.on_command(cmd).await {
-                                    // Per-command error — surface as a protocol error event, do not crash the adapter.
+                                // on_command is dispatched via a child tokio::spawn so a panic inside the user's adapter (e.g. `unwrap()` on a refreshed-token JSON missing a field) surfaces as `JoinError::is_panic()` instead of unwinding through `run` and aborting the whole process — symmetric with the producer task's panic isolation, so panicking inside any trait method has the same observable outcome: a protocol `error` event back to the daemon.
+                                let cmd_adapter = adapter.clone();
+                                let outcome =
+                                    tokio::spawn(async move { cmd_adapter.on_command(cmd).await })
+                                        .await;
+                                let to_report: Option<String> = match outcome {
+                                    Ok(Ok(())) => None,
+                                    Ok(Err(e)) => Some(format!("{e}")),
+                                    Err(je) if je.is_panic() => {
+                                        let msg = panic_payload_message(je.into_panic());
+                                        Some(format!("on_command panicked: {msg}"))
+                                    }
+                                    Err(_) => None, // cancelled — unreachable today, the spawn has no abort handle exposed
+                                };
+                                if let Some(msg) = to_report {
                                     // emit wrapped in select! with stop_rx so a wedged writer does not stall the loop and prevent subsequent shutdown commands from being read.
-                                    let err_event = events::error(format!("{e}"));
+                                    let err_event = events::error(msg);
                                     tokio::select! {
                                         _ = emit_tx.send(err_event) => {}
                                         _ = stop_rx.changed() => break,
@@ -489,32 +512,37 @@ pub async fn run_stdio_with<A: SidecarAdapter + 'static>(
     }
 }
 
-/// One-stop adapter `main` helper: handle `--describe` and otherwise drive `run_stdio`.
+/// One-stop adapter `main` helper: handle `--describe` and otherwise build and drive the adapter via `run_stdio`.
 ///
 /// The daemon's discovery contract (`crates/librefang-api/src/routes/sidecar_describe.rs`) is to spawn the adapter binary with `--describe`, expect a single JSON object on stdout, and then exit; any other run path drives the JSON-RPC protocol on stdio normally.
-/// Python's equivalent is `librefang.sidecar.runtime.run_stdio_main(AdapterClass, schema=SCHEMA)`.
-/// Use this from `tokio::main` instead of calling [`run_stdio`] directly, so a Rust adapter is discoverable by the dashboard out of the box:
+/// Python's equivalent is `librefang.sidecar.runtime.run_stdio_main(AdapterClass)`, which takes the adapter *class* so `--describe` can serve the schema without instantiating; this Rust version takes a `FnOnce() -> A` builder for the same reason — the closure runs only after the `--describe` branch decides not to serve discovery, so adapters whose constructor reads required env vars (bot tokens, credentials) still discover cleanly at boot before the operator has configured anything.
 ///
 /// ```ignore
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-///     run_stdio_main(MyAdapter, MyAdapter::schema()).await
+///     run_stdio_main(MyAdapter::schema, MyAdapter::new).await
 /// }
 /// ```
 ///
-/// When `--describe` is present in argv this emits the schema JSON to stdout and returns `Ok(())` without ever calling the adapter's `produce` or `on_send` — important when the real adapter needs env vars (tokens, secrets) that aren't yet configured at discovery time.
-pub async fn run_stdio_main<A: SidecarAdapter + 'static>(
-    adapter: A,
-    schema: crate::protocol::Schema,
-) -> Result<(), DynError> {
+/// `schema_fn` is also called lazily (only when `--describe` is present) so a schema that itself reads from disk or env can stay deferred.
+/// When `--describe` is present in argv this emits the schema JSON to stdout and returns `Ok(())` without constructing the adapter, and a failure to flush stdout is intentionally swallowed (the schema bytes have already been delivered to the daemon's read end; surfacing a flush error here would let the dashboard read a complete schema and still mark the adapter broken via the non-zero exit code).
+pub async fn run_stdio_main<A, S, B>(schema_fn: S, build_fn: B) -> Result<(), DynError>
+where
+    A: SidecarAdapter + 'static,
+    S: FnOnce() -> crate::protocol::Schema,
+    B: FnOnce() -> A,
+{
     if std::env::args().any(|a| a == "--describe") {
-        let mut stdout = tokio::io::stdout();
+        let schema = schema_fn();
         let body = serde_json::to_string(&schema)?;
+        let mut stdout = tokio::io::stdout();
         stdout.write_all(body.as_bytes()).await?;
-        stdout.flush().await?;
+        // Flush is best-effort: the daemon's discovery reader has already received the bytes via the OS pipe, and a flush error here (broken pipe if the daemon closed its read half eagerly, SIGPIPE on Windows) would otherwise propagate up to `tokio::main` and exit non-zero — making the dashboard treat a successful discovery as a failure.
+        // Matches Python `describe_main` which returns 0 unconditionally after writing.
+        let _ = stdout.flush().await;
         return Ok(());
     }
-    run_stdio(adapter).await
+    run_stdio(build_fn()).await
 }
 
 #[cfg(test)]

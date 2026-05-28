@@ -122,6 +122,12 @@ fn build_event(name: &str) -> Value {
 fn every_event_fixture_is_covered() {
     require_corpus!();
     // A fixture with neither a producer assertion nor a documented skip is not conformance — mirror the Python coverage guard.
+    // Also assert the corpus is non-empty so an accidental `rm conformance/sidecar/corpus/events/*.json` (or a stray git operation leaving the dir present but empty) fails this test loudly instead of trivially-passing the set-equality check on two empty sets.
+    let actual = list_json("events");
+    assert!(
+        !actual.is_empty(),
+        "events corpus dir exists but is empty — likely a deleted fixture"
+    );
     let asserted: HashSet<String> = [
         "ready_full.json",
         "message_text.json",
@@ -134,7 +140,6 @@ fn every_event_fixture_is_covered() {
     .into_iter()
     .map(String::from)
     .collect();
-    let actual = list_json("events");
     let union: HashSet<String> = asserted.union(&event_producer_skip()).cloned().collect();
     assert_eq!(
         union, actual,
@@ -170,6 +175,12 @@ fn parse_cmd(name: &str) -> Command {
 #[test]
 fn every_command_fixture_is_covered() {
     require_corpus!();
+    // Same empty-corpus fail-loud guard as `every_event_fixture_is_covered`.
+    let actual = list_json("commands");
+    assert!(
+        !actual.is_empty(),
+        "commands corpus dir exists but is empty — likely a deleted fixture"
+    );
     let asserted: HashSet<String> = [
         "send_full.json",
         "send_minimal.json",
@@ -188,8 +199,7 @@ fn every_command_fixture_is_covered() {
     .map(String::from)
     .collect();
     assert_eq!(
-        asserted,
-        list_json("commands"),
+        asserted, actual,
         "command corpus is not fully covered by parse asserts"
     );
 }
