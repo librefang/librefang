@@ -222,6 +222,33 @@ entry = "{entry}"
         toml::from_str(&toml_str).expect("manifest parses")
     }
 
+    #[test]
+    fn resolve_capabilities_keeps_known_and_drops_unrecognized() {
+        // The fail-closed contract at the integration point: a manifest with a
+        // mix of valid and garbage capability strings yields exactly the valid
+        // grants, in declaration order, with the garbage silently dropped (it
+        // is WARN-logged at runtime) — never granted.
+        let manifest: SkillManifest = toml::from_str(
+            r#"
+[skill]
+name = "caps-wasm"
+
+[runtime]
+type = "wasm"
+entry = "skill.wasm"
+
+[requirements]
+capabilities = ["NetConnect(*)", "definitely-not-a-cap", "ToolAll", "NetListen(bad)"]
+"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(
+            resolve_capabilities(&manifest),
+            vec![Capability::NetConnect("*".to_string()), Capability::ToolAll]
+        );
+    }
+
     #[tokio::test]
     async fn echo_wasm_skill_runs_in_sandbox_and_returns_envelope() {
         let dir = tempfile::tempdir().unwrap();
