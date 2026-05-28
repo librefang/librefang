@@ -212,6 +212,7 @@ impl librefang_kernel_handle::SessionWriter for OverrideKernel {
     fn inject_attachment_blocks(
         &self,
         _: librefang_types::agent::AgentId,
+        _: librefang_types::agent::SessionId,
         _: Vec<librefang_types::message::ContentBlock>,
     ) {
     }

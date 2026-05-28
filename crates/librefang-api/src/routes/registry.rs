@@ -326,11 +326,25 @@ async fn create_registry_content(
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(target.file_name().unwrap_or(target.as_os_str()))
         });
+    // Render with forward-slash separators regardless of host OS — this
+    // is a JSON API response and the dashboard / SDKs expect a
+    // platform-independent shape (`providers/openai.toml`, not
+    // `providers\openai.toml`). `Path::display()` uses the platform
+    // separator, which produced backslashes on Windows and broke the
+    // `registry_content_path_test` regression tests.
+    let relative_path_str = relative_path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     Json(serde_json::json!({
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
-        "path": relative_path.display().to_string(),
+        "path": relative_path_str,
     }))
     .into_response()
 }
