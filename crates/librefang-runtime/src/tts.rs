@@ -316,9 +316,7 @@ impl TtsEngine {
             let status = response.status();
             let err = response.text().await.unwrap_or_default();
             let truncated = crate::str_utils::safe_truncate_str(&err, 500);
-            return Err(format!(
-                "Custom TTS failed (HTTP {status}): {truncated}"
-            ));
+            return Err(format!("Custom TTS failed (HTTP {status}): {truncated}"));
         }
 
         if let Some(len) = response.content_length() {
@@ -540,7 +538,10 @@ mod tests {
         let result = engine.synthesize("Hello", None, None).await;
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("local-piper"), "error should name the provider");
+        assert!(
+            msg.contains("local-piper"),
+            "error should name the provider"
+        );
         assert!(msg.contains("base_url"), "error should mention base_url");
     }
 

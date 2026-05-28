@@ -246,8 +246,8 @@ impl MediaEngine {
         //    Groq/etc.'s default model on every transcription call.
         // 3. Built-in default for the selected provider
         let custom_stt_model_ref: Option<&str> = match provider {
-            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow"
-            | "gemini" | "elevenlabs" => None,
+            "groq" | "openai" | "minimax" | "fireworks" | "together" | "siliconflow" | "gemini"
+            | "elevenlabs" => None,
             _ => self.config.custom_stt.model.as_deref(),
         };
         let model = self
@@ -271,8 +271,7 @@ impl MediaEngine {
             "elevenlabs" => elevenlabs_transcribe(model, audio_bytes, &mime).await?,
             // Custom / self-hosted OpenAI-compatible Whisper endpoint
             _other => {
-                let (api_url, api_key) =
-                    custom_stt_config(provider, &self.config.custom_stt)?;
+                let (api_url, api_key) = custom_stt_config(provider, &self.config.custom_stt)?;
                 whisper_transcribe(&api_url, &api_key, model, audio_bytes, &filename, &mime).await?
             }
         };
@@ -733,16 +732,13 @@ async fn whisper_transcribe(
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            // Operator-facing: full error in logs. User-facing Err is
-            // sanitized to drop the underlying reqwest::Error display,
-            // which can echo URLs / request internals. See #4999.
-            tracing::warn!(error = %e, "Whisper transcription request failed");
-            "Transcription request failed".to_string()
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        // Operator-facing: full error in logs. User-facing Err is
+        // sanitized to drop the underlying reqwest::Error display,
+        // which can echo URLs / request internals. See #4999.
+        tracing::warn!(error = %e, "Whisper transcription request failed");
+        "Transcription request failed".to_string()
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1472,7 +1468,10 @@ mod tests {
         let result = custom_stt_config("local-whisper", &cfg);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("local-whisper"), "should mention provider name");
+        assert!(
+            msg.contains("local-whisper"),
+            "should mention provider name"
+        );
         assert!(msg.contains("base_url"), "should mention base_url field");
     }
 
@@ -1520,7 +1519,10 @@ mod tests {
         };
         let (url, key) = custom_stt_config("local-whisper", &cfg).unwrap();
         assert_eq!(url, "http://localhost:8080/v1/audio/transcriptions");
-        assert!(key.is_empty(), "missing optional key should produce empty key");
+        assert!(
+            key.is_empty(),
+            "missing optional key should produce empty key"
+        );
     }
 
     #[test]
