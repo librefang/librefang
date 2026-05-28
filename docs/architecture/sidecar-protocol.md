@@ -14,6 +14,7 @@ There are three independent implementations of this protocol today:
   Produces events, consumes commands.
 - **Rust SDK** — `sdk/rust/librefang-sidecar/src/protocol.rs` (`parse_command`, the event builders + `MessageBuilder`, its own `cargo test`).
   Produces events, consumes commands.
+  Usage / API reference: [`rust-sidecar-sdk.md`](./rust-sidecar-sdk.md).
 
 All three are kept honest against each other by a single shared corpus, `conformance/sidecar/corpus/`.
 Each implementation carries its own conformance test that asserts against the corpus in the direction it participates in:

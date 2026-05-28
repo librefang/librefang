@@ -1,0 +1,157 @@
+# Rust Telegram sidecar 适配器
+
+> **状态：** 随 #5831 发布。
+> **Crate：** `sdk/rust/librefang-sidecar-telegram/`。
+> **对标实现：** `sdk/python/librefang/sidecar/adapters/telegram.py`。
+
+`sdk/rust/librefang-sidecar-telegram/` 是基于 [Rust sidecar SDK](/zh/architecture/rust-sidecar-sdk) 实现的第一方 Telegram 通道适配器。
+功能等价于 Python 版 Telegram 适配器——wire 形状一致、`Schema` 一致、访问控制语义一致、表情翻译表一致——以独立二进制形式发布。
+
+## 什么时候选 Rust 版
+
+两个适配器讲同一套协议，supervisor 区分不出来。
+下面这些情况下选 Rust：
+
+- 宿主没有 Python 运行时（最小化容器、Alpine、distroless 部署）；
+- 关心每次 supervised 重启的启动延迟（Rust 二进制 ~10 ms 就绪；Python 解释器即便适配器是空的也要 100-300 ms 走 import）；
+- 部署受带宽 / 内存约束，~3 MB 的剥离后 Rust 二进制比 Python 镜像加 `httpx` 等依赖小很多。
+
+不在上述情况下，用 Python 版就够了；两边能力集和安全模型完全一致。
+
+## 配置
+
+```toml
+[[sidecar_channels]]
+name = "telegram"
+command = "/abs/path/to/target/release/librefang-sidecar-telegram"
+args = []
+restart = true
+
+[sidecar_channels.secrets]
+TELEGRAM_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+
+[sidecar_channels.env]
+ALLOWED_USERS = "123456789, @your_username"      # 可选，空 ⇒ 开放
+TELEGRAM_CLEAR_DONE_REACTION = "true"            # 可选，默认 false
+```
+
+Dashboard 的配置表单由二进制 `--describe` 返回的 schema 渲染，运维不需要手写 `config.toml`。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `TELEGRAM_BOT_TOKEN` | secret | 是 | BotFather 给的 token。Dashboard 显示时会打码；所有错误路径都做了脱敏。 |
+| `ALLOWED_USERS` | list, advanced | 否 | 数字 user ID 或 `@username` 的 CSV（大小写不敏感）。空 ⇒ 开放。 |
+| `TELEGRAM_CLEAR_DONE_REACTION` | bool, advanced | 否 | 为 `true` 时，✅ "done" 反应会清空已有反应而非叠加。 |
+
+## 能力声明
+
+在 `ready` 事件里声明，supervisor 按需 gate：
+
+| 能力          | 入站                                    | 出站                                  |
+|---------------|----------------------------------------|---------------------------------------|
+| `typing`      | —                                      | `Typing` → `sendChatAction`           |
+| `reaction`    | —                                      | `Reaction` → `setMessageReaction`     |
+| `interactive` | `callback_query` → `ButtonCallback`    | `Interactive` / `EditInteractive`     |
+| `thread`      | `message_thread_id`带在 metadata 里     | `message_thread_id` 端到端透传        |
+| `streaming`   | —                                      | `StreamStart` / `Delta` / `End` → `editMessageText`（1 秒去抖） |
+
+## 架构
+
+适配器分成五层：
+
+| 层 | 职责 |
+|----|------|
+| `api/` | Bot API 客户端（reqwest + rustls），值类型（`Update`、`Message`、`User`、所有媒体变体）、错误类型。 |
+| `format/` | Markdown → Telegram HTML（`markdown.rs`）、白名单 HTML sanitiser（`sanitize.rs`）、tag-aware 的 UTF-16 分块器（`chunk.rs`）。 |
+| `translator.rs` | 入站 `Update` → `MessageBuilder` 形状的 `Value` 事件。 |
+| `dispatcher.rs` | 出站 `Content` → Bot API 调用（Text、Image、File、FileData、Voice、Video、Audio、Animation、Sticker、Location、Command、Interactive、EditInteractive、DeleteMessage、MediaGroup、Poll）。 |
+| `adapter.rs` | `TelegramAdapter` 主体：produce 的长轮询、on_send / on_command 调度、streaming 状态表。 |
+
+### 入站
+
+1. `produce()` 用 `allowed_updates = ["message", "edited_message", "callback_query", "poll_answer"]` 长轮询 `getUpdates`。
+2. 每个 update 都先过访问控制：从 `message.from` / `message.sender_chat` / `callback_query.from` / `poll_answer.user` 抽 sender，再调用 `AllowList::permits(user_id, username)`。
+   不通过的 update 静默跳过（不打日志，避免 sender 身份落到 supervisor 的 stderr）。
+3. `update_to_event` 按 update 类型派发，emit 一个 `message` 事件。
+   媒体路径调用 `getFile` 把 `file_id` 解析成公开 URL；`getFile` 失败时回退到 `[Photo received: <cap>]` / `[Document received: <filename>]` / `[Voice message, Ns]` 这种文本占位（与 Python 字节一致），所以即便 URL 拿不到，用户的 caption（往往就是问题本身）也能传到 agent。
+4. `edited_message` 走的事件在 metadata 里加 `edited = true` 和 `edit_date`（若 Telegram 提供）；不然 supervisor 就分辨不出来这是编辑还是新轮——因为 Telegram 编辑会复用原 message_id。
+
+### 出站
+
+`dispatch_content` 按 externally-tagged `ChannelContent` 的 JSON 形状匹配并调用对应 Bot API。
+带 caption 的媒体（Image / Voice / Video / Audio / Animation）把 caption 走和文本一样的 `format_and_sanitize` 管线，遇到 `can't parse entities` 回退到纯文本，所以 sanitiser 输出异常时不会静默丢消息。
+MediaGroup 在 Telegram 一端是原子的：1 项的退化成单条发送，>10 项的切成多个 10 条批次，嵌套的 MediaGroup（递归 payload）在递归前就被拒绝。
+
+### 流式编辑
+
+`StreamStart` 发一条 `…` 占位消息；后续 `StreamDelta` 累积到一个 per-stream buffer 里并用 `editMessageText` 编辑同一条，1 秒去抖。
+`StreamEnd` 刷最后一次。
+`message is not modified`（去抖期间没有新内容）被当成成功；`can't parse entities` 触发 HTML → 纯文本回退；其他失败打日志。
+空 / 纯空白 body 短路返回，避免 `StreamStart` 后紧接 `StreamEnd` 又没 delta 时被 Telegram 拒为 `400 message text is empty`。
+
+## 文本渲染管线
+
+```
+原文  ──▶ markdown_to_telegram_html  ──▶ sanitize_telegram_html  ──▶ split_to_utf16_chunks  ──▶ sendMessage(parse_mode=HTML)
+                                                                                                       │
+                                                                                                       └─ 收到 400 "can't parse entities" 时：
+                                                                                                            html_to_plain(chunk) ──▶ sendMessage(parse_mode=None)
+```
+
+- **Markdown 子集。** 代码围栏（``` ```` ```）、`#` 到 `######` 标题、引用块、有序 / 无序列表、加粗（`**…**`）、斜体（`*…*`）、行内代码（`` `…` ``）、链接（`[label](url)`）。
+  行内代码占位用 Private-Use-Area 哨兵字符（U+E000 / U+E001），`escape_html` 会从输入里剥掉这两个字符——对抗性输入里就算带了这串字节，也撞不上占位符方案，无法绕过 sanitiser 的 tag 白名单注入 `<code>`。
+  链接 URL 在塞进 `<a href="…">` 属性前会做 `&quot;` 转义，URL 里出现裸 `"`（query string 里完全合法）时不会过早终止属性。
+- **HTML sanitiser。** 白名单 `b`、`i`、`u`、`s`、`em`、`strong`、`a`、`code`、`pre`、`blockquote`、`tg-spoiler`、`tg-emoji`——对齐 Telegram 文档化的 HTML 子集。
+  `<a href>` 限定在 `https:` / `http:` / `mailto:` / `tg:`，其他（包括 `javascript:` / `data:`）整个 tag 丢弃。
+  到 EOF 时仍未闭合的 tag 自动平衡补齐。
+- **UTF-16 分块器（Telegram 4096 单元上限）。** Telegram 数的是 UTF-16 code unit，不是字节也不是 Unicode scalar；非 BMP 字符算 2 个。
+  分块器是 tag-aware 的：在一块里打开的 `<a href="…">` 会在块末补 `</a>` 并在下一块开头按完整属性串重新发 `<a href="…">`，用户的格式跨块仍然存活。
+
+## 安全
+
+- **Bot token。** 烤在 `BotClient.api_root` / `file_root`（请求 URL 路径里）。
+  所有可能把 URL 或响应 body 透露给运维的错误路径都过 `BotClient::redact(s)`，把 token 字面替换为 `[REDACTED]`；`From<reqwest::Error>` 在构造 `Error::Http` 前用 `e.without_url()` 整个 strip 掉 URL。
+  日志、protocol error 事件、`Display` 都拿不到 token。
+- **访问控制。** `AllowList::permits(user_id, username)` 按精确匹配查数字 ID；`@username` 大小写不敏感，前导 `@` 可省略。
+  空 allowlist ⇒ 开放；所有入站事件类型（包括 `poll_answer`）都走同一道门——漏掉 poll_answer 的话，任何 Telegram 用户都能给 bot 创建的投票投票并把 PollAnswer 灌进 agent。
+- **MediaGroup 递归。** 每个 `MediaGroup.items[i]` 在递归之前都被全 key 扫描 `MediaGroup` 字段（不是只看第一个 key），所以堆分配的 future 栈不会被对抗性嵌套 payload 撑爆。
+- **FileData 字节解码。** JSON `data` 数组严格解析：任何不在 `[0, 255]` 范围内的非负整数（包括字符串、null、负数）都返回 `Error::Other`，而不是静默丢或截断。
+
+## 限流与重试
+
+- `call_json` 和 `send_multipart` 在 429 Too-Many-Requests 时按服务端 `retry_after` 重试一次，cap 在 `MAX_RETRY_AFTER_SECS = 300`——几小时级别的 flood-wait 会以错误形式冒出来，而不是把 produce 循环堵死。
+- `produce` 的长轮询循环对非 timeout 的 `getUpdates` 失败有独立的指数退避（1 秒 → 300 秒 cap），与 `call_json` 内的逐次重试相互独立。
+
+## 与 Python 适配器的刻意差异
+
+总体功能等价，但有三处有意的偏离，已在代码 doc-comment 里标注：
+
+1. **`parse_command` 用 `MessageEntity.length`（UTF-16）而不是 `txt.split(" ", 1)`。**
+   `/help:foo` 在 Rust 里返回 `("help", [":foo"])`（符合 Bot API 规范）；Python 返回 `("help:foo", [])`（一个长期存在的解析 bug）。
+2. **`MediaGroup` >10 项会切成多个 10 条批次。** Python 直接抛 `ValueError`。
+3. **`channel` 类型聊天不算群。** 现在两边都用 `is_group = chat_type in {group, supergroup}`；Rust 初稿里曾包含 `channel`，对齐时收窄了。
+
+剩下的 wire 形状由跨语言测试钉死（`media_placeholder_matches_python_labels` 把 8 种占位文本字节级覆盖了）。
+
+## 验证
+
+```bash
+# 在仓库的规范 dev 容器里跑（命名卷把 cargo target 跟主仓库的 target/ 隔离开，不会撞用户的会话）。
+docker build -t librefang-rust-dev:latest -f Dockerfile.rust-dev .
+docker run --rm \
+  -v "$(git rev-parse --show-toplevel)":/work \
+  -v librefang-cargo:/cargo -v librefang-target:/target \
+  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
+  -w /work/sdk/rust/librefang-sidecar-telegram \
+  librefang-rust-dev:latest \
+  sh -c 'export PATH=/usr/local/cargo/bin:$PATH; cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check'
+```
+
+40 个单元测试通过，clippy 零警告，fmt 干净。
+真 LLM 测试（真 bot token + 起 `librefang start`）由人工执行。
+
+## 另见
+
+- [Rust sidecar SDK](/zh/architecture/rust-sidecar-sdk) —— 本适配器构建于其上的 SDK。
+- [通道适配器](/zh/integrations/channels) —— 运维侧的通道总览。
+- 仓库内：`docs/architecture/rust-telegram-sidecar.md`（贡献者向的规范参考）、`docs/architecture/sidecar-channels.md`。
