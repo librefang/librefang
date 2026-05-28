@@ -41,6 +41,8 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -104,6 +106,8 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -167,6 +171,8 @@ async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -225,6 +231,8 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -281,6 +289,8 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
 
@@ -479,6 +489,8 @@ async fn test_image_analyze_missing_file() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -576,6 +588,8 @@ async fn test_schedule_tools_without_kernel() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -853,6 +867,8 @@ async fn test_file_read_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -901,6 +917,8 @@ async fn test_file_write_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -946,6 +964,8 @@ async fn test_file_list_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1000,6 +1020,8 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1058,6 +1080,8 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1159,6 +1183,8 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1203,6 +1229,8 @@ async fn test_mcp_tool_allowed_passes_check() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
@@ -1256,6 +1284,8 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should NOT be a permission-denied error
@@ -1299,6 +1329,8 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1342,6 +1374,8 @@ async fn test_allowed_tools_star_allows_everything() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1384,6 +1418,8 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1426,6 +1462,8 @@ async fn test_mcp_tool_wildcard_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
