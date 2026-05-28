@@ -29,7 +29,10 @@ fn format_output(value: &serde_json::Value) -> String {
 }
 
 /// Validate that a string parameter is not empty or whitespace-only.
-fn require_non_empty<'a>(val: &'a str, label: &str) -> Result<&'a str, ToolError> {
+///
+/// `label` is `&'static str` because `ToolError::InvalidParameter.name` is
+/// `&'static str` (every call site already passes a string literal).
+fn require_non_empty<'a>(val: &'a str, label: &'static str) -> Result<&'a str, ToolError> {
     let trimmed = val.trim();
     if trimmed.is_empty() {
         Err(ToolError::InvalidParameter {

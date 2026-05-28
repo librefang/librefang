@@ -240,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_exec_missing_command_is_missing_parameter() {
-        let r = tool_shell_exec(&json!({}), &[], None, None, None).await;
+        let r = tool_shell_exec(&json!({}), &[], None, None, None, None, None).await;
         assert!(matches!(r, Err(ToolError::MissingParameter("command"))));
     }
 
@@ -251,6 +251,8 @@ mod tests {
         let r = tool_shell_exec(
             &json!({"command": "echo \"unterminated"}),
             &[],
+            None,
+            None,
             None,
             None,
             None,
