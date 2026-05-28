@@ -90,6 +90,21 @@ impl StdError for ProducerCrashed {
 ///
 /// Override [`on_send`](SidecarAdapter::on_send) (required) and, for platforms you poll, [`produce`](SidecarAdapter::produce).
 /// Declare optional capabilities so LibreFang routes rich features (typing/reaction/interactive/thread/streaming/typing_events) to you instead of degrading to plain text.
+///
+/// ## Cancel safety / blocking work
+///
+/// Every async method on this trait runs inside the SDK runtime, which the daemon-side supervisor can SIGKILL once its shutdown-grace window expires.
+/// `produce` is also explicitly aborted by the runtime at shutdown (via `tokio::task::JoinHandle::abort`).
+/// `on_command` is awaited inline in the main read loop, so a long-running body blocks the runtime from observing subsequent `shutdown` commands until it returns — the supervisor's grace timer is the only backstop.
+/// `on_shutdown` is awaited during drain and has the same SIGKILL fallback.
+///
+/// In all cases, an implementation that does blocking sync work (CPU-bound loop, `std::thread::sleep`, blocking syscall) without yielding will not observe cancellation and risks being killed mid-cleanup.
+/// If your method body has a long sync section, sprinkle `tokio::task::yield_now().await` or move the work to `tokio::task::spawn_blocking` so the runtime can preempt it on shutdown.
+///
+/// ## Panic isolation
+///
+/// `produce`, `on_command`, and `on_shutdown` are each wrapped by the runtime in a `tokio::spawn` so a panic inside the user's body is captured (via `JoinError::is_panic()`) instead of unwinding through `run` and aborting the whole process.
+/// `produce` and `on_command` panics surface as a protocol `error` event back to the daemon; `on_shutdown` panics are logged to stderr (no `emit` is available during cleanup).
 #[async_trait]
 pub trait SidecarAdapter: Send + Sync {
     /// Capability strings declared in the `ready` event, e.g. `["typing", "interactive"]`.
@@ -154,10 +169,7 @@ pub trait SidecarAdapter: Send + Sync {
     /// Pull inbound platform events and push each one via `emit`.
     /// Default: nothing — for command/webhook-only adapters.
     ///
-    /// **Cancel safety.**
-    /// The runtime calls `inner.abort()` on this future at shutdown and then awaits it; an `abort` only takes effect at the next `.await` point.
-    /// An implementation that does blocking sync work (CPU-bound loop, `std::thread::sleep`, blocking syscall) without yielding will not observe the cancel, and the supervisor's shutdown-grace timer will expire — falling back to SIGKILL.
-    /// If your produce body has a long sync section, sprinkle `tokio::task::yield_now().await` or move the work to `tokio::task::spawn_blocking` so the runtime can preempt it on shutdown.
+    /// See the trait-level "Cancel safety" note: the runtime explicitly aborts this future at shutdown, and a non-yielding body will be SIGKILLed by the supervisor's grace timer.
     async fn produce(&self, _emit: EmitFn) -> Result<(), DynError> {
         Ok(())
     }
@@ -228,6 +240,20 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
         return s.clone();
     }
     "(non-string panic payload)".to_string()
+}
+
+/// Convert a `JoinError` into a one-line panic message, prefixed with `label`.
+/// Returns `None` for the non-panic cases (clean exit or cancellation) so the caller can branch on whether something blew up.
+/// Three sites — produce / on_command / on_shutdown — all want the same `"<label> panicked: <msg>"` shape; centralising it here keeps the format consistent.
+fn format_join_panic(je: tokio::task::JoinError, label: &str) -> Option<String> {
+    if je.is_panic() {
+        Some(format!(
+            "{label} panicked: {}",
+            panic_payload_message(je.into_panic())
+        ))
+    } else {
+        None
+    }
 }
 
 /// Drive an adapter against a `mpsc::Receiver<String>` line source and a `mpsc::Sender<Value>` emit sink.
@@ -328,12 +354,9 @@ pub async fn run<A: SidecarAdapter + 'static>(
                     let to_record: Option<DynError> = match join_result {
                         Ok(Ok(())) => None,
                         Ok(Err(e)) => Some(e),
-                        Err(join_err) if join_err.is_panic() => {
-                            let payload = join_err.into_panic();
-                            let msg = panic_payload_message(payload);
-                            Some(format!("produce panicked: {msg}").into())
-                        }
-                        Err(_) => None, // cancelled — only reachable if `inner` was externally aborted (today only the stop-arm below does that, which exits the select via a different branch)
+                        // Cancellation only fires if `inner` was externally aborted; today only the stop-arm below does that, which exits the select via a different branch.
+                        // format_join_panic returns None on JoinError::Cancelled and Some(msg) on JoinError::is_panic, so this single arm covers both panic-record and cancel-ignore.
+                        Err(je) => format_join_panic(je, "produce").map(|s| s.into()),
                     };
                     if let Some(e) = to_record {
                         *producer_err.lock().await = Some(e);
@@ -378,16 +401,15 @@ pub async fn run<A: SidecarAdapter + 'static>(
                                 let to_report: Option<String> = match outcome {
                                     Ok(Ok(())) => None,
                                     Ok(Err(e)) => Some(format!("{e}")),
-                                    Err(je) if je.is_panic() => {
-                                        let msg = panic_payload_message(je.into_panic());
-                                        Some(format!("on_command panicked: {msg}"))
-                                    }
-                                    Err(_) => None, // cancelled — unreachable today, the spawn has no abort handle exposed
+                                    // Cancellation unreachable today (spawn has no abort handle exposed); format_join_panic returns None in that case so the arm safely degrades to no-op.
+                                    Err(je) => format_join_panic(je, "on_command"),
                                 };
                                 if let Some(msg) = to_report {
                                     // emit wrapped in select! with stop_rx so a wedged writer does not stall the loop and prevent subsequent shutdown commands from being read.
+                                    // `biased` so a ready emit ALWAYS wins over a stop signal arriving in the same tick — without it the supervisor can lose the error event that explains why the loop is exiting, leaving a panic / parse-error invisible. Same fix-class as the producer-side biased at line 326.
                                     let err_event = events::error(msg);
                                     tokio::select! {
+                                        biased;
                                         _ = emit_tx.send(err_event) => {}
                                         _ = stop_rx.changed() => break,
                                     }
@@ -396,6 +418,7 @@ pub async fn run<A: SidecarAdapter + 'static>(
                             Err(e) => {
                                 let err_event = events::error(format!("protocol parse error: {e}"));
                                 tokio::select! {
+                                    biased;
                                     _ = emit_tx.send(err_event) => {}
                                     _ = stop_rx.changed() => break,
                                 }
@@ -424,7 +447,7 @@ pub async fn run<A: SidecarAdapter + 'static>(
     let _ = ready_handle.await;
     let _ = producer_handle.await;
     // on_shutdown is wrapped in tokio::spawn for the same reason as produce / on_command: a panic in the user's cleanup must not unwind through `run` and abort the whole process with no exit-code distinguishing a clean shutdown from a crashed one.
-    // Cannot emit a protocol error event here (the writer task has already drained); log to stderr instead so the supervisor's stderr ingest still sees the panic message in its main log.
+    // No protocol error event is emitted because the trait method takes only `&self` (no `emit` parameter) and the spawn closure deliberately does not capture `emit_tx` — we keep cleanup diagnostics on stderr so the supervisor's stderr ingest still sees the panic message in its main log, and the writer task stays single-purpose (drains user-facing events only, not infrastructure logs).
     let shutdown_adapter = adapter.clone();
     let shutdown_outcome = tokio::spawn(async move { shutdown_adapter.on_shutdown().await }).await;
     match shutdown_outcome {
@@ -432,11 +455,12 @@ pub async fn run<A: SidecarAdapter + 'static>(
         Ok(Err(e)) => {
             eprintln!("[librefang-sidecar] on_shutdown returned error: {e}");
         }
-        Err(je) if je.is_panic() => {
-            let msg = panic_payload_message(je.into_panic());
-            eprintln!("[librefang-sidecar] on_shutdown panicked: {msg}");
+        // Cancellation unreachable today (same contract as produce / on_command — no abort handle exposed); format_join_panic returns None then so the arm is a no-op.
+        Err(je) => {
+            if let Some(msg) = format_join_panic(je, "on_shutdown") {
+                eprintln!("[librefang-sidecar] {msg}");
+            }
         }
-        Err(_) => {} // cancelled — unreachable today, same contract as produce / on_command
     }
 
     if let Some(e) = producer_err.lock().await.take() {
@@ -548,7 +572,7 @@ pub async fn run_stdio_with<A: SidecarAdapter + 'static>(
 /// }
 /// ```
 ///
-/// `schema_fn` is also called lazily (only when `--describe` is present) so a schema that itself reads from disk or env can stay deferred.
+/// `schema_fn` is called lazily (only when `--describe` is present) so the schema-construction work is skipped on the normal run path; it returns a `Schema` infallibly, so the schema itself should be pure (no env-var lookups or disk reads — push those into `build_fn`, which returns `Result`).
 /// When `--describe` is present in argv this emits the schema JSON to stdout and returns `Ok(())` without constructing the adapter, and a failure to flush stdout is intentionally swallowed (matches Python `describe_main` which returns 0 unconditionally after writing — a flush error here from a broken read half would otherwise let the dashboard read a successful schema yet treat the adapter as broken via the non-zero exit code).
 pub async fn run_stdio_main<A, S, B>(schema_fn: S, build_fn: B) -> Result<(), DynError>
 where
