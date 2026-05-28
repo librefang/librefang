@@ -1,0 +1,154 @@
+# Rust sidecar SDK
+
+> **状态：** 随 #5821 发布。
+> **Crate：** `sdk/rust/librefang-sidecar/`。
+
+`sdk/rust/librefang-sidecar/` 是用 Rust 编写 LibreFang 通道适配器（独立子进程二进制）的第一方 SDK。
+它与 `sdk/python/librefang/sidecar/` 配对存在；两套实现都钉在共享的 `conformance/sidecar/corpus/` 测试语料上，对着 supervisor 的 wire 是完全可互换的——`command = "python3 -m my_adapter"` 和 `command = "/usr/local/bin/my-rust-adapter"` 对 supervisor 而言没有任何区别。
+
+要看架构层的论证（崩溃隔离、依赖链封闭、迭代回路），见 [系统架构](/zh/architecture)；要看 wire 规约，见 [OFP 链路加密](/zh/architecture/ofp-wire) 及仓库内 `docs/architecture/sidecar-protocol.md`。
+
+## 什么时候该用这套 SDK
+
+Python SDK 是绝大多数适配器最省心的起点。
+只有当下面这些点确实重要时，才值得切到 Rust：
+
+- **二进制体积 / 启动延迟。**
+  静态链接的 Rust 二进制毫秒级启动，常驻几个 MB 内存；Python sidecar 每次 supervisor 重启都要付一次解释器启动成本。
+- **入站命令的类型安全。**
+  `Command::Send(s)`、`Command::Typing(t)`、`Command::StreamStart(s)` 等变体在编译期强制穷尽匹配；以后新增协议变体时编译器会把每一处需要显式处理的地方都标出来。
+- **现成的 Rust 传输生态。**
+  如果你的平台 HTTP / WebSocket / SSE 客户端已经有一个被外部 Rust 生态广泛验证过的 crate（`reqwest` + `rustls`、`tokio-tungstenite`、`eventsource-client`……），留在 Rust 里就省了一层 Python 封装。
+
+否则直接用 Python SDK。
+
+## Crate 结构
+
+```
+src/
+├── lib.rs        — 重导出
+├── protocol.rs   — wire 类型：Command、Content、MessageBuilder、Schema、……
+└── runtime.rs    — run_stdio_main、EmitFn、panic 隔离、with_backoff
+```
+
+### 类型
+
+| 名字 | 用途 |
+|------|------|
+| `SidecarAdapter` trait | 每个适配器都要实现的 trait。三个必填方法（`capabilities`、`on_send`、`produce`）；`on_command` 和 `header_rules` 有默认实现。 |
+| `Command` 枚举 | 外标记（externally-tagged）入站命令：`Send`、`Typing`、`Reaction`、`Interactive`、`StreamStart`、`StreamDelta`、`StreamEnd`，外加一个 `Unknown` 变体以保持向前兼容。 |
+| `Content::*` 构造函数 | 按 wire 形状构造 `ChannelContent` 枚举的值——`Content::text(...)`、`Content::image(...)`、`Content::voice(...)` 等，返回 `serde_json::Value`。 |
+| `MessageBuilder` | 出站 `message` 事件的链式构造器（`.channel_id(...).platform(...).is_group(...).content(...)`）。 |
+| `Schema`、`Field`、`FieldType` | 描述适配器的配置表单。Dashboard 通过 `--describe` 拿到这套 Schema，在适配器还没用真 env 启动之前就能渲染配置界面。 |
+
+### 运行时
+
+`run_stdio_main(schema_fn, build_fn)` 是规范入口。
+
+- `schema_fn: FnOnce() -> Schema` 在 `--describe` 时立即调用。
+- `build_fn: FnOnce() -> Result<A, DynError>` 在 supervisor 注入真实 env 后惰性调用。
+
+这种两段式布局让 dashboard 可以在必需 env（bot token、API key）尚未配置时就先展示表单——运维填好之后 supervisor 用新 env 重启，*然后*才跑 `build_fn`。
+`on_command` 和 `produce` 里的 panic 会被 runtime 抓住转成 protocol error 事件，所以一个有 bug 的适配器顶多让自己的 supervisor 周期崩一次（被 backoff 重启），而不会把整个 daemon 拖下水。
+
+`with_backoff(f, policy)` 提供 produce 阶段瞬时错误的指数退避。
+它在构造时就 assert `initial > 0`、`initial <= maximum`、`factor >= 1.0`，所以退化的策略会立即失败而不是悄悄死循环。
+
+## 最小适配器
+
+```rust
+use async_trait::async_trait;
+use librefang_sidecar::{
+    run_stdio_main, EmitFn, MessageBuilder, Schema, SendCommand, SidecarAdapter,
+};
+
+struct EchoAdapter;
+
+#[async_trait]
+impl SidecarAdapter for EchoAdapter {
+    fn capabilities(&self) -> Vec<String> {
+        vec!["typing".into()]
+    }
+
+    async fn on_send(
+        &self,
+        cmd: SendCommand,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = cmd;
+        Ok(())
+    }
+
+    async fn produce(
+        &self,
+        emit: EmitFn,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        emit(
+            MessageBuilder::new("42", "Alice")
+                .text("hello from echo")
+                .build(),
+        );
+        Ok(())
+    }
+}
+
+fn schema() -> Schema {
+    Schema::new("echo", "Echo adapter")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_stdio_main(schema, || Ok(EchoAdapter)).await
+}
+```
+
+`examples/echo.rs` 提供一个稍微完整的版本，用 `tokio::sync::watch::channel(Option<EmitFn>)` 让 produce 在重启时能干净地重新绑定。
+
+## 作为 sidecar 注册
+
+```toml
+[[sidecar_channels]]
+name = "echo"
+command = "/abs/path/to/target/release/echo-binary"
+args = []
+restart = true
+```
+
+Dashboard 的配置表单由你的二进制在 `--describe` 时返回的 `Schema` 自动生成；运维不用手写 `config.toml`。
+
+## 职责划分
+
+- **进程重启是 LibreFang 的事。**
+  `crates/librefang-channels/src/sidecar.rs` 里的 supervisor 用指数退避 + 熔断重启崩溃的子进程。
+  你的适配器必须是*崩溃安全*的——不要持有跨重启不可恢复的进程内状态。
+- **平台重连是你的适配器的事。**
+  断开的 WebSocket / 长轮询 / SSE 重连是你自己的传输层关心的事，用 `with_backoff` 即可。
+- **stdout 保留给协议帧。**
+  日志全走 stderr；daemon 会把 stderr 收进主日志并按 channel 名分类。
+
+## 一致性测试（Conformance）
+
+`tests/conformance.rs` 跑 `conformance/sidecar/corpus/` 里的 13 个跨实现测试向量，双向验证：
+
+- **producer 侧**：用 `MessageBuilder` 构造事件，断言序列化结果与语料 fixture 字节一致。
+- **consumer 侧**：反序列化每个命令 fixture，断言得到的 `Command` 变体和字段值符合预期。
+
+加新协议变体或修 wire 形状时先更新语料；Python SDK 和 Rust SDK 都钉在同一份文件上，契约漂移时会同时失败。
+
+## 常见坑
+
+- **不要在 `produce` 之外 spawn 一个捕获了 `EmitFn` 的 future。**
+  Supervisor 期待 `produce` 是 emit 通道的唯一所有者。
+- **不要在跨网络调用的 `.await` 时持有 `tokio::sync::Mutex`。**
+  其他等同一把锁的任务会一起卡。
+  按资源拆锁，或用 `DashMap` 做按 key 的状态。
+- **不要 `println!` 到 stdout。**
+  会污染 wire。
+  编译器抓不到，需要靠规范。
+- **不要在可恢复的错误上提前从 `produce` return。**
+  `produce` 返回会让 supervisor 重启整个子进程；这是留给不可恢复条件的。
+  瞬时失败用 `with_backoff` 处理。
+
+## 另见
+
+- [Rust Telegram sidecar 适配器](/zh/architecture/rust-telegram-sidecar) —— 基于本 SDK 实现的第一个第一方适配器，可作为 Markdown → HTML 管线、UTF-16 分块、Bot API 重试形状的具体参考。
+- 仓库内：`docs/architecture/sidecar-channels.md`、`docs/architecture/sidecar-protocol.md`。
