@@ -596,6 +596,7 @@ pub(super) async fn execute_single_tool_call_inner(
     }
 
     let effective_exec_policy = ctx.manifest.exec_policy.as_ref();
+    let tr_cfg = ctx.opts.tool_results_config.clone().unwrap_or_default();
     let tool_timeout = ctx.kernel.as_ref().map_or(TOOL_TIMEOUT_SECS, |k| {
         k.tool_timeout_secs_for(&tool_call.name)
     });
@@ -636,6 +637,8 @@ pub(super) async fn execute_single_tool_call_inner(
             Some(ctx.session.id.to_string()).as_deref(),
             ctx.dangerous_command_checker,
             Some(ctx.available_tools),
+            tr_cfg.spill_threshold_bytes,
+            tr_cfg.max_artifact_bytes,
         ),
     )
     .await

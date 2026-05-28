@@ -2185,6 +2185,47 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             Err(reason) => Err(reason),
         }
     }
+
+    /// Auto-describe inbound channel images when `[media] image_description` is
+    /// enabled (#5739).
+    ///
+    /// Honors the kernel `[media] image_description` flag (default ON) —
+    /// returns `Ok(None)` when disabled so the bridge delivers the raw
+    /// `ImageFile` block to the agent unchanged. When enabled, materializes a
+    /// `MediaAttachment` over the already-downloaded file and dispatches to
+    /// `MediaEngine::describe_image`.
+    ///
+    /// This allows text-only model agents to receive a natural-language
+    /// description alongside the `ImageFile` block. Vision-capable models
+    /// receive both and can choose which to use.
+    async fn describe_inbound_image(
+        &self,
+        path: &std::path::Path,
+        mime_type: &str,
+    ) -> Result<Option<String>, String> {
+        if !self.kernel.config_ref().media.image_description {
+            return Ok(None);
+        }
+
+        let size_bytes = match tokio::fs::metadata(path).await {
+            Ok(m) => m.len(),
+            Err(e) => return Err(format!("stat saved image failed: {e}")),
+        };
+
+        let attachment = librefang_types::media::MediaAttachment {
+            media_type: librefang_types::media::MediaType::Image,
+            mime_type: mime_type.to_string(),
+            source: librefang_types::media::MediaSource::FilePath {
+                path: path.to_string_lossy().into_owned(),
+            },
+            size_bytes,
+        };
+
+        match self.kernel.media().describe_image(&attachment).await {
+            Ok(result) => Ok(Some(result.description)),
+            Err(reason) => Err(reason),
+        }
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
