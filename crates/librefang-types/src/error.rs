@@ -44,6 +44,12 @@ pub enum LibreFangError {
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    /// A generic resource was not found. Used by tool-runner submodules when
+    /// the resource kind is not one of the typed variants above (agent,
+    /// session). Maps to HTTP 404.
+    #[error("{kind} '{id}' not found")]
+    ResourceNotFound { kind: String, id: String },
+
     /// A memory substrate error occurred.
     ///
     /// `source` carries the original `rusqlite::Error` (or other storage
