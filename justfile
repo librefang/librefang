@@ -276,7 +276,7 @@ _dev-docker *ARGS:
 
     # Forward provider keys from the host environment if they're set, so the agent inside the container can answer.
     HOST_ENV_ARGS=()
-    for k in OPENAI_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY GOOGLE_API_KEY GEMINI_API_KEY DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN; do
+    for k in OPENAI_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY GOOGLE_API_KEY GEMINI_API_KEY DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_LOG; do
       if [ -n "${!k:-}" ]; then
         HOST_ENV_ARGS+=(-e "${k}")
       fi
