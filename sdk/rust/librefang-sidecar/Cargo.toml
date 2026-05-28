@@ -1,0 +1,33 @@
+[workspace]
+# Independent of the kernel workspace: this SDK is consumed by external
+# Rust adapters and must not pull in librefang-channels / librefang-kernel
+# as transitive deps. Keeping it a separate workspace root also isolates
+# its target/ from the kernel's shared one.
+
+[package]
+name = "librefang-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "SDK for writing LibreFang sidecar channel adapters in Rust"
+license = "MIT"
+repository = "https://github.com/librefang/librefang"
+homepage = "https://librefang.ai"
+keywords = ["librefang", "sidecar", "channel", "agent", "ai"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+rust-version = "1.80"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Tokio feature set the runtime actually uses.
+# io-std + io-util: stdin/stdout reader + write_all. rt + macros: spawn + tokio::select!. rt-multi-thread: enables `cargo run --example echo` (the in-tree example uses an unattributed `#[tokio::main]` which expands to `flavor = "multi_thread"`); the SDK runtime itself spawns four tasks and does not require work-stealing, but baking the feature in keeps the example self-contained and the README copy-paste path frictionless for downstream adapters. sync: mpsc + watch + Mutex (runtime + echo example use these — no Notify dependency). time: sleep for backoff and the ready re-announce interval. No `signal` (no signal handling in this SDK).
+tokio = { version = "1", features = ["io-std", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[[example]]
+name = "echo"
+path = "examples/echo.rs"
