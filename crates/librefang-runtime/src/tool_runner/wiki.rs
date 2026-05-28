@@ -1,6 +1,12 @@
 //! Memory-wiki tools (issue #3329).
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576). The per-user ACL gate (`enforce_memory_acl`, shared and still
+//! `Result<_, String>`) returns only its Deny message on `Err`, so it maps to
+//! `ToolError::PermissionDenied`; the message text is preserved verbatim.
 
-use super::{enforce_memory_acl, require_kernel, MemoryAclOp};
+use super::error::{ToolError, ToolResult};
+use super::{enforce_memory_acl, require_kernel_typed, MemoryAclOp};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
@@ -16,9 +22,11 @@ pub(super) fn tool_wiki_get(
     kernel: Option<&Arc<dyn KernelHandle>>,
     sender_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let topic = input["topic"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("topic"))?;
     // #5139: gate the read on the per-user ACL before hitting the vault.
     enforce_memory_acl(
         kernel,
@@ -26,8 +34,9 @@ pub(super) fn tool_wiki_get(
         channel,
         MemoryAclOp::Read,
         WIKI_NAMESPACE,
-    )?;
-    let value = kh.wiki_get(topic).map_err(|e| e.to_string())?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
+    let value = kh.wiki_get(topic).map_err(ToolError::upstream)?;
     Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }
 
@@ -36,9 +45,11 @@ pub(super) fn tool_wiki_search(
     kernel: Option<&Arc<dyn KernelHandle>>,
     sender_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let query = input["query"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("query"))?;
     let limit = input
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -51,8 +62,9 @@ pub(super) fn tool_wiki_search(
         channel,
         MemoryAclOp::Read,
         WIKI_NAMESPACE,
-    )?;
-    let value = kh.wiki_search(query, limit).map_err(|e| e.to_string())?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
+    let value = kh.wiki_search(query, limit).map_err(ToolError::upstream)?;
     Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }
 
@@ -62,10 +74,14 @@ pub(super) fn tool_wiki_write(
     caller_agent_id: Option<&str>,
     sender_id: Option<&str>,
     channel: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
-    let body = input["body"].as_str().ok_or("Missing 'body' parameter")?;
+) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
+    let topic = input["topic"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("topic"))?;
+    let body = input["body"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("body"))?;
     let force = input
         .get("force")
         .and_then(|v| v.as_bool())
@@ -78,7 +94,8 @@ pub(super) fn tool_wiki_write(
         channel,
         MemoryAclOp::Write,
         WIKI_NAMESPACE,
-    )?;
+    )
+    .map_err(ToolError::PermissionDenied)?;
 
     // Provenance is constructed kernel-side rather than left to the LLM:
     // (1) every write is required to carry an agent attribution per #3329's
@@ -103,6 +120,30 @@ pub(super) fn tool_wiki_write(
 
     let value = kh
         .wiki_write(topic, body, provenance, force)
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
     Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn wiki_get_without_kernel_returns_unavailable() {
+        let r = tool_wiki_get(&json!({"topic": "x"}), None, None, None);
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[test]
+    fn wiki_search_without_kernel_returns_unavailable() {
+        let r = tool_wiki_search(&json!({"query": "x"}), None, None, None);
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[test]
+    fn wiki_write_without_kernel_returns_unavailable() {
+        let r = tool_wiki_write(&json!({"topic": "x", "body": "y"}), None, None, None, None);
+        assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
 }

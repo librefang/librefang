@@ -249,6 +249,7 @@ pub async fn execute_tool_raw(
             let raw_input_path = input.get("path").and_then(|v| v.as_str());
             let resolved_for_dedup = raw_input_path
                 .and_then(|p| resolve_file_path_ext(p, *workspace_root, &extra_refs).ok());
+            // #3576: tool returns Result<String, ToolError>; narrow here.
             tool_file_read(input, *workspace_root, &extra_refs)
                 .await
                 .map(|content| match resolved_for_dedup {
@@ -257,6 +258,7 @@ pub async fn execute_tool_raw(
                     }
                     None => content,
                 })
+                .map_err(|e| e.to_string())
         }
         "file_write" => {
             // Enforce named workspace read-only restrictions before the sandbox resolves the path.
@@ -325,7 +327,9 @@ pub async fn execute_tool_raw(
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
-            tool_file_write(input, *workspace_root, &extra_refs).await
+            tool_file_write(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         "file_list" => {
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
@@ -334,7 +338,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_file_list(input, *workspace_root, &extra_refs).await
+            tool_file_list(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         "apply_patch" => {
             // SECURITY #3662: Enforce named workspace read-only restrictions
@@ -404,7 +410,9 @@ pub async fn execute_tool_raw(
             // set.
             let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
             let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
+            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -472,7 +480,10 @@ pub async fn execute_tool_raw(
                             spill_or_passthrough("web_fetch", body, threshold, max_artifact)
                         })
                 } else {
-                    tool_web_fetch_legacy(input, threshold, max_artifact).await
+                    // #3576: tool returns Result<String, ToolError>; narrow here.
+                    tool_web_fetch_legacy(input, threshold, max_artifact)
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             }
         },
@@ -577,9 +588,13 @@ pub async fn execute_tool_raw(
                         spill_or_passthrough("web_search", body, threshold, max_artifact)
                     })
                 } else {
-                    tool_web_search_legacy(input).await.map(|body| {
-                        spill_or_passthrough("web_search", body, threshold, max_artifact)
-                    })
+                    // #3576: tool returns Result<String, ToolError>; narrow here.
+                    tool_web_search_legacy(input)
+                        .await
+                        .map(|body| {
+                            spill_or_passthrough("web_search", body, threshold, max_artifact)
+                        })
+                        .map_err(|e| e.to_string())
                 }
             }
         },
@@ -866,13 +881,19 @@ pub async fn execute_tool_raw(
                 interrupt.clone(),
             )
             .await
+            .map_err(|e| e.to_string()) // #3576: narrow ToolError at the boundary
         }
 
-        // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
-        "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
-        "agent_list" => tool_agent_list(*kernel),
-        "agent_kill" => tool_agent_kill(input, *kernel),
+        // Inter-agent tools (require kernel handle). #3576: return
+        // Result<String, ToolError>; narrow to Result<String, String> here.
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools)
+            .await
+            .map_err(|e| e.to_string()),
+        "agent_list" => tool_agent_list(*kernel).map_err(|e| e.to_string()),
+        "agent_kill" => tool_agent_kill(input, *kernel).map_err(|e| e.to_string()),
 
         // Shared memory tools (peer-scoped when sender_id is present).
         // #5139: the per-user `UserMemoryAccess` ACL is enforced inside each
@@ -885,30 +906,67 @@ pub async fn execute_tool_raw(
         "memory_list" => tool_memory_list(*kernel, *caller_agent_id, *sender_id, *channel),
 
         // Memory wiki tools (issue #3329) — same #5139 per-user ACL gate.
-        "wiki_get" => tool_wiki_get(input, *kernel, *sender_id, *channel),
-        "wiki_search" => tool_wiki_search(input, *kernel, *sender_id, *channel),
-        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel),
-
-        // Collaboration tools
-        "agent_find" => tool_agent_find(input, *kernel),
-        "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
-        "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
-        "task_list" => tool_task_list(input, *kernel).await,
-        "task_status" => tool_task_status(input, *kernel).await,
-        "event_publish" => tool_event_publish(input, *kernel).await,
-
-        // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => {
-            tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id).await
+        // #3576: submodule returns Result<String, ToolError>; narrow here.
+        "wiki_get" => {
+            tool_wiki_get(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
         }
-        "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
-        "schedule_delete" => tool_schedule_delete(input, *kernel).await,
+        "wiki_search" => {
+            tool_wiki_search(input, *kernel, *sender_id, *channel).map_err(|e| e.to_string())
+        }
+        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id, *channel)
+            .map_err(|e| e.to_string()),
 
-        // Knowledge graph tools
-        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
-        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel).await,
-        "knowledge_query" => tool_knowledge_query(input, *kernel).await,
+        // Collaboration tools. task_* is the #3576 third slice: the submodule
+        // returns `Result<String, ToolError>`; arms narrow to
+        // `Result<String, String>` here at the boundary (same bridge as the
+        // cron / schedule slices) until the dispatch return type itself lifts.
+        "agent_find" => tool_agent_find(input, *kernel).map_err(|e| e.to_string()),
+        "task_post" => tool_task_post(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_claim" => tool_task_claim(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_list" => tool_task_list(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "task_status" => tool_task_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "event_publish" => tool_event_publish(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+
+        // Scheduling tools (delegate to CronScheduler via kernel handle).
+        // Second slice of the #3576 typed-error migration: the submodule now
+        // returns `Result<String, ToolError>`; the dispatch arms narrow it to
+        // `Result<String, String>` here at the boundary so the broader
+        // dispatch table stays uniform until every submodule has migrated.
+        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+
+        // Knowledge graph tools (#3576 fourth slice: submodule returns
+        // Result<String, ToolError>; arms narrow to Result<String, String>
+        // here, same boundary bridge as the cron / schedule / task slices).
+        "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "knowledge_add_relation" => tool_knowledge_add_relation(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "knowledge_query" => tool_knowledge_query(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Image analysis tool
         "image_analyze" => {
@@ -922,7 +980,10 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_image_analyze(input, *workspace_root, &extra_refs).await
+            // #3576: tool returns Result<String, ToolError>; narrow here.
+            tool_image_analyze(input, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Media understanding tools
@@ -934,7 +995,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
         "media_transcribe" => {
@@ -947,7 +1010,9 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Media generation tools (MediaDriver-based)
@@ -956,19 +1021,29 @@ pub async fn execute_tool_raw(
             let upload_dir = kernel
                 .map(|k| k.effective_upload_dir())
                 .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
-            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir).await
+            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
-        "video_generate" => tool_video_generate(input, *media_drivers).await,
+        "video_generate" => tool_video_generate(input, *media_drivers)
+            .await
+            .map_err(|e| e.to_string()),
         #[cfg(feature = "media")]
-        "video_status" => tool_video_status(input, *media_drivers).await,
+        "video_status" => tool_video_status(input, *media_drivers)
+            .await
+            .map_err(|e| e.to_string()),
         #[cfg(feature = "media")]
-        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
+        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root)
+            .await
+            .map_err(|e| e.to_string()),
 
         // TTS/STT tools
         #[cfg(feature = "media")]
         "text_to_speech" => {
-            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
+            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root)
+                .await
+                .map_err(|e| e.to_string())
         }
         #[cfg(feature = "media")]
         "speech_to_text" => {
@@ -978,40 +1053,53 @@ pub async fn execute_tool_raw(
                 extra.push(dl);
             }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
+            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs)
+                .await
+                .map_err(|e| e.to_string())
         }
 
-        // Docker sandbox tool
+        // Docker sandbox tool (#3576: returns Result<String, ToolError>)
         #[cfg(feature = "docker-sandbox")]
-        "docker_exec" => {
-            tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
-        }
+        "docker_exec" => tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
-        // Location tool
-        "location_get" => tool_location_get().await,
+        // Location tool (#3576: returns Result<String, ToolError>; narrow here)
+        "location_get" => tool_location_get().await.map_err(|e| e.to_string()),
 
         // System time tool
         "system_time" => Ok(tool_system_time()),
 
-        // Skill file read tool
-        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills).await,
+        // Skill file read tool (#3576: return Result<String, ToolError>;
+        // narrow to Result<String, String> here at the boundary).
+        "skill_read_file" => tool_skill_read_file(input, *skill_registry, *allowed_skills)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Skill evolution tools
-        "skill_evolve_create" => {
-            tool_skill_evolve_create(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_update" => {
-            tool_skill_evolve_update(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_patch" => {
-            tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id).await
-        }
-        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry).await,
+        "skill_evolve_create" => tool_skill_evolve_create(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_update" => tool_skill_evolve_update(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_patch" => tool_skill_evolve_patch(input, *skill_registry, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_delete" => tool_skill_evolve_delete(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
         "skill_evolve_rollback" => {
-            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id).await
+            tool_skill_evolve_rollback(input, *skill_registry, *caller_agent_id)
+                .await
+                .map_err(|e| e.to_string())
         }
-        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry).await,
-        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
+        "skill_evolve_write_file" => tool_skill_evolve_write_file(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
+        "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Cron scheduling tools — first slice of the #3576 typed-error
         // migration. The submodule now returns `Result<String, ToolError>`;
@@ -1044,35 +1132,66 @@ pub async fn execute_tool_raw(
             .await
         }
 
-        // Persistent process tools
-        "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
-        "process_poll" => tool_process_poll(input, *process_manager).await,
-        "process_write" => tool_process_write(input, *process_manager).await,
-        "process_kill" => tool_process_kill(input, *process_manager).await,
-        "process_list" => tool_process_list(*process_manager, *caller_agent_id).await,
+        // Persistent process tools (#3576: return Result<String, ToolError>;
+        // narrow to Result<String, String> here at the boundary).
+        "process_start" => tool_process_start(input, *process_manager, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_poll" => tool_process_poll(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_write" => tool_process_write(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_kill" => tool_process_kill(input, *process_manager)
+            .await
+            .map_err(|e| e.to_string()),
+        "process_list" => tool_process_list(*process_manager, *caller_agent_id)
+            .await
+            .map_err(|e| e.to_string()),
 
-        // Hand tools (curated autonomous capability packages)
-        "hand_list" => tool_hand_list(*kernel).await,
-        "hand_activate" => tool_hand_activate(input, *kernel).await,
-        "hand_status" => tool_hand_status(input, *kernel).await,
-        "hand_deactivate" => tool_hand_deactivate(input, *kernel).await,
+        // Hand tools (curated autonomous capability packages). #3576:
+        // submodule returns Result<String, ToolError>; narrow here.
+        "hand_list" => tool_hand_list(*kernel).await.map_err(|e| e.to_string()),
+        "hand_activate" => tool_hand_activate(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "hand_status" => tool_hand_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "hand_deactivate" => tool_hand_deactivate(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
-        // A2A outbound tools (cross-instance agent communication)
-        "a2a_discover" => tool_a2a_discover(input).await,
-        "a2a_send" => tool_a2a_send(input, *kernel).await,
+        // A2A outbound tools (cross-instance agent communication). #3576:
+        // submodule returns Result<String, ToolError>; narrow at the boundary.
+        "a2a_discover" => tool_a2a_discover(input).await.map_err(|e| e.to_string()),
+        "a2a_send" => tool_a2a_send(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
-        // Goal tracking tool
-        "goal_update" => tool_goal_update(input, *kernel),
+        // Goal tracking tool (#3576: sync tool now returns
+        // Result<String, ToolError>; narrow to Result<String, String> here)
+        "goal_update" => tool_goal_update(input, *kernel).map_err(|e| e.to_string()),
 
-        // Workflow tools
-        "workflow_run" => tool_workflow_run(input, *kernel).await,
-        "workflow_list" => tool_workflow_list(*kernel).await,
-        "workflow_describe" => tool_workflow_describe(input, *kernel).await,
-        "workflow_status" => tool_workflow_status(input, *kernel).await,
-        "workflow_start" => {
-            tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
-        }
-        "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
+        // Workflow tools (#3576: return Result<String, ToolError>; narrow
+        // to Result<String, String> here at the boundary).
+        "workflow_run" => tool_workflow_run(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_list" => tool_workflow_list(*kernel).await.map_err(|e| e.to_string()),
+        "workflow_describe" => tool_workflow_describe(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_status" => tool_workflow_status(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_start" => tool_workflow_start(input, *kernel, *caller_agent_id, *session_id)
+            .await
+            .map_err(|e| e.to_string()),
+        "workflow_cancel" => tool_workflow_cancel(input, *kernel)
+            .await
+            .map_err(|e| e.to_string()),
 
         // Browser automation tools
         #[cfg(feature = "browser")]
@@ -1204,8 +1323,10 @@ pub async fn execute_tool_raw(
             tool_read_artifact(input, &artifact_dir).await
         }
 
-        // Canvas / A2UI tool
-        "canvas_present" => tool_canvas_present(input, *workspace_root).await,
+        // Canvas / A2UI tool (#3576: returns Result<String, ToolError>)
+        "canvas_present" => tool_canvas_present(input, *workspace_root)
+            .await
+            .map_err(|e| e.to_string()),
 
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)

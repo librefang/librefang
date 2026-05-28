@@ -761,7 +761,10 @@ async fn test_agent_tools_without_kernel() {
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: require_kernel_typed renders as "Kernel handle unavailable"
+    // (ToolError::Unavailable) rather than the old "Kernel handle not
+    // available" string.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 #[tokio::test]
