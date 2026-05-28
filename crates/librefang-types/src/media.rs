@@ -126,6 +126,8 @@ pub struct MediaConfig {
     pub max_concurrency: usize,
     /// Preferred image description provider (auto-detect if None).
     pub image_provider: Option<String>,
+    /// Preferred image description model (provider default if None).
+    pub image_model: Option<String>,
     /// Preferred audio transcription provider (auto-detect if None).
     ///
     /// Set to any string (e.g. `"local-whisper"`) to use the custom STT
@@ -152,6 +154,7 @@ impl Default for MediaConfig {
             video_description: false,
             max_concurrency: 2,
             image_provider: None,
+            image_model: None,
             audio_provider: None,
             audio_model: None,
             custom_stt: CustomSttConfig::default(),
@@ -796,6 +799,7 @@ mod tests {
         assert!(!config.video_description);
         assert_eq!(config.max_concurrency, 2);
         assert!(config.image_provider.is_none());
+        assert!(config.image_model.is_none());
     }
 
     #[test]
