@@ -21,12 +21,15 @@ pub(super) fn tool_goal_update(
     let progress = if input.get("progress").is_some() {
         let raw = input["progress"]
             .as_f64()
-            .ok_or("Parameter 'progress' must be a number".to_string())?;
+            .ok_or(ToolError::InvalidParameter {
+                name: "progress",
+                reason: "must be a number".into(),
+            })?;
         if !(0.0..=100.0).contains(&raw) {
-            return Err(format!(
-                "Parameter 'progress' must be between 0 and 100, got {}",
-                raw
-            ));
+            return Err(ToolError::InvalidParameter {
+                name: "progress",
+                reason: format!("must be between 0 and 100, got {}", raw),
+            });
         }
         let val = raw.round() as u8;
         Some(val)
