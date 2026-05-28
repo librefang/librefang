@@ -5,7 +5,9 @@ use super::error::{ToolError, ToolResult};
 use super::{check_taint_outbound_text, require_kernel_typed, AGENT_CALL_DEPTH};
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
+use std::fmt::Write;
 use std::sync::Arc;
+use tracing::warn;
 
 pub(super) fn tool_agent_find(
     input: &serde_json::Value,
@@ -50,9 +52,6 @@ pub(super) async fn tool_agent_send(
         .ok_or(ToolError::MissingParameter("message"))?;
     let conversation_key = input["conversation_key"].as_str();
 
-    // Self-send guard: sending a message to oneself would attempt to acquire
-    // `agent_msg_locks[id]` while that lock is already held by the current
-    // turn, causing an unrecoverable deadlock (issue #3613).
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
             return Err(ToolError::InvalidParameter {
@@ -62,18 +61,20 @@ pub(super) async fn tool_agent_send(
         }
     }
 
-    // Taint check: refuse to pass obvious credential payloads across
-    // the agent boundary. `tool_agent_send` is the entry point for
-    // both in-process delegation *and* external A2A peers, so an LLM
-    // that stuffs `OPENAI_API_KEY=sk-…` into its own tool-call
-    // arguments would otherwise exfiltrate the secret to whoever is
-    // on the receiving side. Uses `TaintSink::agent_message` so the
-    // rejection message matches the shape documented in the taint
-    // module.
-    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+    let sink = TaintSink::agent_message();
+    // agent_id is a UUID/name identifier, not free-form content — skip taint
+    // check here. Taint validation remains on message, conversation_key, etc.
+    if let Some(violation) = check_taint_outbound_text(message, &sink) {
         return Err(ToolError::PermissionDenied(format!(
-            "Taint violation: {violation}"
+            "Taint violation (message): {violation}"
         )));
+    }
+    if let Some(key) = conversation_key {
+        if let Some(violation) = check_taint_outbound_text(key, &sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (conversation_key): {violation}"
+            )));
+        }
     }
 
     // Check + increment inter-agent call depth. Surfaced as
@@ -208,11 +209,30 @@ pub(super) async fn tool_agent_spawn(
         .as_str()
         .ok_or(ToolError::MissingParameter("system_prompt"))?;
 
+    let spawn_sink = TaintSink::agent_message();
+    if let Some(violation) = check_taint_outbound_text(name, &spawn_sink) {
+        return Err(ToolError::PermissionDenied(format!(
+            "Taint violation (name): {violation}"
+        )));
+    }
+    if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
+        return Err(ToolError::PermissionDenied(format!(
+            "Taint violation (system_prompt): {violation}"
+        )));
+    }
+
     let tools: Vec<String> = input["tools"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .enumerate()
+                .filter_map(|(i, v)| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        warn!(index = i, "tools[{}]: non-string value, skipping", i);
+                        None
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -222,7 +242,14 @@ pub(super) async fn tool_agent_spawn(
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .enumerate()
+                .filter_map(|(i, v)| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        warn!(index = i, "shell[{}]: non-string value, skipping", i);
+                        None
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -262,12 +289,14 @@ pub(super) fn tool_agent_list(kernel: Option<&Arc<dyn KernelHandle>>) -> ToolRes
     if agents.is_empty() {
         return Ok("No agents currently running.".to_string());
     }
-    let mut output = format!("Running agents ({}):\n", agents.len());
+    let mut output = String::with_capacity(64 + agents.len() * 128);
+    let _ = writeln!(output, "Running agents ({}):", agents.len());
     for a in &agents {
-        output.push_str(&format!(
-            "  - {} (id: {}, state: {}, model: {}:{})\n",
+        let _ = writeln!(
+            output,
+            "  - {} (id: {}, state: {}, model: {}:{})",
             a.name, a.id, a.state, a.model_provider, a.model_name
-        ));
+        );
     }
     Ok(output)
 }
@@ -280,6 +309,7 @@ pub(super) fn tool_agent_kill(
     let agent_id = input["agent_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("agent_id"))?;
+    // agent_id is a UUID/name identifier, not free-form content — no taint check.
     kh.kill_agent(agent_id).map_err(ToolError::upstream)?;
     Ok(format!("Agent {agent_id} killed successfully."))
 }
