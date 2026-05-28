@@ -39,7 +39,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
-use super::sidecar_describe::{describe_sidecar, SidecarSchema};
+use super::sidecar_describe::{describe_sidecar, SidecarSchema, SidecarSchemaField};
 // The `super::skills` channel-config helpers
 // (upsert_channel_config / remove_channel_config /
 // append_channel_instance / update_channel_instance /
@@ -163,6 +163,24 @@ fn sidecar_channel_rows(
     rows
 }
 
+/// Compile-time field descriptor used as a fallback when the Python sidecar
+/// SDK is not installed and `--describe` cannot be executed at boot.
+///
+/// Field semantics mirror `SidecarSchemaField` but use `&'static str` so the
+/// data can live in the binary. The `options` field is omitted because no
+/// first-party adapter with `select`-type fields relies on static fallback —
+/// adapters with select fields must have the SDK installed.
+struct StaticSidecarField {
+    key: &'static str,
+    label: &'static str,
+    /// Matches the `SidecarSchemaField.field_type` values used at runtime:
+    /// `"text"`, `"secret"`, `"select"`, `"bool"`.
+    field_type: &'static str,
+    required: bool,
+    placeholder: &'static str,
+    advanced: bool,
+}
+
 /// One discoverable, first-party sidecar adapter shipped in the SDK.
 ///
 /// `name` doubles as the catalog key — it must match the value the
@@ -180,6 +198,13 @@ struct SidecarCatalogEntry {
     /// Module / script arguments passed to `command`. `--describe` is appended
     /// by `describe_sidecar()` at probe time.
     args: &'static [&'static str],
+    /// Compile-time fallback schema used when `--describe` fails at daemon
+    /// boot (e.g. Python sidecar SDK not installed). When `Some`, the fields
+    /// are seeded into the schema cache so the dashboard configure form and
+    /// the `POST /api/channels/sidecar/{name}/configure` endpoint work even
+    /// without a live Python interpreter. When `None`, the adapter shows an
+    /// empty form until the SDK is installed and the daemon is restarted.
+    static_fields: Option<&'static [StaticSidecarField]>,
 }
 
 /// First-party sidecar adapters shipped under
@@ -191,6 +216,83 @@ struct SidecarCatalogEntry {
 /// or release notes. `webhook` is deliberately omitted: it still has an
 /// in-process entry in `CHANNEL_REGISTRY` and we must not show two
 /// "webhook" cards on the page.
+/// Compile-time field descriptors for the Feishu / Lark adapter.
+///
+/// Mirrors `FeishuAdapter.SCHEMA.fields` in
+/// `sdk/python/librefang/sidecar/adapters/feishu.py`. These are used as
+/// the fallback schema when `python3 -m librefang.sidecar.adapters.feishu
+/// --describe` fails at daemon boot (e.g. on Windows without the Python
+/// sidecar SDK installed), so the dashboard configure form always shows the
+/// required input fields — `FEISHU_APP_ID` and `FEISHU_APP_SECRET` — rather
+/// than an empty drawer. Keep in sync with the Python `SCHEMA` definition
+/// when fields are added or removed.
+const FEISHU_STATIC_FIELDS: &[StaticSidecarField] = &[
+    StaticSidecarField {
+        key: "FEISHU_APP_ID",
+        label: "App ID",
+        field_type: "text",
+        required: true,
+        placeholder: "cli_a...",
+        advanced: false,
+    },
+    StaticSidecarField {
+        key: "FEISHU_APP_SECRET",
+        label: "App Secret",
+        field_type: "secret",
+        required: true,
+        placeholder: "",
+        advanced: false,
+    },
+    StaticSidecarField {
+        key: "FEISHU_REGION",
+        label: "Region (cn|intl)",
+        field_type: "text",
+        required: false,
+        placeholder: "cn",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "FEISHU_RECEIVE_MODE",
+        label: "Receive mode (websocket|webhook)",
+        field_type: "text",
+        required: false,
+        placeholder: "websocket",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "FEISHU_WEBHOOK_PORT",
+        label: "Webhook port (webhook mode only)",
+        field_type: "text",
+        required: false,
+        placeholder: "8453",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "FEISHU_VERIFICATION_TOKEN",
+        label: "Verification token (webhook mode)",
+        field_type: "secret",
+        required: false,
+        placeholder: "",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "FEISHU_ENCRYPT_KEY",
+        label: "Encrypt key (webhook mode)",
+        field_type: "secret",
+        required: false,
+        placeholder: "",
+        advanced: true,
+    },
+    StaticSidecarField {
+        key: "FEISHU_ACCOUNT_ID",
+        label: "Account ID (multi-bot routing)",
+        field_type: "text",
+        required: false,
+        placeholder: "",
+        advanced: true,
+    },
+];
+
 const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
     SidecarCatalogEntry {
         name: "telegram",
@@ -198,6 +300,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Telegram Bot API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.telegram"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "ntfy",
@@ -205,6 +308,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "ntfy.sh pub/sub notifications (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.ntfy"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "gotify",
@@ -212,6 +316,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Gotify push notifications (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.gotify"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "mastodon",
@@ -219,6 +324,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Mastodon Streaming API (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.mastodon"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "bluesky",
@@ -226,6 +332,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Bluesky / AT Protocol adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.bluesky"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "reddit",
@@ -233,6 +340,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Reddit OAuth2 API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.reddit"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "twitch",
@@ -240,6 +348,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Twitch IRC gateway adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.twitch"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "rocketchat",
@@ -247,6 +356,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Rocket.Chat REST API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.rocketchat"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "discord",
@@ -254,6 +364,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Discord Gateway bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.discord"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "nextcloud",
@@ -261,6 +372,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Nextcloud Talk OCS REST adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.nextcloud"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "slack",
@@ -268,6 +380,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Slack Socket Mode bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.slack"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "webex",
@@ -275,6 +388,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Cisco Webex bot adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.webex"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "line",
@@ -282,6 +396,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "LINE Messaging API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.line"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "zulip",
@@ -289,6 +404,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Zulip REST + event-queue long-poll adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.zulip"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "mattermost",
@@ -296,6 +412,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Mattermost WebSocket + REST adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.mattermost"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "signal",
@@ -303,6 +420,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "signal-cli REST API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.signal"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "qq",
@@ -310,6 +428,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "QQ Bot API v2 WebSocket + REST adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.qq"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "matrix",
@@ -317,6 +436,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Matrix Client-Server API adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.matrix"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "feishu",
@@ -324,6 +444,10 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Feishu/Lark Open Platform adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.feishu"],
+        // Compile-time fallback — surfaces the configure form even when
+        // the Python sidecar SDK is not installed (common on Windows).
+        // Mirrors FeishuAdapter.SCHEMA.fields in feishu.py; keep in sync.
+        static_fields: Some(FEISHU_STATIC_FIELDS),
     },
     SidecarCatalogEntry {
         name: "wecom",
@@ -331,6 +455,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WeCom (\u{4f01}\u{4e1a}\u{5fae}\u{4fe1}) intelligent-bot WebSocket adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.wecom"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "email",
@@ -338,6 +463,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "IMAP / SMTP email adapter (out-of-process sidecar, Python stdlib only)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.email"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "dingtalk",
@@ -345,6 +471,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "DingTalk (\u{9489}\u{9489}) Robot stream-mode adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.dingtalk"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "wechat",
@@ -352,6 +479,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WeChat personal-account adapter via the iLink (ClawBot) gateway (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.wechat"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "teams",
@@ -359,6 +487,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Teams Bot Framework v3 adapter (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.teams"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "whatsapp",
@@ -366,6 +495,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "WhatsApp adapter — Meta Cloud API + Web/QR (Baileys) gateway dual-mode (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.whatsapp"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "webhook",
@@ -373,6 +503,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Generic HMAC-signed HTTP webhook adapter (out-of-process sidecar, Python stdlib only)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.webhook"],
+        static_fields: None,
     },
     SidecarCatalogEntry {
         name: "google_chat",
@@ -380,6 +511,7 @@ const SIDECAR_CATALOG: &[SidecarCatalogEntry] = &[
         description: "Google Chat adapter — service-account JWT auth + REST API send, HTTP webhook receive (out-of-process sidecar)",
         command: "python3",
         args: &["-m", "librefang.sidecar.adapters.google_chat"],
+        static_fields: None,
     },
 ];
 
@@ -399,10 +531,13 @@ fn schema_cache() -> &'static RwLock<HashMap<&'static str, SidecarSchema>> {
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
 /// `server::build_router`. Failures (SDK not installed, describe crashed)
-/// are logged at WARN and the row falls back to an empty `fields[]` — the
-/// operator then sees the description + setup-steps text but no form.
-/// This keeps daemon boot resilient in dev environments that have not
-/// run `pip install -e sdk/python`.
+/// are logged at WARN; when the entry carries `static_fields`, those are
+/// used as a compile-time fallback so the dashboard configure form always
+/// shows fields for adapters that have opted in. Entries without
+/// `static_fields` fall back to an empty `fields[]` — the operator then
+/// sees the description + setup-steps text but no form until the SDK is
+/// installed. This keeps daemon boot resilient in dev environments that
+/// have not run `pip install -e sdk/python`.
 pub async fn populate_sidecar_schema_cache() {
     for entry in SIDECAR_CATALOG {
         let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
@@ -416,11 +551,43 @@ pub async fn populate_sidecar_schema_cache() {
                 schema_cache().write().unwrap().insert(entry.name, schema);
             }
             Err(e) => {
-                tracing::warn!(
-                    adapter = entry.name,
-                    error = %e,
-                    "sidecar --describe failed; discovery card will have no form fields"
-                );
+                if let Some(static_fields) = entry.static_fields {
+                    // Use the compile-time fallback so the configure form is
+                    // usable even without a working Python SDK installation.
+                    let fallback = SidecarSchema {
+                        name: entry.name.to_string(),
+                        display_name: entry.display_name.to_string(),
+                        description: entry.description.to_string(),
+                        fields: static_fields
+                            .iter()
+                            .map(|f| SidecarSchemaField {
+                                key: f.key.to_string(),
+                                label: f.label.to_string(),
+                                field_type: f.field_type.to_string(),
+                                required: f.required,
+                                placeholder: f.placeholder.to_string(),
+                                advanced: f.advanced,
+                                options: None,
+                            })
+                            .collect(),
+                    };
+                    tracing::warn!(
+                        adapter = entry.name,
+                        error = %e,
+                        fields = fallback.fields.len(),
+                        "sidecar --describe failed; using compile-time fallback schema"
+                    );
+                    schema_cache()
+                        .write()
+                        .unwrap()
+                        .insert(entry.name, fallback);
+                } else {
+                    tracing::warn!(
+                        adapter = entry.name,
+                        error = %e,
+                        "sidecar --describe failed; discovery card will have no form fields"
+                    );
+                }
             }
         }
     }
@@ -1059,3 +1226,81 @@ pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl I
 // latter tested `instance_signature` + `resolve_secret_env_overrides`
 // (both deleted with their only callers, the per-instance REST
 // handlers).
+
+#[cfg(test)]
+mod feishu_static_schema_tests {
+    use super::{FEISHU_STATIC_FIELDS, SIDECAR_CATALOG};
+
+    /// The Feishu catalog entry must declare FEISHU_APP_ID + FEISHU_APP_SECRET
+    /// as required non-advanced fields and the remaining six as optional
+    /// advanced fields so the dashboard configure form shows the required
+    /// inputs by default and hides the rest under "Show advanced".
+    #[test]
+    fn feishu_catalog_entry_has_static_fields() {
+        let entry = SIDECAR_CATALOG
+            .iter()
+            .find(|e| e.name == "feishu")
+            .expect("feishu must be in SIDECAR_CATALOG");
+        let fields = entry
+            .static_fields
+            .expect("feishu catalog entry must have static_fields set");
+        assert_eq!(
+            fields.len(),
+            8,
+            "expected 8 static fields matching FeishuAdapter.SCHEMA.fields"
+        );
+    }
+
+    #[test]
+    fn feishu_static_fields_required_set_is_correct() {
+        let required: Vec<&str> = FEISHU_STATIC_FIELDS
+            .iter()
+            .filter(|f| f.required)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            required,
+            vec!["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+            "only FEISHU_APP_ID and FEISHU_APP_SECRET are required"
+        );
+    }
+
+    #[test]
+    fn feishu_static_fields_advanced_set_is_correct() {
+        let advanced: Vec<&str> = FEISHU_STATIC_FIELDS
+            .iter()
+            .filter(|f| f.advanced)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            advanced,
+            vec![
+                "FEISHU_REGION",
+                "FEISHU_RECEIVE_MODE",
+                "FEISHU_WEBHOOK_PORT",
+                "FEISHU_VERIFICATION_TOKEN",
+                "FEISHU_ENCRYPT_KEY",
+                "FEISHU_ACCOUNT_ID",
+            ],
+            "optional advanced fields must match FeishuAdapter.SCHEMA"
+        );
+    }
+
+    #[test]
+    fn feishu_static_fields_secret_type_set_is_correct() {
+        let secrets: Vec<&str> = FEISHU_STATIC_FIELDS
+            .iter()
+            .filter(|f| f.field_type == "secret")
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            secrets,
+            vec![
+                "FEISHU_APP_SECRET",
+                "FEISHU_VERIFICATION_TOKEN",
+                "FEISHU_ENCRYPT_KEY",
+            ],
+            "secret-typed fields must match FeishuAdapter.SCHEMA"
+        );
+    }
+}
