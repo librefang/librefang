@@ -67,8 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsecret-1-dev \
     perl \
     ca-certificates \
-    curl \
-    gnupg \
     libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
@@ -76,8 +74,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI (`gh`) — required by `cargo xtask release` (changelog generation hard-fails with "gh CLI required" at xtask/src/changelog.rs:421 if absent) and by `cargo xtask changelog`. Installed from GitHub's official apt repo per https://github.com/cli/cli/blob/trunk/docs/install_linux.md so the version tracks upstream stable rather than whatever Debian's archive carries. The release wrapper at scripts/run-xtask.sh forwards `GH_TOKEN` from the host (pulled out of the macOS Keychain when needed) so this `gh` authenticates without re-running `gh auth login` inside the container.
-RUN install -d -m 0755 /etc/apt/keyrings \
+# GitHub CLI (`gh`) — required by `cargo xtask release` (changelog generation hard-fails with "gh CLI required" at xtask/src/changelog.rs:421 if absent) and by `cargo xtask changelog`; also used by `release.rs` for the version-bump PR and by `cargo xtask contributors` for the GitHub-API-backed contributor list. Installed from GitHub's official apt repo per https://github.com/cli/cli/blob/trunk/docs/install_linux.md so the version tracks upstream stable rather than whatever Debian's archive carries. The release wrapper at scripts/run-xtask.sh forwards `GH_TOKEN` from the host (pulled out of the macOS Keychain when needed) so this `gh` authenticates without re-running `gh auth login` inside the container.
+# `curl` + `gnupg` are bootstrap deps for the apt-key fetch only — they live in this RUN block (not the Tauri/system-deps block above) so the layer that needs them is the same layer that consumes them, and a future change to the system-deps list doesn't invalidate the gh layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg \
+    && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
