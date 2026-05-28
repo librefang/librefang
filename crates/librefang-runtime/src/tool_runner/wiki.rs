@@ -16,6 +16,30 @@ use std::sync::Arc;
 /// pre-#5139 "all attributed users may use the wiki" behaviour is preserved;
 /// an operator who sets an explicit `memory_access` can now restrict it.
 const WIKI_NAMESPACE: &str = "wiki";
+const MAX_LIMIT: u64 = 100;
+const PRETTY_THRESHOLD: usize = 1024;
+
+/// Compact output for small payloads, pretty-print for large ones.
+fn format_output(value: &serde_json::Value) -> String {
+    match serde_json::to_string(value) {
+        Ok(compact) if compact.len() > PRETTY_THRESHOLD => compact,
+        Ok(_) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        Err(_) => value.to_string(),
+    }
+}
+
+/// Validate that a string parameter is not empty or whitespace-only.
+fn require_non_empty<'a>(val: &'a str, label: &str) -> Result<&'a str, ToolError> {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        Err(ToolError::InvalidParameter {
+            name: label,
+            reason: "must not be empty or whitespace".to_string(),
+        })
+    } else {
+        Ok(trimmed)
+    }
+}
 
 pub(super) fn tool_wiki_get(
     input: &serde_json::Value,
@@ -24,9 +48,10 @@ pub(super) fn tool_wiki_get(
     channel: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
-    let topic = input["topic"]
+    let raw = input["topic"]
         .as_str()
         .ok_or(ToolError::MissingParameter("topic"))?;
+    let topic = require_non_empty(raw, "topic")?;
     // #5139: gate the read on the per-user ACL before hitting the vault.
     enforce_memory_acl(
         kernel,
@@ -37,7 +62,7 @@ pub(super) fn tool_wiki_get(
     )
     .map_err(ToolError::PermissionDenied)?;
     let value = kh.wiki_get(topic).map_err(ToolError::upstream)?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+    Ok(format_output(&value))
 }
 
 pub(super) fn tool_wiki_search(
@@ -47,13 +72,18 @@ pub(super) fn tool_wiki_search(
     channel: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
-    let query = input["query"]
+    let raw = input["query"]
         .as_str()
         .ok_or(ToolError::MissingParameter("query"))?;
+    let query = require_non_empty(raw, "query")?;
     let limit = input
         .get("limit")
         .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
+        .map(|n| {
+            usize::try_from(n)
+                .unwrap_or(usize::MAX)
+                .min(MAX_LIMIT as usize)
+        })
         .unwrap_or(10);
     // #5139: search reads page bodies — gate it the same as `wiki_get`.
     enforce_memory_acl(
@@ -65,7 +95,7 @@ pub(super) fn tool_wiki_search(
     )
     .map_err(ToolError::PermissionDenied)?;
     let value = kh.wiki_search(query, limit).map_err(ToolError::upstream)?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+    Ok(format_output(&value))
 }
 
 pub(super) fn tool_wiki_write(
@@ -76,12 +106,14 @@ pub(super) fn tool_wiki_write(
     channel: Option<&str>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
-    let topic = input["topic"]
+    let raw_topic = input["topic"]
         .as_str()
         .ok_or(ToolError::MissingParameter("topic"))?;
-    let body = input["body"]
+    let topic = require_non_empty(raw_topic, "topic")?;
+    let raw_body = input["body"]
         .as_str()
         .ok_or(ToolError::MissingParameter("body"))?;
+    let body = require_non_empty(raw_body, "body")?;
     let force = input
         .get("force")
         .and_then(|v| v.as_bool())
@@ -103,8 +135,9 @@ pub(super) fn tool_wiki_write(
     //     are authoritative — letting the model spoof them would defeat the
     //     audit value of the frontmatter.
     let agent = caller_agent_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or(ToolError::MissingParameter("agent_id"))?;
     // Keep `channel` and `sender` as DISTINCT fields in the audit
     // frontmatter: `channel` is the transport/room (telegram, slack, "cron",
     // …) and `sender` is the attributed user. Conflating them — as an
@@ -121,7 +154,7 @@ pub(super) fn tool_wiki_write(
     let value = kh
         .wiki_write(topic, body, provenance, force)
         .map_err(ToolError::upstream)?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+    Ok(format_output(&value))
 }
 
 #[cfg(test)]
