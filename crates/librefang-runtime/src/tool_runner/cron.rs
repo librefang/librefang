@@ -22,19 +22,17 @@ pub(super) async fn tool_cron_create(
     let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_create"))?;
     let mut job = input.clone();
     if let Some(obj) = job.as_object_mut() {
-        if obj.contains_key("peer_id") {
-            // Preserve explicit peer_id from the caller.
-        } else {
-            match sender_id {
-                Some(pid) if !pid.is_empty() => {
-                    obj.insert(
-                        "peer_id".to_string(),
-                        serde_json::Value::String(pid.to_string()),
-                    );
-                }
-                _ => {
-                    obj.remove("peer_id");
-                }
+        match sender_id {
+            Some(pid) if !pid.is_empty() => {
+                // Always override peer_id with authenticated sender_id —
+                // caller cannot inject arbitrary peer_id.
+                obj.insert(
+                    "peer_id".to_string(),
+                    serde_json::Value::String(pid.to_string()),
+                );
+            }
+            _ => {
+                obj.remove("peer_id");
             }
         }
     }
