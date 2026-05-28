@@ -142,15 +142,26 @@ impl SemanticStore {
         // Strip the surrounding quotes from the JSON string (e.g. "\"text\"" -> "text")
         let modality_str = modality_str.trim_matches('"');
 
+        // Honor an explicit confidence the caller stashed in metadata (the LLM
+        // extractor does this when it has a probability for an extracted fact).
+        // Defaulting to 1.0 keeps backwards compatibility for rule-based and
+        // manual writes that don't set the key.
+        let confidence = metadata
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+
         conn.execute(
             "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 id.0.to_string(),
                 agent_id.0.to_string(),
                 content,
                 source_str,
                 scope,
+                confidence,
                 meta_str,
                 now,
                 embedding_bytes,
@@ -594,11 +605,17 @@ impl SemanticStore {
     }
 
     /// Soft-delete a memory fragment.
+    ///
+    /// Stamps `deleted_at` (unix seconds) alongside `deleted = 1` so the
+    /// `prune_soft_deleted_memories` retention sweep can hard-delete the row
+    /// later. Without the timestamp the prune filter (`deleted_at IS NOT NULL`)
+    /// would skip it forever, leaking the embedding BLOB indefinitely.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
-            "UPDATE memories SET deleted = 1 WHERE id = ?1",
-            rusqlite::params![id.0.to_string()],
+            "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+             WHERE id = ?2 AND deleted = 0",
+            rusqlite::params![Utc::now().timestamp(), id.0.to_string()],
         )
         .map_err(LibreFangError::memory)?;
         Ok(())
@@ -675,12 +692,15 @@ impl SemanticStore {
     }
 
     /// Soft-delete all memories for a specific agent.
+    ///
+    /// See [`Self::forget`] for why `deleted_at` is stamped.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
-                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND deleted = 0",
-                rusqlite::params![agent_id.0.to_string()],
+                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                 WHERE agent_id = ?2 AND deleted = 0",
+                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string()],
             )
             .map_err(LibreFangError::memory)?;
         Ok(count as u64)
@@ -691,8 +711,9 @@ impl SemanticStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
-                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
-                rusqlite::params![agent_id.0.to_string(), scope],
+                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                 WHERE agent_id = ?2 AND scope = ?3 AND deleted = 0",
+                rusqlite::params![Utc::now().timestamp(), agent_id.0.to_string(), scope],
             )
             .map_err(LibreFangError::memory)?;
         Ok(count as u64)
@@ -708,8 +729,14 @@ impl SemanticStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
-                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND created_at < ?3 AND deleted = 0",
-                rusqlite::params![agent_id.0.to_string(), scope, before.to_rfc3339()],
+                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                 WHERE agent_id = ?2 AND scope = ?3 AND created_at < ?4 AND deleted = 0",
+                rusqlite::params![
+                    Utc::now().timestamp(),
+                    agent_id.0.to_string(),
+                    scope,
+                    before.to_rfc3339()
+                ],
             )
             .map_err(LibreFangError::memory)?;
         Ok(count as u64)
@@ -727,8 +754,9 @@ impl SemanticStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
-                "UPDATE memories SET deleted = 1 WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
-                rusqlite::params![scope, before.to_rfc3339()],
+                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                 WHERE scope = ?2 AND created_at < ?3 AND deleted = 0",
+                rusqlite::params![Utc::now().timestamp(), scope, before.to_rfc3339()],
             )
             .map_err(LibreFangError::memory)?;
         Ok(count as u64)

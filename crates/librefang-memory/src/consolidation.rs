@@ -160,8 +160,9 @@ impl ConsolidationEngine {
 
                         outer_tx
                             .execute(
-                                "UPDATE memories SET deleted = 1 WHERE id = ?1",
-                                rusqlite::params![&rows[j].0],
+                                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                                 WHERE id = ?2",
+                                rusqlite::params![Utc::now().timestamp(), &rows[j].0],
                             )
                             .map_err(LibreFangError::memory)?;
 

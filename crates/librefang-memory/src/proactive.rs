@@ -209,9 +209,16 @@ impl ProactiveMemoryStore {
     /// Decay confidence scores for memories that haven't been accessed recently.
     ///
     /// For each memory not accessed in the last day, applies:
-    ///   `new_confidence = original_confidence * e^(-decay_rate * days_since_access)`
-    /// Then boosts frequently accessed memories:
-    ///   `new_confidence *= min(1.0 + log2(access_count), 2.0)`
+    ///   `effective_rate = decay_rate / boost`, where
+    ///   `boost = min(1 + log2(access_count), MAX_BOOST)`.
+    ///   `new_confidence = current_confidence * e^(-effective_rate * days_since_access)`
+    ///
+    /// Popular memories decay *slower* (rate divided by boost) instead of being
+    /// multiplied back up. The previous formula multiplied by `boost` and
+    /// clamped to `[0,1]`, which made any memory with ≥ 2 accesses effectively
+    /// immortal: `0.99 * 2.0 → clamp → 1.0` every tick. The fix preserves the
+    /// "popular memories stick around longer" intent while keeping decay
+    /// strictly monotonic (per tick, confidence never increases).
     ///
     /// This is rate-limited to run at most once per hour.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
@@ -280,13 +287,17 @@ impl ProactiveMemoryStore {
                 continue;
             }
 
-            // Exponential decay
-            let decayed = current_confidence * (-decay_rate * days_since_access).exp();
-
-            // Boost for frequently accessed memories: min(1.0 + log2(access_count), 2.0)
+            // Popular memories decay slower (rate divided by boost), not
+            // boosted back up post-decay (which would let access_count >= 2
+            // saturate any decay back to 1.0 and freeze the memory forever).
+            // MAX_BOOST = 4.0 means an extremely popular memory still decays
+            // at 1/4 the configured rate — slow, but never zero.
+            const MAX_BOOST: f64 = 4.0;
             let count = (*access_count).max(1) as f64;
-            let boost = (1.0 + count.log2()).min(2.0);
-            let new_confidence = (decayed * boost).clamp(0.0, 1.0);
+            let boost = (1.0 + count.log2()).min(MAX_BOOST);
+            let effective_rate = decay_rate / boost;
+            let new_confidence =
+                (current_confidence * (-effective_rate * days_since_access).exp()).clamp(0.0, 1.0);
 
             conn.execute(
                 "UPDATE memories SET confidence = ?1 WHERE id = ?2",
@@ -618,74 +629,47 @@ impl ProactiveMemoryStore {
             .map_err(|e| LibreFangError::Internal(format!("Failed to parse user_id: {}", e)))
     }
 
-    /// Retrieve memory items from storage.
+    /// Retrieve memory items for an agent, optionally filtered by level
+    /// and/or category.
+    ///
+    /// Reads from the semantic store (the authoritative source). Previously
+    /// this read from `structured.list_kv("memory:*")`, but the KV mirror
+    /// was a denormalised cache written best-effort *after* the semantic
+    /// insert — a failure of the second write (e.g. tx contention, schema
+    /// drift, or a process restart between the two non-transactional
+    /// inserts) left rows visible to `search()` (which reads semantic) but
+    /// invisible to `list()` / `get()` (which read KV), producing the
+    /// long-standing "the agent forgets things" / "the dashboard shows
+    /// memories the agent can't see" split-brain. The KV mirror is still
+    /// written by `add_with_decision` for backwards compatibility, but it
+    /// is no longer load-bearing on the read path.
     fn retrieve_memory_items(
         &self,
         agent_id: AgentId,
         level: Option<MemoryLevel>,
         category: Option<&str>,
     ) -> LibreFangResult<Vec<MemoryItem>> {
-        // Get all keys that match "memory:*"
-        let kv_pairs = self.structured.list_kv(agent_id)?;
-        let mut items = Vec::new();
-
-        for (key, value) in kv_pairs {
-            if !key.starts_with("memory:") {
-                continue;
-            }
-
-            if let Ok(mem) = serde_json::from_value::<serde_json::Value>(value) {
-                let level_str = mem
-                    .get("level")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Session");
-                let cat = mem.get("category").and_then(|v| v.as_str());
-
-                // Filter by level
-                if let Some(target_level) = level {
-                    let current_level = MemoryLevel::from(level_str);
-                    if current_level != target_level {
-                        continue;
-                    }
-                }
-
-                // Filter by category
-                if let Some(target_cat) = category {
-                    if cat != Some(target_cat) {
-                        continue;
-                    }
-                }
-
-                let content = mem
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let created_at_str = mem.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-                let created_at = chrono::DateTime::parse_from_rfc3339(created_at_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now());
-
-                let metadata = mem
-                    .get("metadata")
-                    .and_then(|v| {
-                        serde_json::from_value::<HashMap<String, serde_json::Value>>(v.clone()).ok()
-                    })
-                    .unwrap_or_default();
-
-                let mut item = MemoryItem::new(content, MemoryLevel::from(level_str));
-                item.id = key.strip_prefix("memory:").unwrap_or(&key).to_string();
-                if let Some(c) = cat {
-                    item = item.with_category(c);
-                }
-                item.metadata = metadata;
-                item.created_at = created_at;
-
-                items.push(item);
-            }
+        // Single-pass scan of all non-deleted memories for the agent.
+        // Bound at 10k to match the dashboard `list_all` cap; agents that
+        // legitimately have more are paginated at the route layer.
+        const RECALL_CAP: usize = 10_000;
+        let mut filter = MemoryFilter::agent(agent_id);
+        if let Some(target_level) = level {
+            filter.scope = Some(target_level.scope_str().to_string());
         }
+        let frags = self.semantic.recall("", RECALL_CAP, Some(filter))?;
 
-        // Sort by created_at descending
+        let mut items: Vec<MemoryItem> = frags
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .filter(|item| match category {
+                Some(target) => item.category.as_deref() == Some(target),
+                None => true,
+            })
+            .collect();
+
+        // Newest first — preserves the prior contract for callers that
+        // expect chronological-desc ordering.
         items.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         Ok(items)
@@ -1755,6 +1739,74 @@ impl ProactiveMemoryStore {
         guard.redact_all(&mut items);
         Ok(items)
     }
+
+    /// Reset wrapper. Requires both `write` and `delete` capability on the
+    /// `proactive` namespace — wiping every memory for an agent is a write
+    /// effect AND a destructive operation.
+    pub fn reset_with_guard(
+        &self,
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<u64> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.reset(user_id)
+    }
+
+    /// Clear-by-level wrapper. Same delete gate as [`Self::reset_with_guard`].
+    pub fn clear_level_with_guard(
+        &self,
+        user_id: &str,
+        level: librefang_types::memory::MemoryLevel,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<u64> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.clear_level(user_id, level)
+    }
+
+    /// Export wrapper. Requires the dedicated `export` capability, which is
+    /// stricter than ordinary reads — exports bypass PII redaction and dump
+    /// raw rows, so a Viewer must not be able to call this even when reads
+    /// are allowed.
+    pub fn export_all_with_guard(
+        &self,
+        agent_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<MemoryExportItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_export("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.export_all(agent_id)
+    }
+
+    /// Import wrapper. Bulk-write into the proactive namespace.
+    pub async fn import_memories_with_guard(
+        &self,
+        agent_id: &str,
+        items: Vec<MemoryExportItem>,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<usize> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_write("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.import_memories(agent_id, items).await
+    }
+
+    /// Manual decay trigger wrapper. Treated as a destructive op (decay
+    /// permanently mutates confidence scores across every agent), so it
+    /// requires the `delete` capability.
+    pub fn decay_confidence_with_guard(
+        &self,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<()> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.decay_confidence()
+    }
 }
 
 /// A flat, JSON-serializable representation of a memory for import/export.
@@ -1870,43 +1922,20 @@ impl ProactiveMemory for ProactiveMemoryStore {
             .extract_memories(messages, &categories)
             .await?;
         if !extraction.has_content {
-            // Fallback: store raw message content as session memory
-            let content = messages
-                .iter()
-                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            if content.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            // Enforce per-agent memory cap before inserting fallback memory
-            self.evict_if_over_cap(agent_id, 1)?;
-
-            let mem_id = self.semantic.remember(
-                agent_id,
-                &content,
-                MemorySource::Conversation,
-                scopes::SESSION,
-                HashMap::new(),
-            )?;
-
-            let item = MemoryItem::new(content, MemoryLevel::Session);
-            // Also store in KV using the semantic store's ID for consistency
-            if let Ok(json) = serde_json::to_value(&item) {
-                if let Err(e) = self
-                    .structured
-                    .set(agent_id, &format!("memory:{}", mem_id), json)
-                {
-                    tracing::warn!(
-                        "Failed to set KV entry for fallback memory {}: {}",
-                        mem_id,
-                        e
-                    );
-                }
-            }
-            return Ok(vec![item]);
+            // No extraction signal → no memory. The previous behavior was to
+            // stash the raw concatenated message content as a session memory
+            // with no category, which (a) flooded the store with verbatim
+            // transcripts, (b) produced the `category=null` rows that
+            // littered the dashboard, and (c) was the dominant source of
+            // duplicate "memories" because every chatty turn dumped the
+            // whole conversation. Callers that want raw-content capture
+            // should use [`ProactiveMemoryStore::add_with_level`] explicitly.
+            tracing::debug!(
+                ?agent_id,
+                message_count = messages.len(),
+                "Extractor returned no signal — skipping (no raw-transcript fallback)"
+            );
+            return Ok(Vec::new());
         }
 
         // Step 2-4: For each extracted memory, decide and execute
@@ -3211,10 +3240,15 @@ mod tests {
         let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
 
         let agent_id = AgentId::new().to_string();
+        // `add_with_level` stores raw content unconditionally; the trait
+        // `add` path no longer has a raw-transcript fallback (C2 fix), so
+        // tests that need a deterministic insert without exercising the
+        // extractor pipeline use `add_with_level` directly.
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "Remember this fact"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
@@ -3264,9 +3298,10 @@ mod tests {
 
         let agent_id = AgentId::new().to_string();
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "Old content"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
@@ -3309,16 +3344,18 @@ mod tests {
 
         let agent_id = AgentId::new().to_string();
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "First memory"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "Second memory"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
@@ -3343,11 +3380,13 @@ mod tests {
 
         let agent_id = AgentId::new().to_string();
 
-        // Add session-level memory (default)
+        // Add session-level memory (use add_with_level — the trait
+        // `add` path no longer raw-stores when extraction yields nothing).
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "Session info"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
@@ -3781,10 +3820,14 @@ mod tests {
         let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
 
         let agent_id = AgentId::new().to_string();
+        // Use add_with_level so the test does not depend on the
+        // DefaultMemoryExtractor recognising "topsecret" — the trait
+        // `add` path no longer has a raw-transcript fallback.
         store
-            .add(
+            .add_with_level(
                 &[serde_json::json!({"role": "user", "content": "topsecret"})],
                 &agent_id,
+                MemoryLevel::Session,
             )
             .await
             .unwrap();
@@ -3859,5 +3902,256 @@ mod tests {
                 item.content
             );
         }
+    }
+
+    /// Regression for the "boost makes popular memories immortal" bug.
+    ///
+    /// Before the fix: a memory with access_count >= 2 ended every decay tick
+    /// with `(decayed * 2.0).clamp(0,1) = 1.0`, freezing confidence forever.
+    /// After the fix: boost divides the rate, so popular memories decay slower
+    /// but still drop monotonically.
+    #[test]
+    fn popular_memory_decay_is_monotonic_not_frozen() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent = AgentId::new();
+
+        let mid = store
+            .semantic
+            .remember(
+                agent,
+                "preferred editor",
+                MemorySource::Conversation,
+                "agent_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // Simulate a popular, stale memory: 5 accesses but last touched 10 days ago.
+        let stale = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let db = store.semantic.pool().get().unwrap();
+        db.execute(
+            "UPDATE memories SET confidence = 1.0, access_count = 5, accessed_at = ?1 WHERE id = ?2",
+            rusqlite::params![stale, mid.0.to_string()],
+        )
+        .unwrap();
+        drop(db);
+
+        store.decay_confidence().unwrap();
+
+        let after: f64 = store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = ?1",
+                rusqlite::params![mid.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(
+            after < 1.0,
+            "popular memory must decay below 1.0; got {after} (boost-immortality regression)"
+        );
+        assert!(after > 0.0, "confidence must remain positive; got {after}");
+    }
+
+    /// `metadata["confidence"]` written by the LLM extractor must be honored
+    /// at insert time, not silently overwritten by the legacy `1.0` default.
+    #[test]
+    fn insert_honors_extractor_supplied_confidence() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new();
+        let mut meta = HashMap::new();
+        meta.insert("confidence".to_string(), serde_json::json!(0.42));
+        let mid = store
+            .semantic
+            .remember(
+                agent,
+                "extracted fact",
+                MemorySource::Conversation,
+                "agent_memory",
+                meta,
+            )
+            .unwrap();
+
+        let stored: f64 = store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = ?1",
+                rusqlite::params![mid.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (stored - 0.42).abs() < 1e-9,
+            "extractor confidence must round-trip into the column; got {stored}"
+        );
+    }
+
+    /// C1 regression: `list()` / `get()` must read from the semantic store
+    /// (authoritative), not the best-effort KV mirror. Pre-fix, a memory
+    /// that landed in semantic but missed the KV write was invisible to
+    /// `list()` while remaining searchable via `search()` — the split-brain
+    /// that produced the "agent forgets things" reports.
+    #[tokio::test]
+    async fn list_reflects_semantic_store_not_kv_mirror() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new();
+        let user_id = agent.to_string();
+
+        // Write directly to semantic (simulating a path that wrote semantic
+        // but no KV mirror — exactly the pre-fix divergence pattern).
+        let mut meta = HashMap::new();
+        meta.insert("category".to_string(), serde_json::json!("custom_category"));
+        store
+            .semantic
+            .remember(
+                agent,
+                "semantic-only memory",
+                MemorySource::Conversation,
+                "agent_memory",
+                meta,
+            )
+            .unwrap();
+
+        // The KV table has no `memory:*` keys for this id; with the old
+        // implementation this list() would return empty.
+        let listed = store.list(&user_id, None).await.unwrap();
+        assert!(
+            listed.iter().any(|m| m.content == "semantic-only memory"),
+            "list() must surface semantic-store rows even when the KV mirror is empty; \
+             got: {listed:?}"
+        );
+
+        // Category filter still works through the semantic path.
+        let by_cat = store.list(&user_id, Some("custom_category")).await.unwrap();
+        assert_eq!(by_cat.len(), 1, "category filter must work post-fix");
+    }
+
+    /// C2 regression: when the extractor returns no structured signal,
+    /// `add()` must NOT store the raw concatenated message text as a
+    /// session memory. The old fallback was the dominant source of
+    /// `category=null` junk rows and verbatim-transcript duplicates.
+    #[tokio::test]
+    async fn add_does_not_store_raw_transcript_fallback() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new().to_string();
+
+        // Nothing here matches the rule-based extractor — should yield
+        // `has_content = false` and therefore no rows.
+        let items = store
+            .add(
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+                })],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "no-signal add() must return [], not synthesize a transcript memory; got {items:?}"
+        );
+
+        // And nothing landed in the store either.
+        let listed = store
+            .list_all(None)
+            .await
+            .expect("list_all after no-signal add()");
+        assert!(
+            listed.is_empty(),
+            "no rows must be persisted on the no-signal path; got {} item(s)",
+            listed.len()
+        );
+    }
+
+    /// RBAC C4 regression: every write-side `*_with_guard` wrapper must
+    /// reject the fail-closed Viewer-equivalent ACL (no writes / deletes /
+    /// exports). Previously the HTTP routes called the unguarded inherent
+    /// methods, so any authenticated caller — including Viewer — could
+    /// add / delete / reset / import / export / decay memories.
+    #[tokio::test]
+    async fn write_guarded_wrappers_reject_viewer_acl() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::error::LibreFangError;
+        use librefang_types::memory::MemoryLevel;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        // Viewer fallback ACL: read-only on `proactive`, no writes, no
+        // deletes, no exports — mirrors `anonymous_fallback_acl()` in
+        // `routes/memory.rs` and `default_memory_acl(UserRole::Viewer)`.
+        let viewer = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        });
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new().to_string();
+
+        let add_err = store
+            .add_with_guard(
+                &[serde_json::json!({"role": "user", "content": "I prefer x"})],
+                &agent,
+                &viewer,
+            )
+            .await;
+        assert!(
+            matches!(add_err, Err(LibreFangError::AuthDenied(_))),
+            "add_with_guard must deny Viewer; got {add_err:?}"
+        );
+
+        let del_err = store
+            .delete_with_guard("00000000-0000-0000-0000-000000000001", &agent, &viewer)
+            .await;
+        assert!(
+            matches!(del_err, Err(LibreFangError::AuthDenied(_))),
+            "delete_with_guard must deny Viewer; got {del_err:?}"
+        );
+
+        let reset_err = store.reset_with_guard(&agent, &viewer);
+        assert!(
+            matches!(reset_err, Err(LibreFangError::AuthDenied(_))),
+            "reset_with_guard must deny Viewer; got {reset_err:?}"
+        );
+
+        let clear_err = store.clear_level_with_guard(&agent, MemoryLevel::Session, &viewer);
+        assert!(
+            matches!(clear_err, Err(LibreFangError::AuthDenied(_))),
+            "clear_level_with_guard must deny Viewer; got {clear_err:?}"
+        );
+
+        let export_err = store.export_all_with_guard(&agent, &viewer);
+        assert!(
+            matches!(export_err, Err(LibreFangError::AuthDenied(_))),
+            "export_all_with_guard must deny Viewer; got {export_err:?}"
+        );
+
+        let import_err = store
+            .import_memories_with_guard(&agent, Vec::new(), &viewer)
+            .await;
+        assert!(
+            matches!(import_err, Err(LibreFangError::AuthDenied(_))),
+            "import_memories_with_guard must deny Viewer; got {import_err:?}"
+        );
+
+        let decay_err = store.decay_confidence_with_guard(&viewer);
+        assert!(
+            matches!(decay_err, Err(LibreFangError::AuthDenied(_))),
+            "decay_confidence_with_guard must deny Viewer; got {decay_err:?}"
+        );
     }
 }

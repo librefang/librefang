@@ -1363,8 +1363,22 @@ pub async fn auth(
     // cannot set custom headers on WebSocket connections); they authenticate
     // via crate::ws::ws_auth_token, which never passes through this middleware.
 
-    // Accept if header auth matches a static API key or legacy token
+    // Accept if header auth matches a static API key or legacy token.
+    //
+    // The root `api_key` is the operator's master credential — attribute
+    // the request as an Owner-equivalent `AuthenticatedApiUser` so RBAC-
+    // gated handlers (memory write ACL, `assert_kv_owner_or_admin`, etc.)
+    // treat root-key callers as fully-privileged. Without this attribution
+    // root-key callers fall through as "trusted but anonymous", which the
+    // memory namespace guard correctly downgrades to Viewer-equivalent
+    // (no writes / no deletes / no exports) and breaks the obvious
+    // `librefang start` → `curl POST /api/memory` workflow.
     if header_auth == Some(true) {
+        request.extensions_mut().insert(AuthenticatedApiUser {
+            name: "root".to_string(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("root"),
+        });
         return next.run(request).await;
     }
 
