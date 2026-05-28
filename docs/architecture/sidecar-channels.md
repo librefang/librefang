@@ -65,15 +65,27 @@ Three properties survive when the language gap closes:
 
 The wire protocol (see [`sidecar-protocol.md`](./sidecar-protocol.md))
 is newline-delimited JSON over stdio; nothing in it is Python-specific.
-The current first-party SDK happens to be Python because that was the
-lowest-friction substrate for migrating ~28 adapters, but a Rust
-sidecar SDK against the same conformance corpus
-(`conformance/sidecar/corpus/`) is unblocked future work and would
-inherit every property above without paying the Python interpreter's
-startup or memory cost. An adapter ships as
+Two first-party SDKs against the same conformance corpus
+(`conformance/sidecar/corpus/`) ship today:
+
+- **Python** — `sdk/python/librefang/sidecar/`. The lowest-friction
+  substrate for the ~28 in-process adapters that were migrated
+  through the #5219 → #5459 series.
+- **Rust** — `sdk/rust/librefang-sidecar/`. For adapters that need
+  a stdlib-shaped binary, want type-safe access to the inbound
+  command set without going through `serde_json::Value` by hand, or
+  want to reuse a Rust transport crate that an external ecosystem
+  has already hardened. Inherits every architectural property above
+  without paying the Python interpreter's startup or memory cost.
+
+Both SDKs cover the same protocol surface and pin themselves to the
+same conformance corpus from both directions (producer of events,
+consumer of commands). An adapter ships as
 `command = "python3 -m my_adapter"`,
 `command = "/usr/local/bin/my-rust-adapter"`, or anything else that
-speaks the protocol — the supervisor does not care.
+speaks the protocol — the supervisor does not care. New languages
+(Go, JS, …) can be added the same way; each new SDK adds an entry to
+the corpus's coverage matrix.
 
 ## Process model
 
