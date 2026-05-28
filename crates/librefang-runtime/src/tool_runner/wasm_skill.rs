@@ -137,9 +137,12 @@ pub async fn execute_wasm_skill(
         "executing WASM skill in sandbox"
     );
 
-    let sandbox = WasmSandbox::new()
-        .map_err(|e| SkillError::ExecutionFailed(format!("WASM sandbox init failed: {e}")))?;
-    let result = sandbox
+    // `execute` builds its own per-invocation engine (epoch isolation requires
+    // one engine per guest), so construct the marker directly rather than via
+    // `WasmSandbox::new()`, whose only effect here would be a second, discarded
+    // engine init. A bad engine config still surfaces — `execute` reports it as
+    // `SandboxError::Compilation`.
+    let result = WasmSandbox
         .execute(&wasm_bytes, payload, config, kernel, agent_id)
         .await
         .map_err(|e| SkillError::ExecutionFailed(format!("WASM execution failed: {e}")))?;
