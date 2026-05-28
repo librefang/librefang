@@ -74,7 +74,6 @@ pub(super) fn tool_memory_recall(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    validate_key(key)?;
     enforce_memory_acl(
         kernel,
         peer_id,
