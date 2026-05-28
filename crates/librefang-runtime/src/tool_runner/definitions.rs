@@ -255,211 +255,6 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 "required": ["url", "dest_path"]
             }),
         },
-        ToolDefinition {
-            name: "web_search".to_string(),
-            description: "Search the web using multiple providers (Tavily, Brave, Perplexity, DuckDuckGo) with automatic fallback. Returns structured results with titles, URLs, and snippets.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The search query" },
-                    "max_results": { "type": "integer", "description": "Maximum number of results to return (default: 5, max: 20)" }
-                },
-                "required": ["query"]
-            }),
-        },
-        // --- Shell tool ---
-        ToolDefinition {
-            name: "shell_exec".to_string(),
-            description: "Execute a shell command and return its output.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command to execute" },
-                    "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default: 30)" }
-                },
-                "required": ["command"]
-            }),
-        },
-        // --- Owner-side channel ---
-        ToolDefinition {
-            name: "notify_owner".to_string(),
-            description: "Send a private notice to the agent's owner (operator DM) WITHOUT posting it to the source chat. Use this in groups when you have something to tell the owner that should not be visible to other participants. Returns an opaque ack — do NOT repeat the summary in your public reply.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Short machine-readable category, e.g. 'confirmation_needed', 'stranger_request', 'escalation'."
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "Human-readable message body addressed to the owner."
-                    }
-                },
-                "required": ["reason", "summary"]
-            }),
-        },
-        // --- Inter-agent tools ---
-        ToolDefinition {
-            name: "agent_send".to_string(),
-            description: "Send a message to another agent and receive their response. Accepts UUID or agent name. Use agent_find first to discover agents.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": { "type": "string", "description": "The target agent's UUID or name" },
-                    "message": { "type": "string", "description": "The message to send to the agent" },
-                    "conversation_key": {
-                        "type": "string",
-                        "description": "Optional key to control which conversation thread is used. Provide the same key across calls to preserve history and keep a multi-turn context with the callee. Omit to use the callee's default session mode. A fresh or unique key starts a new isolated thread."
-                    }
-                },
-                "required": ["agent_id", "message"]
-            }),
-        },
-        ToolDefinition {
-            name: "agent_spawn".to_string(),
-            description: "Spawn a new agent from settings. Returns the new agent's ID and name.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
-                    },
-                    "system_prompt": {
-                        "type": "string",
-                        "description": "The system prompt for the new agent"
-                    },
-                    "tools": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Select from all available tools, including MCP tools. Use the full tool names only"
-                    },
-                    "network": {
-                        "type": "boolean",
-                        "description": "Whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
-                    },
-                    "shell": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
-                    }
-                },
-                "required": ["name", "system_prompt"]
-            }),
-        },
-        ToolDefinition {
-            name: "agent_list".to_string(),
-            description: "List all currently running agents with their IDs, names, states, and models.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDefinition {
-            name: "agent_kill".to_string(),
-            description: "Kill (terminate) another agent. Accepts UUID or agent name.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": { "type": "string", "description": "The target agent's UUID or name" }
-                },
-                "required": ["agent_id"]
-            }),
-        },
-        // --- Memory tools (per-agent) ---
-        ToolDefinition {
-            name: "memory_store".to_string(),
-            description: "Store a value in the agent's memory. Each agent has its own isolated memory namespace. Use for persisting data across sessions.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The storage key" },
-                    "value": { "type": "string", "description": "The value to store (JSON-encode objects/arrays, or pass a plain string)" }
-                },
-                "required": ["key", "value"]
-            }),
-        },
-        ToolDefinition {
-            name: "memory_recall".to_string(),
-            description: "Recall a value from the agent's memory by key.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The storage key to recall" }
-                },
-                "required": ["key"]
-            }),
-        },
-        ToolDefinition {
-            name: "memory_list".to_string(),
-            description: "List keys in the agent's memory with pagination.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
-                    "offset": { "type": "integer", "description": "Number of keys to skip" }
-                },
-            }),
-        },
-        // --- Memory wiki tools (issue #3329) — return KernelOpError::unavailable
-        //     when [memory_wiki] enabled = false in config.toml. ---
-        ToolDefinition {
-            name: "wiki_get".to_string(),
-            description:
-                "Read a wiki page by topic from the durable knowledge vault. \
-                 Returns the page as JSON: {topic, frontmatter, body}. The \
-                 frontmatter carries provenance (which agents/sessions \
-                 contributed and when)."
-                    .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "topic": { "type": "string", "description": "Page topic — must match [a-zA-Z0-9_-]+ and not be `index` or `_*`" }
-                },
-                "required": ["topic"]
-            }),
-        },
-        ToolDefinition {
-            name: "wiki_search".to_string(),
-            description:
-                "Search wiki page bodies (case-insensitive substring). Topic \
-                 hits outrank body hits. Returns an array of \
-                 {topic, snippet, score} sorted by score descending."
-                    .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query" },
-                    "limit": { "type": "integer", "description": "Max hits (default 10)" }
-                },
-                "required": ["query"]
-            }),
-        },
-        ToolDefinition {
-            name: "wiki_write".to_string(),
-            description:
-                "Write or update a wiki page. Body may use [[topic]] \
-                 placeholders for cross-references; the vault rewrites them \
-                 per its render mode. Provenance is auto-filled from the \
-                 calling agent. If the page was edited externally since the \
-                 last write, the call fails unless `force = true`, in which \
-                 case the external body is preserved and only provenance is \
-                 appended."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "url": { "type": "string", "description": "The URL to fetch (http/https only)" },
-                        "dest_path": { "type": "string", "description": "Workspace-relative or absolute path to write to. Absolute paths must stay inside the agent workspace or a read-write named workspace." },
-                        "method": { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "description": "HTTP method (default: GET)" },
-                        "headers": { "type": "object", "description": "Custom HTTP headers as key-value pairs" },
-                        "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" },
-                        "max_bytes": { "type": "integer", "description": "Optional per-call cap; clamped down to the configured max_file_bytes" }
-                    },
-                    "required": ["url", "dest_path"]
-                }),
-            },
             ToolDefinition {
                 name: tool_name::WEB_SEARCH.to_string(),
                 description: "Search the web using multiple providers (Tavily, Brave, Perplexity, DuckDuckGo) with automatic fallback. Returns structured results with titles, URLs, and snippets.".to_string(),
@@ -594,10 +389,13 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::MEMORY_LIST.to_string(),
-                description: "List all keys in the agent's memory.".to_string(),
+                description: "List keys in the agent's memory with pagination.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max keys to return (default 100)" },
+                        "offset": { "type": "integer", "description": "Number of keys to skip" }
+                    },
                 }),
             },
             ToolDefinition {
@@ -1511,4 +1309,18 @@ use instead of web_fetch + file_write (which round-trips the entire body through
 
         tools
     }).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_duplicate_tool_names() {
+        let defs = builtin_tool_definitions();
+        let mut seen = std::collections::HashSet::new();
+        for def in &defs {
+            assert!(seen.insert(&def.name), "duplicate tool: {}", def.name);
+        }
+    }
 }
