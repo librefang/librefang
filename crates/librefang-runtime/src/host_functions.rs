@@ -1474,6 +1474,7 @@ mod tests {
         fn inject_attachment_blocks(
             &self,
             _agent_id: librefang_types::agent::AgentId,
+            _session_id: librefang_types::agent::SessionId,
             _blocks: Vec<librefang_types::message::ContentBlock>,
         ) {
         }
