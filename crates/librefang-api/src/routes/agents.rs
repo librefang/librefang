@@ -141,6 +141,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_mcp_servers).put(set_agent_mcp_servers),
         )
         .route(
+            "/agents/{id}/channels",
+            axum::routing::get(get_agent_channels).put(set_agent_channels),
+        )
+        .route(
             "/agents/{id}/identity",
             axum::routing::patch(update_agent_identity),
         )
@@ -4399,6 +4403,111 @@ pub async fn set_agent_mcp_servers(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// GET /api/agents/{id}/channels — Get an agent's channel allowlist info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's channel allowlist info", body = crate::types::JsonObject)
+    )
+)]
+pub async fn get_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    let available: Vec<String> = state
+        .kernel
+        .config_ref()
+        .sidecar_channels
+        .iter()
+        .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+        .collect();
+    let mode = if entry.manifest.channels.is_empty() {
+        "all"
+    } else {
+        "allowlist"
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "assigned": entry.manifest.channels,
+            "available": available,
+            "mode": mode,
+        })),
+    )
+}
+
+/// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/channels",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonArray, description = "Array of channel_type strings"),
+    responses(
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+    )
+)]
+pub async fn set_agent_channels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let channels: Vec<String> = body["channels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    match state.kernel.set_agent_channels(agent_id, channels.clone()) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "channels": channels})),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
