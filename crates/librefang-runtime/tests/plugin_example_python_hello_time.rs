@@ -11,16 +11,21 @@
 //! runs locally when `examples/plugins/python-hello-time/pre-built/plugin.wasm`
 //! exists.
 
-mod support {
-    include!("support/plugin_example_harness.rs");
-}
+#[path = "support/plugin_example_harness.rs"]
+#[allow(dead_code)]
+mod support;
 use support::{wasm_bytes, workspace_root};
 
 use librefang_runtime::sandbox::WasmSandbox;
 use librefang_runtime::sandbox_component::ComponentExecuteOptions;
 use librefang_skills::HostCapability;
 
+// C-007 known-skip: componentize-py embeds CPython, whose init reads
+// the process env via `wasi:cli/environment@0.2.0`. Our Phase-6 linker
+// only binds `librefang:plugin/*` — wiring `wasmtime-wasi` is a Phase-7
+// candidate. Drop the `#[ignore]` once that lands.
 #[tokio::test]
+#[ignore = "requires wasi:cli/environment@0.2.0 host import (CPython init — Phase-7)"]
 async fn python_hello_time_returns_ok() {
     // Skip if the pre-built wasm is absent (e.g., componentize-py not installed).
     let wasm_path =

@@ -5,9 +5,9 @@
 //! `Ok(())`, so the test verifies the end-to-end Component Model load +
 //! execute path with the capability gate in its most minimal configuration.
 
-mod support {
-    include!("support/plugin_example_harness.rs");
-}
+#[path = "support/plugin_example_harness.rs"]
+#[allow(dead_code)]
+mod support;
 use support::wasm_bytes;
 
 use librefang_runtime::sandbox::WasmSandbox;

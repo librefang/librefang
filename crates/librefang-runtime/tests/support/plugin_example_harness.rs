@@ -1,5 +1,16 @@
 //! Shared test harness for Phase-6 plugin example integration tests.
 //!
+//! Loaded by each `tests/plugin_example_*.rs` via:
+//!     #[path = "support/plugin_example_harness.rs"]
+//!     #[allow(dead_code)]
+//!     mod support;
+//!
+//! The `#[allow(dead_code)]` on the `mod support` declaration silences
+//! per-binary dead-code warnings: each test exercises a different
+//! capability (fs / kv / env / time / none) and uses a different subset
+//! of the harness, so "unused trait impl" warnings here are intrinsic,
+//! not a real signal.
+//!
 //! Provides:
 //! - `KernelHandleStub` — minimal `KernelHandle` implementation with an
 //!   in-memory KV store for the `MemoryAccess` role trait. All other role
@@ -41,11 +52,6 @@ pub struct KernelHandleStub {
 impl KernelHandleStub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
-    }
-
-    /// Seed the in-memory KV store before the plugin runs.
-    pub fn seed(&self, key: &str, value: serde_json::Value) {
-        self.kv.lock().unwrap().insert(key.to_owned(), value);
     }
 
     /// Inspect the KV store after the plugin ran.
@@ -129,6 +135,7 @@ impl ToolPolicy for KernelHandleStub {}
 impl CatalogQuery for KernelHandleStub {}
 impl AcpFsBridge for KernelHandleStub {}
 impl AcpTerminalBridge for KernelHandleStub {}
+impl WorkflowRunner for KernelHandleStub {}
 
 impl ApiAuth for KernelHandleStub {
     fn auth_snapshot(&self) -> ApiAuthSnapshot {
@@ -140,6 +147,7 @@ impl SessionWriter for KernelHandleStub {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }

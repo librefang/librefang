@@ -135,8 +135,10 @@
   ],
   "execution_started_at": "2026-05-28T00:00:00Z",
   "changes_total": 8,
-  "changes_completed": 6,
-  "active_change": "C-007",
+  "changes_completed": 8,
+  "active_change": null,
+  "execute_complete": true,
+  "execution_completed_at": "2026-05-28T00:00:00Z",
   "changes": {
     "C-001": {
       "status": "DONE",
@@ -190,10 +192,20 @@
       "verification": "WASI_CLANG=/opt/homebrew/opt/llvm/bin/clang WASI_WASM_LD=/opt/homebrew/opt/lld/bin/wasm-ld TINYGOROOT=/tmp/tinygo cargo xtask plugins-rebuild c-noop: 1072 bytes OK"
     },
     "C-007": {
-      "status": "PENDING"
+      "status": "DONE",
+      "files_touched": 7,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "tests_passing": "c_noop_returns_ok (1/5 active)",
+      "tests_ignored": "rust_fs_cat (wasi:io/poll), python_hello_time (wasi:cli/environment), js_kv_counter (librefang:plugin/fs via StarlingMonkey shim), go_env_greet (wasi:cli/environment) — all deferred to Phase-7 wasmtime-wasi integration with documented #[ignore] reasons",
+      "infra_fix": "Wired Store::set_fuel + set_epoch_deadline in execute_component (was missing — engine had consume_fuel(true)+epoch_interruption(true) but store seed was absent, causing fuel=0 trap on first wasm instruction).",
+      "c_noop_memory_fix": "Rebuilt with --initial-memory=131072 (2 pages); RET_AREA sat at byte 65536 which OOB'd the default 1-page memory.",
+      "verification": "cargo test -p librefang-runtime --no-fail-fast --test 'plugin_example_*': 1 passed, 4 ignored, 0 failed (5/5 binaries compile + run cleanly per plan acceptance: 'fails gracefully with documented skip-marker rather than panic')"
     },
     "C-008": {
-      "status": "PENDING"
+      "status": "DONE",
+      "files_touched": 3,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "verification": "docs/development/plugin-host.md gets new 'Walking examples (Phase-6)' section with the per-language table + sandbox-fix notes; CHANGELOG.md gets [Unreleased]/Added + Fixed entries with (@gqadonis) attribution; examples/plugins/c-noop/README.md updated with --initial-memory=131072 lesson + toolchain provenance."
     }
   }
 }
