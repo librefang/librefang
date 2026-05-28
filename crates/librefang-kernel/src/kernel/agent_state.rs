@@ -528,6 +528,36 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Update an agent's channel allowlist. Empty = all channels (backward compat).
+    pub fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        // Snapshot previous channel list for rollback on DB persist failure.
+        let prev_channels = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.channels.clone());
+
+        self.agents
+            .registry
+            .update_channels(agent_id, channels.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some(p_channels) = prev_channels {
+                    let _ = self.agents.registry.update_channels(agent_id, p_channels);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        // Persist manifest to disk so the change survives a daemon restart.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, channels = ?channels, "Agent channel allowlist updated");
+        Ok(())
+    }
+
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     ///

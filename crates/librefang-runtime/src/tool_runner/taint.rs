@@ -4,8 +4,12 @@
 //! `SECURITY.md` for shell command execution, network fetches, and
 //! free-form payloads (agent messages, channel webhook bodies).
 
-use librefang_types::taint::{TaintLabel, TaintSink, TaintedValue};
+use librefang_types::taint::{
+    TaintLabel, TaintSink, TaintedValue, SECRET_HEADER_NAMES, SECRET_KEYS,
+};
+use regex_lite::Regex;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use tracing::warn;
 
 /// Check if a shell command should be blocked by taint tracking.
@@ -47,9 +51,6 @@ pub(super) fn check_taint_shell_exec(command: &str) -> Option<String> {
 /// tricks such as `api%5Fkey=secret` (the server decodes `%5F` to `_`
 /// and receives the real `api_key=secret`).
 pub(super) fn check_taint_net_fetch(url: &str) -> Option<String> {
-    const SECRET_KEYS: &[&str] = &["api_key", "apikey", "token", "secret", "password"];
-
-    // Scan 1: raw URL literal for `<key>=` and the Authorization header prefix.
     let url_lower = url.to_lowercase();
     let mut hit = url_lower.contains("authorization:");
     if !hit {
@@ -64,7 +65,7 @@ pub(super) fn check_taint_net_fetch(url: &str) -> Option<String> {
         if let Ok(parsed) = url::Url::parse(url) {
             for (name, _value) in parsed.query_pairs() {
                 let name_lower = name.to_lowercase();
-                if SECRET_KEYS.iter().any(|k| name_lower == *k) {
+                if SECRET_KEYS.iter().any(|k| name_lower.contains(k)) {
                     hit = true;
                     break;
                 }
@@ -84,56 +85,6 @@ pub(super) fn check_taint_net_fetch(url: &str) -> Option<String> {
     None
 }
 
-/// Check if a free-form string carries an obvious secret shape. Used by
-/// exfiltration sinks that don't have a URL query-string structure to
-/// parse — `web_fetch` request bodies, `agent_send` message payloads,
-/// and (via shared helper) outbound channel / webhook bodies.
-///
-/// The check is a best-effort denylist: it trips when the text contains
-/// an `<assignment-style-key>=<value>` fragment using one of the common
-/// secret parameter names (`api_key`, `token`, `secret`, `password`,
-/// …), or when it carries an `Authorization:` header prefix, or when it
-/// looks like a long contiguous token (e.g. a raw bearer token dropped
-/// in as the whole body). Hits are wrapped in a `TaintedValue` and run
-/// through the given sink so the rejection message stays consistent
-/// with the URL-side checks.
-///
-/// This is the same "two-sink pattern match" shape described in the
-/// SECURITY.md taint section — it is **not** a full information-flow
-/// tracker, and copy-pasted obfuscation will still bypass it. The goal
-/// is to catch the obvious "the LLM is stuffing OPENAI_API_KEY into an
-/// agent_send" shape on the way out, not to prove a data-flow theorem.
-const SECRET_KEYS: &[&str] = &[
-    "api_key",
-    "apikey",
-    "api-key",
-    "authorization",
-    "proxy-authorization",
-    "access_token",
-    "refresh_token",
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "bearer",
-    "x-api-key",
-];
-
-/// Header names whose mere presence implies the value is a credential,
-/// regardless of what the value looks like. `Authorization: Bearer sk-…`
-/// has a space between the scheme and the token, which would otherwise
-/// defeat the contiguous-token heuristic in `check_taint_outbound_text`.
-const SECRET_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
-    "apikey",
-    "x-auth-token",
-    "cookie",
-    "set-cookie",
-];
-
 /// Check if an HTTP header (name + value) should be blocked. Headers
 /// whose name identifies them as credential carriers are rejected
 /// unconditionally; everything else falls through to the text-level
@@ -143,7 +94,7 @@ pub(super) fn check_taint_outbound_header(
     value: &str,
     sink: &TaintSink,
 ) -> Option<String> {
-    let name_lower = name.to_ascii_lowercase();
+    let name_lower = name.trim().to_ascii_lowercase();
     if SECRET_HEADER_NAMES.iter().any(|h| *h == name_lower)
         || SECRET_KEYS.iter().any(|k| *k == name_lower)
     {
@@ -200,36 +151,41 @@ fn looks_like_opaque_token(trimmed: &str) -> bool {
     (has_upper && has_lower) || has_punct
 }
 
+fn normalize_separators(lower: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\s*([=:])\s*").unwrap());
+    re.replace_all(lower, "$1").into_owned()
+}
+
+fn contains_key_sep(normalized: &str) -> bool {
+    for k in SECRET_KEYS {
+        let mut start = 0;
+        while let Some(idx) = normalized[start..].find(k) {
+            let after = start + idx + k.len();
+            if after < normalized.len() {
+                let rest = &normalized[after..];
+                if rest.starts_with('=')
+                    || rest.starts_with(':')
+                    || rest.starts_with("\":")
+                    || rest.starts_with("':")
+                {
+                    return true;
+                }
+            }
+            start = after;
+        }
+    }
+    false
+}
+
 pub(super) fn check_taint_outbound_text(payload: &str, sink: &TaintSink) -> Option<String> {
     let lower = payload.to_lowercase();
 
-    // Fast path 1: `Authorization:` header literal — unambiguous
-    // signal that the LLM is trying to ship credentials in-band.
     let mut hit = lower.contains("authorization:");
 
-    // Fast path 2: `key=value` / `key: value` / `key":` / `'key':`
-    // shapes. We match on the key name plus one of a handful of
-    // assignment separators so plain prose ("a token of appreciation")
-    // doesn't trip the filter.
     if !hit {
-        let normalized = lower
-            .replace(" = ", "=")
-            .replace(" =", "=")
-            .replace("= ", "=")
-            .replace(" : ", ":")
-            .replace(" :", ":")
-            .replace(": ", ":");
-        for k in SECRET_KEYS {
-            for sep in ["=", ":", "\":", "':"] {
-                if normalized.contains(&format!("{k}{sep}")) {
-                    hit = true;
-                    break;
-                }
-            }
-            if hit {
-                break;
-            }
-        }
+        let normalized = normalize_separators(&lower);
+        hit = contains_key_sep(&normalized);
     }
 
     // Fast path 3: the payload *is* a long opaque token. Covers the

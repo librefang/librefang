@@ -3,6 +3,15 @@
 //! checkpoint-snapshot helpers used by the dispatcher to enforce the
 //! agent's filesystem boundary.
 
+//! #3576: the four tool fns (`tool_file_read/write/list/apply_patch`) return
+//! `Result<String, ToolError>`. Missing params -> `MissingParameter`; the
+//! shared `resolve_file_path_ext` / `parse_patch` (both still `Result<_,
+//! String>`) -> `InvalidParameter` with the message preserved; the `io::Error`
+//! sites -> `ToolError::Upstream` keeping the prefix and source. The path /
+//! checkpoint helpers below keep their `Result<_, String>` / `Option<String>`
+//! shapes (shared with the dispatcher and unmigrated tools).
+
+use super::error::{ToolError, ToolResult};
 use crate::kernel_handle::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +36,24 @@ pub(super) fn resolve_file_path_ext(
          Set a workspace_root in the agent manifest or kernel config to enable file tools.",
     )?;
     crate::workspace_sandbox::resolve_sandbox_path_ext(raw_path, root, additional_roots)
+}
+
+/// #3576 thin wrapper over [`resolve_file_path_ext`] that maps its
+/// stringly-typed rejection (sandbox-escape / not-configured) onto a typed
+/// `ToolError::InvalidParameter` while preserving the message. The underlying
+/// resolver keeps its `Result<_, String>` shape because it is shared with
+/// tools that haven't migrated yet.
+fn resolve_path(
+    raw_path: &str,
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+) -> Result<PathBuf, ToolError> {
+    resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "path",
+            reason,
+        }
+    })
 }
 
 /// Fetch the named-workspace prefixes (all modes) for the calling agent.
@@ -188,12 +215,17 @@ pub(super) async fn tool_file_read(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+) -> ToolResult {
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
+    let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
     tokio::fs::read_to_string(&resolved)
         .await
-        .map_err(|e| format!("Failed to read file: {e}"))
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to read file: {e}"),
+            source: Some(Box::new(e)),
+        })
 }
 
 /// `file_read` deduplication shim (#4971).
@@ -238,20 +270,28 @@ pub(super) async fn tool_file_write(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+) -> ToolResult {
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
+    let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
     let content = input["content"]
         .as_str()
-        .ok_or("Missing 'content' parameter")?;
+        .ok_or(ToolError::MissingParameter("content"))?;
     if let Some(parent) = resolved.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("Failed to create directories: {e}"))?;
+            .map_err(|e| ToolError::Upstream {
+                message: format!("Failed to create directories: {e}"),
+                source: Some(Box::new(e)),
+            })?;
     }
     tokio::fs::write(&resolved, content)
         .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to write file: {e}"),
+            source: Some(Box::new(e)),
+        })?;
     Ok(format!(
         "Successfully wrote {} bytes to {}",
         content.len(),
@@ -263,19 +303,30 @@ pub(super) async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
-    let raw_path = input["path"].as_str().ok_or(
-        "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
-    )?;
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+) -> ToolResult {
+    // Keep the self-correction hint the pre-#3576 message carried: an LLM that
+    // calls file_list with no path recovers in one turn by re-calling with
+    // {"path": "."}. MissingParameter can't carry free text, so use
+    // InvalidParameter to preserve the guidance.
+    let raw_path = input["path"].as_str().ok_or(ToolError::InvalidParameter {
+        name: "path",
+        reason: "retry with {\"path\": \".\"} to list the workspace root".to_string(),
+    })?;
+    let resolved = resolve_path(raw_path, workspace_root, additional_roots)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
-        .map_err(|e| format!("Failed to list directory: {e}"))?;
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to list directory: {e}"),
+            source: Some(Box::new(e)),
+        })?;
     let mut files = Vec::new();
     while let Some(entry) = entries
         .next_entry()
         .await
-        .map_err(|e| format!("Failed to read entry: {e}"))?
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to read entry: {e}"),
+            source: Some(Box::new(e)),
+        })?
     {
         let name = entry.file_name().to_string_lossy().to_string();
         let metadata = entry.metadata().await;
@@ -294,10 +345,17 @@ pub(super) async fn tool_apply_patch(
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
     readonly_roots: &[&Path],
-) -> Result<String, String> {
-    let patch_str = input["patch"].as_str().ok_or("Missing 'patch' parameter")?;
-    let root = workspace_root.ok_or("apply_patch requires a workspace root")?;
-    let ops = crate::apply_patch::parse_patch(patch_str)?;
+) -> ToolResult {
+    let patch_str = input["patch"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("patch"))?;
+    let root = workspace_root.ok_or(ToolError::Unavailable("workspace directory"))?;
+    let ops = crate::apply_patch::parse_patch(patch_str).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "patch",
+            reason,
+        }
+    })?;
     // SECURITY #3662: defense-in-depth — pass readonly named-workspace prefixes
     // through to `apply_patch_ext` so any resolved target path that lands
     // inside a read-only workspace is rejected at the write site as well as
@@ -307,11 +365,13 @@ pub(super) async fn tool_apply_patch(
     if result.is_ok() {
         Ok(result.summary())
     } else {
-        Err(format!(
+        // A partial apply is a downstream outcome, not bad input — keep the
+        // summary + per-hunk errors verbatim.
+        Err(ToolError::upstream_msg(format!(
             "Patch partially applied: {}. Errors: {}",
             result.summary(),
             result.errors.join("; ")
-        ))
+        )))
     }
 }
 
@@ -409,5 +469,52 @@ mod path_check_tests {
         let err = check_absolute_path_inside_workspace(Some("../../etc/shadow"), Some(&root), &[])
             .expect("relative `..` must be blocked");
         assert!(err.contains("'..'"));
+    }
+}
+
+#[cfg(test)]
+mod toolerror_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn file_read_missing_path_is_missing_parameter() {
+        let r = tool_file_read(&json!({}), None, &[]).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("path"))));
+    }
+
+    #[tokio::test]
+    async fn file_write_missing_path_is_missing_parameter() {
+        let r = tool_file_write(&json!({}), None, &[]).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("path"))));
+    }
+
+    #[tokio::test]
+    async fn file_list_missing_path_is_invalid_parameter_with_hint() {
+        // file_list maps a missing path to InvalidParameter so it can carry the
+        // {"path": "."} self-correction hint (MissingParameter is name-only).
+        let r = tool_file_list(&json!({}), None, &[]).await;
+        match r {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "path");
+                assert!(reason.contains("\"path\": \".\""), "got: {reason}");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_missing_patch_is_missing_parameter() {
+        let r = tool_apply_patch(&json!({}), None, &[], &[]).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("patch"))));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_without_workspace_is_unavailable() {
+        let r = tool_apply_patch(&json!({"patch": "x"}), None, &[], &[]).await;
+        assert!(matches!(
+            r,
+            Err(ToolError::Unavailable("workspace directory"))
+        ));
     }
 }

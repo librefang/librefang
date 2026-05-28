@@ -41,6 +41,8 @@ async fn tool_runner_rbac_user_deny_returns_hard_error() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -104,6 +106,8 @@ async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -167,6 +171,8 @@ async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -225,6 +231,8 @@ async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() 
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -281,6 +289,8 @@ async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
 
@@ -479,6 +489,8 @@ async fn test_image_analyze_missing_file() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -519,7 +531,9 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
          no named-workspace prefixes are provided, got: {:?}",
         denied
     );
-    let err = denied.unwrap_err();
+    // #3576: Err is now ToolError; assert via its Display (the sandbox reason
+    // is preserved inside InvalidParameter).
+    let err = denied.unwrap_err().to_string();
     assert!(
         err.contains("resolves outside workspace") || err.contains("Access denied"),
         "expected sandbox rejection, got: {err}"
@@ -586,10 +600,16 @@ async fn test_schedule_tools_without_kernel() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: schedule_* now goes through `require_kernel_typed`, which yields
+    // `ToolError::Unavailable("Kernel handle")` rendered as "Kernel handle
+    // unavailable" (the old `require_kernel` string was "Kernel handle not
+    // available ..."). shell.rs still asserts the old text until shell migrates.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 // ─── Canvas / A2UI tests ────────────────────────────────────────
@@ -809,6 +829,8 @@ async fn test_file_read_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -857,6 +879,8 @@ async fn test_file_write_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -902,6 +926,8 @@ async fn test_file_list_no_workspace_root_returns_error() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -956,6 +982,8 @@ async fn test_agent_spawn_capability_escalation_denied() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1014,6 +1042,8 @@ async fn test_agent_spawn_subset_capabilities_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1115,6 +1145,8 @@ async fn test_mcp_tool_blocked_by_allowed_tools() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1159,6 +1191,8 @@ async fn test_mcp_tool_allowed_passes_check() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
@@ -1212,6 +1246,8 @@ async fn test_allowed_tools_wildcard_prefix_match() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should NOT be a permission-denied error
@@ -1255,6 +1291,8 @@ async fn test_allowed_tools_wildcard_blocks_non_matching() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1298,6 +1336,8 @@ async fn test_allowed_tools_star_allows_everything() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1340,6 +1380,8 @@ async fn test_allowed_tools_mixed_wildcard_and_exact() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1382,6 +1424,8 @@ async fn test_mcp_tool_wildcard_allowed() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     // Should fail for "MCP not available", not "Permission denied"
@@ -1421,7 +1465,8 @@ fn test_goal_update_missing_kernel() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Kernel handle"));
+    // #3576: Err is now ToolError; assert via its Display.
+    assert!(result.unwrap_err().to_string().contains("Kernel handle"));
 }
 
 #[test]
@@ -1440,7 +1485,7 @@ fn test_goal_update_no_fields() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("At least one"));
+    assert!(result.unwrap_err().to_string().contains("At least one"));
 }
 
 #[test]
@@ -1451,7 +1496,7 @@ fn test_goal_update_invalid_status() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid status"));
+    assert!(result.unwrap_err().to_string().contains("Invalid status"));
 }
 
 /// Mock kernel that validates capability inheritance in spawn_agent_checked.
@@ -1668,6 +1713,7 @@ impl SessionWriter for SpawnCheckKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }

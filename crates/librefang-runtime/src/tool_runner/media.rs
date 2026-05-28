@@ -2,9 +2,25 @@
 //! transcribe, image / video / music generation, text-to-speech /
 //! speech-to-text.
 
+use super::error::{ToolError, ToolResult};
 use super::resolve_file_path_ext;
 use std::path::Path;
 use tracing::warn;
+
+/// #3576: map the shared `resolve_file_path_ext` (still `Result<_, String>`)
+/// rejection onto a typed `InvalidParameter`, message preserved.
+fn resolve_media_path(
+    raw_path: &str,
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+) -> Result<std::path::PathBuf, ToolError> {
+    resolve_file_path_ext(raw_path, workspace_root, additional_roots).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "path",
+            reason,
+        }
+    })
+}
 
 /// Describe an image using a vision-capable LLM provider.
 pub(super) async fn tool_media_describe(
@@ -12,21 +28,23 @@ pub(super) async fn tool_media_describe(
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
+) -> ToolResult {
     use base64::Engine;
-    let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let engine = media_engine.ok_or(ToolError::Unavailable("Media engine"))?;
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
     // `/etc/passwd`. Named workspace prefixes are honored via
     // `additional_roots` so agents can describe media that lives under
     // declared `[workspaces]` mounts.
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+    let resolved = resolve_media_path(raw_path, workspace_root, additional_roots)?;
 
     // Read image file
     let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read image file: {e}"))?;
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to read image file: {e}")))?;
 
     // Detect MIME type from extension
     let ext = resolved
@@ -41,7 +59,12 @@ pub(super) async fn tool_media_describe(
         "webp" => "image/webp",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
-        _ => return Err(format!("Unsupported image format: .{ext}")),
+        _ => {
+            return Err(ToolError::InvalidParameter {
+                name: "path",
+                reason: format!("Unsupported image format: .{ext}"),
+            })
+        }
     };
 
     let attachment = librefang_types::media::MediaAttachment {
@@ -54,8 +77,11 @@ pub(super) async fn tool_media_describe(
         size_bytes: data.len() as u64,
     };
 
-    let understanding = engine.describe_image(&attachment).await?;
-    serde_json::to_string_pretty(&understanding).map_err(|e| format!("Serialize error: {e}"))
+    let understanding = engine
+        .describe_image(&attachment)
+        .await
+        .map_err(ToolError::upstream_msg)?;
+    Ok(serde_json::to_string_pretty(&understanding)?)
 }
 
 /// Human-readable list of audio extensions accepted by `audio_mime_from_ext`,
@@ -88,21 +114,23 @@ pub(super) async fn tool_media_transcribe(
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
+) -> ToolResult {
     use base64::Engine;
-    let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    let engine = media_engine.ok_or(ToolError::Unavailable("Media engine"))?;
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
     // `/etc/passwd`. Named workspace prefixes are honored via
     // `additional_roots` so agents can transcribe audio under declared
     // `[workspaces]` mounts.
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+    let resolved = resolve_media_path(raw_path, workspace_root, additional_roots)?;
 
     // Read audio file
     let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read audio file: {e}"))?;
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to read audio file: {e}")))?;
 
     // Detect MIME type from extension
     let ext = resolved
@@ -110,8 +138,10 @@ pub(super) async fn tool_media_transcribe(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let mime =
-        audio_mime_from_ext(&ext).ok_or_else(|| format!("Unsupported audio format: .{ext}"))?;
+    let mime = audio_mime_from_ext(&ext).ok_or_else(|| ToolError::InvalidParameter {
+        name: "path",
+        reason: format!("Unsupported audio format: .{ext}"),
+    })?;
 
     let attachment = librefang_types::media::MediaAttachment {
         media_type: librefang_types::media::MediaType::Audio,
@@ -123,8 +153,11 @@ pub(super) async fn tool_media_transcribe(
         size_bytes: data.len() as u64,
     };
 
-    let understanding = engine.transcribe_audio(&attachment).await?;
-    serde_json::to_string_pretty(&understanding).map_err(|e| format!("Serialize error: {e}"))
+    let understanding = engine
+        .transcribe_audio(&attachment)
+        .await
+        .map_err(ToolError::upstream_msg)?;
+    Ok(serde_json::to_string_pretty(&understanding)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,10 +170,10 @@ pub(super) async fn tool_image_generate(
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
     upload_dir: &Path,
-) -> Result<String, String> {
+) -> ToolResult {
     let prompt = input["prompt"]
         .as_str()
-        .ok_or("Missing 'prompt' parameter")?;
+        .ok_or(ToolError::MissingParameter("prompt"))?;
 
     let provider = input["provider"].as_str().map(|s| s.to_string());
     let model = input["model"].as_str().map(|s| s.to_string());
@@ -164,19 +197,24 @@ pub(super) async fn tool_image_generate(
             seed: None,
         };
 
-        request.validate().map_err(|e| e.to_string())?;
+        request
+            .validate()
+            .map_err(|e| ToolError::InvalidParameter {
+                name: "request",
+                reason: e.to_string(),
+            })?;
 
         let driver = if let Some(ref name) = provider {
             cache.get_or_create(name, None)
         } else {
             cache.detect_for_capability(librefang_types::media::MediaCapability::ImageGeneration)
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
         let result = driver
             .generate_image(&request)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
@@ -191,8 +229,7 @@ pub(super) async fn tool_image_generate(
             "image_urls": image_urls,
         });
 
-        return serde_json::to_string_pretty(&response)
-            .map_err(|e| format!("Serialize error: {e}"));
+        return Ok(serde_json::to_string_pretty(&response)?);
     }
 
     // Fallback: old OpenAI-only path (when media_drivers is None)
@@ -202,9 +239,13 @@ pub(super) async fn tool_image_generate(
         "dall-e-2" | "dalle2" | "dalle-2" => librefang_types::media::ImageGenModel::DallE2,
         "gpt-image-1" | "gpt_image_1" => librefang_types::media::ImageGenModel::GptImage1,
         _ => {
-            return Err(format!(
+            let reason = format!(
                 "Unknown image model: {model_str}. Use 'dall-e-3', 'dall-e-2', or 'gpt-image-1'."
-            ))
+            );
+            return Err(ToolError::InvalidParameter {
+                name: "model",
+                reason,
+            });
         }
     };
 
@@ -220,7 +261,9 @@ pub(super) async fn tool_image_generate(
         count: count_val,
     };
 
-    let result = crate::image_gen::generate_image(&request).await?;
+    let result = crate::image_gen::generate_image(&request)
+        .await
+        .map_err(ToolError::upstream_msg)?;
 
     let saved_paths = if let Some(workspace) = workspace_root {
         match crate::image_gen::save_images_to_workspace(&result, workspace) {
@@ -258,7 +301,7 @@ pub(super) async fn tool_image_generate(
         "image_urls": image_urls,
     });
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 /// Save MediaImageResult images to workspace output/ dir.
@@ -325,12 +368,11 @@ fn save_media_images_to_uploads(
 pub(super) async fn tool_video_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
-) -> Result<String, String> {
-    let cache =
-        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+) -> ToolResult {
+    let cache = media_drivers.ok_or(ToolError::Unavailable("Media drivers"))?;
     let prompt = input["prompt"]
         .as_str()
-        .ok_or("Missing 'prompt' parameter")?;
+        .ok_or(ToolError::MissingParameter("prompt"))?;
 
     let request = librefang_types::media::MediaVideoRequest {
         prompt: prompt.to_string(),
@@ -345,20 +387,25 @@ pub(super) async fn tool_video_generate(
     // Validate request parameters before sending to the provider
     request
         .validate()
-        .map_err(|e| format!("Invalid request: {e}"))?;
+        .map_err(|e| ToolError::InvalidParameter {
+            name: "request",
+            reason: e.to_string(),
+        })?;
 
     let driver = if let Some(p) = &request.provider {
-        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+        cache
+            .get_or_create(p, None)
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     } else {
         cache
             .detect_for_capability(librefang_types::media::MediaCapability::VideoGeneration)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     };
 
     let result = driver
         .submit_video(&request)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
     let response = serde_json::json!({
         "task_id": result.task_id,
@@ -367,40 +414,41 @@ pub(super) async fn tool_video_generate(
         "note": "Use video_status tool with this task_id to check progress"
     });
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 /// Check the status of a video generation task. Returns download URL when complete.
 pub(super) async fn tool_video_status(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
-) -> Result<String, String> {
-    let cache =
-        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+) -> ToolResult {
+    let cache = media_drivers.ok_or(ToolError::Unavailable("Media drivers"))?;
     let task_id = input["task_id"]
         .as_str()
-        .ok_or("Missing 'task_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("task_id"))?;
     let provider = input["provider"].as_str();
 
     let driver = if let Some(p) = provider {
-        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+        cache
+            .get_or_create(p, None)
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     } else {
         cache
             .detect_for_capability(librefang_types::media::MediaCapability::VideoGeneration)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     };
 
     let status = driver
         .poll_video(task_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
     // If completed, also fetch the full result with download URL
     if status == librefang_types::media::MediaTaskStatus::Completed {
         let video_result = driver
             .get_video_result(task_id)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
         let response = serde_json::json!({
             "status": "completed",
             "file_url": video_result.file_url,
@@ -410,8 +458,7 @@ pub(super) async fn tool_video_status(
             "provider": video_result.provider,
             "model": video_result.model,
         });
-        return serde_json::to_string_pretty(&response)
-            .map_err(|e| format!("Serialize error: {e}"));
+        return Ok(serde_json::to_string_pretty(&response)?);
     }
 
     let response = serde_json::json!({
@@ -420,7 +467,7 @@ pub(super) async fn tool_video_status(
         "note": "Task is still in progress. Poll again after a few seconds."
     });
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 /// Generate music from a prompt and/or lyrics. Saves audio to workspace output/ directory.
@@ -428,9 +475,8 @@ pub(super) async fn tool_music_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
-) -> Result<String, String> {
-    let cache =
-        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+) -> ToolResult {
+    let cache = media_drivers.ok_or(ToolError::Unavailable("Media drivers"))?;
 
     let request = librefang_types::media::MediaMusicRequest {
         prompt: input["prompt"].as_str().map(String::from),
@@ -444,27 +490,32 @@ pub(super) async fn tool_music_generate(
     // Validate request parameters before sending to the provider
     request
         .validate()
-        .map_err(|e| format!("Invalid request: {e}"))?;
+        .map_err(|e| ToolError::InvalidParameter {
+            name: "request",
+            reason: e.to_string(),
+        })?;
 
     let driver = if let Some(p) = &request.provider {
-        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+        cache
+            .get_or_create(p, None)
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     } else {
         cache
             .detect_for_capability(librefang_types::media::MediaCapability::MusicGeneration)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| ToolError::upstream_msg(e.to_string()))?
     };
 
     let result = driver
         .generate_music(&request)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
     // Save audio to workspace output/ directory (same pattern as text_to_speech)
     let saved_path = if let Some(workspace) = workspace_root {
         let output_dir = workspace.join("output");
         tokio::fs::create_dir_all(&output_dir)
             .await
-            .map_err(|e| format!("Failed to create output dir: {e}"))?;
+            .map_err(|e| ToolError::upstream_msg(format!("Failed to create output dir: {e}")))?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let filename = format!("music_{timestamp}.{}", result.format);
@@ -472,7 +523,7 @@ pub(super) async fn tool_music_generate(
 
         tokio::fs::write(&path, &result.audio_data)
             .await
-            .map_err(|e| format!("Failed to write audio file: {e}"))?;
+            .map_err(|e| ToolError::upstream_msg(format!("Failed to write audio file: {e}")))?;
 
         Some(path.display().to_string())
     } else {
@@ -496,7 +547,7 @@ pub(super) async fn tool_music_generate(
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&result.audio_data));
     }
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -508,8 +559,10 @@ pub(super) async fn tool_text_to_speech(
     media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     workspace_root: Option<&Path>,
-) -> Result<String, String> {
-    let text = input["text"].as_str().ok_or("Missing 'text' parameter")?;
+) -> ToolResult {
+    let text = input["text"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("text"))?;
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
@@ -559,7 +612,7 @@ pub(super) async fn tool_text_to_speech(
             let result = driver
                 .synthesize_speech(&request)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| ToolError::upstream_msg(e.to_string()))?;
 
             return finish_tts_result(
                 &result.audio_data,
@@ -575,10 +628,12 @@ pub(super) async fn tool_text_to_speech(
     }
 
     // Fallback: old TtsEngine (OpenAI / ElevenLabs only)
-    let engine =
-        tts_engine.ok_or("TTS not available. No media driver or TTS engine configured.")?;
+    let engine = tts_engine.ok_or(ToolError::Unavailable("TTS"))?;
 
-    let result = engine.synthesize(text, voice, format).await?;
+    let result = engine
+        .synthesize(text, voice, format)
+        .await
+        .map_err(ToolError::upstream_msg)?;
 
     finish_tts_result(
         &result.audio_data,
@@ -699,12 +754,12 @@ async fn finish_tts_result(
     duration_ms: Option<u64>,
     workspace_root: Option<&Path>,
     output_format: &str,
-) -> Result<String, String> {
+) -> ToolResult {
     let (saved_path, final_format, final_size, warning) = if let Some(workspace) = workspace_root {
         let output_dir = workspace.join("output");
         tokio::fs::create_dir_all(&output_dir)
             .await
-            .map_err(|e| format!("Failed to create output dir: {e}"))?;
+            .map_err(|e| ToolError::upstream_msg(format!("Failed to create output dir: {e}")))?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
 
@@ -716,9 +771,9 @@ async fn finish_tts_result(
                 Ok(None) => {
                     let filename = format!("tts_{timestamp}.{format}");
                     let path = output_dir.join(&filename);
-                    tokio::fs::write(&path, audio_data)
-                        .await
-                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    tokio::fs::write(&path, audio_data).await.map_err(|e| {
+                        ToolError::upstream_msg(format!("Failed to write audio file: {e}"))
+                    })?;
                     (
                         Some(path.display().to_string()),
                         format.to_string(),
@@ -733,9 +788,9 @@ async fn finish_tts_result(
                     tracing::warn!("OGG Opus conversion failed, falling back to {format}: {e}");
                     let filename = format!("tts_{timestamp}.{format}");
                     let path = output_dir.join(&filename);
-                    tokio::fs::write(&path, audio_data)
-                        .await
-                        .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                    tokio::fs::write(&path, audio_data).await.map_err(|e| {
+                        ToolError::upstream_msg(format!("Failed to write audio file: {e}"))
+                    })?;
                     (
                         Some(path.display().to_string()),
                         format.to_string(),
@@ -751,7 +806,7 @@ async fn finish_tts_result(
             let path = output_dir.join(&filename);
             tokio::fs::write(&path, audio_data)
                 .await
-                .map_err(|e| format!("Failed to write audio file: {e}"))?;
+                .map_err(|e| ToolError::upstream_msg(format!("Failed to write audio file: {e}")))?;
 
             (
                 Some(path.display().to_string()),
@@ -783,7 +838,7 @@ async fn finish_tts_result(
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(audio_data));
     }
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 pub(super) async fn tool_speech_to_text(
@@ -791,17 +846,19 @@ pub(super) async fn tool_speech_to_text(
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
-) -> Result<String, String> {
-    let engine = media_engine.ok_or("Media engine not available for speech-to-text")?;
-    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+) -> ToolResult {
+    let engine = media_engine.ok_or(ToolError::Unavailable("Media engine"))?;
+    let raw_path = input["path"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("path"))?;
     let _language = input["language"].as_str();
 
-    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
+    let resolved = resolve_media_path(raw_path, workspace_root, additional_roots)?;
 
     // Read the audio file
     let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read audio file: {e}"))?;
+        .map_err(|e| ToolError::upstream_msg(format!("Failed to read audio file: {e}")))?;
 
     // Determine MIME type from extension. Unknown extensions fall back to
     // audio/mpeg here (the speech_to_text path is permissive); the strict
@@ -827,7 +884,10 @@ pub(super) async fn tool_speech_to_text(
         size_bytes: data.len() as u64,
     };
 
-    let understanding = engine.transcribe_audio(&attachment).await?;
+    let understanding = engine
+        .transcribe_audio(&attachment)
+        .await
+        .map_err(ToolError::upstream_msg)?;
 
     let response = serde_json::json!({
         "transcript": understanding.description,
@@ -835,5 +895,5 @@ pub(super) async fn tool_speech_to_text(
         "model": understanding.model,
     });
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
 }
