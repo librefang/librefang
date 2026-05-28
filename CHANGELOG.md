@@ -5,6 +5,78 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.28] - 2026-05-28
+
+_46 PRs from 5 contributors since v2026.5.25-beta.13._
+
+### Breaking Changes
+
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Added
+
+- Per-agent channel allowlist (#5738) (@DaBlitzStein)
+- Implement describe_image() and wire ImageFile description through channel adapters (#5815) (@houko)
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Fixed
+
+- Isolate attachment pre-inject per chat session — close cross-chat image leak (#5334) (@f-liva)
+- Make migrate path containment existence-independent (fixes #5716) (#5719) (@houko)
+- Repair discussion-to-issue backfill — gh api --jq doesn't take --arg (#5754) (@houko)
+- Tool_runner taint — unified SECRET_KEYS, substring match, header trim, single-pass normalization (#5762) (@leszek3737)
+- Tool_runner shell_safety — command injection hardening, quote-aware tokenizer (#5765) (@leszek3737)
+- Tool_runner definitions — ALWAYS_NATIVE complete, OnceLock caches, schema fixes, tool_name constants (#5771) (@leszek3737)
+- Tool_runner error — Upstream message preserved, MissingParameter String, ResourceNotFound 404 (#5772) (@leszek3737)
+- Tool_runner cron — sender_id override, TOCTOU reduction, HashSet lookup, empty job_id rejected (#5773) (@leszek3737)
+- Tool_runner dispatch — mutex split, fallback ACL, ACP args, spill wiring, snapshot ordering (#5774) (@leszek3737)
+- Tool_runner spill — config-based threshold, validation, fast-path (#5776) (@leszek3737)
+- Tool_runner wiki — limit cap, input validation, safe usize, caller_agent_id required (#5777) (@leszek3737)
+- Tool_runner meta — case-insensitive lookup, Cow optimization, deterministic sort (#5779) (@leszek3737)
+- Tool_runner task — typed deserialization, contextual errors, empty validation, status default (#5780) (@leszek3737)
+- Tool_runner notify — length limit, control char sanitization, PII removal (#5782) (@leszek3737)
+- Tool_runner hand — deterministic sort, empty id reject, config whitelist, output sanitization (#5784) (@leszek3737)
+- Tool_runner goal — progress type fix, range validation (#5785) (@leszek3737)
+- Tool_runner event — event_type validation, caller identity, reserved prefix guard (#5786) (@leszek3737)
+- Tool_runner a2a — session_id taint, SSRF diagnostics, zero-alloc agent check (#5787) (@leszek3737)
+- Tool_runner artifact — spawn_blocking, explicit errors, usize safe, zero-length reject (#5788) (@leszek3737)
+- Tool_runner channel — poll u8 safe, file size limit, email regex, mirror dedup, thread_id routing (#5789) (@leszek3737)
+- Skip bridge-side formatting for sidecar adapters (fixes #5795) (#5796) (@DaBlitzStein)
+- Return forward-slash relative path from registry/content on Windows (#5801) (@houko)
+- Make step timeout errors actionable with remediation guidance (#5806) (@houko)
+- Eliminate Instant subtraction that panics on Windows CI (fixes #5726) (#5808) (@houko)
+- Seed Feishu/Lark configure form when Python SDK is absent (#5809) (@houko)
+- Unbreak coverage build — thread session_id into two SessionWriter test stubs (#5816) (@houko)
+- Wiki.rs lifetime + shell.rs test arity after #5774/#5777 (#5818) (@houko)
+- Unbreak main — agent channels in ApiDoc + fmt + secrets baseline (#5820) (@houko)
+- Install gh CLI for release flow (#5826) (@houko)
+- Run `gh auth setup-git` to unblock git push from container (#5827) (@houko)
+- Override host-absolute credential helper path inside container (#5829) (@houko)
+
+### Changed
+
+- Migrate tool_runner tools to ToolError (#3576) (#5737) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the cargo-minor-patch group with 4 updates (#5748) (@app/dependabot)
+- Bump wasmtime from 44.0.1 to 45.0.0 (#5749) (@app/dependabot)
+- Bump sysinfo from 0.38.4 to 0.39.2 (#5750) (@app/dependabot)
+- Bump which from 7.0.3 to 8.0.2 (#5751) (@app/dependabot)
+- Bump tikv-jemallocator from 0.6.1 to 0.7.0 (#5752) (@app/dependabot)
+- Bump the actions-minor-patch group with 4 updates (#5790) (@app/dependabot)
+- Bump actions/setup-python from 5 to 6 (#5791) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 3 updates (#5810) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 7 updates (#5811) (@app/dependabot)
+- Bump globals from 15.15.0 to 17.6.0 in /crates/librefang-api/dashboard (#5812) (@app/dependabot)
+- Docker fallback for `just release` when cargo is missing (#5825) (@houko)
+
+</details>
+
+
 ## [2026.5.25] - 2026-05-25
 
 _308 PRs from 7 contributors since v2026.5.17-beta.12._
