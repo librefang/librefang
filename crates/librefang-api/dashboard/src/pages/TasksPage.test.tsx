@@ -202,6 +202,58 @@ describe("TasksPage", () => {
     });
   });
 
+  describe("drag to re-queue", () => {
+    function withCancelledTask() {
+      useTaskQueueMock.mockReturnValue(
+        makeQuery({
+          tasks: [
+            ...SAMPLE_TASKS,
+            { id: "task-cancelled-1", status: "cancelled", title: "Cancelled one", description: "Was cancelled", created_at: new Date().toISOString() },
+          ],
+          total: SAMPLE_TASKS.length + 1,
+        }),
+      );
+    }
+
+    function fakeDataTransfer() {
+      const store: Record<string, string> = {};
+      return {
+        setData: vi.fn((k: string, v: string) => { store[k] = v; }),
+        getData: vi.fn((k: string) => store[k] ?? ""),
+        effectAllowed: "",
+        dropEffect: "",
+      } as unknown as DataTransfer;
+    }
+
+    it("populates dataTransfer on dragStart (Firefox requires it)", () => {
+      withCancelledTask();
+      renderPage();
+      const card = screen.getByText("Cancelled one").closest("[draggable='true']");
+      expect(card).not.toBeNull();
+      const dt = fakeDataTransfer();
+      fireEvent.dragStart(card as Element, { dataTransfer: dt });
+      // Without setData here the drag is a silent no-op in Firefox.
+      expect(dt.setData).toHaveBeenCalledWith("text/plain", "task-cancelled-1");
+    });
+
+    it("re-queues a cancelled task when dropped on the Pending column", () => {
+      withCancelledTask();
+      const mutate = vi.fn();
+      useUpdateTaskStatusMock.mockReturnValue(makeMutation({ mutate }));
+      renderPage();
+      const card = screen.getByText("Cancelled one").closest("[draggable='true']");
+      const pendingColumn = screen.getByText("tasks.col_pending").closest("[data-column='pending']");
+      expect(pendingColumn).not.toBeNull();
+      const dt = fakeDataTransfer();
+      fireEvent.dragStart(card as Element, { dataTransfer: dt });
+      fireEvent.dragOver(pendingColumn as Element, { dataTransfer: dt });
+      fireEvent.drop(pendingColumn as Element, { dataTransfer: dt });
+      expect(mutate).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "task-cancelled-1", status: "pending" }),
+      );
+    });
+  });
+
   describe("status summary bar", () => {
     it("renders status counters", () => {
       renderPage();

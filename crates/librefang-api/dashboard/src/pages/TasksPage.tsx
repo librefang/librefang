@@ -99,7 +99,16 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
   return (
     <div
       draggable={actions.includes("requeue")}
-      onDragStart={() => { if (id) onDragStart(id); }}
+      onDragStart={e => {
+        if (!id) return;
+        // Firefox refuses to start a drag unless dataTransfer is populated in
+        // dragstart; without this the entire re-queue-by-drag gesture is a
+        // no-op there. The payload also carries the id so the drop does not
+        // rely solely on React state.
+        e.dataTransfer.setData("text/plain", id);
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart(id);
+      }}
       className={`rounded-xl border p-3 text-sm transition-shadow cursor-default select-none
         ${isDragTarget ? "border-brand/60 bg-brand/5" : "border-border-subtle bg-surface hover:shadow-sm"}
       `}
@@ -249,6 +258,7 @@ function KanbanColumn({
 
   return (
     <div
+      data-column={columnKey}
       className={`flex flex-col min-w-[240px] max-w-[320px] flex-1 rounded-2xl border transition-colors
         ${isDragOver && acceptsDrop
           ? "border-brand bg-brand/5"
