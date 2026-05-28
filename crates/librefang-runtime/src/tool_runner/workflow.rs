@@ -42,46 +42,47 @@ pub(super) fn prepare_workflow_input(raw: Option<&serde_json::Value>) -> Result<
     }
 }
 
-/// Recursively walk `value` and rewrite every `{"_artifact": "sha256:..."}`
-/// object into the bare handle string. Anything else passes through
-/// unchanged. Malformed handles fail fast with a clear error message so
-/// the agent's tool-result includes the bad reference and can self-correct
-/// on the next turn — silently coercing or stripping would leave the
-/// downstream step rendering `[object Object]` into its prompt.
 pub(super) fn resolve_workflow_input_artifacts(
     value: &mut serde_json::Value,
 ) -> Result<(), String> {
+    const MAX_DEPTH: usize = 128;
+    resolve_workflow_input_artifacts_impl(value, 0, MAX_DEPTH)
+}
+
+fn resolve_workflow_input_artifacts_impl(
+    value: &mut serde_json::Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), String> {
+    if depth > max_depth {
+        return Err("JSON nesting exceeds maximum depth".to_string());
+    }
     match value {
         serde_json::Value::Object(map) => {
-            // Single-key `_artifact` reference — replace this whole node.
             if map.len() == 1 {
-                if let Some(serde_json::Value::String(handle)) = map.get("_artifact") {
-                    let handle = handle.clone();
-                    // Validate the handle format via the artifact_store
-                    // parser — same shape (`sha256:<64hex>`) read_artifact
-                    // accepts, so the agent's existing handle vocabulary
-                    // works without translation. The offending handle is
-                    // interpolated so the agent gets enough context in
-                    // its tool-result to self-correct on the next turn
-                    // (`ArtifactHandle::parse` itself only quotes the
-                    // suffix on the "wrong length" path, not the "wrong
-                    // prefix" path — surfacing it unconditionally
-                    // closes that gap).
-                    crate::artifact_store::ArtifactHandle::parse(&handle).map_err(|e| {
-                        format!("Invalid '_artifact' reference in workflow input: '{handle}' ({e})")
-                    })?;
-                    *value = serde_json::Value::String(handle);
-                    return Ok(());
+                if let Some(av) = map.get("_artifact") {
+                    if let Some(handle) = av.as_str() {
+                        let handle = handle.to_string();
+                        crate::artifact_store::ArtifactHandle::parse(&handle).map_err(|e| {
+                            format!(
+                                "Invalid '_artifact' reference in workflow input: '{handle}' ({e})"
+                            )
+                        })?;
+                        *value = serde_json::Value::String(handle);
+                        return Ok(());
+                    } else {
+                        return Err("'_artifact' value must be a string".to_string());
+                    }
                 }
             }
             for (_k, v) in map.iter_mut() {
-                resolve_workflow_input_artifacts(v)?;
+                resolve_workflow_input_artifacts_impl(v, depth + 1, max_depth)?;
             }
             Ok(())
         }
         serde_json::Value::Array(items) => {
             for v in items.iter_mut() {
-                resolve_workflow_input_artifacts(v)?;
+                resolve_workflow_input_artifacts_impl(v, depth + 1, max_depth)?;
             }
             Ok(())
         }
@@ -159,8 +160,7 @@ pub(super) async fn tool_workflow_run(
 pub(super) async fn tool_workflow_list(kernel: Option<&Arc<dyn KernelHandle>>) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
     let mut summaries = kh.list_workflows().await;
-    // Sort by name for deterministic LLM prompt output (#3298).
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    summaries.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     let json_array: Vec<serde_json::Value> = summaries
         .into_iter()
         .map(|w| {
@@ -293,15 +293,26 @@ pub(super) async fn tool_workflow_cancel(
     })?;
 
     let kh = require_kernel_typed(kernel)?;
-    kh.cancel_workflow_run(run_id)
-        .await
-        .map_err(ToolError::upstream)?;
-
-    Ok(serde_json::json!({
-        "run_id": run_id,
-        "state": "cancelled",
-    })
-    .to_string())
+    match kh.cancel_workflow_run(run_id).await {
+        Ok(()) => Ok(serde_json::json!({
+            "run_id": run_id,
+            "state": "cancelled",
+        })
+        .to_string()),
+        Err(e) => {
+            let msg = e.to_string();
+            let state = if msg.contains("not found") {
+                "not_found"
+            } else if msg.contains("already") {
+                "already_terminal"
+            } else {
+                "error"
+            };
+            Err(ToolError::upstream_msg(format!(
+                "cancel failed ({state}): {msg}"
+            )))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
