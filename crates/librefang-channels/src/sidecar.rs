@@ -1670,6 +1670,10 @@ impl ChannelAdapter for SidecarAdapter {
         .await
     }
 
+    fn owns_formatting(&self) -> bool {
+        true
+    }
+
     fn supports_streaming(&self) -> bool {
         self.has_cap("streaming")
     }

@@ -1089,6 +1089,11 @@ pub struct AgentManifest {
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
+    /// Channel allowlist — restricts which configured channels this agent can
+    /// receive messages from. Uses the `channel_type` string (e.g. `"telegram"`,
+    /// `"discord"`, `"slack"`). Empty = all channels (backward-compatible default).
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub channels: Vec<String>,
     /// Explicitly disable all MCP server tools for this agent. Mirrors
     /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
     ///
@@ -1513,6 +1518,7 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
+            channels: Vec::new(),
             mcp_disabled: false,
             metadata: HashMap::new(),
             tags: Vec::new(),

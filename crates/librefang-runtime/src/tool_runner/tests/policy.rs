@@ -519,7 +519,9 @@ async fn test_media_tools_honor_named_workspace_prefixes() {
          no named-workspace prefixes are provided, got: {:?}",
         denied
     );
-    let err = denied.unwrap_err();
+    // #3576: Err is now ToolError; assert via its Display (the sandbox reason
+    // is preserved inside InvalidParameter).
+    let err = denied.unwrap_err().to_string();
     assert!(
         err.contains("resolves outside workspace") || err.contains("Access denied"),
         "expected sandbox rejection, got: {err}"
@@ -589,7 +591,11 @@ async fn test_schedule_tools_without_kernel() {
     )
     .await;
     assert!(result.is_error);
-    assert!(result.content.contains("Kernel handle not available"));
+    // #3576: schedule_* now goes through `require_kernel_typed`, which yields
+    // `ToolError::Unavailable("Kernel handle")` rendered as "Kernel handle
+    // unavailable" (the old `require_kernel` string was "Kernel handle not
+    // available ..."). shell.rs still asserts the old text until shell migrates.
+    assert!(result.content.contains("Kernel handle unavailable"));
 }
 
 // ─── Canvas / A2UI tests ────────────────────────────────────────
@@ -1421,7 +1427,8 @@ fn test_goal_update_missing_kernel() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Kernel handle"));
+    // #3576: Err is now ToolError; assert via its Display.
+    assert!(result.unwrap_err().to_string().contains("Kernel handle"));
 }
 
 #[test]
@@ -1440,7 +1447,7 @@ fn test_goal_update_no_fields() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("At least one"));
+    assert!(result.unwrap_err().to_string().contains("At least one"));
 }
 
 #[test]
@@ -1451,7 +1458,7 @@ fn test_goal_update_invalid_status() {
     });
     let result = tool_goal_update(&input, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid status"));
+    assert!(result.unwrap_err().to_string().contains("Invalid status"));
 }
 
 /// Mock kernel that validates capability inheritance in spawn_agent_checked.

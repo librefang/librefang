@@ -292,6 +292,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Return the agent's channel allowlist (`manifest.channels`).
+    ///
+    /// Empty = all channels permitted (backward-compatible default).
+    /// Non-empty = only the listed `channel_type` strings are allowed.
+    async fn agent_channel_allowlist(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
     async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
@@ -2740,7 +2748,11 @@ async fn send_response(
         text_len = text.len(),
         "Sending response to channel"
     );
-    let formatted = formatter::format_for_channel(&text, output_format);
+    let formatted = if adapter.owns_formatting() {
+        text
+    } else {
+        formatter::format_for_channel(&text, output_format)
+    };
     let content = ChannelContent::Text(formatted);
 
     let result = if let Some(tid) = thread_id {
@@ -2999,6 +3011,13 @@ async fn resolve_or_fallback(
     };
 
     if let Some(id) = agent_id {
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                return None;
+            }
+        }
         return Some(id);
     }
 
@@ -3013,6 +3032,13 @@ async fn resolve_or_fallback(
             .and_then(|agents| agents.first().map(|(id, _)| *id)),
     };
     if let Some(id) = fallback {
+        let allowlist = handle.agent_channel_allowlist(id).await;
+        if !allowlist.is_empty() {
+            let ct = channel_type_str(&message.channel);
+            if !allowlist.iter().any(|c| c == ct) {
+                return None;
+            }
+        }
         // Auto-set this as the user's default so future messages route
         // directly. Scope the cache entry to (channel, account_id) when we
         // know the bot identity, otherwise we would re-introduce the #5672
