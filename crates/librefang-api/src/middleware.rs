@@ -263,6 +263,22 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Sentinel `user_id` for the synthetic Owner attribution applied when
+/// the request authenticated only via the root `api_key` (operator's
+/// master credential).
+///
+/// Chosen as a fixed UUID outside the `LIBREFANG_USER_NAMESPACE` v5
+/// hash space so it cannot collide with a real `[users] name = "..."`
+/// entry — even if an operator registers a user literally named `root`,
+/// `UserId::from_name("root")` resolves to a *different* UUID and stays
+/// isolated. Without this guarantee the master credential would silently
+/// inherit any ACL / per-user budget cap configured for that user.
+///
+/// The specific bytes are arbitrary — what matters is that they're
+/// stable across restarts (so audit-log queries can group by this id)
+/// and unmistakable in `git log` / log output (`r00t…`).
+pub const ROOT_API_KEY_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-72006f0074a0");
+
 /// Resolved language code extracted from the `Accept-Language` header.
 ///
 /// Inserted into request extensions by the [`accept_language`] middleware so
@@ -1373,11 +1389,20 @@ pub async fn auth(
     // memory namespace guard correctly downgrades to Viewer-equivalent
     // (no writes / no deletes / no exports) and breaks the obvious
     // `librefang start` → `curl POST /api/memory` workflow.
+    //
+    // The synthetic user_id is a fixed sentinel UUID (`ROOT_API_KEY_USER_ID`),
+    // NOT `UserId::from_name("root")` — the latter would collide with a
+    // real `[users] name = "root"` entry in `config.toml`, silently
+    // granting the master credential whatever ACL / per-user budget cap
+    // that user has configured. The sentinel falls outside the
+    // `LIBREFANG_USER_NAMESPACE` v5 hash space, so `AuthManager.users.get`
+    // returns None and the fail-open Owner-default ACL applies (matching
+    // the documented "master credential" contract).
     if header_auth == Some(true) {
         request.extensions_mut().insert(AuthenticatedApiUser {
             name: "root".to_string(),
             role: UserRole::Owner,
-            user_id: UserId::from_name("root"),
+            user_id: UserId(ROOT_API_KEY_USER_ID),
         });
         return next.run(request).await;
     }
@@ -1591,6 +1616,24 @@ mod tests {
         // Empty / nonsense paths don't match.
         assert!(!is_noisy_metrics_unauth(401, ""));
         assert!(!is_noisy_metrics_unauth(401, "/"));
+    }
+
+    /// Review-followup #1: the synthetic root user_id used for root-api_key
+    /// callers MUST live outside `LIBREFANG_USER_NAMESPACE` so it can't
+    /// collide with a real `[users] name = "..."` registration that happens
+    /// to be called "root", "admin", "system", etc.
+    #[test]
+    fn root_api_key_user_id_does_not_collide_with_any_named_user() {
+        use librefang_types::agent::UserId;
+        // Any name an operator might plausibly use for the master account.
+        for candidate in ["root", "admin", "owner", "system", "operator", "user"] {
+            let from_name = UserId::from_name(candidate);
+            assert_ne!(
+                from_name.0, ROOT_API_KEY_USER_ID,
+                "synthetic root id collides with UserId::from_name({candidate:?}) — \
+                 operator with a {candidate} user would silently inherit master ACL"
+            );
+        }
     }
 
     #[test]

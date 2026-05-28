@@ -227,6 +227,15 @@ pub struct ProactiveMemoryConfig {
     /// first. Default: 1000. Set to 0 to disable the cap.
     #[serde(default = "default_max_memories_per_agent")]
     pub max_memories_per_agent: usize,
+    /// Maximum number of characters that `format_context` (the prompt
+    /// injection for `auto_retrieve` memories) may emit, including the
+    /// header template (H4 review-followup #8). At ~4 chars per token
+    /// this is roughly a token budget; the default 8000 (~2000 tokens)
+    /// suits an 8k–32k context window. Operators on larger windows can
+    /// raise this without recompiling. Excess memories are dropped and
+    /// reported via a footer; the cap is a hard ceiling on the section.
+    #[serde(default = "default_format_context_max_chars")]
+    pub format_context_max_chars: usize,
 }
 
 fn default_true() -> bool {
@@ -235,6 +244,10 @@ fn default_true() -> bool {
 
 fn default_max_memories_per_agent() -> usize {
     1000
+}
+
+fn default_format_context_max_chars() -> usize {
+    8000
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -259,6 +272,7 @@ impl Default for ProactiveMemoryConfig {
             duplicate_threshold: 0.85,
             confidence_decay_rate: 0.01,
             max_memories_per_agent: 1000,
+            format_context_max_chars: default_format_context_max_chars(),
         }
     }
 }
@@ -951,24 +965,40 @@ impl MemoryExtractor for DefaultMemoryExtractor {
     }
 
     fn format_context(&self, memories: &[MemoryItem]) -> String {
-        format_memories_with_budget(memories)
+        // The trait method has no config access; fall back to the const
+        // default budget. Callers that have a `ProactiveMemoryConfig`
+        // (the store, not the bare trait) should go through
+        // `ProactiveMemoryStore::format_context*` which uses the
+        // configured `format_context_max_chars`.
+        format_memories_with_budget(memories, FORMAT_CONTEXT_MAX_CHARS)
     }
 }
 
-/// Maximum number of characters spent on memory-content bullets in a
-/// single prompt injection (H4). At ~4 chars per token this caps the
-/// memory section at roughly 2000 tokens, which is a reasonable share
-/// of a typical 8k-32k context window. Pre-fix `format_context` had no
-/// cap at all: 10 memories × 2000 chars (`MAX_MEMORY_CONTENT_LENGTH`)
-/// could pump 20 KB into every request. The bullet header counts against
-/// this budget too so the cap is a true ceiling on prompt-section
-/// growth, not just per-bullet content.
+/// Default maximum number of characters spent on memory-content
+/// bullets in a single prompt injection (H4). At ~4 chars per token
+/// this caps the memory section at roughly 2000 tokens, which is a
+/// reasonable share of a typical 8k-32k context window.
+///
+/// Pre-fix `format_context` had no cap at all: 10 memories × 2000
+/// chars (`MAX_MEMORY_CONTENT_LENGTH`) could pump 20 KB into every
+/// request. The bullet header counts against this budget too so the
+/// cap is a true ceiling on prompt-section growth, not just per-bullet
+/// content.
+///
+/// Operators on larger context windows can override via
+/// `ProactiveMemoryConfig::format_context_max_chars`
+/// (review-followup #8). The const value is the trait-level fallback
+/// used by callers that don't have access to a `ProactiveMemoryConfig`
+/// (e.g. `DefaultMemoryExtractor` invoked directly from tests).
 pub const FORMAT_CONTEXT_MAX_CHARS: usize = 8000;
 
 /// Shared formatter used by both [`DefaultMemoryExtractor::format_context`]
 /// and the LLM-backed extractor — keeps the H4 budget logic centralized
 /// instead of duplicated.
-pub fn format_memories_with_budget(memories: &[MemoryItem]) -> String {
+///
+/// `max_chars` is the hard ceiling on the returned string length. Pass
+/// `FORMAT_CONTEXT_MAX_CHARS` when no per-call config is available.
+pub fn format_memories_with_budget(memories: &[MemoryItem], max_chars: usize) -> String {
     if memories.is_empty() {
         return String::new();
     }
@@ -997,7 +1027,7 @@ pub fn format_memories_with_budget(memories: &[MemoryItem]) -> String {
         // Reserve ~64 chars for the truncation footer so we never emit a
         // bullet that pushes us past the cap and then has no room for the
         // "[+N more]" note.
-        if context.len() + bullet.len() > FORMAT_CONTEXT_MAX_CHARS.saturating_sub(64) {
+        if context.len() + bullet.len() > max_chars.saturating_sub(64) {
             break;
         }
         context.push_str(&bullet);
@@ -1015,14 +1045,14 @@ pub fn format_memories_with_budget(memories: &[MemoryItem]) -> String {
     // Defense-in-depth: if even the header alone exceeded the cap (unlikely
     // — header is ~700 chars), at least guarantee the returned string never
     // exceeds the budget by trimming on a char boundary.
-    if context.len() > FORMAT_CONTEXT_MAX_CHARS {
-        let mut cutoff = FORMAT_CONTEXT_MAX_CHARS;
+    if context.len() > max_chars {
+        let mut cutoff = max_chars;
         while cutoff > 0 && !context.is_char_boundary(cutoff) {
             cutoff -= 1;
         }
         context.truncate(cutoff);
     }
-    debug_assert!(context.len() <= FORMAT_CONTEXT_MAX_CHARS);
+    debug_assert!(context.len() <= max_chars);
     let _ = header_len;
     context
 }

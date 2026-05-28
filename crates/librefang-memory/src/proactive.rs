@@ -39,6 +39,7 @@ use librefang_types::memory::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::Instrument;
 
 /// Scope names for multi-level memory.
 pub mod scopes {
@@ -362,70 +363,13 @@ impl ProactiveMemoryStore {
 
         let cutoff = Utc::now() - chrono::Duration::hours(ttl_hours as i64);
 
-        // Collect agent_ids that have expired session memories BEFORE soft-deleting them.
-        // This ensures we don't miss agents whose only memories were the expired ones.
-        let agent_ids: Vec<String> = {
-            let conn = self
-                .semantic
-                .pool()
-                .get()
-                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT DISTINCT agent_id FROM memories \
-                     WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
-                )
-                .map_err(LibreFangError::memory)?;
-            let ids = stmt
-                .query_map(
-                    rusqlite::params![scopes::SESSION, cutoff.to_rfc3339()],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(LibreFangError::memory)?
-                .filter_map(|r| r.ok())
-                .collect();
-            ids
-        };
-
-        // Soft-delete expired session memories in the semantic store (across all agents)
+        // Soft-delete expired session memories in the semantic store
+        // (across all agents). The KV mirror (`memory:*` keys in
+        // `structured`) is no longer written, so there is nothing to
+        // clean up there.
         let count = self
             .semantic
             .forget_session_older_than_global(scopes::SESSION, cutoff)?;
-
-        // For each agent, clean up expired session KV entries
-        for aid_str in &agent_ids {
-            if let Ok(aid) = uuid::Uuid::parse_str(aid_str) {
-                let agent_id = AgentId(aid);
-                if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
-                    for (key, value) in kv_pairs {
-                        if !key.starts_with("memory:") {
-                            continue;
-                        }
-                        let level_str = value
-                            .get("level")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Session");
-                        if MemoryLevel::from(level_str) != MemoryLevel::Session {
-                            continue;
-                        }
-                        let created_at_str = value.get("created_at").and_then(|v| v.as_str());
-                        if let Some(ts) = created_at_str {
-                            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
-                                if created.with_timezone(&Utc) < cutoff {
-                                    if let Err(e) = self.structured.delete(agent_id, &key) {
-                                        tracing::warn!(
-                                            "Failed to delete expired session KV entry '{}': {}",
-                                            key,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         if count > 0 {
             tracing::debug!(
@@ -541,14 +485,26 @@ impl ProactiveMemoryStore {
             let level = MemoryLevel::from(item.level.as_str());
             let scope = level.scope_str();
 
-            // Skip near-verbatim duplicates on bulk import. The threshold
-            // is intentionally stricter than the configured
-            // `duplicate_threshold` (which gates extraction-time UPDATE
-            // decisions) — bulk import is an explicit operator action, so
-            // we want a high bar before silently dropping a row. 0.95 ==
-            // near-exact match (Jaccard); a paraphrase that the operator
-            // legitimately wants imported as a distinct memory will get
-            // through and can be consolidated later.
+            // Skip only near-verbatim duplicates on bulk import. The
+            // threshold here (0.95) is intentionally *higher* than the
+            // configured `duplicate_threshold` (which defaults to 0.85
+            // and gates extraction-time UPDATE decisions) — a higher
+            // value means LESS gets dropped, MORE imports succeed. Bulk
+            // import is an explicit operator action so we want a high
+            // bar before silently swallowing a row; a paraphrase the
+            // operator legitimately wants imported as a distinct memory
+            // gets through and can be consolidated later via the
+            // on-demand `/api/memory/agents/{id}/consolidate` route.
+            //
+            // Review-followup #10: the previous comment described 0.95
+            // as "stricter than extraction-time dedup", which is true
+            // only relative to the extraction-time 0.85 baseline (a
+            // higher bar to call something a duplicate ⇒ stricter dedup
+            // gating ⇒ more imports get through). Pre-fix this was 0.9,
+            // so 0.95 is also slightly *more permissive* for is_duplicate
+            // judgements than the original value. Both readings are
+            // consistent; the intent is "let almost everything through
+            // and let the on-demand consolidator clean up later".
             let filter = Some(MemoryFilter::agent(aid));
             let existing = self.semantic.recall(&item.content, 5, filter)?;
             let is_duplicate = existing.iter().any(|frag| {
@@ -588,7 +544,7 @@ impl ProactiveMemoryStore {
                 None
             };
 
-            let mem_id = self.semantic.remember_with_embedding(
+            let _mem_id = self.semantic.remember_with_embedding(
                 aid,
                 &item.content,
                 MemorySource::System,
@@ -599,21 +555,6 @@ impl ProactiveMemoryStore {
                 None,
                 Default::default(),
             )?;
-
-            // Also store in KV for consistency
-            let mem_item = MemoryItem::new(item.content, level);
-            if let Ok(json) = serde_json::to_value(&mem_item) {
-                if let Err(e) = self
-                    .structured
-                    .set(aid, &format!("memory:{}", mem_id), json)
-                {
-                    tracing::warn!(
-                        "Failed to set KV entry for imported memory {}: {}",
-                        mem_id,
-                        e
-                    );
-                }
-            }
 
             imported += 1;
         }
@@ -639,17 +580,20 @@ impl ProactiveMemoryStore {
     /// Retrieve memory items for an agent, optionally filtered by level
     /// and/or category.
     ///
-    /// Reads from the semantic store (the authoritative source). Previously
-    /// this read from `structured.list_kv("memory:*")`, but the KV mirror
-    /// was a denormalised cache written best-effort *after* the semantic
-    /// insert — a failure of the second write (e.g. tx contention, schema
-    /// drift, or a process restart between the two non-transactional
-    /// inserts) left rows visible to `search()` (which reads semantic) but
-    /// invisible to `list()` / `get()` (which read KV), producing the
-    /// long-standing "the agent forgets things" / "the dashboard shows
-    /// memories the agent can't see" split-brain. The KV mirror is still
-    /// written by `add_with_decision` for backwards compatibility, but it
-    /// is no longer load-bearing on the read path.
+    /// Reads from the semantic store (the authoritative source).
+    /// Pre-fix this read from `structured.list_kv("memory:*")`, but that
+    /// mirror was a denormalised cache written best-effort *after* the
+    /// semantic insert — a failure of the second write (e.g. tx
+    /// contention, schema drift, or a process restart between the two
+    /// non-transactional inserts) left rows visible to `search()` (which
+    /// reads semantic) but invisible to `list()` / `get()` (which read
+    /// KV), producing the long-standing "agent forgets things" /
+    /// "dashboard shows memories the agent can't see" split-brain.
+    /// Review-followup #5: the KV mirror writes have been deleted entirely
+    /// — the read path was already on semantic, and keeping dead writes
+    /// just leaked disk and risked future divergence regressions. The KV
+    /// `memory:*` namespace is now unused; any legacy entries left over
+    /// from older installs are silently ignored (no reader looks at them).
     fn retrieve_memory_items(
         &self,
         agent_id: AgentId,
@@ -812,7 +756,7 @@ impl ProactiveMemoryStore {
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
                 // Store with embedding if available
-                let mem_id = self.semantic.remember_with_embedding_and_peer(
+                let _mem_id = self.semantic.remember_with_embedding_and_peer(
                     agent_id,
                     &item.content,
                     MemorySource::Conversation,
@@ -824,17 +768,6 @@ impl ProactiveMemoryStore {
                     Default::default(),
                     peer_id,
                 )?;
-                // Also store in KV using the semantic store's ID for consistency
-                let mut kv_item = item.clone();
-                kv_item.id = mem_id.0.to_string();
-                if let Ok(json) = serde_json::to_value(&kv_item) {
-                    if let Err(e) =
-                        self.structured
-                            .set(agent_id, &format!("memory:{}", mem_id), json)
-                    {
-                        tracing::warn!("Failed to set KV entry for new memory {}: {}", mem_id, e);
-                    }
-                }
                 tracing::debug!(
                     "Memory decision: ADD new: {}",
                     truncate_for_log(&item.content, 80)
@@ -906,19 +839,6 @@ impl ProactiveMemoryStore {
                 // Update content in-place (preserves ID, agent, scope, access stats)
                 self.semantic
                     .update_content(old_mid, &item.content, Some(metadata))?;
-                // Also update in KV so get()/list() reflect the change
-                if let Ok(json) = serde_json::to_value(item) {
-                    if let Err(e) =
-                        self.structured
-                            .set(agent_id, &format!("memory:{}", existing_id), json)
-                    {
-                        tracing::warn!(
-                            "Failed to update KV entry for memory {}: {}",
-                            existing_id,
-                            e
-                        );
-                    }
-                }
 
                 if conflict.is_some() {
                     tracing::info!(
@@ -990,14 +910,6 @@ impl ProactiveMemoryStore {
         let ids = self.semantic.lowest_confidence(agent_id, to_evict)?;
         for id in &ids {
             self.semantic.forget(*id)?;
-            // Also clean up the corresponding KV entry
-            if let Err(e) = self.structured.delete(agent_id, &format!("memory:{}", id)) {
-                tracing::debug!(
-                    "KV cleanup for evicted memory {} failed (non-fatal): {}",
-                    id,
-                    e
-                );
-            }
         }
         tracing::debug!(
             agent_id = %agent_id,
@@ -1160,9 +1072,15 @@ impl ProactiveMemoryStore {
     /// Format retrieved memories into a context string for prompt injection.
     ///
     /// Also includes relevant knowledge graph relations if any entity
-    /// names appear in the memory content.
+    /// names appear in the memory content. Honors the configured
+    /// `format_context_max_chars` (H4 review-followup #8).
     pub fn format_context_with_query(&self, memories: &[MemoryItem], query: &str) -> String {
-        let mut context = self.extractor.format_context(memories);
+        let max_chars = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .format_context_max_chars;
+        let mut context = librefang_types::memory::format_memories_with_budget(memories, max_chars);
 
         // Append knowledge graph context if relevant
         if let Some(graph_ctx) = self.graph_context(query) {
@@ -1175,7 +1093,12 @@ impl ProactiveMemoryStore {
 
     /// Format retrieved memories into a context string for prompt injection.
     pub fn format_context(&self, memories: &[MemoryItem]) -> String {
-        self.extractor.format_context(memories)
+        let max_chars = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .format_context_max_chars;
+        librefang_types::memory::format_memories_with_budget(memories, max_chars)
     }
 
     /// Get memory statistics for a user/agent.
@@ -1302,18 +1225,9 @@ impl ProactiveMemoryStore {
         let agent_id = Self::parse_agent_id(user_id)?;
         let count = self.semantic.forget_by_agent(agent_id)?;
 
-        // Also clean up all memory:* KV entries for this agent
-        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
-            for (key, _) in kv_pairs {
-                if key.starts_with("memory:") {
-                    if let Err(e) = self.structured.delete(agent_id, &key) {
-                        tracing::warn!("Failed to delete KV entry '{}': {}", key, e);
-                    }
-                }
-            }
-        }
-
-        // Clean up knowledge graph entities and relations for this agent
+        // Clean up knowledge graph entities and relations for this agent.
+        // The KV mirror (`memory:*` keys in `structured`) is no longer
+        // written, so there is nothing to clean up there.
         if let Err(e) = self.knowledge.delete_by_agent(user_id) {
             tracing::warn!("Failed to clean up knowledge graph for agent {user_id}: {e}");
         }
@@ -1327,30 +1241,6 @@ impl ProactiveMemoryStore {
     pub fn clear_level(&self, user_id: &str, level: MemoryLevel) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
         let count = self.semantic.forget_by_scope(agent_id, level.scope_str())?;
-
-        // Also clean up matching KV entries for this level
-        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
-            for (key, value) in kv_pairs {
-                if !key.starts_with("memory:") {
-                    continue;
-                }
-                // Check if this KV entry's level matches the one being cleared
-                let level_str = value
-                    .get("level")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Session");
-                if MemoryLevel::from(level_str) == level {
-                    if let Err(e) = self.structured.delete(agent_id, &key) {
-                        tracing::warn!(
-                            "Failed to delete KV entry '{}' during clear_level: {}",
-                            key,
-                            e
-                        );
-                    }
-                }
-            }
-        }
-
         Ok(count)
     }
 
@@ -1368,38 +1258,6 @@ impl ProactiveMemoryStore {
         let count = self
             .semantic
             .forget_older_than(agent_id, scopes::SESSION, cutoff)?;
-
-        // Also clean up expired session KV entries
-        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
-            for (key, value) in kv_pairs {
-                if !key.starts_with("memory:") {
-                    continue;
-                }
-                // Check if this is a session-level memory that's expired
-                let level_str = value
-                    .get("level")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Session");
-                if MemoryLevel::from(level_str) != MemoryLevel::Session {
-                    continue;
-                }
-                let created_at_str = value.get("created_at").and_then(|v| v.as_str());
-                if let Some(ts) = created_at_str {
-                    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        if created.with_timezone(&chrono::Utc) < cutoff {
-                            if let Err(e) = self.structured.delete(agent_id, &key) {
-                                tracing::warn!(
-                                    "Failed to delete expired session KV entry '{}': {}",
-                                    key,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         Ok(count)
     }
 
@@ -1440,7 +1298,10 @@ impl ProactiveMemoryStore {
     /// Returns the number of memories merged (soft-deleted).
     pub async fn consolidate(&self, user_id: &str) -> LibreFangResult<u64> {
         self.maybe_run_maintenance();
-        let agent_id = Self::parse_agent_id(user_id)?;
+        // Validate the user_id parses to a valid AgentId before doing any
+        // work (legacy guard — keeps mismatched callers from spending an
+        // O(n²) find_duplicates pass on a malformed id).
+        let _agent_id = Self::parse_agent_id(user_id)?;
         let groups = self.find_duplicates(user_id, None).await?;
         let mut merged_count = 0u64;
 
@@ -1463,13 +1324,6 @@ impl ProactiveMemoryStore {
                     if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
                         let mid = MemoryId(uuid);
                         if self.semantic.forget(mid).is_ok() {
-                            // Also remove the KV entry
-                            if let Err(e) = self
-                                .structured
-                                .delete(agent_id, &format!("memory:{}", item.id))
-                            {
-                                tracing::warn!("Failed to delete KV entry during consolidation for memory {}: {}", item.id, e);
-                            }
                             merged_count += 1;
                         }
                     }
@@ -1997,21 +1851,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
             level.scope_str(),
             HashMap::new(),
         )?;
-
-        // Also store in KV using the semantic store's ID for consistency
-        let item = MemoryItem::new(content, level);
-        if let Ok(json) = serde_json::to_value(&item) {
-            if let Err(e) = self
-                .structured
-                .set(agent_id, &format!("memory:{}", mem_id), json)
-            {
-                tracing::warn!(
-                    "Failed to set KV entry for leveled memory {}: {}",
-                    mem_id,
-                    e
-                );
-            }
-        }
+        let _ = mem_id; // semantic insert is the authoritative write; no KV mirror.
 
         // Enforce per-agent memory cap
         if let Err(e) = self.evict_if_over_cap(agent_id, 0) {
@@ -2056,17 +1896,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         }
 
         self.semantic.forget(mid)?;
-
-        // Also clean up the KV store entry
-        if let Ok(agent_id) = Self::parse_agent_id(user_id) {
-            if let Err(e) = self
-                .structured
-                .delete(agent_id, &format!("memory:{}", memory_id))
-            {
-                tracing::warn!("Failed to delete KV entry for memory {}: {}", memory_id, e);
-            }
-        }
-
+        let _ = user_id; // KV mirror removed; semantic.forget is the only write.
         Ok(true)
     }
 
@@ -2132,23 +1962,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
             }
         }
 
-        // Also update the KV store entry with new content
-        if let Ok(agent_id) = Self::parse_agent_id(user_id) {
-            let kv_key = format!("memory:{}", memory_id);
-            if let Ok(Some(mut kv_val)) = self.structured.get(agent_id, &kv_key) {
-                if let Some(obj) = kv_val.as_object_mut() {
-                    obj.insert("content".to_string(), serde_json::json!(content));
-                    obj.insert(
-                        "updated_at".to_string(),
-                        serde_json::json!(chrono::Utc::now().to_rfc3339()),
-                    );
-                }
-                if let Err(e) = self.structured.set(agent_id, &kv_key, kv_val) {
-                    tracing::warn!("Failed to update KV entry for memory {}: {}", memory_id, e);
-                }
-            }
-        }
-
+        let _ = user_id; // KV mirror removed; semantic.update_content is authoritative.
         Ok(true)
     }
 }
@@ -2484,23 +2298,39 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             // detached future borrows nothing from `self` thanks to the
             // manual Clone impl on ProactiveMemoryStore (all inner state
             // is Arc'd).
+            //
+            // Review-followup #6: wrap in a `tracing::Instrument` span so
+            // (a) any panic in `consolidate` is attributed in tracing
+            // output rather than disappearing silently, and (b) operators
+            // can grep `task = "auto_consolidate"` to find the work this
+            // detached future is doing.
             let store = self.clone();
             let agent = user_id.to_string();
-            tokio::spawn(async move {
-                match store.consolidate(&agent).await {
-                    Ok(merged) if merged > 0 => {
-                        tracing::info!(
-                            "Auto-consolidation (background): merged {merged} duplicate memories for {agent}"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::debug!(
-                            "Auto-consolidation failed (non-fatal, background) for {agent}: {e}"
-                        );
+            let span = tracing::info_span!(
+                "auto_consolidate",
+                task = "auto_consolidate",
+                agent = %agent
+            );
+            tokio::spawn(
+                async move {
+                    match store.consolidate(&agent).await {
+                        Ok(merged) if merged > 0 => {
+                            tracing::info!(
+                                merged,
+                                "Auto-consolidation (background): merged duplicate memories"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Auto-consolidation failed (non-fatal, background)"
+                            );
+                        }
                     }
                 }
-            });
+                .instrument(span),
+            );
         }
 
         Ok(ExtractionResult {
@@ -3284,32 +3114,25 @@ mod tests {
             .await
             .unwrap();
         assert!(!results.is_empty());
-        let mem_id = &results[0].id;
-
-        // Verify KV entry exists before delete
-        let agent_id_parsed = ProactiveMemoryStore::parse_agent_id(&agent_id).unwrap();
-        let kv_before = store
-            .structured
-            .get(agent_id_parsed, &format!("memory:{}", mem_id))
-            .unwrap();
-        assert!(kv_before.is_some(), "KV entry should exist after add()");
+        let mem_id = results[0].id.clone();
 
         // Delete it
-        let deleted = store.delete(mem_id, &agent_id).await.unwrap();
+        let deleted = store.delete(&mem_id, &agent_id).await.unwrap();
         assert!(deleted);
 
-        // Verify KV entry is also removed
-        let kv_after = store
-            .structured
-            .get(agent_id_parsed, &format!("memory:{}", mem_id))
+        // After delete, search must no longer find it (semantic store is
+        // the source of truth post-#5839 C1 fix; the KV mirror is gone).
+        let results_after = store
+            .search("Remember this fact", &agent_id, 10)
+            .await
             .unwrap();
         assert!(
-            kv_after.is_none(),
-            "KV entry should be removed after delete()"
+            !results_after.iter().any(|m| m.id == mem_id),
+            "deleted memory must not appear in subsequent searches"
         );
 
         // Deleting non-existent memory should return false
-        let deleted_again = store.delete(mem_id, &agent_id).await.unwrap();
+        let deleted_again = store.delete(&mem_id, &agent_id).await.unwrap();
         assert!(
             !deleted_again,
             "delete() should return false for non-existent memory"

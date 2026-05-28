@@ -314,10 +314,14 @@ impl MemorySubstrate {
     }
 
     /// Push the configured `duplicate_threshold` down to the background
-    /// [`ConsolidationEngine`] (H5). Called from kernel boot once
-    /// `[proactive_memory] duplicate_threshold` has been parsed so the
-    /// global sweep agrees with the on-demand per-agent consolidator.
-    pub fn set_consolidation_duplicate_threshold(&mut self, threshold: f32) {
+    /// [`ConsolidationEngine`] (H5).
+    ///
+    /// Takes `&self` because the hot-reload path
+    /// (`config_reload_ops.rs::HotAction::UpdateProactiveMemory`) holds
+    /// only `Arc<MemorySubstrate>` and cannot get a `&mut` borrow. The
+    /// underlying field uses an atomic, so concurrent reads on the merge
+    /// loop see the new value on the next pair comparison.
+    pub fn set_consolidation_duplicate_threshold(&self, threshold: f32) {
         self.consolidation.set_duplicate_threshold(threshold);
     }
 

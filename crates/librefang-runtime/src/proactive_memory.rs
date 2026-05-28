@@ -158,6 +158,35 @@ const MAX_MEMORY_CONTENT_LENGTH: usize = 2000;
 /// the prompt-injection budget in `format_context`.
 const MAX_MEMORIES_PER_EXTRACTION: usize = 20;
 
+/// Snap a model-emitted category to the configured allowlist when the
+/// match is close enough that an exact-string compare would be brittle
+/// noise (H2 review-followup #7).
+///
+/// Two-pass:
+/// 1. Case-insensitive exact match — handles `"Preference"`.
+/// 2. Case-insensitive match after dropping a trailing `s` on either
+///    side — handles `"preferences"` vs configured `"preference"`,
+///    or `"preference"` vs configured `"preferences"` (rare, but
+///    operators do declare plural forms sometimes).
+///
+/// Returns the *configured* string so the canonical spelling lands in
+/// the column, regardless of what the model wrote.
+fn match_category_fuzzy<'a>(raw: &str, configured: &'a [String]) -> Option<&'a str> {
+    let raw_l = raw.to_ascii_lowercase();
+    let raw_stem = raw_l.strip_suffix('s').unwrap_or(&raw_l);
+    for c in configured {
+        let c_l = c.to_ascii_lowercase();
+        if c_l == raw_l {
+            return Some(c.as_str());
+        }
+        let c_stem = c_l.strip_suffix('s').unwrap_or(&c_l);
+        if c_stem == raw_stem {
+            return Some(c.as_str());
+        }
+    }
+    None
+}
+
 fn build_extraction_prompt(categories: &[String]) -> String {
     let categories_list = if categories.is_empty() {
         "any relevant category".to_string()
@@ -203,6 +232,7 @@ Respond with a JSON object containing two arrays:
    - "content": the extracted memory (concise, one natural sentence with actionable nuance)
    - "category": one of: {categories_list}
    - "level": "user" for personal/preference info, "session" for current task context, "agent" for agent-specific learnings
+   - "confidence": float in [0.0, 1.0]. How sure are you the user stated or strongly demonstrated this fact? 1.0 = explicitly stated by the user this turn; 0.7 = strongly implied; 0.4 = inferred from partial evidence. Memories scoring below the configured extraction_threshold are dropped, so be calibrated rather than uniformly confident.
 
 2. "relations" - Entity relationships (knowledge graph triples):
    - "subject": entity name (e.g., "Alice")
@@ -214,8 +244,8 @@ Respond with a JSON object containing two arrays:
 Example:
 {{
   "memories": [
-    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user"}},
-    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user"}}
+    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user", "confidence": 0.95}},
+    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user", "confidence": 0.85}}
   ],
   "relations": [
     {{"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"}}
@@ -635,10 +665,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
     }
 
     fn format_context(&self, memories: &[MemoryItem]) -> String {
-        // Both extractor impls go through the same shared helper so the
-        // H4 prompt-injection budget (FORMAT_CONTEXT_MAX_CHARS) is honoured
-        // regardless of which extractor is wired up.
-        librefang_types::memory::format_memories_with_budget(memories)
+        // Trait method has no config access — fall back to the const
+        // default. The store's `format_context*` methods read the
+        // configured `format_context_max_chars` and pass it explicitly.
+        librefang_types::memory::format_memories_with_budget(
+            memories,
+            librefang_types::memory::FORMAT_CONTEXT_MAX_CHARS,
+        )
     }
 }
 
@@ -822,8 +855,14 @@ fn parse_llm_extraction_response(
             // value is preserved.
             let category = if raw_category.is_empty() {
                 "general".to_string()
-            } else if categories.is_empty() || categories.iter().any(|c| c == raw_category) {
+            } else if categories.is_empty() {
                 raw_category.to_string()
+            } else if let Some(matched) = match_category_fuzzy(raw_category, categories) {
+                // Snap "preferences"/"PREFERENCE" back to the canonical
+                // configured "preference" (H2 review-followup #7). Strict
+                // string match was too brittle: every model variation in
+                // case / number caused an unnecessary "general" downgrade.
+                matched.to_string()
             } else {
                 tracing::debug!(
                     "Extractor produced category '{raw_category}' not in allowlist; \
@@ -837,8 +876,23 @@ fn parse_llm_extraction_response(
                 _ => MemoryLevel::Session,
             };
 
+            // C3 follow-up: the LLM extractor now asks each memory for a
+            // `confidence` field (see `build_extraction_prompt`). Clamp
+            // to [0, 1] and stash in metadata under the key that
+            // `SemanticStore::remember_with_embedding_and_peer` reads
+            // when populating the `confidence` column. Missing field →
+            // default 1.0 (preserves the "rule-based extractor always
+            // passes" behaviour and never silently drops a memory just
+            // because a model forgot to emit the field).
+            let confidence = item
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .map(|f| f.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("extracted_by".to_string(), serde_json::json!("llm"));
+            metadata.insert("confidence".to_string(), serde_json::json!(confidence));
 
             Some(MemoryItem {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -848,7 +902,7 @@ fn parse_llm_extraction_response(
                 metadata,
                 created_at: chrono::Utc::now(),
                 source: None,
-                confidence: None,
+                confidence: Some(confidence as f32),
                 accessed_at: None,
                 access_count: None,
                 agent_id: None,
@@ -1454,6 +1508,31 @@ mod tests {
         assert_eq!(result.memories[0].content, "real fact about preferences");
     }
 
+    /// Review-followup #7: fuzzy category match accepts case + plural
+    /// variations from the model. "Preferences" / "PREFERENCE" /
+    /// "preferences" all snap to configured "preference".
+    #[test]
+    fn parse_extraction_fuzzy_matches_category_case_and_plural() {
+        let categories = vec!["preference".to_string(), "frustration".to_string()];
+        let json = r#"[
+            {"content": "case variation pref", "category": "Preference", "level": "user"},
+            {"content": "all caps pref", "category": "PREFERENCE", "level": "user"},
+            {"content": "plural pref", "category": "preferences", "level": "user"},
+            {"content": "plural frust", "category": "frustrations", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &categories).unwrap();
+        for m in &result.memories {
+            assert!(
+                matches!(
+                    m.category.as_deref(),
+                    Some("preference") | Some("frustration")
+                ),
+                "fuzzy-matched category must snap to canonical configured spelling; got {:?}",
+                m.category
+            );
+        }
+    }
+
     /// When `extract_categories` is non-empty, categories outside the
     /// allowlist are downgraded to "general" (H2). Prompt-tuning the
     /// extractor can't smuggle unknown buckets onto the dashboard.
@@ -1491,6 +1570,45 @@ mod tests {
             result.memories[0].category.as_deref(),
             Some("custom_bucket")
         );
+    }
+
+    /// C3 follow-up: when the LLM emits a per-memory `confidence` field
+    /// (the prompt now asks for it), the parser must propagate it to
+    /// `MemoryItem.confidence` AND to `metadata["confidence"]` so the
+    /// `remember_with_embedding_and_peer` insert path can land it in the
+    /// `confidence` column. Missing → default 1.0.
+    #[test]
+    fn parse_extraction_propagates_confidence_to_metadata() {
+        let json = r#"[
+            {"content": "rust developer", "level": "user", "confidence": 0.62},
+            {"content": "missing confidence field", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(result.memories.len(), 2);
+        // Explicit confidence round-trips.
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.62).abs() < 1e-6));
+        let meta_conf = result.memories[0]
+            .metadata
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .expect("confidence metadata key present");
+        assert!((meta_conf - 0.62).abs() < 1e-9);
+        // Missing field falls back to 1.0 so legacy extractors don't
+        // suddenly start dropping memories under extraction_threshold.
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
+    }
+
+    /// Out-of-range confidence values are clamped, never propagated
+    /// unsafely into the column (which is REAL with no constraint).
+    #[test]
+    fn parse_extraction_clamps_confidence_to_unit_interval() {
+        let json = r#"[
+            {"content": "negative confidence", "level": "user", "confidence": -0.5},
+            {"content": "wild confidence", "level": "user", "confidence": 7.0}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.0).abs() < 1e-6));
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
     }
 
     /// A runaway extractor cannot blow past the per-call cap (H2). 50
