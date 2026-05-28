@@ -5,6 +5,78 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.28] - 2026-05-28
+
+_46 PRs from 5 contributors since v2026.5.25-beta.13._
+
+### Breaking Changes
+
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Added
+
+- Per-agent channel allowlist (#5738) (@DaBlitzStein)
+- Implement describe_image() and wire ImageFile description through channel adapters (#5815) (@houko)
+- Rust sidecar adapter SDK + AI-codegen-era rationale rewrite (#5821) (@houko)
+
+### Fixed
+
+- Isolate attachment pre-inject per chat session — close cross-chat image leak (#5334) (@f-liva)
+- Make migrate path containment existence-independent (fixes #5716) (#5719) (@houko)
+- Repair discussion-to-issue backfill — gh api --jq doesn't take --arg (#5754) (@houko)
+- Tool_runner taint — unified SECRET_KEYS, substring match, header trim, single-pass normalization (#5762) (@leszek3737)
+- Tool_runner shell_safety — command injection hardening, quote-aware tokenizer (#5765) (@leszek3737)
+- Tool_runner definitions — ALWAYS_NATIVE complete, OnceLock caches, schema fixes, tool_name constants (#5771) (@leszek3737)
+- Tool_runner error — Upstream message preserved, MissingParameter String, ResourceNotFound 404 (#5772) (@leszek3737)
+- Tool_runner cron — sender_id override, TOCTOU reduction, HashSet lookup, empty job_id rejected (#5773) (@leszek3737)
+- Tool_runner dispatch — mutex split, fallback ACL, ACP args, spill wiring, snapshot ordering (#5774) (@leszek3737)
+- Tool_runner spill — config-based threshold, validation, fast-path (#5776) (@leszek3737)
+- Tool_runner wiki — limit cap, input validation, safe usize, caller_agent_id required (#5777) (@leszek3737)
+- Tool_runner meta — case-insensitive lookup, Cow optimization, deterministic sort (#5779) (@leszek3737)
+- Tool_runner task — typed deserialization, contextual errors, empty validation, status default (#5780) (@leszek3737)
+- Tool_runner notify — length limit, control char sanitization, PII removal (#5782) (@leszek3737)
+- Tool_runner hand — deterministic sort, empty id reject, config whitelist, output sanitization (#5784) (@leszek3737)
+- Tool_runner goal — progress type fix, range validation (#5785) (@leszek3737)
+- Tool_runner event — event_type validation, caller identity, reserved prefix guard (#5786) (@leszek3737)
+- Tool_runner a2a — session_id taint, SSRF diagnostics, zero-alloc agent check (#5787) (@leszek3737)
+- Tool_runner artifact — spawn_blocking, explicit errors, usize safe, zero-length reject (#5788) (@leszek3737)
+- Tool_runner channel — poll u8 safe, file size limit, email regex, mirror dedup, thread_id routing (#5789) (@leszek3737)
+- Skip bridge-side formatting for sidecar adapters (fixes #5795) (#5796) (@DaBlitzStein)
+- Return forward-slash relative path from registry/content on Windows (#5801) (@houko)
+- Make step timeout errors actionable with remediation guidance (#5806) (@houko)
+- Eliminate Instant subtraction that panics on Windows CI (fixes #5726) (#5808) (@houko)
+- Seed Feishu/Lark configure form when Python SDK is absent (#5809) (@houko)
+- Unbreak coverage build — thread session_id into two SessionWriter test stubs (#5816) (@houko)
+- Wiki.rs lifetime + shell.rs test arity after #5774/#5777 (#5818) (@houko)
+- Unbreak main — agent channels in ApiDoc + fmt + secrets baseline (#5820) (@houko)
+- Install gh CLI for release flow (#5826) (@houko)
+- Run `gh auth setup-git` to unblock git push from container (#5827) (@houko)
+- Override host-absolute credential helper path inside container (#5829) (@houko)
+
+### Changed
+
+- Migrate tool_runner tools to ToolError (#3576) (#5737) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Maintenance
+
+- Bump the cargo-minor-patch group with 4 updates (#5748) (@app/dependabot)
+- Bump wasmtime from 44.0.1 to 45.0.0 (#5749) (@app/dependabot)
+- Bump sysinfo from 0.38.4 to 0.39.2 (#5750) (@app/dependabot)
+- Bump which from 7.0.3 to 8.0.2 (#5751) (@app/dependabot)
+- Bump tikv-jemallocator from 0.6.1 to 0.7.0 (#5752) (@app/dependabot)
+- Bump the actions-minor-patch group with 4 updates (#5790) (@app/dependabot)
+- Bump actions/setup-python from 5 to 6 (#5791) (@app/dependabot)
+- Bump the web-minor-patch group in /web with 3 updates (#5810) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 7 updates (#5811) (@app/dependabot)
+- Bump globals from 15.15.0 to 17.6.0 in /crates/librefang-api/dashboard (#5812) (@app/dependabot)
+- Docker fallback for `just release` when cargo is missing (#5825) (@houko)
+
+</details>
+
+
 ## [2026.5.25] - 2026-05-25
 
 _308 PRs from 7 contributors since v2026.5.17-beta.12._
@@ -395,6 +467,7 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 - **BREAKING: rename crate `librefang-migrate` → `librefang-import`** (@houko) — the framework-import tool shared the word "migration" with `librefang-memory/src/migration.rs` (SQLite schema migrations), so grepping for "migration" returned the wrong file and forced every reader to disambiguate. The crate is renamed to `librefang-import`, which is what it actually does: import agents / memory / sessions / skills / channel configs from other frameworks (OpenClaw, OpenFang, LangChain, AutoGPT). Directory moved `crates/librefang-migrate/` → `crates/librefang-import/`; package name in `Cargo.toml` flipped; the three consumers (`librefang-api`, `librefang-cli`, `xtask`) updated to depend on `librefang-import` and reference `librefang_import::` in source. Public API (`MigrateSource`, `MigrateOptions`, `run_migration`, `report::MigrationReport`, `openclaw::*`, `openfang::*`) is preserved verbatim — only the crate name and import path change. The user-facing CLI command (`librefang migrate ...`) is unchanged. Workspace `members = [...]` and the doc references in `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` / `README.md` + the 7 i18n READMEs (zh / es / fr / ko / de / ja / pl) also updated. **Operator action required**: out-of-tree consumers that declared `librefang-migrate = { path = "...", ... }` in their `Cargo.toml` must update both the dep name and any `use librefang_migrate::...` paths to `librefang_import`. Closes #5668.
 - **docs(claude-md): reconcile `crates/librefang-extensions/CLAUDE.md` and `crates/librefang-channels/CLAUDE.md` with current code** (@houko) — both files had drifted away from the live source; replaced with concise pointers to the top-level `CLAUDE.md` crate index so the stale prose can't mislead readers further. Closes #5668.
 - **build(justfile): make `justfile` the canonical developer entry point; delegate to `cargo xtask`** (@houko) — the `justfile` and `xtask/` overlapped on `setup` and several other recipes, with docs alternating between `just setup` and `cargo xtask setup` interchangeably. The rule is now documented at the top of `justfile`: `just` is the developer-facing surface, `xtask` is the underlying logic; recipes that duplicated logic now call `cargo xtask <subcmd>`. Closes #5668.
+- **docs(architecture): strengthen the sidecar-channels rationale against AI-codegen-era critique** (@houko) — the "Why" paragraph in `docs/architecture/sidecar-channels.md` had been leading with the contributor-ergonomics argument ("writable in ~40 lines of Python against a documented protocol"), which is a real benefit but no longer load-bearing on its own now that LLM-assisted Rust authoring has narrowed the practical gap between writing Python and writing Rust. Rewrote the top-of-doc rationale to lead with the three properties that survive when the language gap closes — crash isolation (an in-process panic ends the daemon, a sidecar crash is a `waitpid` event the supervisor restarts), supply-chain confinement (each of ~28 platform SDKs is its own sealed dependency tree, not part of the kernel binary's `cargo audit` surface), and the iteration loop (subprocess restart in seconds vs. `cargo build` + daemon restart that drops every active agent session) — and demoted the contributor-ergonomics benefit to a secondary effect. Added a new "Why subprocess, not in-process Rust?" section that addresses the AI-codegen counterargument head-on, plus an inline note that the wire protocol (see `sidecar-protocol.md`) is language-agnostic — a Rust sidecar SDK against the existing `conformance/sidecar/corpus/` is unblocked future work — so Python is the current first-party SDK out of migration friction, not architectural necessity. Also corrected the stale "~46 in-process Rust adapters that predate the policy are grandfathered and frozen" claim — `crates/librefang-channels/src/channels-allowlist.txt` now permits only the `sidecar` trampoline itself, the in-process set has been fully drained. No code changes; pure documentation.
 
 - **kernel(config-reload): non-IdP `external_auth` edits are a no-op, not a restart** — follow-up to #5652. #5652 cleared the main-CI red by gating #5619's backfill restart on `!external_auth_idp_changed(...)`, which left a non-IdP `external_auth` change (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`) still classified as restart-required. But the OAuth layer reads every one of those live from the ArcSwap config on each request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so the bare config swap already applies them on the next request — a restart was never needed, only over-conservative classification inherited from #5619's "RESTART when the live-read path can't be verified" default. The planner now records a no-op (`"external_auth config changed (effective on next request via config swap)"`) for those edits instead of telling the operator to restart; IdP-identity changes still queue `ReloadExternalAuth` (#5594) to evict the JWKS/discovery caches. Removed the now-dead `restart_if_changed(external_auth)` branch and moved the `classified_reload_fields()` entry into the hot-reload group. `test_external_auth_unrelated_field_does_not_evict_caches` extended to assert `!restart_required` + the no-op entry. `cargo test -p librefang-kernel --lib config_reload::` 40/40 (with the strengthened assertions), `cargo clippy -p librefang-kernel --lib -- -D warnings` + `cargo fmt --check` clean. Also refreshed the canonical ops table in `docs/operations/config-reload.md` — the `external_auth` row now reads **H/N** (was **R/H**), and the non-IdP prose reflects the live-read ArcSwap path instead of "no hot reapply path is wired, planner conservatively flags a restart". (@houko)
 
@@ -402,6 +475,7 @@ _308 PRs from 7 contributors since v2026.5.17-beta.12._
 
 - **memory: per-agent `[proactive_memory] extraction_model` override** — #5475. `ProactiveMemoryOverrides` (per-agent override block in `agent.toml`) previously exposed only the three boolean knobs (`enabled`, `auto_memorize`, `auto_retrieve`) that #4870/#4892 added; the LLM extraction model was global-only, so multi-provider deployments had to pick one extractor that may not be reachable from every agent's provider keys. Added `extraction_model: Option<String>` to `ProactiveMemoryOverrides` with the same `provider/model` / `provider:model` / bare-name surface as the global field, plus a `resolve_extraction_model(global)` resolver. Plumbed through a new `CatalogQuery::proactive_memory_extraction_model_for(agent_id)` role-trait method (default returns `None`, real impl in `LibreFangKernel` looks up the agent registry then resolves agent-override → kernel-global → `None`) that `LlmMemoryExtractor::extract_memories_with_agent_id` consults at request-build time to swap the wire-level model name. Driver itself is reused from the boot-time extraction driver — full per-agent driver switching (cross-provider) is a follow-up, documented inline on the new field. Integration test (`crates/librefang-runtime/tests/proactive_memory_extraction_model_override.rs`) builds a stub `KernelHandle` + recording `LlmDriver` to assert: agent override wins over the boot-time model, missing override falls back, and the `provider/` / `provider:` prefix is stripped before the API request. `Copy` removed from `ProactiveMemoryOverrides` (now owns a `String`). Docs updated in `docs/src/app/configuration/page.mdx` under `[proactive_memory]` with a new "Per-agent overrides" subsection. (@houko)
 
+- **sdk(rust): first-party Rust sidecar adapter SDK at `sdk/rust/librefang-sidecar/`** (@houko) — pairs with `sdk/python/librefang/sidecar/`, both implementing the post-#5219 sidecar wire protocol. Same surface on both sides: `Content::*` builders for every `ChannelContent` variant; event builders (`events::ready`, `events::message` + `MessageBuilder`, `events::error`, `events::typing`, `events::qr_ready`, `events::qr_status`); typed inbound `Command` enum with `parse_command(&str)` parsing every variant (`send`, `ready_ack`, `shutdown`, `heartbeat`, `typing`, `reaction`, `interactive`, `stream_start` / `_delta` / `_end`, plus a `Command::Unknown` forward-compat envelope); `SidecarAdapter` async trait with `on_send` (required) and `on_command` / `produce` / `on_shutdown` defaults; `run_stdio(adapter)` driver that owns the stdin reader, stdout writer, `ready` re-announce handshake (bounded by `ready_max_attempts` so a pre-#5219 daemon without `ready_ack` doesn't get spammed), graceful shutdown, and routing; `run_stdio_main(schema_fn, build_fn)` one-stop `main` helper that serves the daemon's `--describe` discovery contract before constructing the adapter (builder returns `Result<A, DynError>` so adapters whose `new()` validates required env vars can fail with a structured error instead of panicking before discovery can respond); `with_backoff` helper for platform reconnect (independent of daemon-managed process lifecycle); `Schema` / `Field` for `--describe` self-description payloads. Wire-equivalent with the Python SDK and the Rust supervisor's `SidecarEvent` / `SidecarCommand` — pinned by the shared `conformance/sidecar/corpus/` via `sdk/rust/librefang-sidecar/tests/conformance.rs` (13 tests: producer-side asserts every event builder reproduces its corpus frame, consumer-side asserts every command corpus parses into the expected typed `Command`; coverage guards refuse a corpus entry with no assertion on either side, mirroring the Python suite's `EVENT_PRODUCER_SKIP` discipline). Lives as its own independent cargo workspace at `sdk/rust/librefang-sidecar/` so it doesn't pull `librefang-channels` / `librefang-kernel` into adapter authors' dep trees and doesn't contend with the kernel's shared `target/`. `cargo test` → 16 unit + 13 conformance + 3 doc-tests pass; `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check` clean (Linux container build via `Dockerfile.rust-dev`). Includes `examples/echo.rs` — minimal `SidecarAdapter` that echoes every `send` back as a synthetic inbound `message` (no platform integration, suitable as a smoke-test against the supervisor and as a template for new adapters). `docs/architecture/sidecar-protocol.md` lifted from "two independent implementations" to "three" (Rust supervisor + Python SDK + Rust SDK), with the conformance-pair table updated. `docs/architecture/sidecar-channels.md` "polyglot by design" paragraph dropped its "unblocked future work" hedge and now lists the two SDKs side-by-side with their respective trade-offs.
 - **cli: restore `librefang channel` subcommand as a sidecar-only group** — #5463 deleted the entire `Commands::Channel(ChannelCommands)` group on the same "everything was broken anyway" theory that took out `ChannelsPage.tsx`. Same wrong call. Restored as four sidecar-aware subcommands driving the surviving daemon endpoints: (@houko)
   - `librefang channel list` → `GET /api/channels` → table (NAME, KIND, CONFIGURED, TOKEN, 24H MSGS). (@houko)
   - `librefang channel reload` → `POST /api/channels/reload` → hot-reload `[[sidecar_channels]]` from disk without a daemon restart. (@houko)

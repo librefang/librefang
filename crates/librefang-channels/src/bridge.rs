@@ -3479,23 +3479,16 @@ async fn dispatch_message(
             // kernel's `MediaEngine`.  Inline `Image` blocks (base64
             // fallback when the save failed) have no on-disk path, so
             // skip description for those.
-            let saved_image: Option<(std::path::PathBuf, String)> = blocks
-                .iter()
-                .find_map(|b| {
-                    if let ContentBlock::ImageFile { path, media_type } = b {
-                        Some((
-                            std::path::PathBuf::from(path),
-                            media_type.clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                });
+            let saved_image: Option<(std::path::PathBuf, String)> = blocks.iter().find_map(|b| {
+                if let ContentBlock::ImageFile { path, media_type } = b {
+                    Some((std::path::PathBuf::from(path), media_type.clone()))
+                } else {
+                    None
+                }
+            });
             let mut final_blocks = blocks;
             if let Some(ref saved) = saved_image {
-                if let Some(desc_block) =
-                    maybe_describe_inbound_image(handle, Some(saved)).await
-                {
+                if let Some(desc_block) = maybe_describe_inbound_image(handle, Some(saved)).await {
                     // Prepend the description so the model reads context
                     // before the raw image bytes.
                     final_blocks.insert(0, desc_block);
