@@ -29,11 +29,12 @@ async fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
     })?;
     tokio::fs::create_dir_all(parent).await?;
     let tmp_name = format!(
-        ".librefang-tmp-{}",
+        ".librefang-tmp-{}-{}",
         target
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "patch".to_string())
+            .unwrap_or_else(|| "patch".to_string()),
+        rand::random::<u64>()
     );
     let tmp_path = parent.join(tmp_name);
     if let Err(e) = tokio::fs::write(&tmp_path, content).await {

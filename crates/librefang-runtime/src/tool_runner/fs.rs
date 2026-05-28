@@ -253,13 +253,10 @@ pub(super) async fn tool_file_read(
             message: format!("Failed to open file '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to read metadata for '{}': {e}", resolved.display()),
-            source: Some(Box::new(e)),
-        })?;
+    let metadata = file.metadata().await.map_err(|e| ToolError::Upstream {
+        message: format!("Failed to read metadata for '{}': {e}", resolved.display()),
+        source: Some(Box::new(e)),
+    })?;
     let file_size = metadata.len();
     if file_size > max_bytes {
         return Err(ToolError::InvalidParameter {
@@ -283,14 +280,12 @@ pub(super) async fn tool_file_read(
             message: format!("Failed to read file '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?;
-    String::from_utf8(buf).map_err(|e| {
-        ToolError::InvalidParameter {
-            name: "path",
-            reason: format!(
-                "File '{}' contains non-UTF-8 content: {e}",
-                resolved.display()
-            ),
-        }
+    String::from_utf8(buf).map_err(|e| ToolError::InvalidParameter {
+        name: "path",
+        reason: format!(
+            "File '{}' contains non-UTF-8 content: {e}",
+            resolved.display()
+        ),
     })
 }
 
@@ -355,7 +350,7 @@ pub(super) async fn tool_file_write(
                 source: Some(Box::new(e)),
             })?;
     }
-    let tmp = resolved.with_extension(format!("{}.tmp", std::process::id()));
+    let tmp = resolved.with_extension(format!("{}.tmp", rand::random::<u64>()));
     tokio::fs::write(&tmp, content)
         .await
         .map_err(|e| ToolError::Upstream {
