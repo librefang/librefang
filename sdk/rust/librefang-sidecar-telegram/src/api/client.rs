@@ -421,12 +421,13 @@ impl BotClient {
             payload["message_thread_id"] = json!(t);
         }
         let result_envelope: Value = self.call_json("sendPoll", &payload).await?;
+        // `result.poll.id` is required by Bot API. `unwrap_or_default` would hide a real protocol regression behind an empty string that downstream callers (e.g. agents waiting on the poll's id to record the answer) would treat as a valid id; surface an error instead.
         let poll_id = result_envelope
             .get("poll")
             .and_then(|p| p.get("id"))
             .and_then(Value::as_str)
             .map(|s| s.to_string())
-            .unwrap_or_default();
+            .ok_or_else(|| Error::Other("sendPoll: result.poll.id missing".into()))?;
         Ok(PollResult { id: poll_id })
     }
 
@@ -442,7 +443,6 @@ impl BotClient {
         self.call_json("setMessageReaction", &payload).await
     }
 
-    #[allow(dead_code)]
     pub async fn answer_callback_query(&self, callback_query_id: &str) -> Result<Value> {
         let payload = json!({ "callback_query_id": callback_query_id });
         self.call_json("answerCallbackQuery", &payload).await

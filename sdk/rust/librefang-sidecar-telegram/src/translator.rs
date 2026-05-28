@@ -237,8 +237,8 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
     None
 }
 
-/// Reply context: prefix `[Replying to <sender>: "..."]` to a text-shaped TgContent.
-pub fn apply_reply(content: TgContent, msg: &Message) -> TgContent {
+/// Reply context: prefix `[Replying to <sender>: "..."]` to a text-shaped TgContent. If the replied-to message is itself a photo AND the current content is plain Text, the function upgrades it to an Image carrying the replied photo's URL — without this the agent never sees the photo the user is reacting to. Mirrors the Python adapter's `_apply_reply` behaviour.
+pub async fn apply_reply(client: &BotClient, content: TgContent, msg: &Message) -> TgContent {
     let Some(reply) = msg.reply_to_message.as_ref() else {
         return content;
     };
@@ -254,6 +254,21 @@ pub fn apply_reply(content: TgContent, msg: &Message) -> TgContent {
         .unwrap_or("");
     let trimmed = truncate_bytes(body, 200);
     let prefix = format!("[Replying to {replier}: \"{trimmed}\"]\n");
+    // Photo-reply upgrade: if the user replied to a photo with text, fetch the photo's URL and turn the inbound into an Image so the agent can actually see what's being replied to.
+    if matches!(&content, TgContent::Text(_)) {
+        if let Some(photo) = reply.photo.last() {
+            if let Some(url) = file_url(client, &photo.file_id).await {
+                let TgContent::Text(t) = content else {
+                    unreachable!("matched above")
+                };
+                return TgContent::Image {
+                    url,
+                    caption: Some(format!("{prefix}{t}")),
+                    mime_type: Some("image/jpeg".into()),
+                };
+            }
+        }
+    }
     match content {
         TgContent::Text(t) => TgContent::Text(format!("{prefix}{t}")),
         TgContent::Image {
@@ -307,8 +322,12 @@ fn build_metadata(msg: &Message, sender: &Sender, edited: bool) -> serde_json::M
 
 /// Build a message-event Value from a Telegram `Message`. `edited=true` for `update.edited_message`.
 pub async fn message_event(client: &BotClient, msg: &Message, edited: bool) -> Option<Value> {
+    // Defensive: `Chat.id` defaults to 0 if the deserialiser couldn't find it (the struct carries `#[serde(default)]` so missing fields don't fail the parse). Routing every malformed Update to chat 0 would silently merge them into a synthetic "chat 0" session — drop instead.
+    if msg.chat.id == 0 {
+        return None;
+    }
     let content = extract_content(client, msg).await?;
-    let content = apply_reply(content, msg);
+    let content = apply_reply(client, content, msg).await;
     let sender = extract_sender(msg);
     let chat_id = msg.chat.id.to_string();
     // `channel` posts have separate semantics (no sender user, broadcast-only); treat them as DM-like for routing, matching the Python adapter.
@@ -570,6 +589,8 @@ pub async fn update_to_event(client: &BotClient, update: &Update) -> Option<Valu
         return message_event(client, msg, true).await;
     }
     if let Some(cq) = &update.callback_query {
+        // Dismiss Telegram's inline-button spinner immediately. Without this, the user's UI shows a loading state for up to 30 seconds while waiting for our event to reach the agent and produce an outbound reply. We fire-and-forget — a 400 here doesn't block the event emit.
+        let _ = client.answer_callback_query(&cq.id).await;
         return callback_event(cq);
     }
     if let Some(pa) = &update.poll_answer {

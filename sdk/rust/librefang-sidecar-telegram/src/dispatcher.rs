@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 const PARSE_MODE_HTML: &str = "HTML";
 /// Bot API caption hard limit (per <https://core.telegram.org/bots/api#sendphoto>). Captions longer than this are truncated to fit before we hit the wire — Telegram rejects oversize captions with `MESSAGE_CAPTION_TOO_LONG` and there is no graceful fallback.
 const CAPTION_LIMIT_UTF16: usize = 1024;
+/// Maximum FileData byte count we'll accept on the wire before erroring. Sized at 64 MiB — comfortably above cloud Bot API's 50 MB document ceiling and well below any plausible RAM exhaustion budget. Anything larger is either a producer bug or an attempt to OOM the sidecar.
+const FILE_DATA_BYTE_CAP: usize = 64 * 1024 * 1024;
 
 /// Telegram returned `400 Bad Request: can't parse entities ...`. Used by every HTML-parse-mode call to decide whether to fall back to plain text.
 pub(crate) fn is_parse_entities_error(e: &Error) -> bool {
@@ -138,6 +140,13 @@ pub async fn dispatch_content(
     let Some(obj) = content.as_object() else {
         return Err(Error::Other("Content is not a JSON object".into()));
     };
+    // Content is the externally-tagged ChannelContent enum — exactly one key. `obj.iter().next()` returns "the first key by iteration order", which depends on whether `serde_json` was built with the `preserve_order` feature; a multi-key object could silently route to the wrong arm. Reject anything but a single-key object.
+    if obj.len() != 1 {
+        return Err(Error::Other(format!(
+            "Content must be a single-key externally-tagged object, got {} keys",
+            obj.len()
+        )));
+    }
     let Some((tag, payload)) = obj.iter().next() else {
         return Err(Error::Other("Content is empty".into()));
     };
@@ -197,6 +206,13 @@ pub async fn dispatch_content(
                 .get("data")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("FileData.data missing".into()))?;
+            // Cap up-front allocation. An adversarial / misbehaving producer can declare a 10 billion-element JSON array and force us to reserve ~10 GB of heap before we ever read element 1; bound to a generous-but-safe ceiling so a malicious payload errors during parse rather than during an OOM. Telegram's hard ceiling for sendDocument is 50 MB (cloud Bot API) / 2 GB (local Bot API), so a sub-100 MB cap covers every legitimate upload.
+            if data_array.len() > FILE_DATA_BYTE_CAP {
+                return Err(Error::Other(format!(
+                    "FileData.data: {} bytes exceeds {FILE_DATA_BYTE_CAP}-byte cap",
+                    data_array.len()
+                )));
+            }
             // Decode bytes strictly: any element that is not a non-negative integer in [0,255] is a wire-protocol violation. Silently dropping (`filter_map`) or truncating (`n as u8`) would emit a corrupt file with no diagnostic; reject loudly instead so a misbehaving producer is visible.
             let mut bytes: Vec<u8> = Vec::with_capacity(data_array.len());
             for v in data_array {
@@ -440,14 +456,15 @@ pub async fn dispatch_content(
                 .get("items")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("MediaGroup.items missing".into()))?;
-            // Reject nested MediaGroup BEFORE recursing — an adversarial / buggy agent payload like `MediaGroup{items:[MediaGroup{items:[...]}]}` would otherwise recurse via Box::pin without depth bound and overflow the heap-allocated future stack. Scan ALL keys, not just the first, so a future change to `serde_json::Map` iteration order (or a multi-key object) cannot bypass the guard.
+            // Reject nested MediaGroup BEFORE recursing — an adversarial / buggy agent payload like `MediaGroup{items:[MediaGroup{items:[...]}]}` would otherwise recurse via Box::pin without depth bound and overflow the heap-allocated future stack. Scan ALL keys with `any` so a multi-key item (which is itself a contract violation, but defensive checking is cheap) cannot smuggle a MediaGroup past the guard regardless of `serde_json::Map` iteration order.
             for item in items_array {
-                if let Some(obj) = item.as_object() {
-                    if obj.keys().any(|k| k == "MediaGroup") {
-                        return Err(Error::Other(
-                            "MediaGroup may not contain nested MediaGroup items".into(),
-                        ));
-                    }
+                if item
+                    .as_object()
+                    .is_some_and(|obj| obj.keys().any(|k| k == "MediaGroup"))
+                {
+                    return Err(Error::Other(
+                        "MediaGroup may not contain nested MediaGroup items".into(),
+                    ));
                 }
             }
             // Bot API requires 2..=10 items per sendMediaGroup. Outside that range, fall back to per-item dispatch (1 item → single send; >10 → chunk into batches of 10) so the user's media still ships. NOTE: the Python reference adapter raises ValueError on >10; this Rust port is deliberately more permissive.
@@ -524,6 +541,12 @@ fn build_media_group(items: &[Value]) -> Result<Value> {
         let Some(obj) = item.as_object() else {
             continue;
         };
+        if obj.len() != 1 {
+            return Err(Error::Other(format!(
+                "MediaGroup item must be a single-key externally-tagged object, got {} keys",
+                obj.len()
+            )));
+        }
         let Some((tag, payload)) = obj.iter().next() else {
             continue;
         };

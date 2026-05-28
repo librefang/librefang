@@ -207,7 +207,10 @@ impl SidecarAdapter for TelegramAdapter {
                         chat_id,
                         message_id: res.message_id,
                         buf: String::new(),
-                        last_edit: Instant::now() - Duration::from_secs(2),
+                        // `Instant::now() - 2s` panics if the system has been up less than 2 s (cold-boot container, embedded sidecar). saturating_sub returns `Instant::now()` in that case — the first delta will be throttled instead of firing immediately, which is fine.
+                        last_edit: Instant::now()
+                            .checked_sub(Duration::from_secs(2))
+                            .unwrap_or_else(Instant::now),
                     },
                 );
                 Ok(())

@@ -11,6 +11,17 @@ use regex::Regex;
 
 pub const TELEGRAM_MSG_LIMIT: usize = 4096;
 
+/// Cap on the safety margin reserved per chunk for close tags the rebalancer will append at chunk end. Realistic markdown nesting is 2-3 deep so the actual reserve we use is `min(NEW_TAG_RESERVE, limit/4)` — small enough not to starve tiny test limits, large enough to absorb the 1-2 new tags a chunk typically opens inside itself.
+const NEW_TAG_RESERVE: usize = 16;
+
+/// Compute the UTF-16 width of the close-tag suffix that would be appended for the tags already open in `carry`. Used to subtract the *known* close-tag cost from the chunk budget so the emit cannot overshoot `limit` and trip Telegram's `MESSAGE_TOO_LONG`. The chunk may open additional tags inside it; those are covered by `NEW_TAG_RESERVE`.
+fn carry_close_cost(carry: &str) -> usize {
+    unclosed_tags(carry)
+        .iter()
+        .map(|(name, _)| 3 + utf16_len(name)) // `</name>`
+        .sum()
+}
+
 /// UTF-16 code-unit length of `s` (chars above U+FFFF count as 2).
 pub fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
@@ -160,7 +171,14 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
             out.push(last);
             break;
         }
-        let budget = limit - carry_units;
+        // Reserve room for the close-tag suffix we will append after `unclosed_tags` runs. Without the reserve, an emit ending in deeply-nested `<b><i><a>` opens would push the total past `limit` once the matching closes are appended, and Telegram rejects with `MESSAGE_TOO_LONG` (400). We charge the exact close cost of whatever is already open in `carry`, plus a tiny reserve for any new tags the chunk itself opens — both capped to `limit/4` so very small test limits still make non-trivial progress.
+        let carry_close = carry_close_cost(&carry);
+        let new_reserve = NEW_TAG_RESERVE.min(limit / 4);
+        let budget = limit
+            .saturating_sub(carry_units)
+            .saturating_sub(carry_close)
+            .saturating_sub(new_reserve)
+            .max(1);
         let input_prefix = truncate_to_utf16_limit(remaining, budget);
         // Prefer a newline as the split point.
         let split_idx = input_prefix
@@ -182,10 +200,17 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         let emitted_text: String;
         let consumed_from_input: usize;
         if trimmed_len <= carry.len() {
-            // Degenerate: budget too small for any safe progress. If `remaining` starts with `<` AND the matching `>` is within `limit` units, consume the whole tag so the next chunk reopens cleanly — emitting a bare leading `<` would produce HTML Telegram cannot parse. If the tag is unmatched (no `>`) or runs past `limit` (a degenerate or adversarial mega-attribute), fall back to forcing one Unicode scalar of progress; the chunk will be unbalanced and the parse-entities fallback will rescue delivery as plain text.
+            // Degenerate: budget too small for any safe progress. If `remaining` starts with `<` AND the matching `>` is within `limit` UTF-16 units, consume the whole tag so the next chunk reopens cleanly — emitting a bare leading `<` would produce HTML Telegram cannot parse. If the tag is unmatched (no `>`) or runs past `limit` UTF-16 units (a degenerate or adversarial mega-attribute), fall back to forcing one Unicode scalar of progress; the chunk will be unbalanced and the parse-entities fallback will rescue delivery as plain text.
+            //
+            // Comparison must be in UTF-16 code units, not bytes — for ASCII tag content they coincide but `<tg-emoji emoji-id="…">` can carry non-ASCII attrs that make the byte count exceed the UTF-16 unit count.
             let take = remaining
                 .starts_with('<')
-                .then(|| remaining.find('>').map(|gt| gt + 1).filter(|&n| n <= limit))
+                .then(|| {
+                    remaining
+                        .find('>')
+                        .map(|gt| gt + 1)
+                        .filter(|&n_bytes| utf16_len(&remaining[..n_bytes]) <= limit)
+                })
                 .flatten()
                 .unwrap_or_else(|| {
                     remaining
@@ -367,6 +392,23 @@ mod tests {
         assert_eq!(adjust_html_entity_boundary("abc&quot"), "abc");
         // Closed entity stays put.
         assert_eq!(adjust_html_entity_boundary("abc&lt;def"), "abc&lt;def");
+    }
+
+    #[test]
+    fn chunks_never_exceed_limit_with_deep_nesting() {
+        // Regression: the previous chunker didn't reserve budget for the close-tag suffix it appends after `unclosed_tags`. With deeply-nested formatting near the production limit, the emit could overshoot and Telegram would 400 it. With the carry-close cost + NEW_TAG_RESERVE, every emit must fit.
+        let inner = "x".repeat(4090);
+        let s = format!("<b><i><u>{inner}</u></i></b>");
+        let chunks = split_to_utf16_chunks(&s, 4096);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(
+                utf16_len(c) <= 4096,
+                "chunk len {} exceeds 4096-unit limit: {:?}",
+                utf16_len(c),
+                &c[..c.len().min(80)]
+            );
+        }
     }
 
     #[test]

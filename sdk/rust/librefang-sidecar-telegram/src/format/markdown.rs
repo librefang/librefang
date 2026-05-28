@@ -55,32 +55,24 @@ fn render_inline_markdown(text: &str) -> String {
         })
         .to_string();
 
-    // Italic — the regex captures a leading non-star char to disambiguate from `**`; we need to preserve that char.
-    // Run iteratively so adjacent italics don't get skipped.
-    let mut italics_done = with_bold;
-    loop {
-        let after = RE_ITALIC
-            .replace(&italics_done, |caps: &regex::Captures<'_>| {
-                let m = caps.get(0).unwrap().as_str();
-                let inner = &caps[1];
-                // Preserve the leading non-`*` byte (and trailing non-`*` byte) so word boundaries don't drift.
-                let leading = m.chars().next().filter(|c| *c != '*').map_or("", |_| {
-                    &m[..m.char_indices().nth(1).map(|(i, _)| i).unwrap_or(0)]
-                });
-                let trailing = if m.ends_with('*') {
-                    ""
-                } else {
-                    let last_idx = m.char_indices().last().map(|(i, _)| i).unwrap_or(m.len());
-                    &m[last_idx..]
-                };
-                format!("{leading}<i>{inner}</i>{trailing}")
-            })
-            .to_string();
-        if after == italics_done {
-            break;
-        }
-        italics_done = after;
-    }
+    // Italic — `replace_all` walks left-to-right and the regex consumes the surrounding non-`*` characters as part of each match's leading/trailing capture, so adjacent italics still resolve correctly in a single O(n) pass. The earlier `loop { replace; if unchanged break }` form was O(n²) on input with many italic runs (a 25 KB stream of `*a* *b* …` re-scanned the entire buffer per iteration, ~2.5 GB total scan).
+    let italics_done = RE_ITALIC
+        .replace_all(&with_bold, |caps: &regex::Captures<'_>| {
+            let m = caps.get(0).unwrap().as_str();
+            let inner = &caps[1];
+            // Preserve the leading non-`*` byte (and trailing non-`*` byte) so word boundaries don't drift.
+            let leading = m.chars().next().filter(|c| *c != '*').map_or("", |_| {
+                &m[..m.char_indices().nth(1).map(|(i, _)| i).unwrap_or(0)]
+            });
+            let trailing = if m.ends_with('*') {
+                ""
+            } else {
+                let last_idx = m.char_indices().last().map(|(i, _)| i).unwrap_or(m.len());
+                &m[last_idx..]
+            };
+            format!("{leading}<i>{inner}</i>{trailing}")
+        })
+        .to_string();
 
     // Links last so `[text](url)` inside bold/italic is recognised.
     // The URL is inserted into an HTML attribute, so a literal `"` in it (legal per RFC 3986 in query strings) would prematurely terminate the attribute — `sanitize_telegram_html::RE_ATTR` then reads the truncated href and the user lands somewhere wrong. Escape `"` to `&quot;` defensively. `&`, `<`, `>` were already escape_htmled before RE_LINK ran.
