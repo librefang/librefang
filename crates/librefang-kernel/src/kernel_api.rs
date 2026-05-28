@@ -279,6 +279,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -1004,6 +1005,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
+    }
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        Self::set_agent_channels(self, agent_id, channels)
     }
     fn set_agent_schedule(
         self: Arc<Self>,

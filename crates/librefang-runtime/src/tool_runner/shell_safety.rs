@@ -94,6 +94,8 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
                     state = TokenizerState::Normal;
                 } else if ch == '\\' {
                     state = TokenizerState::DqEscape;
+                } else if ch == '$' && i + 1 < len && chars[i + 1] == '(' {
+                    return Err("$(...) command-substitution inside double-quotes".to_string());
                 }
                 current.push(ch);
                 i += 1;
@@ -145,6 +147,13 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
                     i += 2;
                     continue;
                 }
+                // Bare `&` — background / command separator.
+                if ch == '&' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 1;
+                    continue;
+                }
                 // `||` operator.
                 if ch == '|' && i + 1 < len && chars[i + 1] == '|' {
                     fragments.push(current.clone());
@@ -166,6 +175,13 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
                     i += 1;
                     continue;
                 }
+                // Newline — command separator.
+                if ch == '\n' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 1;
+                    continue;
+                }
                 current.push(ch);
                 i += 1;
             }
@@ -174,6 +190,88 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
 
     fragments.push(current);
     Ok(fragments)
+}
+
+fn shell_tokenize(command: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    let mut i = 0usize;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum TState {
+        Normal,
+        SingleQuote,
+        DoubleQuote,
+        Escape,
+        DqEscape,
+    }
+    let mut state = TState::Normal;
+
+    while i < len {
+        let ch = chars[i];
+        match state {
+            TState::Normal => {
+                if ch == '\'' {
+                    state = TState::SingleQuote;
+                    in_token = true;
+                    current.push(ch);
+                } else if ch == '"' {
+                    state = TState::DoubleQuote;
+                    in_token = true;
+                    current.push(ch);
+                } else if ch == '\\' {
+                    state = TState::Escape;
+                    in_token = true;
+                    current.push(ch);
+                } else if ch.is_whitespace() {
+                    if in_token {
+                        tokens.push(current.clone());
+                        current.clear();
+                        in_token = false;
+                    }
+                } else {
+                    in_token = true;
+                    current.push(ch);
+                }
+                i += 1;
+            }
+            TState::SingleQuote => {
+                if ch == '\'' {
+                    state = TState::Normal;
+                }
+                current.push(ch);
+                i += 1;
+            }
+            TState::DoubleQuote => {
+                if ch == '"' {
+                    state = TState::Normal;
+                } else if ch == '\\' {
+                    state = TState::DqEscape;
+                }
+                current.push(ch);
+                i += 1;
+            }
+            TState::Escape => {
+                current.push(ch);
+                state = TState::Normal;
+                i += 1;
+            }
+            TState::DqEscape => {
+                current.push(ch);
+                state = TState::DoubleQuote;
+                i += 1;
+            }
+        }
+    }
+
+    if in_token {
+        tokens.push(current);
+    }
+
+    tokens
 }
 
 /// Determine whether a shell command is safe to execute when `ro_prefix` is a
@@ -324,6 +422,12 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
                     // Only treat as a real redirect if the operator starts in
                     // Normal (unquoted) state (H1).
                     if normal_at[op_start] {
+                        if *op == ">(" {
+                            return RoSafety::Block(
+                                "shell_exec blocked: process substitution '>(...)' is not allowed"
+                                    .to_string(),
+                            );
+                        }
                         let after_op = command[op_start + op_len..].trim_start();
                         let dest_token = after_op.split_whitespace().next().unwrap_or("");
                         if is_ro_path(dest_token, ro_prefix) {
@@ -343,10 +447,10 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
     } // quote-aware redirect scan block
 
     // --- 2. Split into tokens for verb + arg analysis --------------------------
-    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let tokens = shell_tokenize(command);
     let verb = match tokens.first() {
-        Some(v) => *v,
-        None => return RoSafety::Allow, // empty command
+        Some(v) => v.as_str(),
+        None => return RoSafety::Allow,
     };
     // Strip any leading path component (e.g. /usr/bin/cat → cat).
     //
@@ -403,12 +507,12 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
     // --- 4. sed: allow `-n` (no-print), block `-i` (in-place edit) -------------
     if verb_base == "sed" {
         let has_inplace = tokens.iter().any(|t| {
-            // `-i` alone (POSIX) or `-i<suffix>` (GNU sed extension).
             if *t == "-i" || (t.starts_with("-i") && t.len() > 2) {
                 return true;
             }
-            // Combined short flags e.g. `-ni` — only short-option bundles, not
-            // long options (which start with `--`).
+            if *t == "--in-place" {
+                return true;
+            }
             if t.starts_with('-') && !t.starts_with("--") && t.contains('i') {
                 return true;
             }
@@ -428,7 +532,7 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
         let mut iter = tokens.iter().peekable();
         let mut has_inplace = false;
         while let Some(tok) = iter.next() {
-            if *tok == "-i" && iter.peek().map(|s| **s) == Some("inplace") {
+            if *tok == "-i" && iter.peek().map(|s| s.as_str()) == Some("inplace") {
                 has_inplace = true;
                 break;
             }
@@ -535,7 +639,7 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
             let positional: Vec<&str> = tokens[1..]
                 .iter()
                 .filter(|t| !t.starts_with('-'))
-                .copied()
+                .map(|t| t.as_str())
                 .collect();
             if let Some(dst) = positional.last() {
                 if is_ro_path(dst, ro_prefix) {
@@ -562,8 +666,10 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
 /// Returns true if `token` refers to a path that starts with `ro_prefix` at
 /// a path boundary (i.e. the token equals the prefix or has a '/' after it).
 fn is_ro_path(token: &str, ro_prefix: &str) -> bool {
-    // Strip surrounding quotes that the shell would have consumed.
     let token = token.trim_matches(|c| c == '"' || c == '\'');
+    let token = token.strip_prefix("./").unwrap_or(token);
+    let token = token.trim_end_matches('/');
+    let ro_prefix = ro_prefix.trim_end_matches('/');
     if let Some(rest) = token.strip_prefix(ro_prefix) {
         rest.is_empty() || rest.starts_with('/')
     } else {
