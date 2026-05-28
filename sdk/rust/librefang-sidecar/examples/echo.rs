@@ -1,8 +1,5 @@
-//! Minimal echo sidecar — does not talk to any platform; on every
-//! `send` command from the daemon it emits a synthetic `message`
-//! event that contains the same text, attributed to a fake user.
-//! Useful as a smoke test against the LibreFang supervisor and as a
-//! template for new adapters.
+//! Minimal echo sidecar — does not talk to any platform; on every `send` command from the daemon it emits a synthetic `message` event that contains the same text, attributed to a fake user.
+//! Useful as a smoke test against the LibreFang supervisor and as a template for new adapters.
 //!
 //! Run as a sidecar by adding to `~/.librefang/config.toml`:
 //!
@@ -20,8 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 struct EchoAdapter {
-    /// Stash an emit handle so `on_send` can write a synthetic
-    /// inbound `message` echoing what the daemon just sent us.
+    /// Stash an emit handle so `on_send` can write a synthetic inbound `message` echoing what the daemon just sent us.
     /// `produce` runs once at startup and captures the handle here.
     emit: Arc<Mutex<Option<EmitFn>>>,
 }

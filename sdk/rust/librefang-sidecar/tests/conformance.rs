@@ -1,20 +1,15 @@
 //! Rust SDK side of the sidecar protocol conformance suite.
 //!
-//! The shared corpus (`conformance/sidecar/corpus/`) is the single
-//! oracle. This crate (the Rust *adapter* SDK) is — like the Python
-//! SDK — both a **producer** of events and a **consumer** of
-//! commands, so we assert in both directions:
+//! The shared corpus (`conformance/sidecar/corpus/`) is the single oracle.
+//! This crate (the Rust *adapter* SDK) is — like the Python SDK — both a **producer** of events and a **consumer** of commands, so we assert in both directions:
 //!
 //! * Events: builder output == corpus JSON value (structural).
 //! * Commands: `parse_command(corpus)` == expected typed `Command`.
 //!
-//! This mirrors `sdk/python/tests/test_sidecar_conformance.py`. The
-//! Rust supervisor's pair
-//! (`crates/librefang-channels/tests/sidecar_protocol_conformance.rs`)
-//! asserts the OTHER direction for each frame kind.
+//! This mirrors `sdk/python/tests/test_sidecar_conformance.py`.
+//! The Rust supervisor's pair (`crates/librefang-channels/tests/sidecar_protocol_conformance.rs`) asserts the OTHER direction for each frame kind.
 //!
-//! Equality is structural JSON value equality, not byte equality —
-//! see `conformance/sidecar/README.md`.
+//! Equality is structural JSON value equality, not byte equality — see `conformance/sidecar/README.md`.
 
 use librefang_sidecar::protocol::{events, parse_command, ChannelUser, Command, Content};
 use serde_json::Value;

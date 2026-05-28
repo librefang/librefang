@@ -1,8 +1,6 @@
 //! LibreFang sidecar channel adapter SDK (Rust).
 //!
-//! Write a channel adapter in Rust that runs as a supervised
-//! subprocess of LibreFang, speaking newline-delimited JSON-RPC over
-//! stdio:
+//! Write a channel adapter in Rust that runs as a supervised subprocess of LibreFang, speaking newline-delimited JSON-RPC over stdio:
 //!
 //! ```ignore
 //! use async_trait::async_trait;
@@ -24,21 +22,15 @@
 //! }
 //! ```
 //!
-//! The SDK is wire-equivalent with the Python SDK
-//! (`librefang.sidecar`) and with the Rust supervisor that lives in
-//! `crates/librefang-channels/src/sidecar.rs` inside the LibreFang
-//! daemon. The three implementations are kept honest against each
-//! other by the shared corpus at `conformance/sidecar/corpus/`.
+//! The SDK is wire-equivalent with the Python SDK (`librefang.sidecar`) and with the Rust supervisor that lives in `crates/librefang-channels/src/sidecar.rs` inside the LibreFang daemon.
+//! The three implementations are kept honest against each other by the shared corpus at `conformance/sidecar/corpus/`.
 //!
-//! See `docs/architecture/sidecar-channels.md` for the architecture
-//! and `docs/architecture/sidecar-protocol.md` for the normative wire
-//! spec.
+//! See `docs/architecture/sidecar-channels.md` for the architecture and `docs/architecture/sidecar-protocol.md` for the normative wire spec.
 
 pub mod protocol;
 pub mod runtime;
 
-// Re-export the most commonly used items at the top level to match
-// the Python SDK's `librefang.sidecar` namespace shape.
+// Re-export the most commonly used items at the top level to match the Python SDK's `librefang.sidecar` namespace shape.
 pub use protocol::{
     events, parse_command, ChannelUser, Command, Content, Field, FieldType, Interactive,
     InteractiveButton, InteractiveMessage, MessageBuilder, Reaction, Schema, Send, StreamDelta,

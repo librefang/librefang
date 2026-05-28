@@ -1,7 +1,6 @@
 //! Runtime for LibreFang sidecar channel adapters.
 //!
-//! Implement [`SidecarAdapter`] for your channel, then drive it with
-//! [`run_stdio`]:
+//! Implement [`SidecarAdapter`] for your channel, then drive it with [`run_stdio`]:
 //!
 //! ```ignore
 //! use async_trait::async_trait;
@@ -33,24 +32,18 @@
 //! # fn my_platform_next() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>>> { unreachable!() }
 //! ```
 //!
-//! The framework owns the stdin command-reader, the JSON envelope
-//! parsing, the `ready` re-announce handshake (bounded by
-//! `ready_max_attempts` so a pre-#5219 daemon without `ready_ack` does
-//! not flood stdout), the graceful `shutdown` path, and the discipline
-//! of keeping **stdout protocol-only** (your logs must go to stderr).
+//! The framework owns the stdin command-reader, the JSON envelope parsing, the `ready` re-announce handshake (bounded by `ready_max_attempts` so a pre-#5219 daemon without `ready_ack` does not flood stdout), the graceful `shutdown` path, and the discipline of keeping **stdout protocol-only** (your logs must go to stderr).
 //!
 //! ## Responsibility split
 //!
-//! - **Process restart is the daemon's job.** The supervisor in
-//!   `crates/librefang-channels/src/sidecar.rs` respawns a crashed
-//!   sidecar with backoff and a circuit-breaker. Your adapter must be
-//!   *crash-safe* — hold no irreplaceable in-process state, and let
-//!   the framework re-emit `ready` on each fresh start. Do **not**
-//!   try to keep your own process alive across a fatal error.
-//! - **Platform reconnect is the adapter's job.** Reconnecting a
-//!   dropped WS / long-poll / SSE stream is your transport concern.
-//!   [`with_backoff`] helps. It is independent of the daemon-managed
-//!   process lifecycle.
+//! - **Process restart is the daemon's job.**
+//!   The supervisor in `crates/librefang-channels/src/sidecar.rs` respawns a crashed sidecar with backoff and a circuit-breaker.
+//!   Your adapter must be *crash-safe* — hold no irreplaceable in-process state, and let the framework re-emit `ready` on each fresh start.
+//!   Do **not** try to keep your own process alive across a fatal error.
+//! - **Platform reconnect is the adapter's job.**
+//!   Reconnecting a dropped WS / long-poll / SSE stream is your transport concern.
+//!   [`with_backoff`] helps.
+//!   It is independent of the daemon-managed process lifecycle.
 
 use crate::protocol::{events, parse_command, Command, Send as SendCmd};
 use async_trait::async_trait;
@@ -68,19 +61,14 @@ pub type DynError = Box<dyn StdError + Send + Sync>;
 
 /// Callback an adapter's `produce` impl uses to push inbound events.
 ///
-/// Cheap to clone and to call from multiple tasks. The implementation
-/// pushes through a bounded mpsc; if the writer task has died the
-/// emit is silently dropped — same behavior as Python's `emit`, which
-/// writes to a (possibly broken) stdout.
+/// Cheap to clone and to call from multiple tasks.
+/// The implementation pushes through a bounded mpsc; if the writer task has died the emit is silently dropped — same behavior as Python's `emit`, which writes to a (possibly broken) stdout.
 pub type EmitFn = Arc<dyn Fn(Value) + Send + Sync>;
 
-/// Raised by [`run`] when [`SidecarAdapter::produce`] exits with an
-/// unhandled error. Cleanup ([`SidecarAdapter::on_shutdown`]) has
-/// already run by the time this is returned.
+/// Raised by [`run`] when [`SidecarAdapter::produce`] exits with an unhandled error.
+/// Cleanup ([`SidecarAdapter::on_shutdown`]) has already run by the time this is returned.
 ///
-/// [`run_stdio`] converts this to a process exit code of 1 so the
-/// daemon supervisor sees a non-zero exit (distinguishable from a
-/// clean `shutdown` / EOF).
+/// [`run_stdio`] converts this to a process exit code of 1 so the daemon supervisor sees a non-zero exit (distinguishable from a clean `shutdown` / EOF).
 #[derive(Debug)]
 pub struct ProducerCrashed {
     pub source: DynError,
@@ -100,29 +88,23 @@ impl StdError for ProducerCrashed {
 
 /// Base trait every sidecar adapter implements.
 ///
-/// Override [`on_send`](SidecarAdapter::on_send) (required) and, for
-/// platforms you poll, [`produce`](SidecarAdapter::produce). Declare
-/// optional capabilities so LibreFang routes rich features
-/// (typing/reaction/interactive/thread/streaming/typing_events) to
-/// you instead of degrading to plain text.
+/// Override [`on_send`](SidecarAdapter::on_send) (required) and, for platforms you poll, [`produce`](SidecarAdapter::produce).
+/// Declare optional capabilities so LibreFang routes rich features (typing/reaction/interactive/thread/streaming/typing_events) to you instead of degrading to plain text.
 #[async_trait]
 pub trait SidecarAdapter: Send + Sync {
-    /// Capability strings declared in the `ready` event, e.g.
-    /// `["typing", "interactive"]`. Default: none — adapter degrades
-    /// to plain text only.
+    /// Capability strings declared in the `ready` event, e.g. `["typing", "interactive"]`.
+    /// Default: none — adapter degrades to plain text only.
     fn capabilities(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// Multi-bot account id, if this adapter is one of several
-    /// instances sharing a config namespace.
+    /// Multi-bot account id, if this adapter is one of several instances sharing a config namespace.
     fn account_id(&self) -> Option<String> {
         None
     }
 
-    /// When `true`, the daemon posts error responses privately to the
-    /// operator instead of back into the user's chat. Useful for
-    /// broadcast/notification adapters.
+    /// When `true`, the daemon posts error responses privately to the operator instead of back into the user's chat.
+    /// Useful for broadcast/notification adapters.
     fn suppress_error_responses(&self) -> bool {
         false
     }
@@ -132,20 +114,19 @@ pub trait SidecarAdapter: Send + Sync {
         Vec::new()
     }
 
-    /// `[(host, [[k, v], ...]), ...]` auth headers the daemon should
-    /// attach when fetching media URLs the adapter exposes.
+    /// `[(host, [[k, v], ...]), ...]` auth headers the daemon should attach when fetching media URLs the adapter exposes.
     fn header_rules(&self) -> Vec<Value> {
         Vec::new()
     }
 
-    /// Optional protocol-version tag carried on `ready` for skew
-    /// diagnostics. Logged by the daemon, never enforced.
+    /// Optional protocol-version tag carried on `ready` for skew diagnostics.
+    /// Logged by the daemon, never enforced.
     fn protocol_version(&self) -> Option<u32> {
         None
     }
 
-    /// Build the `ready` event payload from the trait's declarative
-    /// methods. Override for full control (rarely needed).
+    /// Build the `ready` event payload from the trait's declarative methods.
+    /// Override for full control (rarely needed).
     fn ready_event(&self) -> Value {
         events::ready(
             self.capabilities(),
@@ -160,11 +141,9 @@ pub trait SidecarAdapter: Send + Sync {
     /// Deliver an outbound message to the platform. **Required.**
     async fn on_send(&self, cmd: SendCmd) -> Result<(), DynError>;
 
-    /// Dispatch any inbound command. Default routes
-    /// [`Command::Send`] to [`on_send`](SidecarAdapter::on_send);
-    /// other variants are no-ops unless you override this. `ReadyAck`
-    /// / `Shutdown` are handled by the framework and never reach
-    /// here.
+    /// Dispatch any inbound command.
+    /// Default routes [`Command::Send`] to [`on_send`](SidecarAdapter::on_send); other variants are no-ops unless you override this.
+    /// `ReadyAck` / `Shutdown` are handled by the framework and never reach here.
     async fn on_command(&self, cmd: Command) -> Result<(), DynError> {
         if let Command::Send(s) = cmd {
             self.on_send(s).await?;
@@ -186,10 +165,9 @@ pub trait SidecarAdapter: Send + Sync {
 
 /// Retry `op` with exponential backoff until it returns `Ok`.
 ///
-/// For **platform** reconnection only — process restart is the
-/// daemon's job (see module docs). Propagates cancellation by
-/// dropping. Logs each failure to stderr via `eprintln!` to keep
-/// stdout protocol-clean.
+/// For **platform** reconnection only — process restart is the daemon's job (see module docs).
+/// Propagates cancellation by dropping.
+/// Logs each failure to stderr via `eprintln!` to keep stdout protocol-clean.
 pub async fn with_backoff<F, Fut, T>(
     mut op: F,
     initial: Duration,
@@ -218,15 +196,11 @@ where
     }
 }
 
-/// Drive an adapter against a `mpsc::Receiver<String>` line source and
-/// a `mpsc::Sender<Value>` emit sink. Returns when LibreFang sends
-/// `shutdown` or `line_rx` reaches EOF (the sender side dropped).
+/// Drive an adapter against a `mpsc::Receiver<String>` line source and a `mpsc::Sender<Value>` emit sink.
+/// Returns when LibreFang sends `shutdown` or `line_rx` reaches EOF (the sender side dropped).
 ///
-/// `ready_max_attempts` bounds the un-acked `ready` re-announce
-/// (`0` = re-announce forever). After the cap the loop stops
-/// re-announcing but the run continues — a pre-#5219 daemon that
-/// never sends `ready_ack` still gets the first `ready` and the
-/// adapter keeps serving without flooding stdout.
+/// `ready_max_attempts` bounds the un-acked `ready` re-announce (`0` = re-announce forever).
+/// After the cap the loop stops re-announcing but the run continues — a pre-#5219 daemon that never sends `ready_ack` still gets the first `ready` and the adapter keeps serving without flooding stdout.
 pub async fn run<A: SidecarAdapter + 'static>(
     adapter: Arc<A>,
     mut line_rx: mpsc::Receiver<String>,
@@ -374,24 +348,18 @@ pub async fn run<A: SidecarAdapter + 'static>(
     Ok(())
 }
 
-/// Production entry point: wire the adapter to real `stdin`/`stdout`
-/// and drive `run`.
+/// Production entry point: wire the adapter to real `stdin`/`stdout` and drive `run`.
 ///
-/// Spawns a reader task that converts `stdin` lines into the
-/// `line_rx` mpsc; spawns a writer task that drains `emit_tx` and
-/// writes one newline-delimited JSON line per event to `stdout`. Both
-/// tasks shut down when the underlying I/O completes or the channels
-/// close.
+/// Spawns a reader task that converts `stdin` lines into the `line_rx` mpsc; spawns a writer task that drains `emit_tx` and writes one newline-delimited JSON line per event to `stdout`.
+/// Both tasks shut down when the underlying I/O completes or the channels close.
 ///
-/// Returns when LibreFang sends `shutdown`, stdin reaches EOF, or
-/// [`SidecarAdapter::produce`] errors out (the last case yields
-/// [`ProducerCrashed`]).
+/// Returns when LibreFang sends `shutdown`, stdin reaches EOF, or [`SidecarAdapter::produce`] errors out (the last case yields [`ProducerCrashed`]).
 pub async fn run_stdio<A: SidecarAdapter + 'static>(adapter: A) -> Result<(), DynError> {
     run_stdio_with(adapter, Duration::from_secs(2), 5).await
 }
 
-/// [`run_stdio`] with explicit tunables for the `ready` re-announce
-/// loop. `ready_max_attempts = 0` re-announces forever.
+/// [`run_stdio`] with explicit tunables for the `ready` re-announce loop.
+/// `ready_max_attempts = 0` re-announces forever.
 pub async fn run_stdio_with<A: SidecarAdapter + 'static>(
     adapter: A,
     ready_interval: Duration,

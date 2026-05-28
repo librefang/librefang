@@ -2,18 +2,11 @@
 //!
 //! Newline-delimited JSON over stdio:
 //!
-//! * **Events** (adapter → LibreFang, written to **stdout**): `ready`,
-//!   `message`, `error`, `typing`, `qr_ready`, `qr_status`.
-//! * **Commands** (LibreFang → adapter, read from **stdin**): `send`,
-//!   `ready_ack`, `typing`, `reaction`, `interactive`, `stream_start`,
-//!   `stream_delta`, `stream_end`, `heartbeat`, `shutdown`.
+//! * **Events** (adapter → LibreFang, written to **stdout**): `ready`, `message`, `error`, `typing`, `qr_ready`, `qr_status`.
+//! * **Commands** (LibreFang → adapter, read from **stdin**): `send`, `ready_ack`, `typing`, `reaction`, `interactive`, `stream_start`, `stream_delta`, `stream_end`, `heartbeat`, `shutdown`.
 //!
-//! Wire shape is byte-equivalent with the Python SDK
-//! (`librefang.sidecar.protocol`) and with the Rust supervisor
-//! (`crates/librefang-channels/src/sidecar.rs`). The three implementations
-//! are kept honest against each other by the shared corpus at
-//! `conformance/sidecar/corpus/` — see the integration test
-//! `tests/conformance.rs`.
+//! Wire shape is byte-equivalent with the Python SDK (`librefang.sidecar.protocol`) and with the Rust supervisor (`crates/librefang-channels/src/sidecar.rs`).
+//! The three implementations are kept honest against each other by the shared corpus at `conformance/sidecar/corpus/` — see the integration test `tests/conformance.rs`.
 //!
 //! See `docs/architecture/sidecar-protocol.md` for the normative spec.
 
@@ -22,12 +15,9 @@ use serde_json::{json, Value};
 
 // ── ChannelContent builders ─────────────────────────────────────────
 //
-// `Content::*` mirrors the externally-tagged `crate::types::ChannelContent`
-// enum in `librefang-channels`. We return `Value` instead of defining
-// our own typed enum to avoid drifting from the kernel-side source of
-// truth — the conformance corpus is the executable contract. Adapter
-// authors who want a typed variant can construct a struct that
-// serializes to the same shape.
+// `Content::*` mirrors the externally-tagged `crate::types::ChannelContent` enum in `librefang-channels`.
+// We return `Value` instead of defining our own typed enum to avoid drifting from the kernel-side source of truth — the conformance corpus is the executable contract.
+// Adapter authors who want a typed variant can construct a struct that serializes to the same shape.
 
 /// Builders for every `ChannelContent` variant the wire accepts.
 pub struct Content;
@@ -240,10 +230,8 @@ pub mod events {
 
     /// Build a `message` event.
     ///
-    /// `content` (a [`super::Content`] result) supersedes `text`; legacy
-    /// text-only adapters may pass only `text`. Plain-text `content` is
-    /// mirrored into `text` so a pre-#5219 daemon still delivers the
-    /// message non-empty.
+    /// `content` (a [`super::Content`] result) supersedes `text`; legacy text-only adapters may pass only `text`.
+    /// Plain-text `content` is mirrored into `text` so a pre-#5219 daemon still delivers the message non-empty.
     #[allow(clippy::too_many_arguments)]
     pub fn message(
         user_id: impl Into<String>,
@@ -378,8 +366,7 @@ pub mod events {
     }
 }
 
-/// Fluent builder for the rich `message` event — friendlier than
-/// `events::message(...)` when most fields are absent.
+/// Fluent builder for the rich `message` event — friendlier than `events::message(...)` when most fields are absent.
 ///
 /// ```ignore
 /// use librefang_sidecar::{Content, MessageBuilder};
@@ -556,10 +543,8 @@ pub struct StreamEnd {
     pub stream_id: String,
 }
 
-/// Forward-compat envelope: a command method this SDK version does not
-/// model. Adapters must tolerate these rather than crash — the daemon
-/// relies on the symmetry (e.g. it sends `ready_ack` to older adapters
-/// that don't know the method).
+/// Forward-compat envelope: a command method this SDK version does not model.
+/// Adapters must tolerate these rather than crash — the daemon relies on the symmetry (e.g. it sends `ready_ack` to older adapters that don't know the method).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownCommand {
     pub method: String,
@@ -591,19 +576,14 @@ struct Envelope {
 
 /// Parse one stdin line into a typed [`Command`].
 ///
-/// Returns `Err` on malformed JSON (and on syntactically valid JSON
-/// that is not an object — a bare number/array). The reader loop in
-/// [`crate::runtime::run`] catches both, emits a protocol-level
-/// `error` event, and continues — matching the Python SDK's behavior.
+/// Returns `Err` on malformed JSON (and on syntactically valid JSON that is not an object — a bare number/array).
+/// The reader loop in [`crate::runtime::run`] catches both, emits a protocol-level `error` event, and continues — matching the Python SDK's behavior.
 ///
-/// Unknown methods become [`Command::Unknown`] rather than an error,
-/// so a newer daemon can introduce a method without breaking an older
-/// adapter.
+/// Unknown methods become [`Command::Unknown`] rather than an error, so a newer daemon can introduce a method without breaking an older adapter.
 pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
     let v: Value = serde_json::from_str(line)?;
     if !v.is_object() {
-        // Mirror Python's behavior: surface as a JSON error so the
-        // runtime can react identically across implementations.
+        // Mirror Python's behavior: surface as a JSON error so the runtime can react identically across implementations.
         return Err(serde::de::Error::custom("expected a JSON object"));
     }
     let env: Envelope = serde_json::from_value(v.clone())?;
@@ -650,9 +630,8 @@ pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
 // kind of channel with one form component.
 
 /// Field type for the dashboard's schema-driven config form.
-/// `Secret` is routed to `~/.librefang/secrets.env` on save (never
-/// written to `config.toml`). Every other type is stored in the
-/// `[sidecar_channels.env]` table of `config.toml`.
+/// `Secret` is routed to `~/.librefang/secrets.env` on save (never written to `config.toml`).
+/// Every other type is stored in the `[sidecar_channels.env]` table of `config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
