@@ -446,6 +446,8 @@ async fn run_file_read_for_dedup(
         Some(session_id),
         None,
         None,
+        0,
+        0,
     )
     .await
 }

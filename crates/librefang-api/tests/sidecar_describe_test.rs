@@ -73,6 +73,62 @@ async fn describe_missing_sdk_returns_actionable_install_hint() {
     );
 }
 
+/// Mirrors the telegram test: verify the Feishu adapter's --describe output
+/// contains the expected fields when the SDK is installed, and skip gracefully
+/// when it is not. This guards against the Python SCHEMA drifting from the
+/// Rust FEISHU_STATIC_FIELDS compile-time fallback.
+#[tokio::test]
+async fn describe_feishu_returns_schema_or_skips_when_sdk_missing() {
+    let result = describe_sidecar(
+        "python3",
+        &["-m".into(), "librefang.sidecar.adapters.feishu".into()],
+    )
+    .await;
+    let schema: SidecarSchema = match result {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("describe failed (SDK not installed?): {e}");
+            return;
+        }
+    };
+    assert_eq!(schema.name, "feishu");
+    let app_id = schema
+        .fields
+        .iter()
+        .find(|f| f.key == "FEISHU_APP_ID")
+        .expect("schema must declare FEISHU_APP_ID");
+    assert_eq!(app_id.field_type, "text");
+    assert!(app_id.required);
+    assert!(!app_id.advanced);
+
+    let app_secret = schema
+        .fields
+        .iter()
+        .find(|f| f.key == "FEISHU_APP_SECRET")
+        .expect("schema must declare FEISHU_APP_SECRET");
+    assert_eq!(app_secret.field_type, "secret");
+    assert!(app_secret.required);
+    assert!(!app_secret.advanced);
+
+    // Verify advanced optional fields are present.
+    for key in &[
+        "FEISHU_REGION",
+        "FEISHU_RECEIVE_MODE",
+        "FEISHU_WEBHOOK_PORT",
+        "FEISHU_VERIFICATION_TOKEN",
+        "FEISHU_ENCRYPT_KEY",
+        "FEISHU_ACCOUNT_ID",
+    ] {
+        let f = schema
+            .fields
+            .iter()
+            .find(|f| f.key.as_str() == *key)
+            .unwrap_or_else(|| panic!("schema must declare {key}"));
+        assert!(f.advanced, "{key} must be advanced");
+        assert!(!f.required, "{key} must not be required");
+    }
+}
+
 #[tokio::test]
 async fn describe_other_failure_modes_keep_raw_stderr() {
     // A non-SDK failure (here: adapter raising a normal ImportError
