@@ -22,6 +22,25 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/sidecar/corpus")
 }
 
+/// Tests in this file are integration tests against the SHARED corpus that lives at the LibreFang repo root.
+/// When the crate is consumed outside that repo (a `cargo publish` package, a docs.rs build, a downstream vendor that ran `cargo test -p librefang-sidecar`), the corpus path does not exist and every test below would otherwise panic with "corpus dir missing".
+/// This helper returns true when the corpus IS present (in-repo) and false otherwise; tests skip-with-stderr-message in the absent case instead of failing.
+fn corpus_available() -> bool {
+    corpus_dir().is_dir()
+}
+
+macro_rules! require_corpus {
+    () => {
+        if !corpus_available() {
+            eprintln!(
+                "[librefang-sidecar conformance] corpus not present at {} — skipping (expected when the crate is consumed outside the librefang repo).",
+                corpus_dir().display()
+            );
+            return;
+        }
+    };
+}
+
 fn read_corpus(rel: &str) -> Value {
     let path = corpus_dir().join(rel);
     let raw =
@@ -42,11 +61,9 @@ fn list_json(subdir: &str) -> HashSet<String> {
 
 #[test]
 fn corpus_present() {
-    assert!(
-        corpus_dir().is_dir(),
-        "corpus dir missing at {}",
-        corpus_dir().display()
-    );
+    // Skip cleanly when the corpus is absent (out-of-repo consumer).
+    // In-repo this still asserts the structural invariant that both subdirs are populated.
+    require_corpus!();
     assert!(!list_json("events").is_empty(), "no event fixtures");
     assert!(!list_json("commands").is_empty(), "no command fixtures");
 }
@@ -90,20 +107,29 @@ fn build_event(name: &str) -> Value {
             .build(),
         "error.json" => events::error("boom"),
         "typing.json" => events::typing("u", "n", true),
+        "qr_ready.json" => events::qr_ready(
+            "wxp://f2f0YGcQ-xxxxxxxxxxxxxxxxxxxx",
+            Some("https://login.example/qr?code=abc".into()),
+            Some("Scan within 5 minutes".into()),
+            Some("2026-05-28T20:00:00Z".into()),
+        ),
+        "qr_status.json" => events::qr_status("confirmed", Some("Login confirmed".into())),
         other => panic!("unmapped event fixture: {other}"),
     }
 }
 
 #[test]
 fn every_event_fixture_is_covered() {
-    // A fixture with neither a producer assertion nor a documented
-    // skip is not conformance — mirror the Python coverage guard.
+    require_corpus!();
+    // A fixture with neither a producer assertion nor a documented skip is not conformance — mirror the Python coverage guard.
     let asserted: HashSet<String> = [
         "ready_full.json",
         "message_text.json",
         "message_minimal.json",
         "error.json",
         "typing.json",
+        "qr_ready.json",
+        "qr_status.json",
     ]
     .into_iter()
     .map(String::from)
@@ -118,6 +144,7 @@ fn every_event_fixture_is_covered() {
 
 #[test]
 fn event_builders_match_corpus() {
+    require_corpus!();
     let skip = event_producer_skip();
     for name in list_json("events") {
         if skip.contains(&name) {
@@ -142,6 +169,7 @@ fn parse_cmd(name: &str) -> Command {
 
 #[test]
 fn every_command_fixture_is_covered() {
+    require_corpus!();
     let asserted: HashSet<String> = [
         "send_full.json",
         "send_minimal.json",
@@ -168,6 +196,7 @@ fn every_command_fixture_is_covered() {
 
 #[test]
 fn command_send_full() {
+    require_corpus!();
     match parse_cmd("send_full.json") {
         Command::Send(s) => {
             assert_eq!(s.channel_id, "c1");
@@ -189,6 +218,7 @@ fn command_send_full() {
 
 #[test]
 fn command_send_minimal() {
+    require_corpus!();
     match parse_cmd("send_minimal.json") {
         Command::Send(s) => {
             assert_eq!(s.channel_id, "c1");
@@ -205,6 +235,7 @@ fn command_send_minimal() {
 
 #[test]
 fn command_parameterless() {
+    require_corpus!();
     assert_eq!(parse_cmd("ready_ack.json"), Command::ReadyAck);
     assert_eq!(parse_cmd("shutdown.json"), Command::Shutdown);
     assert_eq!(parse_cmd("heartbeat.json"), Command::Heartbeat);
@@ -212,6 +243,7 @@ fn command_parameterless() {
 
 #[test]
 fn command_typing() {
+    require_corpus!();
     match parse_cmd("typing.json") {
         Command::Typing(t) => assert_eq!(t.channel_id, "c1"),
         other => panic!("expected Typing, got {other:?}"),
@@ -220,6 +252,7 @@ fn command_typing() {
 
 #[test]
 fn command_reaction() {
+    require_corpus!();
     match parse_cmd("reaction.json") {
         Command::Reaction(r) => {
             assert_eq!(r.channel_id, "c1");
@@ -232,6 +265,7 @@ fn command_reaction() {
 
 #[test]
 fn command_interactive() {
+    require_corpus!();
     match parse_cmd("interactive.json") {
         Command::Interactive(i) => {
             assert_eq!(i.channel_id, "c1");
@@ -251,6 +285,7 @@ fn command_interactive() {
 
 #[test]
 fn command_stream_start_default_thread() {
+    require_corpus!();
     match parse_cmd("stream_start.json") {
         Command::StreamStart(s) => {
             assert_eq!(s.channel_id, "c1");
@@ -263,6 +298,7 @@ fn command_stream_start_default_thread() {
 
 #[test]
 fn command_stream_start_threaded() {
+    require_corpus!();
     match parse_cmd("stream_start_threaded.json") {
         Command::StreamStart(s) => {
             assert_eq!(s.thread_id.as_deref(), Some("t1"));
@@ -273,6 +309,7 @@ fn command_stream_start_threaded() {
 
 #[test]
 fn command_stream_delta_and_end() {
+    require_corpus!();
     match parse_cmd("stream_delta.json") {
         Command::StreamDelta(d) => {
             assert_eq!(d.stream_id, "s1");

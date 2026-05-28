@@ -56,14 +56,14 @@ impl Content {
         })
     }
 
-    pub fn voice(url: impl Into<String>, caption: Option<String>, duration_seconds: u64) -> Value {
+    pub fn voice(url: impl Into<String>, caption: Option<String>, duration_seconds: u32) -> Value {
         json!({"Voice": {"url": url.into(), "caption": caption, "duration_seconds": duration_seconds}})
     }
 
     pub fn video(
         url: impl Into<String>,
         caption: Option<String>,
-        duration_seconds: u64,
+        duration_seconds: u32,
         filename: Option<String>,
     ) -> Value {
         json!({
@@ -107,7 +107,7 @@ impl Content {
     pub fn audio(
         url: impl Into<String>,
         caption: Option<String>,
-        duration_seconds: u64,
+        duration_seconds: u32,
         title: Option<String>,
         performer: Option<String>,
     ) -> Value {
@@ -127,7 +127,7 @@ impl Content {
     pub fn animation(
         url: impl Into<String>,
         caption: Option<String>,
-        duration_seconds: u64,
+        duration_seconds: u32,
     ) -> Value {
         json!({"Animation": {"url": url.into(), "caption": caption, "duration_seconds": duration_seconds}})
     }
@@ -144,7 +144,7 @@ impl Content {
         question: impl Into<String>,
         options: Vec<String>,
         is_quiz: bool,
-        correct_option_id: Option<i64>,
+        correct_option_id: Option<u32>,
         explanation: Option<String>,
     ) -> Value {
         let mut p = json!({"question": question.into(), "options": options, "is_quiz": is_quiz});
@@ -493,8 +493,16 @@ pub struct InteractiveMessage {
     pub buttons: Vec<Vec<InteractiveButton>>,
 }
 
+/// Params of the inbound `send` command (the daemon asking the adapter
+/// to deliver a message to its platform).
+///
+/// Named `SendCommand` (not `Send`) so the SDK does not shadow
+/// `std::marker::Send` for any caller that uses
+/// `use librefang_sidecar::*;` — a glob import of a struct called `Send`
+/// breaks every `T: Send` trait bound with cryptic diagnostics. The
+/// `method` field on the wire is still `"send"`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-pub struct Send {
+pub struct SendCommand {
     pub channel_id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -553,7 +561,7 @@ pub struct UnknownCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Send(Send),
+    Send(SendCommand),
     ReadyAck,
     Shutdown,
     Heartbeat,
@@ -576,10 +584,10 @@ struct Envelope {
 
 /// Parse one stdin line into a typed [`Command`].
 ///
-/// Returns `Err` on malformed JSON (and on syntactically valid JSON that is not an object — a bare number/array).
-/// The reader loop in [`crate::runtime::run`] catches both, emits a protocol-level `error` event, and continues — matching the Python SDK's behavior.
+/// Returns `Err` on malformed JSON, on a JSON value that is not an object (a bare number/array), AND on a typed-params variant whose `params` shape does not deserialize.
+/// The reader loop in [`crate::runtime::run`] catches all three, emits a protocol-level `error` event with the deserialization message, and continues — so a wire-shape skew is surfaced instead of silently degrading the affected command to default values.
 ///
-/// Unknown methods become [`Command::Unknown`] rather than an error, so a newer daemon can introduce a method without breaking an older adapter.
+/// Unknown `method` strings become [`Command::Unknown`] rather than an error, so a newer daemon can introduce a method without breaking an older adapter.
 pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
     let v: Value = serde_json::from_str(line)?;
     if !v.is_object() {
@@ -594,26 +602,16 @@ pub fn parse_command(line: &str) -> Result<Command, serde_json::Error> {
         params
     };
     let cmd = match env.method.as_str() {
-        "send" => Command::Send(serde_json::from_value(params_or_empty).unwrap_or_default()),
+        "send" => Command::Send(serde_json::from_value(params_or_empty)?),
         "ready_ack" => Command::ReadyAck,
         "shutdown" => Command::Shutdown,
         "heartbeat" => Command::Heartbeat,
-        "typing" => Command::Typing(serde_json::from_value(params_or_empty).unwrap_or_default()),
-        "reaction" => {
-            Command::Reaction(serde_json::from_value(params_or_empty).unwrap_or_default())
-        }
-        "interactive" => {
-            Command::Interactive(serde_json::from_value(params_or_empty).unwrap_or_default())
-        }
-        "stream_start" => {
-            Command::StreamStart(serde_json::from_value(params_or_empty).unwrap_or_default())
-        }
-        "stream_delta" => {
-            Command::StreamDelta(serde_json::from_value(params_or_empty).unwrap_or_default())
-        }
-        "stream_end" => {
-            Command::StreamEnd(serde_json::from_value(params_or_empty).unwrap_or_default())
-        }
+        "typing" => Command::Typing(serde_json::from_value(params_or_empty)?),
+        "reaction" => Command::Reaction(serde_json::from_value(params_or_empty)?),
+        "interactive" => Command::Interactive(serde_json::from_value(params_or_empty)?),
+        "stream_start" => Command::StreamStart(serde_json::from_value(params_or_empty)?),
+        "stream_delta" => Command::StreamDelta(serde_json::from_value(params_or_empty)?),
+        "stream_end" => Command::StreamEnd(serde_json::from_value(params_or_empty)?),
         other => Command::Unknown(UnknownCommand {
             method: other.to_string(),
             raw: v,
@@ -756,7 +754,7 @@ mod tests {
 
     #[test]
     fn send_minimal_omits_content_and_thread_id() {
-        let s = Send {
+        let s = SendCommand {
             channel_id: "c1".into(),
             text: "hi".into(),
             content: None,

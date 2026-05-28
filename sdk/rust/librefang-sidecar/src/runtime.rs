@@ -4,7 +4,7 @@
 //!
 //! ```ignore
 //! use async_trait::async_trait;
-//! use librefang_sidecar::{run_stdio, EmitFn, SidecarAdapter, Send as SendCmd, events};
+//! use librefang_sidecar::{run_stdio, EmitFn, SendCommand, SidecarAdapter, events};
 //!
 //! struct MyAdapter;
 //!
@@ -12,7 +12,7 @@
 //! impl SidecarAdapter for MyAdapter {
 //!     fn capabilities(&self) -> Vec<String> { vec!["typing".into()] }
 //!
-//!     async fn on_send(&self, cmd: SendCmd) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//!     async fn on_send(&self, cmd: SendCommand) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!         // deliver cmd.text / cmd.content to your platform
 //!         Ok(())
 //!     }
@@ -45,7 +45,7 @@
 //!   [`with_backoff`] helps.
 //!   It is independent of the daemon-managed process lifecycle.
 
-use crate::protocol::{events, parse_command, Command, Send as SendCmd};
+use crate::protocol::{events, parse_command, Command, SendCommand};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::error::Error as StdError;
@@ -139,7 +139,7 @@ pub trait SidecarAdapter: Send + Sync {
     }
 
     /// Deliver an outbound message to the platform. **Required.**
-    async fn on_send(&self, cmd: SendCmd) -> Result<(), DynError>;
+    async fn on_send(&self, cmd: SendCommand) -> Result<(), DynError>;
 
     /// Dispatch any inbound command.
     /// Default routes [`Command::Send`] to [`on_send`](SidecarAdapter::on_send); other variants are no-ops unless you override this.
@@ -178,6 +178,18 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, DynError>>,
 {
+    // Refuse the inputs that turn this loop into a CPU spin or a converging delay.
+    // factor < 1.0 makes the delay shrink toward zero on every failure (silent rate-limit / IP-ban escalation against the remote).
+    // factor <= 0.0 + non-finite values produce a zero or NaN delay that becomes a tight retry spin.
+    // initial > maximum is a configuration typo — the loop would honor `initial` on iteration 0 then clamp later, masking the typo.
+    assert!(
+        factor.is_finite() && factor >= 1.0,
+        "with_backoff: factor must be finite and >= 1.0 (got {factor})"
+    );
+    assert!(
+        initial <= maximum,
+        "with_backoff: initial ({initial:?}) must be <= maximum ({maximum:?})"
+    );
     let mut delay = initial;
     loop {
         match op().await {
@@ -194,6 +206,18 @@ where
             }
         }
     }
+}
+
+/// Best-effort stringification of a `Box<dyn Any + Send + 'static>` produced by `tokio::task::JoinError::into_panic`.
+/// Covers the two common payload types `panic!` emits — `&'static str` and `String` — and falls back to an opaque label so the message slot is never empty.
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "(non-string panic payload)".to_string()
 }
 
 /// Drive an adapter against a `mpsc::Receiver<String>` line source and a `mpsc::Sender<Value>` emit sink.
@@ -222,18 +246,26 @@ pub async fn run<A: SidecarAdapter + 'static>(
     // run promptly instead of waiting for the next stdin line.
     let (producer_done_tx, mut producer_done_rx) = watch::channel(false);
 
-    // Emit callback handed to the producer. Sync; pushes through
-    // emit_tx via try_send. A full or closed channel silently drops
-    // — same as Python emit writing to a broken stdout.
+    // Emit callback handed to the producer. Sync; pushes through emit_tx via try_send.
+    // A full or closed channel still drops the event (the supervisor's stdout pipe is back-pressured or broken), but we count drops in an Arc<AtomicU64> and log the 1st and every 100th drop to stderr — same rate-limited pattern the daemon-side supervisor uses (`crates/librefang-channels/src/sidecar.rs` overflow=drop_newest path).
+    // A silent drop is the worst outcome; a noisy log lets the operator see "the daemon isn't draining my stdout" instead of "my messages just disappear".
     let emit: EmitFn = {
         let tx = emit_tx.clone();
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         Arc::new(move |v: Value| {
-            let _ = tx.try_send(v);
+            if tx.try_send(v).is_err() {
+                let n = dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n == 1 || n % 100 == 0 {
+                    eprintln!(
+                        "[librefang-sidecar] producer emit dropped — channel full or writer task gone ({n} dropped total). Sustained drops indicate the supervisor is not draining sidecar stdout."
+                    );
+                }
+            }
         })
     };
 
-    // Ready re-announce task. Emits ready every `ready_interval`
-    // until acked, stop fires, or max_attempts is reached.
+    // Ready re-announce task. Emits ready every `ready_interval` until acked, stop fires, or max_attempts is reached.
+    // Every emit_tx.send(...) is itself wrapped in select! with stop_rx so a wedged writer (e.g. supervisor stopped reading sidecar stdout) cannot park this task on send and prevent it from observing the stop signal during shutdown.
     let ready_handle = {
         let adapter = adapter.clone();
         let emit_tx = emit_tx.clone();
@@ -245,12 +277,14 @@ pub async fn run<A: SidecarAdapter + 'static>(
                 if *acked_rx.borrow() || *stop_rx.borrow() {
                     return;
                 }
-                let _ = emit_tx.send(adapter.ready_event()).await;
+                tokio::select! {
+                    _ = emit_tx.send(adapter.ready_event()) => {}
+                    _ = stop_rx.changed() => return,
+                }
                 attempts += 1;
                 if ready_max_attempts != 0 && attempts >= ready_max_attempts {
-                    // Stop re-announcing but keep the adapter alive —
-                    // a pre-#5219 daemon without ready_ack still got
-                    // the first ready. Producer + reader loop continue.
+                    // Stop re-announcing but keep the adapter alive — a pre-#5219 daemon without ready_ack still got the first ready.
+                    // Producer + reader loop continue.
                     return;
                 }
                 tokio::select! {
@@ -262,10 +296,9 @@ pub async fn run<A: SidecarAdapter + 'static>(
         })
     };
 
-    // Producer task — adapter's inbound stream. Only an ERROR from
-    // `produce` should terminate the run (via `producer_done_tx`); a
-    // clean `Ok(())` return is a legitimate "emit-once-and-exit"
-    // adapter and must not kill the command loop.
+    // Producer task — adapter's inbound stream.
+    // Only an ERROR or PANIC from `produce` terminates the run (via `producer_done_tx`); a clean `Ok(())` return is a legitimate "emit-once-and-exit" adapter and must not kill the command loop.
+    // produce() is spawned as its own child task so a panic inside the user's `produce` impl surfaces as `JoinError::is_panic()` instead of silently aborting the future and leaving the main loop blocked forever waiting for a wake-up that never comes.
     let producer_handle = {
         let adapter = adapter.clone();
         let emit = emit.clone();
@@ -273,9 +306,22 @@ pub async fn run<A: SidecarAdapter + 'static>(
         let producer_done_tx = producer_done_tx.clone();
         let mut stop_rx = stop_rx.clone();
         tokio::spawn(async move {
+            let inner_adapter = adapter.clone();
+            let inner_emit = emit.clone();
+            let inner = tokio::spawn(async move { inner_adapter.produce(inner_emit).await });
             tokio::select! {
-                r = adapter.produce(emit) => {
-                    if let Err(e) = r {
+                join_result = inner => {
+                    let to_record: Option<DynError> = match join_result {
+                        Ok(Ok(())) => None,
+                        Ok(Err(e)) => Some(e),
+                        Err(join_err) if join_err.is_panic() => {
+                            let payload = join_err.into_panic();
+                            let msg = panic_payload_message(payload);
+                            Some(format!("produce panicked: {msg}").into())
+                        }
+                        Err(_) => None, // cancelled
+                    };
+                    if let Some(e) = to_record {
                         *producer_err.lock().await = Some(e);
                         let _ = producer_done_tx.send(true);
                     }
@@ -306,16 +352,21 @@ pub async fn run<A: SidecarAdapter + 'static>(
                             }
                             Ok(cmd) => {
                                 if let Err(e) = adapter.on_command(cmd).await {
-                                    // Per-command error — surface as a
-                                    // protocol error event, do not crash
-                                    // the adapter.
-                                    let _ = emit_tx.send(events::error(format!("{e}"))).await;
+                                    // Per-command error — surface as a protocol error event, do not crash the adapter.
+                                    // emit wrapped in select! with stop_rx so a wedged writer does not stall the loop and prevent subsequent shutdown commands from being read.
+                                    let err_event = events::error(format!("{e}"));
+                                    tokio::select! {
+                                        _ = emit_tx.send(err_event) => {}
+                                        _ = stop_rx.changed() => break,
+                                    }
                                 }
                             }
                             Err(e) => {
-                                let _ = emit_tx.send(
-                                    events::error(format!("protocol parse error: {e}"))
-                                ).await;
+                                let err_event = events::error(format!("protocol parse error: {e}"));
+                                tokio::select! {
+                                    _ = emit_tx.send(err_event) => {}
+                                    _ = stop_rx.changed() => break,
+                                }
                             }
                         }
                     }
@@ -424,16 +475,46 @@ pub async fn run_stdio_with<A: SidecarAdapter + 'static>(
     )
     .await;
 
-    // Best-effort drain. Reader will terminate on its own when stdin
-    // closes; writer terminates when emit_tx is dropped (which it is
-    // when `run` returns, by stack unwind).
+    // Abort the reader first.
+    // After `run` returns we no longer care about further stdin lines, and a daemon that keeps its write half of the sidecar's stdin open (e.g. during a graceful drain or when the supervisor is itself stuck) leaves `next_line().await` parked indefinitely.
+    // Without abort, `reader_handle.await` would block until the OS finally closes the pipe — turning a clean shutdown into a wedged process the supervisor must SIGKILL.
+    reader_handle.abort();
     let _ = reader_handle.await;
+    // The writer task drains naturally once emit_tx is dropped (which happened when `run` returned by stack-unwind), so a plain await is correct here.
     let _ = writer_handle.await;
 
     match result {
         Ok(()) => Ok(()),
         Err(e) => Err(Box::new(e) as DynError),
     }
+}
+
+/// One-stop adapter `main` helper: handle `--describe` and otherwise drive `run_stdio`.
+///
+/// The daemon's discovery contract (`crates/librefang-api/src/routes/sidecar_describe.rs`) is to spawn the adapter binary with `--describe`, expect a single JSON object on stdout, and then exit; any other run path drives the JSON-RPC protocol on stdio normally.
+/// Python's equivalent is `librefang.sidecar.runtime.run_stdio_main(AdapterClass, schema=SCHEMA)`.
+/// Use this from `tokio::main` instead of calling [`run_stdio`] directly, so a Rust adapter is discoverable by the dashboard out of the box:
+///
+/// ```ignore
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+///     run_stdio_main(MyAdapter, MyAdapter::schema()).await
+/// }
+/// ```
+///
+/// When `--describe` is present in argv this emits the schema JSON to stdout and returns `Ok(())` without ever calling the adapter's `produce` or `on_send` — important when the real adapter needs env vars (tokens, secrets) that aren't yet configured at discovery time.
+pub async fn run_stdio_main<A: SidecarAdapter + 'static>(
+    adapter: A,
+    schema: crate::protocol::Schema,
+) -> Result<(), DynError> {
+    if std::env::args().any(|a| a == "--describe") {
+        let mut stdout = tokio::io::stdout();
+        let body = serde_json::to_string(&schema)?;
+        stdout.write_all(body.as_bytes()).await?;
+        stdout.flush().await?;
+        return Ok(());
+    }
+    run_stdio(adapter).await
 }
 
 #[cfg(test)]
@@ -451,7 +532,7 @@ mod tests {
         fn capabilities(&self) -> Vec<String> {
             vec!["typing".into()]
         }
-        async fn on_send(&self, _cmd: SendCmd) -> Result<(), DynError> {
+        async fn on_send(&self, _cmd: SendCommand) -> Result<(), DynError> {
             self.sends.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -577,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn channel_user_typed_emit_round_trips_through_send() {
         // Smoke check: ChannelUser → Send → JSON → parse → ChannelUser.
-        let original = SendCmd {
+        let original = SendCommand {
             channel_id: "c1".into(),
             text: "hi".into(),
             content: Some(Content::text("hi")),
