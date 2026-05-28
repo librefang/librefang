@@ -147,6 +147,11 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         skills,
         skills_disabled: false,
         mcp_servers,
+        // BossFang UAR translator: UAR artifacts don't carry a per-agent
+        // channel allowlist (#5738), so default to "all channels" — the
+        // historical pre-#5738 behaviour. Operators who want to restrict
+        // channels for a UAR-spawned agent set them on the LibreFang side.
+        channels: Vec::new(),
         metadata: HashMap::new(),
         tags,
         routing: None,

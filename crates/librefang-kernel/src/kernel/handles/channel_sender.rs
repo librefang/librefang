@@ -272,6 +272,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<(), kernel_handle::KernelOpError> {
         let lookup_key = account_id
@@ -304,10 +305,17 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             explanation: explanation.map(|s| s.to_string()),
         };
 
-        adapter
-            .send(&user, content)
-            .await
-            .map_err(|e| format!("Channel poll send failed: {e}"))?;
+        if let Some(tid) = thread_id {
+            adapter
+                .send_in_thread(&user, content, tid)
+                .await
+                .map_err(|e| format!("Channel poll send failed: {e}"))?;
+        } else {
+            adapter
+                .send(&user, content)
+                .await
+                .map_err(|e| format!("Channel poll send failed: {e}"))?;
+        }
 
         Ok(())
     }

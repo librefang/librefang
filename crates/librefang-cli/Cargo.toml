@@ -84,7 +84,7 @@ opentelemetry = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
+tikv-jemallocator = { version = "0.7", features = ["disable_initial_exec_tls"] }
 
 [build-dependencies]
 # `build.rs` uses `chrono::Utc::now()` to stamp `BUILD_DATE` instead of

@@ -1,6 +1,13 @@
 //! Canvas / A2UI tool — sanitize agent-generated HTML and write it to the
 //! workspace `output/` directory.
+//!
+//! `tool_canvas_present` migrated from `Result<String, String>` to
+//! `Result<String, ToolError>` (#3576). The `sanitize_canvas_html` helper is
+//! `pub` (re-exported and unit-tested directly), so its `Result<_, String>`
+//! signature is left untouched; its validation/security messages are mapped to
+//! `ToolError::InvalidParameter` at the tool boundary, preserved verbatim.
 
+use super::error::{ToolError, ToolResult};
 use super::CANVAS_MAX_BYTES;
 use std::path::{Path, PathBuf};
 
@@ -62,13 +69,21 @@ pub fn sanitize_canvas_html(html: &str, max_bytes: usize) -> Result<String, Stri
 pub(super) async fn tool_canvas_present(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
-) -> Result<String, String> {
-    let html = input["html"].as_str().ok_or("Missing 'html' parameter")?;
+) -> ToolResult {
+    let html = input["html"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("html"))?;
     let title = input["title"].as_str().unwrap_or("Canvas");
 
     // Use configured max from task-local (set by agent_loop from KernelConfig), or default 512KB.
     let max_bytes = CANVAS_MAX_BYTES.try_with(|v| *v).unwrap_or(512 * 1024);
-    let sanitized = sanitize_canvas_html(html, max_bytes)?;
+    // The sanitizer's validation/security messages are user-facing — map them
+    // onto the `html` parameter, keeping the text verbatim.
+    let sanitized =
+        sanitize_canvas_html(html, max_bytes).map_err(|reason| ToolError::InvalidParameter {
+            name: "html",
+            reason,
+        })?;
 
     // Generate canvas ID
     let canvas_id = uuid::Uuid::new_v4().to_string();
@@ -94,7 +109,10 @@ pub(super) async fn tool_canvas_present(
     );
     tokio::fs::write(&filepath, &full_html)
         .await
-        .map_err(|e| format!("Failed to save canvas: {e}"))?;
+        .map_err(|e| ToolError::Upstream {
+            message: format!("Failed to save canvas: {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
     let response = serde_json::json!({
         "canvas_id": canvas_id,
@@ -103,5 +121,28 @@ pub(super) async fn tool_canvas_present(
         "size_bytes": full_html.len(),
     });
 
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+    Ok(serde_json::to_string_pretty(&response)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canvas_present_missing_html_is_missing_parameter() {
+        let r = tool_canvas_present(&serde_json::json!({}), None).await;
+        assert!(matches!(r, Err(ToolError::MissingParameter("html"))));
+    }
+
+    #[tokio::test]
+    async fn canvas_present_forbidden_tag_is_invalid_parameter() {
+        let input = serde_json::json!({ "html": "<script>alert(1)</script>" });
+        match tool_canvas_present(&input, None).await {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "html");
+                assert!(reason.contains("Forbidden"));
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+    }
 }

@@ -46,6 +46,8 @@ async fn tool_runner_rbac_force_human_propagates_to_deferred() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -100,6 +102,8 @@ async fn tool_runner_rbac_force_human_stays_false_for_global_require_approval() 
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
 
@@ -246,6 +250,8 @@ async fn test_file_read_missing() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(
@@ -287,6 +293,8 @@ async fn test_file_read_path_traversal_blocked() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -325,6 +333,8 @@ async fn test_file_write_path_traversal_blocked() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -363,6 +373,8 @@ async fn test_file_list_path_traversal_blocked() {
         None, // session_id
         None, // dangerous_command_checker
         None, // available_tools
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -594,6 +606,7 @@ impl SessionWriter for NamedWsKernel {
     fn inject_attachment_blocks(
         &self,
         _agent_id: librefang_types::agent::AgentId,
+        _session_id: librefang_types::agent::SessionId,
         _blocks: Vec<librefang_types::message::ContentBlock>,
     ) {
     }
@@ -662,6 +675,8 @@ async fn test_file_read_allows_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -709,6 +724,8 @@ async fn test_file_list_allows_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -760,6 +777,8 @@ async fn test_file_read_allows_channel_download_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -807,6 +826,8 @@ async fn test_file_list_allows_channel_download_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -870,6 +891,8 @@ async fn test_image_analyze_allows_channel_download_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(
@@ -930,6 +953,8 @@ async fn test_image_analyze_rejects_path_outside_staging_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(
@@ -990,6 +1015,8 @@ async fn test_image_analyze_rejects_dotdot_escape_from_staging_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(
@@ -1087,6 +1114,8 @@ async fn run_media_read_tool(
         None,
         None,
         None,
+        0,
+        0,
     )
     .await
 }
@@ -1420,6 +1449,8 @@ async fn test_file_write_rejects_channel_download_dir() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(result.is_error, "expected write to be rejected");
@@ -1473,6 +1504,8 @@ async fn test_file_write_allows_rw_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -1523,6 +1556,8 @@ async fn test_file_write_denies_readonly_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1576,6 +1611,8 @@ async fn test_file_read_outside_all_workspaces_still_blocked() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(result.is_error);
@@ -1631,6 +1668,8 @@ async fn test_apply_patch_allows_rw_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(!result.is_error, "got error: {}", result.content);
@@ -1683,6 +1722,8 @@ async fn test_apply_patch_denies_readonly_named_workspace_path() {
         None,
         None,
         None,
+        0,
+        0,
     )
     .await;
     assert!(result.is_error, "expected denial, got: {}", result.content);

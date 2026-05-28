@@ -33,7 +33,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.5.17-beta.12"
+version = "2026.5.25-beta.13"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -189,7 +189,7 @@ tera = { version = "1", default-features = false }
 # parallel-compilation: Multi-threaded AOT compilation
 # async:                Async host-function support (needed for non-blocking plugin calls)
 # WASI support is part of the wasmtime runtime by default; no separate feature flag needed.
-wasmtime = { version = "44", features = [
+wasmtime = { version = "45", features = [
     "cranelift",
     "component-model",
     "cache",
@@ -301,7 +301,10 @@ smallvec = "1"
 # Build-script helpers — used by `crates/librefang-api/build.rs` and
 # `crates/librefang-cli/build.rs` to resolve `git` via PATH instead of
 # invoking it by bare name (refs #5667). Lightweight, well-maintained.
-which = { version = "7", default-features = false }
+# `real-sys` is which 8.0's default feature gating the free `which()` helper
+# against the real filesystem; keep it explicit since we drop the rest of the
+# defaults to avoid pulling the optional `regex` dependency.
+which = { version = "8", default-features = false, features = ["real-sys"] }
 
 [profile.dev]
 split-debuginfo = "unpacked" # Speeds up incremental linking on macOS

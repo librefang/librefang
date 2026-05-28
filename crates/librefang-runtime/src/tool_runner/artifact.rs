@@ -13,13 +13,44 @@ pub(super) async fn tool_read_artifact(
         .as_str()
         .ok_or("Missing required parameter 'handle'")?;
 
-    let offset = input["offset"].as_u64().unwrap_or(0) as usize;
-    let length = input["length"]
-        .as_u64()
-        .unwrap_or(4096)
-        .min(crate::artifact_store::MAX_READ_LENGTH as u64) as usize;
+    let offset: usize = match input.get("offset") {
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| "Parameter 'offset' must be a non-negative integer".to_string())
+            .and_then(|n| {
+                usize::try_from(n)
+                    .map_err(|_| "Parameter 'offset' is too large for this platform".to_string())
+            })?,
+        None => 0,
+    };
 
-    let bytes = crate::artifact_store::read(handle, offset, length, artifact_dir)?;
+    let length: usize = match input.get("length") {
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| "Parameter 'length' must be a non-negative integer".to_string())
+                .and_then(|n| {
+                    usize::try_from(n).map_err(|_| {
+                        "Parameter 'length' is too large for this platform".to_string()
+                    })
+                })?;
+            if n == 0 {
+                return Err("Parameter 'length' must be greater than 0".to_string());
+            }
+            n
+        }
+        None => 4096,
+    };
+
+    let length = length.min(crate::artifact_store::MAX_READ_LENGTH);
+
+    let handle_owned = handle.to_string();
+    let dir_owned = artifact_dir.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || {
+        crate::artifact_store::read(&handle_owned, offset, length, &dir_owned)
+    })
+    .await
+    .map_err(|e| format!("read_artifact task panicked: {e}"))??;
 
     if bytes.is_empty() {
         return Ok(format!(

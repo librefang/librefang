@@ -275,6 +275,8 @@ pub async fn invoke_tool(
         None, // session_id
         None, // dangerous_command_checker — session-scoped, not meaningful here
         None, // available_tools — lazy-load pool not applicable to REST bridge
+        cfg.tool_results.spill_threshold_bytes,
+        cfg.tool_results.max_artifact_bytes,
     )
     .await;
 

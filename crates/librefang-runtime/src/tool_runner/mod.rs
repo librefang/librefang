@@ -144,6 +144,30 @@ pub(super) fn require_kernel_typed(
     kernel.ok_or(ToolError::Unavailable("Kernel handle"))
 }
 
+/// The `ToolError` returned when a tool that needs caller attribution is
+/// reached with no caller agent id (#3576). Two legitimate dispatchers feed
+/// these tools:
+///   * the direct agent-loop dispatcher always attributes a caller — `None`
+///     here is a wiring bug, but the LLM cannot recover from it either way;
+///   * the MCP HTTP route (`/mcp`) intentionally passes `None` when the
+///     `X-LibreFang-Agent-Id` header is missing or names an unknown agent —
+///     external clients should get a user-recoverable error.
+///
+/// `MissingParameter("agent_id")` is the honest mapping for the second case
+/// (lifts to `LibreFangError::InvalidInput` → HTTP 400) and no worse than
+/// `Internal` for the first. The tool name is preserved on the tracing channel
+/// at `debug!` so a real direct-loop regression can still be traced under
+/// `RUST_LOG=debug` without spamming `warn!` on every legitimate MCP-without-
+/// `X-LibreFang-Agent-Id` call — which would otherwise become the dominant
+/// signal on the warn channel for any deployment with MCP traffic.
+pub(super) fn caller_agent_id_missing(tool: &'static str) -> ToolError {
+    tracing::debug!(
+        tool,
+        "caller agent_id missing — surfaced as MissingParameter to the LLM"
+    );
+    ToolError::MissingParameter("agent_id")
+}
+
 /// The memory-namespace operation a memory / wiki tool is about to perform.
 /// Maps onto [`librefang_memory::namespace_acl::MemoryNamespaceGuard`]'s
 /// `check_read` / `check_write`.
