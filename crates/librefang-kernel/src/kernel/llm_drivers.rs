@@ -278,8 +278,12 @@ impl LibreFangKernel {
                 let fb_api_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
-                    // Resolve using provider_api_keys / convention for custom providers
-                    let env_var = cfg.resolve_api_key_env(&fb_provider);
+                    // Same precedence as the primary path (operator-explicit >
+                    // catalog `api_key_env` > convention). A custom catalog
+                    // provider used only as a fallback model would otherwise
+                    // 401 on the convention-only env var — the same #5755 bug
+                    // as the primary branch above. Refs: #5755, #5807.
+                    let env_var = self.resolve_non_default_api_key_env(&cfg, &fb_provider);
                     std::env::var(&env_var).ok()
                 };
                 let config = DriverConfig {

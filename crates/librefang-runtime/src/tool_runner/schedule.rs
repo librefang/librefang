@@ -14,6 +14,76 @@ use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
+fn validate_cron_field(field: &str, name: &str, min: u32, max: u32) -> Result<(), String> {
+    if field == "*" {
+        return Ok(());
+    }
+    for part in field.split(',') {
+        // Strip optional `/step` suffix first — applies to wildcards, ranges,
+        // and single values alike (e.g. `*/5`, `10-20/2`, `1/2`).
+        let (base, step) = match part.split_once('/') {
+            Some((base, step_str)) => {
+                let s: u32 = step_str
+                    .parse()
+                    .map_err(|_| format!("Invalid {name} step in cron: '{part}'"))?;
+                if s == 0 {
+                    return Err(format!("{name} step must be >= 1, got 0"));
+                }
+                (base, Some(s))
+            }
+            None => (part, None),
+        };
+
+        if base == "*" {
+            // `*/step` — step already validated above
+            if step.is_none() {
+                return Err(format!("Invalid {name} value in cron: '{part}'"));
+            }
+            continue;
+        }
+
+        // Try parsing as range `start-end`
+        if let Some((start_str, end_str)) = base.split_once('-') {
+            let start: u32 = start_str
+                .parse()
+                .map_err(|_| format!("Invalid {name} range start in cron: '{base}'"))?;
+            let end: u32 = end_str
+                .parse()
+                .map_err(|_| format!("Invalid {name} range end in cron: '{base}'"))?;
+            if start < min || start > max {
+                return Err(format!("{name} must be {min}-{max}, got {start}"));
+            }
+            if end < min || end > max {
+                return Err(format!("{name} must be {min}-{max}, got {end}"));
+            }
+            if start > end {
+                return Err(format!("{name} range start {start} > end {end}"));
+            }
+            // step validated above
+            continue;
+        }
+
+        // Single value (optionally with step, e.g. `1/2`)
+        let val: u32 = base
+            .parse()
+            .map_err(|_| format!("Invalid {name} value in cron: '{part}'"))?;
+        if val < min || val > max {
+            return Err(format!("{name} must be {min}-{max}, got {val}"));
+        }
+        // step validated above
+    }
+    Ok(())
+}
+
+fn validate_cron_fields(parts: &[&str]) -> Result<(), String> {
+    validate_cron_field(parts[0], "minute", 0, 59)?;
+    validate_cron_field(parts[1], "hour", 0, 23)?;
+    validate_cron_field(parts[2], "day of month", 1, 31)?;
+    validate_cron_field(parts[3], "month", 1, 12)?;
+    validate_cron_field(parts[4], "day of week", 0, 7)?;
+    Ok(())
+}
+
 /// Parse a natural language schedule into a cron expression.
 pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
     let input = input.trim().to_lowercase();
@@ -25,6 +95,7 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
             .iter()
             .all(|p| p.chars().all(|c| c.is_ascii_digit() || "*/,-".contains(c)))
     {
+        validate_cron_fields(&parts)?;
         return Ok(input);
     }
 
@@ -66,20 +137,18 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
 
     // "daily at Xam/pm"
     if let Some(time_str) = input.strip_prefix("daily at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * *"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * *"));
     }
 
-    // "weekdays at Xam/pm"
     if let Some(time_str) = input.strip_prefix("weekdays at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * 1-5"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * 1-5"));
     }
 
-    // "weekends at Xam/pm"
     if let Some(time_str) = input.strip_prefix("weekends at ") {
-        let hour = parse_time_to_hour(time_str)?;
-        return Ok(format!("0 {hour} * * 0,6"));
+        let (hour, minute) = parse_time_to_hour_minute(time_str)?;
+        return Ok(format!("{minute} {hour} * * 0,6"));
     }
 
     // "hourly" / "daily" / "weekly" / "monthly"
@@ -96,43 +165,79 @@ pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
     ))
 }
 
-/// Parse a time string like "9am", "6pm", "14:00", "9:30am" into an hour (0-23).
-pub(super) fn parse_time_to_hour(s: &str) -> Result<u32, String> {
+pub(super) fn parse_time_to_hour_minute(s: &str) -> Result<(u32, u32), String> {
     let s = s.trim().to_lowercase();
 
-    // Handle "9am", "6pm", "12pm", "12am"
     if let Some(h) = s.strip_suffix("am") {
+        if let Some((hh, mm)) = h.trim().split_once(':') {
+            let hour: u32 = hh
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            let minute: u32 = mm
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            if minute > 59 {
+                return Err(format!("Minute must be 0-59, got {minute}"));
+            }
+            return match hour {
+                12 => Ok((0, minute)),
+                1..=11 => Ok((hour, minute)),
+                _ => Err(format!("Invalid hour: {hour}")),
+            };
+        }
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         return match hour {
-            12 => Ok(0),
-            1..=11 => Ok(hour),
+            12 => Ok((0, 0)),
+            1..=11 => Ok((hour, 0)),
             _ => Err(format!("Invalid hour: {hour}")),
         };
     }
     if let Some(h) = s.strip_suffix("pm") {
+        if let Some((hh, mm)) = h.trim().split_once(':') {
+            let hour: u32 = hh
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            let minute: u32 = mm
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid time: {s}"))?;
+            if minute > 59 {
+                return Err(format!("Minute must be 0-59, got {minute}"));
+            }
+            return match hour {
+                12 => Ok((12, minute)),
+                1..=11 => Ok((hour + 12, minute)),
+                _ => Err(format!("Invalid hour: {hour}")),
+            };
+        }
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         return match hour {
-            12 => Ok(12),
-            1..=11 => Ok(hour + 12),
+            12 => Ok((12, 0)),
+            1..=11 => Ok((hour + 12, 0)),
             _ => Err(format!("Invalid hour: {hour}")),
         };
     }
 
-    // Handle "14:00" or "9:30"
-    if let Some((h, _m)) = s.split_once(':') {
+    if let Some((h, m)) = s.split_once(':') {
         let hour: u32 = h.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
+        let minute: u32 = m.trim().parse().map_err(|_| format!("Invalid time: {s}"))?;
         if hour > 23 {
             return Err(format!("Hour must be 0-23, got {hour}"));
         }
-        return Ok(hour);
+        if minute > 59 {
+            return Err(format!("Minute must be 0-59, got {minute}"));
+        }
+        return Ok((hour, minute));
     }
 
-    // Plain number
     let hour: u32 = s.parse().map_err(|_| format!("Invalid time: {s}"))?;
     if hour > 23 {
         return Err(format!("Hour must be 0-23, got {hour}"));
     }
-    Ok(hour)
+    Ok((hour, 0))
 }
 
 pub(super) async fn tool_schedule_create(
