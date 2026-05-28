@@ -54,6 +54,54 @@ impl LibreFangKernel {
         None
     }
 
+    /// Look up the `api_key_env` name for a provider from the model catalog.
+    ///
+    /// Custom providers (added via the dashboard or `registry/providers/`) store
+    /// their `api_key_env` in the catalog but NOT in `KernelConfig.provider_api_keys`.
+    /// This helper surfaces that catalog value so the chat path can read the same
+    /// env-var name that `POST /api/providers/{name}/test` uses — fixing the
+    /// mismatch that caused 401s for custom providers with non-conventional
+    /// `api_key_env` names (e.g. `UNSLOTH_API_KEY` vs the convention
+    /// `UNSLOTH_STUDIO_API_KEY`). Refs: #5755.
+    fn lookup_catalog_api_key_env(&self, provider: &str) -> Option<String> {
+        let catalog = self.llm.model_catalog.load();
+        catalog.get_provider(provider).and_then(|p| {
+            if p.api_key_env.is_empty() {
+                None
+            } else {
+                Some(p.api_key_env.clone())
+            }
+        })
+    }
+
+    /// Resolve the env-var name for a non-default provider's API key.
+    ///
+    /// Precedence:
+    ///   1. Operator-explicit `[provider_api_keys]` or `[auth_profiles]` in
+    ///      `config.toml` — always wins, so an operator can pin a custom
+    ///      provider's key to a specific env var.
+    ///   2. Model catalog `api_key_env` (populated by the dashboard
+    ///      "Add provider" flow or `registry/providers/*.toml`) — needed
+    ///      for custom providers whose env var deviates from the
+    ///      `<PROVIDER>_API_KEY` naming convention.
+    ///   3. Convention fallback via `cfg.resolve_api_key_env`.
+    ///
+    /// Refs: #5755 (catalog lookup introduced), #5807 review (precedence:
+    /// operator-explicit must not be shadowed by catalog).
+    pub(crate) fn resolve_non_default_api_key_env(
+        &self,
+        cfg: &KernelConfig,
+        provider: &str,
+    ) -> String {
+        if cfg.provider_api_keys.contains_key(provider) || cfg.auth_profiles.contains_key(provider)
+        {
+            cfg.resolve_api_key_env(provider)
+        } else {
+            self.lookup_catalog_api_key_env(provider)
+                .unwrap_or_else(|| cfg.resolve_api_key_env(provider))
+        }
+    }
+
     pub(crate) fn resolve_driver(
         &self,
         manifest: &AgentManifest,
@@ -175,7 +223,10 @@ impl LibreFangKernel {
                     std::env::var(&env_var).ok()
                 }
             } else {
-                let env_var = cfg.resolve_api_key_env(agent_provider);
+                // See `resolve_non_default_api_key_env` for the precedence
+                // contract (operator-explicit > catalog > convention).
+                // Refs: #5755, #5807.
+                let env_var = self.resolve_non_default_api_key_env(&cfg, agent_provider);
                 std::env::var(&env_var).ok()
             };
 
@@ -227,8 +278,12 @@ impl LibreFangKernel {
                 let fb_api_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
-                    // Resolve using provider_api_keys / convention for custom providers
-                    let env_var = cfg.resolve_api_key_env(&fb_provider);
+                    // Same precedence as the primary path (operator-explicit >
+                    // catalog `api_key_env` > convention). A custom catalog
+                    // provider used only as a fallback model would otherwise
+                    // 401 on the convention-only env var — the same #5755 bug
+                    // as the primary branch above. Refs: #5755, #5807.
+                    let env_var = self.resolve_non_default_api_key_env(&cfg, &fb_provider);
                     std::env::var(&env_var).ok()
                 };
                 let config = DriverConfig {
@@ -300,7 +355,10 @@ pub(crate) fn resolve_effective_fallbacks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_types::{agent::FallbackModel, config::FallbackProviderConfig};
+    use librefang_types::{
+        agent::FallbackModel,
+        config::{FallbackProviderConfig, KernelConfig, MemoryConfig},
+    };
 
     fn make_global(provider: &str, model: &str) -> FallbackProviderConfig {
         FallbackProviderConfig {
@@ -365,6 +423,154 @@ mod tests {
         assert_eq!(
             result[0].model, "gpt-4o-mini",
             "model must match agent chain"
+        );
+    }
+
+    /// Regression test for #5755: a custom provider whose `api_key_env` doesn't
+    /// follow the naming convention (`UNSLOTH_API_KEY` instead of
+    /// `UNSLOTH_STUDIO_API_KEY`) must be resolvable via the model catalog on the
+    /// chat path, matching what `POST /api/providers/{name}/test` does.
+    ///
+    /// The test writes a provider TOML file into the home-dir's `providers/`
+    /// directory before booting the kernel so the catalog is populated the same
+    /// way the dashboard "Upload provider" or `registry/providers/` flow does it.
+    /// Then it calls `lookup_catalog_api_key_env` (the new helper in `llm_drivers.rs`)
+    /// and asserts it returns the TOML-specified env-var name, not the
+    /// convention-derived one.
+    #[test]
+    fn lookup_catalog_api_key_env_returns_catalog_value_for_custom_provider() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let data_dir = home.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+
+        // Pre-touch the sync marker so `registry_sync::sync_registry` treats
+        // the registry cache as fresh and skips the download + fan-out step.
+        // Without this, `sync_flat_files` removes any TOML in `providers/` that
+        // does not exist in the (empty) registry cache, nuking our fixture before
+        // the catalog is loaded. See the same pattern in kernel/tests.rs.
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        // Write a custom provider TOML with a non-conventional api_key_env name.
+        // This mirrors `registry/providers/unsloth-studio.toml` from the issue.
+        let providers_dir = home.join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("unsloth-studio.toml"),
+            r#"
+[provider]
+id = "unsloth-studio"
+display_name = "Unsloth Studio"
+api_key_env = "UNSLOTH_API_KEY"
+base_url = "http://127.0.0.1:8888/v1"
+key_required = true
+"#,
+        )
+        .unwrap();
+
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: data_dir.clone(),
+            network_enabled: false,
+            memory: MemoryConfig {
+                sqlite_path: Some(data_dir.join("test.db")),
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+        // The catalog lookup must return the TOML-specified env-var name, not
+        // the convention form (`UNSLOTH_STUDIO_API_KEY`).
+        let resolved = kernel.lookup_catalog_api_key_env("unsloth-studio");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("UNSLOTH_API_KEY"),
+            "chat path must read api_key_env from catalog, not derive it by convention"
+        );
+
+        // A provider not in the catalog must return None so the caller falls
+        // back to `cfg.resolve_api_key_env` (convention / provider_api_keys).
+        let absent = kernel.lookup_catalog_api_key_env("unknown-provider-xyz");
+        assert!(
+            absent.is_none(),
+            "unknown providers must return None so convention fallback is used"
+        );
+    }
+
+    /// Precedence regression test: an operator-explicit `[provider_api_keys]`
+    /// mapping must beat the model catalog's `api_key_env`. Refs: #5807 review.
+    #[test]
+    fn resolve_non_default_api_key_env_operator_explicit_beats_catalog() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        let data_dir = home.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        // Catalog declares UNSLOTH_API_KEY for the custom provider.
+        let providers_dir = home.join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("unsloth-studio.toml"),
+            r#"
+[provider]
+id = "unsloth-studio"
+display_name = "Unsloth Studio"
+api_key_env = "UNSLOTH_API_KEY"
+base_url = "http://127.0.0.1:8888/v1"
+key_required = true
+"#,
+        )
+        .unwrap();
+
+        // Operator pins the same provider to a DIFFERENT env var.
+        let mut provider_api_keys = std::collections::BTreeMap::new();
+        provider_api_keys.insert(
+            "unsloth-studio".to_string(),
+            "PINNED_OPERATOR_KEY".to_string(),
+        );
+
+        let config = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: data_dir.clone(),
+            network_enabled: false,
+            memory: MemoryConfig {
+                sqlite_path: Some(data_dir.join("test.db")),
+                ..Default::default()
+            },
+            provider_api_keys,
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config.clone()).expect("kernel boot");
+
+        let resolved = kernel.resolve_non_default_api_key_env(&config, "unsloth-studio");
+        assert_eq!(
+            resolved, "PINNED_OPERATOR_KEY",
+            "operator-explicit [provider_api_keys] must beat catalog api_key_env"
+        );
+
+        // Catalog still wins when there is no operator-explicit mapping.
+        let resolved_no_explicit =
+            kernel.resolve_non_default_api_key_env(&config, "other-custom-provider");
+        // No catalog entry for "other-custom-provider" either, so we expect the
+        // convention fallback ("OTHER_CUSTOM_PROVIDER_API_KEY").
+        assert_eq!(
+            resolved_no_explicit, "OTHER_CUSTOM_PROVIDER_API_KEY",
+            "no explicit + no catalog must fall back to convention"
         );
     }
 }
