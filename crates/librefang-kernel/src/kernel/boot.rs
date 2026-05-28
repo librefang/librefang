@@ -719,6 +719,9 @@ impl LibreFangKernel {
             config.max_concurrent_bg_llm,
             config.background.max_consecutive_rate_limits,
         );
+        // Autonomous long-horizon goal runner (#5744) — shares the kernel
+        // shutdown signal so active runs end cleanly on shutdown.
+        let goal_runner = crate::goal_runner::GoalRunner::new(supervisor.subscribe());
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -1449,6 +1452,7 @@ impl LibreFangKernel {
                 },
                 trigger_engine,
                 background,
+                goal_runner,
                 cron_scheduler,
                 command_queue,
             ),
