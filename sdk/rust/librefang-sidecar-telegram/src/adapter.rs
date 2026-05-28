@@ -71,12 +71,17 @@ impl TelegramAdapter {
     }
 
     /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. The plain fallback is derived from `html_body` via `dispatcher::html_to_plain` so the user sees readable prose (matching `send_text`'s fallback shape) rather than literal markdown / HTML markup. `message is not modified` is treated as success on both paths. Other failures are logged; token-bearing errors are already redacted at the BotClient layer.
+    ///
+    /// Empty / whitespace-only bodies are no-ops — Telegram rejects `editMessageText` with `400 message text is empty`, so we skip the call entirely and leave the previous content (the `…` placeholder, or the last successful edit) in place.
     async fn edit_with_fallback(
         client: &BotClient,
         chat_id: i64,
         message_id: i64,
         html_body: &str,
     ) {
+        if html_body.trim().is_empty() {
+            return;
+        }
         match client
             .edit_message_text(chat_id, message_id, html_body, Some("HTML"), None)
             .await

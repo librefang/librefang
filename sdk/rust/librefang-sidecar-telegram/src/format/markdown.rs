@@ -83,10 +83,11 @@ fn render_inline_markdown(text: &str) -> String {
     }
 
     // Links last so `[text](url)` inside bold/italic is recognised.
+    // The URL is inserted into an HTML attribute, so a literal `"` in it (legal per RFC 3986 in query strings) would prematurely terminate the attribute — `sanitize_telegram_html::RE_ATTR` then reads the truncated href and the user lands somewhere wrong. Escape `"` to `&quot;` defensively. `&`, `<`, `>` were already escape_htmled before RE_LINK ran.
     let with_links = RE_LINK
         .replace_all(&italics_done, |caps: &regex::Captures<'_>| {
             let label = &caps[1];
-            let url = &caps[2];
+            let url = caps[2].replace('"', "&quot;");
             format!("<a href=\"{url}\">{label}</a>")
         })
         .to_string();
@@ -327,5 +328,20 @@ mod tests {
         // The literal `\u{E000}C0\u{E001}` should be stripped (escape_html eats the sentinels), and only the real backtick span should render as <code>.
         assert!(html.contains("<code>x</code>"));
         assert_eq!(html.matches("<code>").count(), 1);
+    }
+
+    #[test]
+    fn link_url_with_quote_is_escaped() {
+        // A URL containing a literal `"` would otherwise close the href attribute early and let the sanitiser truncate everything after the embedded quote. Escaping to `&quot;` keeps the URL intact through sanitize.
+        let html = markdown_to_telegram_html("[click](https://x.com/?q=a\"b)");
+        // The href must contain the escaped quote, not a bare `"`.
+        assert!(
+            html.contains("href=\"https://x.com/?q=a&quot;b\"") ||
+            // (sanitize may further re-escape, accept that shape too)
+            html.contains("&amp;quot;"),
+            "href did not escape quote: {html:?}"
+        );
+        // The label still renders.
+        assert!(html.contains(">click</a>"), "label missing: {html:?}");
     }
 }

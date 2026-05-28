@@ -197,10 +197,19 @@ pub async fn dispatch_content(
                 .get("data")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("FileData.data missing".into()))?;
-            let bytes: Vec<u8> = data_array
-                .iter()
-                .filter_map(|v| v.as_u64().map(|n| n as u8))
-                .collect();
+            // Decode bytes strictly: any element that is not a non-negative integer in [0,255] is a wire-protocol violation. Silently dropping (`filter_map`) or truncating (`n as u8`) would emit a corrupt file with no diagnostic; reject loudly instead so a misbehaving producer is visible.
+            let mut bytes: Vec<u8> = Vec::with_capacity(data_array.len());
+            for v in data_array {
+                let n = v.as_u64().ok_or_else(|| {
+                    Error::Other("FileData.data: element is not a non-negative integer".into())
+                })?;
+                if n > 255 {
+                    return Err(Error::Other(format!(
+                        "FileData.data: element {n} out of byte range"
+                    )));
+                }
+                bytes.push(n as u8);
+            }
             let filename = payload
                 .get("filename")
                 .and_then(Value::as_str)
@@ -368,15 +377,26 @@ pub async fn dispatch_content(
             let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
             let keyboard = build_inline_keyboard(payload);
             let formatted = format_and_sanitize(text);
-            client
+            match client
                 .send_message(
                     chat_id,
                     &formatted,
                     Some(PARSE_MODE_HTML),
                     thread_id,
-                    Some(keyboard),
+                    Some(keyboard.clone()),
                 )
-                .await?;
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_parse_entities_error(&e) => {
+                    // Same fallback shape as send_text / EditInteractive: strip HTML so the buttons still ship even when the body's HTML is malformed. Without this the entire interactive payload (text + keyboard) is silently dropped.
+                    let plain = html_to_plain(&formatted);
+                    client
+                        .send_message(chat_id, &plain, None, thread_id, Some(keyboard))
+                        .await?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         "EditInteractive" => {
             let message_id = payload
@@ -420,10 +440,10 @@ pub async fn dispatch_content(
                 .get("items")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("MediaGroup.items missing".into()))?;
-            // Reject nested MediaGroup BEFORE recursing — an adversarial / buggy agent payload like `MediaGroup{items:[MediaGroup{items:[...]}]}` would otherwise recurse via Box::pin without depth bound and overflow the heap-allocated future stack.
+            // Reject nested MediaGroup BEFORE recursing — an adversarial / buggy agent payload like `MediaGroup{items:[MediaGroup{items:[...]}]}` would otherwise recurse via Box::pin without depth bound and overflow the heap-allocated future stack. Scan ALL keys, not just the first, so a future change to `serde_json::Map` iteration order (or a multi-key object) cannot bypass the guard.
             for item in items_array {
                 if let Some(obj) = item.as_object() {
-                    if matches!(obj.keys().next().map(String::as_str), Some("MediaGroup")) {
+                    if obj.keys().any(|k| k == "MediaGroup") {
                         return Err(Error::Other(
                             "MediaGroup may not contain nested MediaGroup items".into(),
                         ));

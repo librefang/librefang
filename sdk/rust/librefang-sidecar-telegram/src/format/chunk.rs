@@ -182,19 +182,18 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         let emitted_text: String;
         let consumed_from_input: usize;
         if trimmed_len <= carry.len() {
-            // Degenerate: budget too small for any safe progress. If `remaining` starts with `<`, consume up to AND including the matching `>` so the next tag is intact — emitting a bare leading `<` would produce HTML Telegram cannot parse. Otherwise force one Unicode scalar.
-            let take = if remaining.starts_with('<') {
-                remaining
-                    .find('>')
-                    .map(|gt| gt + 1)
-                    .unwrap_or(remaining.len())
-            } else {
-                remaining
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len())
-            };
+            // Degenerate: budget too small for any safe progress. If `remaining` starts with `<` AND the matching `>` is within `limit` units, consume the whole tag so the next chunk reopens cleanly — emitting a bare leading `<` would produce HTML Telegram cannot parse. If the tag is unmatched (no `>`) or runs past `limit` (a degenerate or adversarial mega-attribute), fall back to forcing one Unicode scalar of progress; the chunk will be unbalanced and the parse-entities fallback will rescue delivery as plain text.
+            let take = remaining
+                .starts_with('<')
+                .then(|| remaining.find('>').map(|gt| gt + 1).filter(|&n| n <= limit))
+                .flatten()
+                .unwrap_or_else(|| {
+                    remaining
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(remaining.len())
+                });
             let mut t = String::with_capacity(carry.len() + take);
             t.push_str(&carry);
             t.push_str(&remaining[..take]);

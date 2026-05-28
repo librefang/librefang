@@ -142,11 +142,8 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
         let filename = doc.file_name.clone().unwrap_or_else(|| "document".into());
         return Some(match file_url(client, &doc.file_id).await {
             Some(url) => TgContent::File { url, filename },
-            None => {
-                // Prefer the user's caption over the filename — captions usually carry the question; the filename is best-effort.
-                let cap = msg.caption.as_deref().or(Some(&filename));
-                media_placeholder("Document received", None, cap)
-            }
+            // Python parity: `[Document received: {filename}]`. The user's caption — often more useful — is intentionally NOT substituted in here so cross-language log grep matches.
+            None => media_placeholder("Document received", None, Some(&filename)),
         });
     }
     if let Some(audio) = &msg.audio {
