@@ -114,9 +114,9 @@ clean:
 sync-versions *ARGS:
     cargo xtask sync-versions {{ARGS}}
 
-# Cut a release
+# Cut a release (falls back to `librefang-rust-dev` container if cargo is missing)
 release *ARGS:
-    cargo xtask release {{ARGS}}
+    scripts/run-xtask.sh release {{ARGS}}
 
 # Generate CHANGELOG from merged PRs
 changelog *ARGS:
