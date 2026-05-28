@@ -155,10 +155,7 @@ pub(super) async fn tool_hand_status(
     let kh = require_kernel_typed(kernel)?;
     let hand_id = validate_required_string(input, "hand_id")?;
 
-    let result = kh
-        .hand_status(hand_id)
-        .await
-        .map_err(ToolError::upstream)?;
+    let result = kh.hand_status(hand_id).await.map_err(ToolError::upstream)?;
 
     let icon = result["icon"].as_str().unwrap_or("");
     let name = sanitize_value(&result["name"], 80);
