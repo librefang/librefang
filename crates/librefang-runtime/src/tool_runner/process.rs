@@ -155,10 +155,11 @@ fn join_with_cap(lines: &[String], max_bytes: usize) -> CappedOutput {
             truncated = true;
             break;
         }
-        if line.len() < remaining {
-            // Line fits entirely (including the newline separator).
+        if line.len() <= remaining {
             buf.push_str(line);
-            buf.push('\n');
+            if remaining - line.len() > 0 {
+                buf.push('\n');
+            }
         } else {
             // Line would exceed cap — truncate at a char boundary.
             truncated = true;
@@ -228,6 +229,17 @@ mod tests {
         let result = join_with_cap(&lines, 100);
         assert!(!result.truncated);
         assert_eq!(result.text, "hello\nworld\n");
+    }
+
+    #[test]
+    fn join_with_cap_exact_fit_not_truncated() {
+        // Line length exactly equals cap — fits, only trailing \n is dropped.
+        let line = "x".repeat(100);
+        let lines = vec![line];
+        let result = join_with_cap(&lines, 100);
+        assert!(!result.truncated);
+        assert_eq!(result.text.len(), 100);
+        assert!(!result.text.ends_with('\n'));
     }
 
     #[test]
