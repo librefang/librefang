@@ -1,12 +1,12 @@
 {
-  "active_phase": "phase-5-plugin-host-crate",
+  "active_phase": "phase-6-plugin-examples",
   "active_change": null,
-  "last_updated": "2026-05-27T00:00:00Z",
-  "last_updated_by": "kbd-reflect",
+  "last_updated": "2026-05-28T00:00:00Z",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
-  "phase_progress": "Phase 5: 8/8 changes done; reflection written.",
+  "phase_progress": "Phase 6: 0/8 done; plan written; ready for /kbd-execute C-001.",
   "next_action": {
-    "command": "Commit + PR",
-    "description": "Suggested split: feat(runtime,skills): WIT + wit_host + sandbox_component; feat(runtime): AOT cache + capabilities; chore(kbd): record phase-5 + docs"
+    "command": "/kbd-execute C-001",
+    "description": "scaffold + xtask plugins-rebuild"
   }
 }

@@ -1,0 +1,20 @@
+# Phase-6 plugin example: c-noop
+#
+# Minimal C plugin that implements the `plugin` world and immediately
+# returns Ok. Imports no host capabilities — exercises the baseline
+# link-time gate with an empty `host_capabilities` list.
+
+[skill]
+name = "c-noop"
+version = "0.1.0"
+description = "Phase-6 example: minimal C plugin that returns Ok immediately."
+author = "librefang"
+license = "Apache-2.0"
+tags = ["example", "phase-6", "wasm-component", "c"]
+
+[runtime]
+type = "wasm"
+entry = "pre-built/plugin.wasm"
+
+# No capabilities — the linker should wire an empty set of host imports.
+host_capabilities = []

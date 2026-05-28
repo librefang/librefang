@@ -1,0 +1,28 @@
+# Phase-6 plugin example: rust-fs-cat
+#
+# Reads /tmp/test-input.txt via librefang:plugin/fs.read and writes
+# the content to /tmp/test-output.txt via fs.write. Exercises the `fs`
+# coarse capability gate (Phase-5 C-005) and the fs interface's
+# read+write surface.
+#
+# `host_capabilities = ["fs"]` declares the coarse Component-Model
+# capability the linker should bind. Fine-grained per-path access
+# (Capability::FileRead("/tmp/test-input.txt") etc.) is still
+# enforced at runtime by host_functions::dispatch — Phase-5 C-005's
+# layered model.
+
+[skill]
+name = "rust-fs-cat"
+version = "0.1.0"
+description = "Phase-6 example: read a file and write its content back via librefang:plugin/fs."
+author = "librefang"
+license = "Apache-2.0"
+tags = ["example", "phase-6", "wasm-component", "fs"]
+
+[runtime]
+type = "wasm"
+entry = "pre-built/plugin.wasm"
+
+# Phase-5 C-005 link-time capability gate. Only "fs" — the plugin
+# imports nothing else.
+host_capabilities = ["fs"]

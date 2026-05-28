@@ -1,0 +1,19 @@
+# Phase-6 plugin example: js-kv-counter
+#
+# Reads a "counter" key from the host KV store, increments it, and
+# writes it back. Exercises the `kv` host capability.
+
+[skill]
+name = "js-kv-counter"
+version = "0.1.0"
+description = "Phase-6 example: increment a KV counter via librefang:plugin/kv."
+author = "librefang"
+license = "Apache-2.0"
+tags = ["example", "phase-6", "wasm-component", "kv", "javascript"]
+
+[runtime]
+type = "wasm"
+entry = "pre-built/plugin.wasm"
+
+# Phase-5 C-005 link-time capability gate. Only "kv".
+host_capabilities = ["kv"]

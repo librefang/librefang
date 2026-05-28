@@ -1,0 +1,199 @@
+{
+  "phase": "phase-6-plugin-examples",
+  "status": "executing",
+  "assessment_complete": true,
+  "assessment_completed_at": "2026-05-28T00:00:00Z",
+  "assessed_by": "claude-code /kbd-assess",
+  "plan_complete": true,
+  "execute_complete": false,
+  "reflect_complete": false,
+  "decisions_required": [
+    "D1: examples/plugins/<lang>-<feature>/ layout vs nested under crates/",
+    "D2: pre-built .wasm artefacts committed vs built-at-test-time vs hybrid",
+    "D3: one test per language vs parametrised iterator",
+    "D4: KernelHandle-stub side-effect assertions vs dispatch closure injection",
+    "D5: cargo xtask plugins-rebuild vs just plugin-examples-rebuild",
+    "scope: confirm fs/time/kv/env coverage, agent/net deferred"
+  ],
+  "proposed_examples": [
+    {
+      "lang": "rust",
+      "dir": "rust-fs-cat",
+      "capability": "fs",
+      "toolchain": "cargo-component"
+    },
+    {
+      "lang": "python",
+      "dir": "python-hello-time",
+      "capability": "time",
+      "toolchain": "componentize-py"
+    },
+    {
+      "lang": "js",
+      "dir": "js-kv-counter",
+      "capability": "kv",
+      "toolchain": "jco componentize"
+    },
+    {
+      "lang": "go",
+      "dir": "go-env-greet",
+      "capability": "env",
+      "toolchain": "tinygo + wit-bindgen-go"
+    },
+    {
+      "lang": "c",
+      "dir": "c-noop",
+      "capability": "none",
+      "toolchain": "wasi-clang + wit-bindgen-c"
+    }
+  ],
+  "deferred_capabilities": [
+    "net",
+    "agent"
+  ],
+  "next_action": {
+    "command": "/kbd-execute C-002",
+    "description": "rust-fs-cat example (cargo-component, fs)"
+  },
+  "plan_completed_at": "2026-05-28T00:00:00Z",
+  "planned_by": "claude-code /kbd-plan",
+  "decisions_baked": {
+    "D1_layout": "examples/plugins/<lang>-<feature>/",
+    "D2_artefacts": "committed pre-built/plugin.wasm + cargo xtask plugins-rebuild",
+    "D3_test_shape": "one integration test file per language",
+    "D4_side_effects": "KernelHandle-stub-driven",
+    "D5_regen": "cargo xtask plugins-rebuild",
+    "capabilities": "fs/time/kv/env covered; net/agent deferred to phase 7"
+  },
+  "ordered_changes": [
+    {
+      "id": "C-001",
+      "title": "examples/plugins/ scaffold + xtask command",
+      "depends_on": [],
+      "effort": "S"
+    },
+    {
+      "id": "C-002",
+      "title": "rust-fs-cat (cargo-component, fs)",
+      "depends_on": [
+        "C-001"
+      ],
+      "effort": "M"
+    },
+    {
+      "id": "C-003",
+      "title": "python-hello-time (componentize-py, time)",
+      "depends_on": [
+        "C-001"
+      ],
+      "effort": "M"
+    },
+    {
+      "id": "C-004",
+      "title": "js-kv-counter (jco, kv)",
+      "depends_on": [
+        "C-001"
+      ],
+      "effort": "M"
+    },
+    {
+      "id": "C-005",
+      "title": "go-env-greet (TinyGo + wit-bindgen-go, env)",
+      "depends_on": [
+        "C-001"
+      ],
+      "effort": "M-L"
+    },
+    {
+      "id": "C-006",
+      "title": "c-noop (wasi-clang + wit-bindgen-c, no caps)",
+      "depends_on": [
+        "C-001"
+      ],
+      "effort": "M"
+    },
+    {
+      "id": "C-007",
+      "title": "integration tests per language",
+      "depends_on": [
+        "C-002",
+        "C-003",
+        "C-004",
+        "C-005",
+        "C-006"
+      ],
+      "effort": "M-L"
+    },
+    {
+      "id": "C-008",
+      "title": "docs cross-link + CHANGELOG",
+      "depends_on": [
+        "C-007"
+      ],
+      "effort": "S"
+    }
+  ],
+  "execution_started_at": "2026-05-28T00:00:00Z",
+  "changes_total": 8,
+  "changes_completed": 6,
+  "active_change": "C-007",
+  "changes": {
+    "C-001": {
+      "status": "DONE",
+      "files_touched": 4,
+      "qa_skip_reason": "scaffolding; no behavioural surface",
+      "completed_at": "2026-05-28T00:00:00Z",
+      "verification": "cargo check -p xtask exit 0; plugins-rebuild prints empty-registry message"
+    },
+    "C-002": {
+      "status": "DONE",
+      "files_touched": 5,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "wasm_bytes": 54736,
+      "budget_bytes": 204800,
+      "verification": "cargo xtask plugins-rebuild rust-fs-cat: 54736 bytes; file identifies as WebAssembly Component Model binary"
+    },
+    "C-003": {
+      "status": "DONE",
+      "files_touched": 4,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "wasm_bytes": 18368830,
+      "budget_bytes": 25165824,
+      "note": "CPython embedded by componentize-py; per-example budget 24 MB applied",
+      "verification": "cargo xtask plugins-rebuild python-hello-time: 18368830 bytes; file is valid WebAssembly component"
+    },
+    "C-004": {
+      "status": "DONE",
+      "files_touched": 4,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "wasm_bytes": 12660894,
+      "budget_bytes": 16777216,
+      "note": "StarlingMonkey JS engine embedded by jco componentize; per-example budget 16 MB; versioned import 'librefang:plugin/kv@0.1.0' required",
+      "verification": "cargo xtask plugins-rebuild js-kv-counter: 12660894 bytes OK"
+    },
+    "C-005": {
+      "status": "DONE",
+      "files_touched": 8,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "wasm_bytes": 404950,
+      "budget_bytes": 2097152,
+      "note": "TinyGo wasip1 + wasm-tools embed/new + WASI P1 adapter; TINYGOROOT=/tmp/tinygo required; wit-bindgen-go 0.7.0 + go.bytecodealliance.org 0.7.0",
+      "verification": "TINYGOROOT=/tmp/tinygo cargo xtask plugins-rebuild go-env-greet: 404950 bytes OK"
+    },
+    "C-006": {
+      "status": "DONE",
+      "files_touched": 5,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "wasm_bytes": 1072,
+      "budget_bytes": 204800,
+      "note": "LLVM clang + wasm-ld; stubs.c satisfies linker for dead allocator refs; no WASI adapter needed",
+      "verification": "WASI_CLANG=/opt/homebrew/opt/llvm/bin/clang WASI_WASM_LD=/opt/homebrew/opt/lld/bin/wasm-ld TINYGOROOT=/tmp/tinygo cargo xtask plugins-rebuild c-noop: 1072 bytes OK"
+    },
+    "C-007": {
+      "status": "PENDING"
+    },
+    "C-008": {
+      "status": "PENDING"
+    }
+  }
+}
