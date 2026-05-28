@@ -82,7 +82,10 @@ if [[ "$(uname -s)" == "Linux" ]]; then
 fi
 
 # Build the inner command with POSIX-safe single-quote escaping so args containing spaces or quotes survive the `sh -c` wrapper inside the container.
-inner_cmd='export PATH=/usr/local/cargo/bin:$PATH && exec cargo xtask'
+# `gh auth setup-git` (when GH_TOKEN is present) wires gh in as the git credential helper, so `git push` against https://github.com URLs authenticates via the forwarded token instead of dropping to an interactive HTTPS username prompt. Stderr is silenced because gh prints a banner; we only care about its side effect.
+inner_cmd='export PATH=/usr/local/cargo/bin:$PATH'
+inner_cmd+=' && if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git 2>/dev/null || true; fi'
+inner_cmd+=' && exec cargo xtask'
 for arg in "$@"; do
     quoted=${arg//\'/\'\\\'\'}
     inner_cmd+=" '$quoted'"
