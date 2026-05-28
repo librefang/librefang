@@ -313,6 +313,14 @@ impl MemorySubstrate {
         self.semantic.set_vector_store(store);
     }
 
+    /// Push the configured `duplicate_threshold` down to the background
+    /// [`ConsolidationEngine`] (H5). Called from kernel boot once
+    /// `[proactive_memory] duplicate_threshold` has been parsed so the
+    /// global sweep agrees with the on-demand per-agent consolidator.
+    pub fn set_consolidation_duplicate_threshold(&mut self, threshold: f32) {
+        self.consolidation.set_duplicate_threshold(threshold);
+    }
+
     /// Get a clone of the connection pool (for constructing stores from outside).
     pub fn pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()

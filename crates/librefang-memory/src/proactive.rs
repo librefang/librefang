@@ -541,13 +541,20 @@ impl ProactiveMemoryStore {
             let level = MemoryLevel::from(item.level.as_str());
             let scope = level.scope_str();
 
-            // Skip duplicates: check if a memory with very similar content already exists
+            // Skip near-verbatim duplicates on bulk import. The threshold
+            // is intentionally stricter than the configured
+            // `duplicate_threshold` (which gates extraction-time UPDATE
+            // decisions) — bulk import is an explicit operator action, so
+            // we want a high bar before silently dropping a row. 0.95 ==
+            // near-exact match (Jaccard); a paraphrase that the operator
+            // legitimately wants imported as a distinct memory will get
+            // through and can be consolidated later.
             let filter = Some(MemoryFilter::agent(aid));
             let existing = self.semantic.recall(&item.content, 5, filter)?;
             let is_duplicate = existing.iter().any(|frag| {
                 let sim =
                     text_similarity(&item.content.to_lowercase(), &frag.content.to_lowercase());
-                sim > 0.9
+                sim >= 0.95
             });
             if is_duplicate {
                 tracing::debug!(
@@ -2467,15 +2474,33 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             }
         };
         if should_consolidate {
-            match self.consolidate(user_id).await {
-                Ok(merged) if merged > 0 => {
-                    tracing::info!("Auto-consolidation: merged {} duplicate memories", merged);
+            // H6: consolidate is O(n²) over up to 100 candidates and runs
+            // a SQLite transaction; awaiting it inside the agent's
+            // auto_memorize hot path blocks every subsequent turn for the
+            // duration. Detach to a background task so the agent keeps
+            // going while the dedup pass finishes asynchronously.
+            //
+            // Failure here is non-fatal (the next tick re-tries). The
+            // detached future borrows nothing from `self` thanks to the
+            // manual Clone impl on ProactiveMemoryStore (all inner state
+            // is Arc'd).
+            let store = self.clone();
+            let agent = user_id.to_string();
+            tokio::spawn(async move {
+                match store.consolidate(&agent).await {
+                    Ok(merged) if merged > 0 => {
+                        tracing::info!(
+                            "Auto-consolidation (background): merged {merged} duplicate memories for {agent}"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            "Auto-consolidation failed (non-fatal, background) for {agent}: {e}"
+                        );
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!("Auto-consolidation failed (non-fatal): {}", e);
-                }
-            }
+            });
         }
 
         Ok(ExtractionResult {

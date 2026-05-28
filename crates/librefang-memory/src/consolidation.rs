@@ -11,17 +11,61 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
 
 /// Memory consolidation engine.
+///
+/// Runs as a periodic kernel-wide sweep (see
+/// `kernel/background_lifecycle.rs::memory_consolidation`). Decays the
+/// confidence of stale memories and merges near-verbatim duplicates
+/// using `text_similarity` (Jaccard word overlap).
+///
+/// This engine is intentionally *text-only* — it operates on every
+/// agent's memories in a single pass and does not have access to
+/// per-call embeddings, so it can't use cosine similarity. For
+/// embedding-aware, per-agent dedup, see
+/// `librefang_memory::ProactiveMemoryStore::consolidate`, which the
+/// `/api/memory/agents/{id}/consolidate` route uses.
+///
+/// Both engines now read from the same configured
+/// `duplicate_threshold` (H5) so an operator who tightens the knob in
+/// `config.toml` gets consistent behaviour from both the periodic
+/// global sweep and the per-agent on-demand call.
 #[derive(Clone)]
 pub struct ConsolidationEngine {
     pool: Pool<SqliteConnectionManager>,
     /// Decay rate: how much to reduce confidence per consolidation cycle.
     decay_rate: f32,
+    /// Similarity threshold for merging near-duplicates (Jaccard 0..=1).
+    /// Mirrors `ProactiveMemoryConfig::duplicate_threshold` so the global
+    /// sweep and the per-agent on-demand consolidate agree.
+    duplicate_threshold: f32,
 }
 
+/// Default merge threshold when the kernel has not yet pushed the
+/// configured value down via [`ConsolidationEngine::set_duplicate_threshold`].
+/// Matches the post-fix `ProactiveMemoryConfig::duplicate_threshold`
+/// default so a freshly-constructed engine behaves the same as the
+/// on-demand per-agent consolidator.
+const DEFAULT_DUPLICATE_THRESHOLD: f32 = 0.85;
+
 impl ConsolidationEngine {
-    /// Create a new consolidation engine.
+    /// Create a new consolidation engine with the default duplicate threshold.
+    ///
+    /// The threshold can be updated post-construction via
+    /// [`Self::set_duplicate_threshold`] — the kernel boot path does this
+    /// once it has parsed `[proactive_memory] duplicate_threshold` so the
+    /// 142 existing call sites (mostly tests on
+    /// `MemorySubstrate::open_in_memory(decay_rate)`) do not need to pass
+    /// a second number.
     pub fn new(pool: Pool<SqliteConnectionManager>, decay_rate: f32) -> Self {
-        Self { pool, decay_rate }
+        Self {
+            pool,
+            decay_rate,
+            duplicate_threshold: DEFAULT_DUPLICATE_THRESHOLD,
+        }
+    }
+
+    /// Update the merge threshold (H5). Clamped to `0.0..=1.0`.
+    pub fn set_duplicate_threshold(&mut self, threshold: f32) {
+        self.duplicate_threshold = threshold.clamp(0.0, 1.0);
     }
 
     /// Run a consolidation cycle: decay old memories.
@@ -136,7 +180,7 @@ impl ConsolidationEngine {
                         continue;
                     }
                     let sim = text_similarity(&lowered[i], &lowered[j]);
-                    if sim > 0.9 {
+                    if sim > self.duplicate_threshold {
                         // Keep rows[i] (sorted by confidence DESC). Merge:
                         //   - access_count: keeper + loser (sum)
                         //   - metadata: union, keeper wins on key conflict
