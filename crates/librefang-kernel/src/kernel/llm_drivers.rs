@@ -93,8 +93,7 @@ impl LibreFangKernel {
         cfg: &KernelConfig,
         provider: &str,
     ) -> String {
-        if cfg.provider_api_keys.contains_key(provider)
-            || cfg.auth_profiles.contains_key(provider)
+        if cfg.provider_api_keys.contains_key(provider) || cfg.auth_profiles.contains_key(provider)
         {
             cfg.resolve_api_key_env(provider)
         } else {
