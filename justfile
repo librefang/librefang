@@ -190,12 +190,17 @@ doctor *ARGS:
 dev *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Branch on --docker before the recipe tries to invoke cargo, so hosts without a Rust toolchain can still run the docker workflow.
+    # Explicit --docker → docker mode.
     for arg in {{ARGS}}; do
       if [ "$arg" = "--docker" ]; then
         exec just _dev-docker {{ARGS}}
       fi
     done
+    # No --docker but no host cargo either → auto-fall-back to docker mode rather than dying with a confusing `sh: cargo: not found`. Notify so the operator knows what's happening.
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "Host has no cargo on PATH; falling back to --docker mode. Run 'mise install rust' to use the native path instead."
+      exec just _dev-docker --docker {{ARGS}}
+    fi
     exec cargo xtask dev {{ARGS}}
 
 # Pure-shell docker workflow invoked from `just dev --docker`. Not meant to be called directly — use `just dev --docker` so the args parse the same way as the native path.
