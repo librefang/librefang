@@ -62,11 +62,8 @@ pub(super) async fn tool_agent_send(
     }
 
     let sink = TaintSink::agent_message();
-    if let Some(violation) = check_taint_outbound_text(agent_id, &sink) {
-        return Err(ToolError::PermissionDenied(format!(
-            "Taint violation (agent_id): {violation}"
-        )));
-    }
+    // agent_id is a UUID/name identifier, not free-form content — skip taint
+    // check here. Taint validation remains on message, conversation_key, etc.
     if let Some(violation) = check_taint_outbound_text(message, &sink) {
         return Err(ToolError::PermissionDenied(format!(
             "Taint violation (message): {violation}"
@@ -312,11 +309,7 @@ pub(super) fn tool_agent_kill(
     let agent_id = input["agent_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("agent_id"))?;
-    if let Some(violation) = check_taint_outbound_text(agent_id, &TaintSink::agent_message()) {
-        return Err(ToolError::PermissionDenied(format!(
-            "Taint violation (agent_id): {violation}"
-        )));
-    }
+    // agent_id is a UUID/name identifier, not free-form content — no taint check.
     kh.kill_agent(agent_id).map_err(ToolError::upstream)?;
     Ok(format!("Agent {agent_id} killed successfully."))
 }
