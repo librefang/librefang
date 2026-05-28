@@ -1,0 +1,9 @@
+{
+  "method": "qr_ready",
+  "params": {
+    "qr_code": "wxp://f2f0YGcQ-xxxxxxxxxxxxxxxxxxxx",
+    "qr_url": "https://login.example/qr?code=abc",
+    "message": "Scan within 5 minutes",
+    "expires_at": "2026-05-28T20:00:00Z"
+  }
+}
