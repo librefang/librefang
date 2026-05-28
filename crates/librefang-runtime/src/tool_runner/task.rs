@@ -2,24 +2,40 @@
 //!
 //! Migrated from `Result<String, String>` to `Result<String, ToolError>`
 //! (#3576) — third slice after `tool_runner::{cron, schedule}`.
+//!
+//! Per-field extraction preserves "which field is missing/wrong-typed" for
+//! the LLM (collapsed serde `from_value` would lose that).
 
 use super::error::{ToolError, ToolResult};
 use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
+fn validate_non_empty(value: &str, param: &'static str) -> Result<(), ToolError> {
+    if value.trim().is_empty() {
+        Err(ToolError::InvalidParameter {
+            name: param,
+            reason: "must not be empty or whitespace".to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) async fn tool_task_post(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
     let title = input["title"]
         .as_str()
         .ok_or(ToolError::MissingParameter("title"))?;
     let description = input["description"]
         .as_str()
         .ok_or(ToolError::MissingParameter("description"))?;
+    validate_non_empty(title, "title")?;
+    validate_non_empty(description, "description")?;
+    let kh = require_kernel_typed(kernel)?;
     let assigned_to = input["assigned_to"].as_str();
     let task_id = kh
         .task_post(title, description, assigned_to, caller_agent_id)
@@ -45,14 +61,16 @@ pub(super) async fn tool_task_complete(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
-    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("task_complete"))?;
     let task_id = input["task_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("task_id"))?;
     let result = input["result"]
         .as_str()
         .ok_or(ToolError::MissingParameter("result"))?;
+    validate_non_empty(task_id, "task_id")?;
+    validate_non_empty(result, "result")?;
+    let kh = require_kernel_typed(kernel)?;
+    let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("task_complete"))?;
     kh.task_complete(agent_id, task_id, result)
         .await
         .map_err(ToolError::upstream)?;
@@ -76,10 +94,11 @@ pub(super) async fn tool_task_status(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
     let task_id = input["task_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("task_id"))?;
+    validate_non_empty(task_id, "task_id")?;
+    let kh = require_kernel_typed(kernel)?;
     match kh.task_get(task_id).await.map_err(ToolError::upstream)? {
         Some(task) => {
             // Project to the same six columns comms_task_status returns from
@@ -97,7 +116,7 @@ pub(super) async fn tool_task_status(
         }
         // Behaviour preserved from the pre-#3576 contract: a missing task is a
         // readable success message, NOT a `NotFound` error (see
-        // `test_task_status_not_found_returns_message`).
+        // test_task_status_not_found_returns_message).
         None => Ok(format!("Task '{task_id}' not found.")),
     }
 }
@@ -112,7 +131,12 @@ mod tests {
 
     #[tokio::test]
     async fn task_post_without_kernel_returns_unavailable() {
-        let r = tool_task_post(&json!({}), None, Some("agent-a")).await;
+        let r = tool_task_post(
+            &json!({"title": "t", "description": "d"}),
+            None,
+            Some("agent-a"),
+        )
+        .await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
@@ -124,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_complete_without_kernel_returns_unavailable() {
-        let r = tool_task_complete(&json!({}), None, Some("agent-a")).await;
+        let r = tool_task_complete(&json!({"task_id": "x", "result": "y"}), None, Some("a")).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
@@ -136,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_status_without_kernel_returns_unavailable() {
-        let r = tool_task_status(&json!({}), None).await;
+        let r = tool_task_status(&json!({"task_id": "x"}), None).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
@@ -145,5 +169,61 @@ mod tests {
         let e = caller_agent_id_missing("task_claim");
         assert!(matches!(e, ToolError::MissingParameter("agent_id")));
         assert!(e.to_string().contains("agent_id"));
+    }
+
+    #[tokio::test]
+    async fn task_post_empty_title_returns_invalid_parameter() {
+        let r = tool_task_post(
+            &json!({"title": "  ", "description": "ok"}),
+            None,
+            Some("a"),
+        )
+        .await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter { name: "title", .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_post_empty_description_returns_invalid_parameter() {
+        let r = tool_task_post(
+            &json!({"title": "ok", "description": "  "}),
+            None,
+            Some("a"),
+        )
+        .await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter {
+                name: "description",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_complete_empty_task_id_returns_invalid_parameter() {
+        let r =
+            tool_task_complete(&json!({"task_id": "  ", "result": "ok"}), None, Some("a")).await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter {
+                name: "task_id",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_status_empty_task_id_returns_invalid_parameter() {
+        let r = tool_task_status(&json!({"task_id": "  "}), None).await;
+        assert!(matches!(
+            r,
+            Err(ToolError::InvalidParameter {
+                name: "task_id",
+                ..
+            })
+        ));
     }
 }
