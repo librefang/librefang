@@ -185,6 +185,7 @@ doctor *ARGS:
     cargo xtask doctor {{ARGS}}
 
 # Start dev environment (daemon + dashboard hot reload)
+# Pass `--docker` to run daemon + sidecar binaries inside the librefang-rust-dev container with host ~/.librefang mounted in.
 dev *ARGS:
     cargo xtask dev {{ARGS}}
 
