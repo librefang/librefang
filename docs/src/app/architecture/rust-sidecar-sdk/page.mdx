@@ -1,0 +1,156 @@
+# Rust sidecar SDK
+
+> **Status:** shipped in #5821.
+> **Crate:** `sdk/rust/librefang-sidecar/`.
+
+`sdk/rust/librefang-sidecar/` is the first-party Rust SDK for writing LibreFang channel adapters as out-of-process binaries.
+It pairs with the Python SDK at `sdk/python/librefang/sidecar/`; both implementations are pinned to the same shared conformance corpus at `conformance/sidecar/corpus/` and are interchangeable on the wire — the supervisor treats `command = "python3 -m my_adapter"` and `command = "/usr/local/bin/my-rust-adapter"` identically.
+
+For the architectural case (crash isolation, supply-chain confinement, iteration loop) see [System Architecture](/architecture); for the wire spec see [OFP Wire Encryption](/architecture/ofp-wire) and the in-repo `docs/architecture/sidecar-protocol.md`.
+
+## When to reach for this SDK
+
+The Python SDK is the lowest-friction substrate for most adapters.
+Reach for the Rust SDK when one of the following actually matters for your deployment:
+
+- **Binary footprint / startup latency.**
+  A statically-linked Rust binary boots in milliseconds and consumes a few MB of resident memory; a Python sidecar pays the interpreter cost on every supervised respawn.
+- **Type safety on the inbound command set.**
+  `Command::Send(s)`, `Command::Typing(t)`, `Command::StreamStart(s)` etc.
+  are exhaustively matched at compile time, so a future protocol addition forces the compiler to flag every site that needs to opt in or explicitly ignore the new variant.
+- **Existing Rust transport ecosystem.**
+  If your platform's HTTP / WebSocket / SSE client is a Rust crate the broader ecosystem has already hardened (`reqwest` + `rustls`, `tokio-tungstenite`, `eventsource-client`, …), staying in Rust avoids reimplementing the transport against Python wrappers.
+
+If none of those apply, prefer the Python SDK.
+
+## Crate surface
+
+```
+src/
+├── lib.rs        — re-exports
+├── protocol.rs   — wire types: Command, Content, MessageBuilder, Schema, …
+└── runtime.rs    — run_stdio_main, EmitFn, panic isolation, with_backoff
+```
+
+### Types
+
+| Item | What it is |
+|------|------------|
+| `SidecarAdapter` trait | What every adapter implements. Three required methods (`capabilities`, `on_send`, `produce`); `on_command` and `header_rules` are optional. |
+| `Command` enum | Externally-tagged inbound commands (`Send`, `Typing`, `Reaction`, `Interactive`, `StreamStart`, `StreamDelta`, `StreamEnd`) plus a non-exhaustive variant for forward compatibility. |
+| `Content::*` builders | Value-typed builder for the wire-shape `ChannelContent` enum — `Content::text(...)`, `Content::image(...)`, `Content::voice(...)`, etc.  Returns `serde_json::Value`. |
+| `MessageBuilder` | Fluent builder for outbound `message` events with chainable setters (`.channel_id(...).platform(...).is_group(...).content(...)`). |
+| `Schema`, `Field`, `FieldType` | Describe the adapter's configuration form, served via `--describe` so the dashboard renders the configure UI before the binary is spawned with real env vars. |
+
+### Runtime
+
+`run_stdio_main(schema_fn, build_fn)` is the canonical entry point.
+
+- `schema_fn: FnOnce() -> Schema` is called eagerly on `--describe`.
+- `build_fn: FnOnce() -> Result<A, DynError>` is called lazily after the supervisor has injected the real environment.
+
+The two-step layout means the configure form can be served even when required env vars (a bot token, an API key) aren't set yet — operators see the form, fill it in, the supervisor respawns with the env, and *then* `build_fn` runs.
+Panics inside `on_command` and `produce` are caught by the runtime and converted to protocol-level error events so a buggy adapter crashes its supervisor cycle (and gets restarted under backoff) without taking the whole daemon out.
+
+`with_backoff(f, policy)` provides exponential backoff for transient errors in `produce`.
+It asserts `initial > 0`, `initial <= maximum`, `factor >= 1.0` so degenerate policies fail fast at construction rather than silently looping.
+
+## Minimal adapter
+
+```rust
+use async_trait::async_trait;
+use librefang_sidecar::{
+    run_stdio_main, EmitFn, MessageBuilder, Schema, SendCommand, SidecarAdapter,
+};
+
+struct EchoAdapter;
+
+#[async_trait]
+impl SidecarAdapter for EchoAdapter {
+    fn capabilities(&self) -> Vec<String> {
+        vec!["typing".into()]
+    }
+
+    async fn on_send(
+        &self,
+        cmd: SendCommand,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = cmd;
+        Ok(())
+    }
+
+    async fn produce(
+        &self,
+        emit: EmitFn,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        emit(
+            MessageBuilder::new("42", "Alice")
+                .text("hello from echo")
+                .build(),
+        );
+        Ok(())
+    }
+}
+
+fn schema() -> Schema {
+    Schema::new("echo", "Echo adapter")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_stdio_main(schema, || Ok(EchoAdapter)).await
+}
+```
+
+`examples/echo.rs` ships a slightly richer version that wires a `tokio::sync::watch::channel(Option<EmitFn>)` so the produce loop can be re-armed cleanly across restarts.
+
+## Configure as a sidecar
+
+```toml
+[[sidecar_channels]]
+name = "echo"
+command = "/abs/path/to/target/release/echo-binary"
+args = []
+restart = true
+```
+
+The dashboard's configure form is populated from the `Schema` your binary serves under `--describe`, so operators set secrets / advanced fields without hand-editing `config.toml`.
+
+## Responsibility split
+
+- **Process restart is LibreFang's job.**
+  The supervisor in `crates/librefang-channels/src/sidecar.rs` respawns a crashed child with exponential backoff and a circuit-breaker.
+  Your adapter must be *crash-safe*: hold no irreplaceable in-process state across crashes.
+- **Platform reconnect is your adapter's job.**
+  Reconnecting a dropped WebSocket / long-poll / SSE is your transport's concern.
+  Use `with_backoff` for the standard exponential-retry shape.
+- **stdout is reserved for protocol frames.**
+  Send all logs to stderr; the daemon collects them into its main log under the channel's name.
+
+## Conformance
+
+`tests/conformance.rs` runs the 13 cross-implementation test vectors from `conformance/sidecar/corpus/` in both directions:
+
+- **Producer-side**: build an event with `MessageBuilder`, assert it serialises byte-identically to the corpus fixture.
+- **Consumer-side**: deserialise each command fixture, assert the resulting `Command` variant and field values match expectations.
+
+When you add a new protocol variant or change a wire shape, update the corpus first; the Python and Rust SDKs both pin against the same files and fail in parallel if the contract drifts.
+
+## Common pitfalls
+
+- **Don't `tokio::spawn` a future that captures the `EmitFn` and outlives `produce`.**
+  The supervisor expects `produce` to be the single owner of the emit channel.
+- **Don't hold a `tokio::sync::Mutex` across an `.await` of a network call that could block for many seconds.**
+  Other tasks waiting on the same mutex stall too.
+  Prefer per-resource locks (or `DashMap` for keyed state).
+- **Don't print to stdout.**
+  `println!` corrupts the wire.
+  The compiler can't catch this; treat it as a discipline.
+- **Don't return early from `produce` on a recoverable error.**
+  The supervisor restarts your whole subprocess on a `produce` return; reserve that for unrecoverable conditions.
+  Use `with_backoff` for transient failures.
+
+## See also
+
+- [Rust Telegram sidecar adapter](/architecture/rust-telegram-sidecar) — the first first-party adapter built against this SDK; concrete reference for the Markdown → HTML pipeline, UTF-16 chunking, and Bot-API retry shape.
+- In-repo: `docs/architecture/sidecar-channels.md` and `docs/architecture/sidecar-protocol.md`.
