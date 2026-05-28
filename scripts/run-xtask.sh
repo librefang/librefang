@@ -82,9 +82,11 @@ if [[ "$(uname -s)" == "Linux" ]]; then
 fi
 
 # Build the inner command with POSIX-safe single-quote escaping so args containing spaces or quotes survive the `sh -c` wrapper inside the container.
-# `gh auth setup-git` (when GH_TOKEN is present) wires gh in as the git credential helper, so `git push` against https://github.com URLs authenticates via the forwarded token instead of dropping to an interactive HTTPS username prompt. Stderr is silenced because gh prints a banner; we only care about its side effect.
+# Synthesize a container-side gitconfig that `[include]`s the host's gitconfig (mounted at /tmp/host.gitconfig — see mounts below) for user.*/alias.* AND then overrides any `credential.helper` that hard-codes a host-only absolute path. The double `helper =` form first clears (resets) the included value, then installs a relative `!gh auth git-credential` that resolves in both /usr/bin/gh (container) and /opt/homebrew/bin/gh (macOS host PATH). This subsumes the previous `gh auth setup-git` call from #5827 — setup-git tried to write /home/dev/.gitconfig, but that path was mounted :ro from the host, so the write silently failed and the host helper kept winning. Direct synthesis at a writeable path is the only reliable fix.
 inner_cmd='export PATH=/usr/local/cargo/bin:$PATH'
-inner_cmd+=' && if [ -n "${GH_TOKEN:-}" ]; then gh auth setup-git 2>/dev/null || true; fi'
+inner_cmd+=' && if [ -f /tmp/host.gitconfig ]; then'
+inner_cmd+=' printf "[include]\n\tpath = /tmp/host.gitconfig\n[credential]\n\thelper =\n\thelper = !gh auth git-credential\n" > /home/dev/.gitconfig;'
+inner_cmd+=' fi'
 inner_cmd+=' && exec cargo xtask'
 for arg in "$@"; do
     quoted=${arg//\'/\'\\\'\'}
@@ -96,8 +98,9 @@ mounts=(-v "$REPO_ROOT:/work")
 if [[ "$MAIN_REPO" != "$REPO_ROOT" ]]; then
     mounts+=(-v "$MAIN_REPO:$MAIN_REPO")
 fi
+# Mount the host gitconfig at a side path (NOT directly at $GUEST_HOME/.gitconfig). The inner_cmd above writes a real gitconfig at $GUEST_HOME/.gitconfig that includes this one for user/alias settings but overrides any host-absolute-path credential helper. Mounting directly at $GUEST_HOME/.gitconfig:ro would block both the override and any in-container `git config` from working.
 if [[ -f "$HOME/.gitconfig" ]]; then
-    mounts+=(-v "$HOME/.gitconfig:$GUEST_HOME/.gitconfig:ro")
+    mounts+=(-v "$HOME/.gitconfig:/tmp/host.gitconfig:ro")
 fi
 if [[ -d "$HOME/.ssh" ]]; then
     mounts+=(-v "$HOME/.ssh:$GUEST_HOME/.ssh:ro")
