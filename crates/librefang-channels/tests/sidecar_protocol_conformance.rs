@@ -85,6 +85,8 @@ fn events_deserialize_into_expected_variant() {
                 | (SidecarEvent::Ready { .. }, "ready")
                 | (SidecarEvent::Error { .. }, "error")
                 | (SidecarEvent::Typing { .. }, "typing")
+                | (SidecarEvent::QrReady { .. }, "qr_ready")
+                | (SidecarEvent::QrStatus { .. }, "qr_status")
         );
         assert!(ok, "events/{name}: parsed variant != method {method:?}");
     }

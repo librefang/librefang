@@ -6,18 +6,23 @@ The architecture (supervision, backoff, capability gating, config) is
 described in [`sidecar-channels.md`](./sidecar-channels.md); this
 document specifies only the bytes on the wire.
 
-There are two independent implementations of this protocol today:
+There are three independent implementations of this protocol today:
 
-- **Rust supervisor** — `crates/librefang-channels/src/sidecar.rs`
-  (`SidecarEvent`, `SidecarCommand`, ~24 unit tests).
-- **Python SDK** — `sdk/python/librefang/sidecar/protocol.py`
-  (`parse_command`, the event builders, its own pytest).
+- **Rust supervisor** — `crates/librefang-channels/src/sidecar.rs` (`SidecarEvent`, `SidecarCommand`, ~24 unit tests).
+  Consumes events, produces commands.
+- **Python SDK** — `sdk/python/librefang/sidecar/protocol.py` (`parse_command`, the event builders, its own pytest).
+  Produces events, consumes commands.
+- **Rust SDK** — `sdk/rust/librefang-sidecar/src/protocol.rs` (`parse_command`, the event builders + `MessageBuilder`, its own `cargo test`).
+  Produces events, consumes commands.
 
-They are kept honest against each other by a single shared corpus,
-`conformance/sidecar/corpus/`, exercised from both sides
-(`crates/librefang-channels/tests/sidecar_protocol_conformance.rs` and
-`sdk/python/tests/test_sidecar_conformance.py`). The corpus — not this
-prose — is the executable contract; this document explains it.
+All three are kept honest against each other by a single shared corpus, `conformance/sidecar/corpus/`.
+Each implementation carries its own conformance test that asserts against the corpus in the direction it participates in:
+
+- `crates/librefang-channels/tests/sidecar_protocol_conformance.rs`
+- `sdk/python/tests/test_sidecar_conformance.py`
+- `sdk/rust/librefang-sidecar/tests/conformance.rs`
+
+The corpus — not this prose — is the executable contract; this document explains it.
 
 ## Transport
 

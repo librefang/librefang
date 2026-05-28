@@ -344,6 +344,31 @@ The daemon command is `start` (not `daemon`).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
 - **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
 
+## Prose wrapping: no column limit; break only at sentence boundaries
+
+LibreFang has no column-width rule for prose.
+Do not hard-wrap at 72, 80, 100, or any other character count.
+
+The only legitimate line break inside a paragraph is at a complete sentence boundary (after `.`, `?`, `!`, or other terminal punctuation).
+One sentence = one line, regardless of length.
+Editors soft-wrap, viewers reflow, and the diff stays clean when a single word changes inside a sentence.
+
+This rule applies universally:
+
+- Markdown documentation anywhere in the repo (`docs/**`, crate / project READMEs, `AGENTS.md`, `CLAUDE.md`, this file, all the rest).
+- `CHANGELOG.md` bullets — one sentence per line within a bullet.
+- PR titles, PR bodies, and issue / PR comments posted via `gh pr create`, `gh pr edit`, `gh issue comment`, etc.
+- Source code doc-comments (`//!`, `///`, `#`-style docstrings, JSDoc, …) and any multi-line free-form prose comment block.
+  The doc renderer joins consecutive prose lines anyway; splitting mid-sentence just fragments `git blame` and obscures intent.
+- Commit message bodies.
+  Subject lines still follow git's own ~72-char display-truncation convention — that is a tooling limit, not prose wrapping.
+
+Hand-tuned column wraps split noun phrases and subject-verb pairs at awkward points, force a single-word edit to re-flow the whole paragraph (which pollutes `git blame` and review diffs), and carry no semantic information.
+Break where the writer *meant* to break — at sentence ends — and let viewers reflow.
+
+Pre-existing files in the repo that were written under the old column-wrap convention are not retroactively rewrapped; the rule applies to *new* prose and to any paragraph an agent is already touching.
+Do not rewrap an untouched paragraph just to enforce the rule.
+
 ## GitHub Collaboration & Wait Policy
 
 LibreFang is an open-source project with heavy AI-assistant traffic. The
