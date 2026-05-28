@@ -139,6 +139,9 @@
   "active_change": null,
   "execute_complete": true,
   "execution_completed_at": "2026-05-28T00:00:00Z",
+  "reflect_complete": true,
+  "reflection_completed_at": "2026-05-28T00:00:00Z",
+  "reflected_by": "claude-code /kbd-reflect",
   "changes": {
     "C-001": {
       "status": "DONE",
