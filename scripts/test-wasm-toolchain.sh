@@ -41,6 +41,54 @@ note() { printf '\n==> %s\n' "$*"; }
 pass() { results["$1"]="PASS ($2)"; }
 fail() { results["$1"]="FAIL ($2)"; fail_count=$((fail_count + 1)); }
 
+# Phase-5 C-007: after a Component-producing language's compile step,
+# pipe the .wasm through `load_and_run` so we exercise the
+# librefang-runtime Component Model loader path (sandbox_component.rs)
+# as well — extending phase-4's "compile + validate" with
+# "compile + load via librefang".
+#
+# The example is built lazily on first call; subsequent calls reuse
+# the binary at target/debug/examples/load_and_run. If the example
+# can't be built (e.g. no cargo on PATH inside this image), the per-
+# language load step is reported as SKIP rather than fail.
+LOAD_RUN_BIN=""
+ensure_load_run_bin() {
+    if [[ -n "$LOAD_RUN_BIN" ]]; then return 0; fi
+    # Probe a few known locations first; fall back to building on demand.
+    for candidate in \
+        ./target/debug/examples/load_and_run \
+        ./target/release/examples/load_and_run
+    do
+        if [[ -x "$candidate" ]]; then
+            LOAD_RUN_BIN="$candidate"
+            return 0
+        fi
+    done
+    if command -v cargo >/dev/null 2>&1; then
+        cargo build --example load_and_run -p librefang-runtime --quiet 2>/dev/null \
+            && LOAD_RUN_BIN=./target/debug/examples/load_and_run
+    fi
+    [[ -n "$LOAD_RUN_BIN" ]]
+}
+
+# Smoke: parse the .wasm via wasmtime::component::Component::from_binary
+# through librefang_runtime's loader. Updates `results[$lang]` to
+# include a `LOAD-OK` annotation on success; on failure, records as
+# a soft warning (does not fail the run — phase-4 compile+validate is
+# the hard gate; this is incremental signal).
+load_component_check() {
+    local lang="$1" wasm="$2"
+    if ! ensure_load_run_bin; then
+        results["$lang"]+=" [load: SKIP — example not built]"
+        return 0
+    fi
+    if out=$("$LOAD_RUN_BIN" "$wasm" 2>&1) && echo "$out" | grep -q "^LOAD-OK"; then
+        results["$lang"]+=" [load: OK]"
+    else
+        results["$lang"]+=" [load: WARN — $(echo "$out" | head -1)]"
+    fi
+}
+
 # ----- Rust ------------------------------------------------------------------
 test_rust() {
     local d="$work/rust"
@@ -64,6 +112,7 @@ EOF
     [[ -s "$out" ]] || { fail rust "no output"; return; }
     wasmtime run --wasi cli "$out" 2>&1 | grep -q hello-rust-wasm \
         || { fail rust "stdout mismatch"; return; }
+    load_component_check rust "$out"
     pass rust "$(rustc +nightly --version | awk '{print $1, $2}')"
 }
 
@@ -95,6 +144,7 @@ EOF
         || { fail python "validate"; return; }
     wasm-tools component wit "$d/hello.wasm" 2>/dev/null | grep -q 'export run' \
         || { fail python "missing export"; return; }
+    load_component_check python "$d/hello.wasm"
     pass python "$(python3.13 --version | awk '{print $2}')"
 }
 
@@ -155,6 +205,7 @@ EOF
         || { fail javascript "validate"; return; }
     wasm-tools component wit "$d/hello.wasm" 2>/dev/null | grep -q 'export run' \
         || { fail javascript "missing export"; return; }
+    load_component_check javascript "$d/hello.wasm"
     pass javascript "componentize-js (via jco)"
 }
 
@@ -171,6 +222,7 @@ EOF
     [[ -s "$d/hello.wasm" ]] || { fail go "no output"; return; }
     wasmtime run "$d/hello.wasm" 2>&1 | grep -q hello-go-wasm \
         || { fail go "stdout mismatch"; return; }
+    load_component_check go "$d/hello.wasm"
     pass go "tinygo $(tinygo version | awk '{print $3}')"
 }
 

@@ -1,0 +1,47 @@
+package librefang:plugin@0.1.0;
+
+// File: world.wit
+// Canonical Component Model world a librefang plugin targets.
+// A plugin imports any subset of the librefang:plugin interfaces it
+// needs (declared in its skill.toml `capabilities` field — Phase-5
+// C-005) and exports a single `run` entry point.
+// See host.wit for the interface definitions.
+
+interface plugin-types {
+    /// A failure originating from the plugin's own `run` body.
+    /// Distinct from `host-error` (which only the host produces).
+    variant plugin-error {
+        /// The plugin's input was malformed or violated invariants the
+        /// plugin enforces.
+        invalid-input(string),
+        /// The plugin encountered an unrecoverable internal condition.
+        /// Should not normally bubble — prefer explicit variants.
+        internal(string),
+    }
+}
+
+world plugin {
+    /// Every host capability is import-only. The host decides at
+    /// instantiation time (Phase-5 C-005) which subset the linker
+    /// actually wires up; undeclared imports cause a clean
+    /// SandboxError::MissingCapability at instantiation rather than
+    /// an opaque trap at first use.
+    // host-types is imported explicitly even though the other
+    // interfaces only `use` it. Without this line bindgen rejects the
+    // `with: { "librefang:plugin/host-types/host-error": ... }`
+    // mapping with "interface not referenced in the target world".
+    import host-types;
+    import fs;
+    import net;
+    import kv;
+    import agent;
+    import env;
+    import time;
+
+    use plugin-types.{plugin-error};
+
+    /// The single entry point. The host invokes this after binding
+    /// the imports the manifest declared. Returning an error surfaces
+    /// to the host as `ExecutionResult::Err(plugin-error)`.
+    export run: func() -> result<_, plugin-error>;
+}

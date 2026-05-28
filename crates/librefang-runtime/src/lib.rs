@@ -51,6 +51,20 @@ pub mod hooks;
 pub use librefang_http as http_client;
 pub mod host_functions;
 pub mod image_gen;
+// Phase-5 C-003: typed Component Model host shim. Stays adjacent
+// (not modifying) host_functions.rs to preserve upstream-merge
+// hygiene. Bindgen-generated trait impls and the wasmtime
+// ComponentLinker setup land in C-004 (sandbox_component.rs); this
+// file ships the dispatch-result conversion layer they consume.
+pub mod wit_host;
+// Phase-5 C-004: Component Model execute path on WasmSandbox. Pairs
+// with sandbox.rs (which keeps the core-module execute() path).
+// Issues its own bindgen! against crates/librefang-skills/wit.
+pub mod sandbox_component;
+// Phase-5 C-006: AOT .cwasm cache for the Component path. Pure
+// helper module — no wasmtime version coupling beyond the
+// `WASMTIME_CACHE_VERSION` constant.
+pub mod aot_cache;
 pub mod injection_guard;
 pub mod interrupt;
 pub use librefang_kernel_handle as kernel_handle;

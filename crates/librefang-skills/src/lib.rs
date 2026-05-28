@@ -143,6 +143,48 @@ pub struct SkillConfigVar {
     pub default: Option<String>,
 }
 
+/// Phase-5 C-005: coarse-grained Component Model host interface gate.
+///
+/// One variant per WIT interface in `librefang:plugin@0.1.0`
+/// (`crates/librefang-skills/wit/`). A Wasm-Component plugin's
+/// `skill.toml` declares which interfaces it needs via
+/// `host_capabilities = ["fs", "net"]`; the plugin host (see
+/// `librefang_runtime::sandbox_component::execute_component`) binds
+/// only the declared interfaces at link time. A Component that
+/// imports an undeclared interface fails instantiation with a clean
+/// "missing capability" error rather than trapping at first use.
+///
+/// Distinct from the existing fine-grained
+/// `librefang_types::capability::Capability` enum, which gates
+/// individual calls at runtime ("read /etc/passwd" vs "read
+/// /tmp/foo"). The two layer cleanly: this enum decides whether the
+/// `fs.read` symbol is bindable; the runtime `Capability` decides
+/// whether a specific path argument is allowed.
+///
+/// Default behavior: a `SkillManifest` with no `host_capabilities`
+/// field deserializes to an empty `Vec`. The Component execute path
+/// treats empty-vec as "deny all host interfaces" — old core-module
+/// Wasm skills are unaffected because they use `WasmSandbox::execute`
+/// rather than `execute_component`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostCapability {
+    /// `librefang:plugin/fs` — filesystem read / write / list.
+    Fs,
+    /// `librefang:plugin/net` — HTTP fetch (SSRF-guarded).
+    Net,
+    /// `librefang:plugin/kv` — per-agent key-value store.
+    Kv,
+    /// `librefang:plugin/agent` — spawn / send messages to other agents.
+    Agent,
+    /// `librefang:plugin/env` — read allowlisted environment variables.
+    Env,
+    /// `librefang:plugin/time` — wall-clock now. (No gating in practice
+    /// — every plugin can read the clock — but declared here for
+    /// completeness and so the linker setup is uniform.)
+    Time,
+}
+
 /// A skill manifest (parsed from skill.toml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
@@ -157,6 +199,14 @@ pub struct SkillManifest {
     /// Requirements from the host.
     #[serde(default)]
     pub requirements: SkillRequirements,
+    /// Phase-5 C-005: Component Model host interfaces this skill
+    /// imports. Only meaningful for `runtime = "wasm"` skills loaded
+    /// via the Component path. Defaults to empty (= deny all);
+    /// pre-Phase-5 manifests deserialize without this field and stay
+    /// on the core-module `WasmSandbox::execute` path which doesn't
+    /// consult this field.
+    #[serde(default)]
+    pub host_capabilities: Vec<HostCapability>,
     /// Markdown body for prompt-only skills (injected into LLM system prompt).
     #[serde(default)]
     pub prompt_context: Option<String>,

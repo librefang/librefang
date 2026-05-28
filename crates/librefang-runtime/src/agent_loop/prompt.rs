@@ -864,7 +864,13 @@ mod tests {
             max_recall_results: 5,
             ..Default::default()
         };
-        let engine = DefaultContextEngine::new(engine_cfg, Arc::clone(&substrate), None);
+        // Phase-5: DefaultContextEngine::new now requires Arc<dyn SemanticBackend>;
+        // MemorySubstrate implements SemanticBackend. Arc::clone is generic so
+        // we clone first, then let the explicit binding type drive the unsized
+        // coercion `Arc<MemorySubstrate>` -> `Arc<dyn SemanticBackend>`.
+        let substrate_for_semantic = Arc::clone(&substrate);
+        let semantic: Arc<dyn librefang_memory::SemanticBackend> = substrate_for_semantic;
+        let engine = DefaultContextEngine::new(engine_cfg, Arc::clone(&substrate), semantic, None);
 
         let session = empty_session(agent_id);
         let opts = LoopOptions::default();
