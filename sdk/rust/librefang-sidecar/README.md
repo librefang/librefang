@@ -5,6 +5,8 @@ An adapter is an out-of-process subprocess that LibreFang supervises and talks t
 
 The wire protocol is shared with the Python SDK (`librefang.sidecar` in `sdk/python/`) and pinned by the conformance corpus at `conformance/sidecar/corpus/` — see `tests/conformance.rs` for the cross-implementation tests.
 
+The canonical reference is [`docs/architecture/rust-sidecar-sdk.md`](../../../docs/architecture/rust-sidecar-sdk.md); this README is the quick-start.
+
 ## When to use this crate
 
 - You already write Rust and want type-safe access to the inbound command set without going through `serde_json::Value` by hand.
