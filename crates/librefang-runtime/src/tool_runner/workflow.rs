@@ -1,6 +1,15 @@
 //! Workflow execution tools — run / list / status / start / cancel / describe.
+//!
+//! Migrated from `Result<String, String>` to `Result<String, ToolError>`
+//! (#3576). Missing params -> `MissingParameter`; bad `input` object / bad
+//! `_artifact` ref / non-UUID run_id -> `InvalidParameter`; unknown run/workflow
+//! -> `NotFound`; kernel ops (`KernelOpError`) -> `ToolError::upstream`; JSON
+//! serialization via `?`. The `prepare_workflow_input` /
+//! `resolve_workflow_input_artifacts` / `build_workflow_run_result` helpers keep
+//! their `Result<_, String>` / infallible shapes (shared, unit-tested directly).
 
-use super::require_kernel;
+use super::error::{ToolError, ToolResult};
+use super::require_kernel_typed;
 use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
@@ -117,21 +126,26 @@ pub(super) fn build_workflow_run_result(
 pub(super) async fn tool_workflow_run(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
+) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
-        .ok_or("Missing 'workflow_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("workflow_id"))?;
 
     // Resolve any {"_artifact": "sha256:..."} references in the input
     // object before serializing for the workflow engine (#4982 — gap 3
     // / file & image input). See `resolve_workflow_input_artifacts`.
-    let input_str = prepare_workflow_input(input.get("input"))?;
+    let input_str = prepare_workflow_input(input.get("input")).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "input",
+            reason,
+        }
+    })?;
 
-    let kh = require_kernel(kernel)?;
+    let kh = require_kernel_typed(kernel)?;
     let (run_id, output) = kh
         .run_workflow(workflow_id, &input_str)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
 
     // Fetch the structured run summary so the caller gets {step_outputs,
     // output_json?} alongside the final output string (#4982 — gap 3 /
@@ -142,10 +156,8 @@ pub(super) async fn tool_workflow_run(
     Ok(build_workflow_run_result(&run_id, &output, summary.as_ref()).to_string())
 }
 
-pub(super) async fn tool_workflow_list(
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+pub(super) async fn tool_workflow_list(kernel: Option<&Arc<dyn KernelHandle>>) -> ToolResult {
+    let kh = require_kernel_typed(kernel)?;
     let mut summaries = kh.list_workflows().await;
     // Sort by name for deterministic LLM prompt output (#3298).
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -161,28 +173,32 @@ pub(super) async fn tool_workflow_list(
             })
         })
         .collect();
-    serde_json::to_string(&json_array)
-        .map_err(|e| format!("Failed to serialize workflow list: {e}"))
+    Ok(serde_json::to_string(&json_array)?)
 }
 
 pub(super) async fn tool_workflow_status(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
+) -> ToolResult {
     let run_id = input["run_id"]
         .as_str()
-        .ok_or("Missing 'run_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("run_id"))?;
 
     // Validate UUID format before calling kernel — returns a clear error
     // rather than silently returning not-found for a malformed id.
-    uuid::Uuid::parse_str(run_id)
-        .map_err(|_| format!("Invalid run_id — must be a UUID: {run_id}"))?;
+    uuid::Uuid::parse_str(run_id).map_err(|_| ToolError::InvalidParameter {
+        name: "run_id",
+        reason: format!("must be a UUID: {run_id}"),
+    })?;
 
-    let kh = require_kernel(kernel)?;
+    let kh = require_kernel_typed(kernel)?;
     let summary = kh
         .get_workflow_run(run_id)
         .await
-        .ok_or_else(|| format!("workflow run not found: {run_id}"))?;
+        .ok_or_else(|| ToolError::NotFound {
+            kind: "Workflow run",
+            id: run_id.to_string(),
+        })?;
 
     // Mirror the run_workflow tool's structured shape: alongside the raw
     // `output` string, surface a parsed `output_json` when applicable and
@@ -219,7 +235,7 @@ pub(super) async fn tool_workflow_status(
     if let Some(json) = output_json {
         body["output_json"] = json;
     }
-    serde_json::to_string(&body).map_err(|e| format!("Failed to serialize workflow status: {e}"))
+    Ok(serde_json::to_string(&body)?)
 }
 
 pub(super) async fn tool_workflow_start(
@@ -227,16 +243,21 @@ pub(super) async fn tool_workflow_start(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
     caller_session_id: Option<librefang_types::agent::SessionId>,
-) -> Result<String, String> {
+) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
-        .ok_or("Missing 'workflow_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("workflow_id"))?;
 
     // Resolve `_artifact` refs in the input object before serializing
     // (#4982 — gap 3 / file & image input).
-    let input_str = prepare_workflow_input(input.get("input"))?;
+    let input_str = prepare_workflow_input(input.get("input")).map_err(|reason| {
+        ToolError::InvalidParameter {
+            name: "input",
+            reason,
+        }
+    })?;
 
-    let kh = require_kernel(kernel)?;
+    let kh = require_kernel_typed(kernel)?;
 
     // Forward caller context so the kernel can register the workflow on
     // its async-task tracker (#4983) and inject a `TaskCompletionEvent`
@@ -252,7 +273,7 @@ pub(super) async fn tool_workflow_start(
             session_id_str.as_deref(),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
 
     Ok(serde_json::json!({ "run_id": run_id }).to_string())
 }
@@ -260,19 +281,21 @@ pub(super) async fn tool_workflow_start(
 pub(super) async fn tool_workflow_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
+) -> ToolResult {
     let run_id = input["run_id"]
         .as_str()
-        .ok_or("Missing 'run_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("run_id"))?;
 
     // Validate UUID format before calling kernel.
-    uuid::Uuid::parse_str(run_id)
-        .map_err(|_| format!("Invalid run_id — must be a UUID: {run_id}"))?;
+    uuid::Uuid::parse_str(run_id).map_err(|_| ToolError::InvalidParameter {
+        name: "run_id",
+        reason: format!("must be a UUID: {run_id}"),
+    })?;
 
-    let kh = require_kernel(kernel)?;
+    let kh = require_kernel_typed(kernel)?;
     kh.cancel_workflow_run(run_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ToolError::upstream)?;
 
     Ok(serde_json::json!({
         "run_id": run_id,
@@ -288,16 +311,19 @@ pub(super) async fn tool_workflow_cancel(
 pub(super) async fn tool_workflow_describe(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
+) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
-        .ok_or("Missing 'workflow_id' parameter")?;
+        .ok_or(ToolError::MissingParameter("workflow_id"))?;
 
-    let kh = require_kernel(kernel)?;
-    let description = kh
-        .describe_workflow(workflow_id)
-        .await
-        .ok_or_else(|| format!("workflow not found: {workflow_id}"))?;
+    let kh = require_kernel_typed(kernel)?;
+    let description =
+        kh.describe_workflow(workflow_id)
+            .await
+            .ok_or_else(|| ToolError::NotFound {
+                kind: "Workflow",
+                id: workflow_id.to_string(),
+            })?;
 
     let input_schema: Vec<serde_json::Value> = description
         .input_schema
@@ -315,12 +341,11 @@ pub(super) async fn tool_workflow_describe(
         })
         .collect();
 
-    serde_json::to_string(&serde_json::json!({
+    Ok(serde_json::to_string(&serde_json::json!({
         "id": description.id,
         "name": description.name,
         "description": description.description,
         "step_names": description.step_names,
         "input_schema": input_schema,
-    }))
-    .map_err(|e| format!("Failed to serialize workflow description: {e}"))
+    }))?)
 }
