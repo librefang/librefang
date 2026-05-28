@@ -70,13 +70,12 @@ impl TelegramAdapter {
         thread.and_then(|s| s.parse::<i64>().ok())
     }
 
-    /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. `message is not modified` is treated as success on both paths (debounce ticked before any new content arrived). Other failures are logged so a debugger can correlate a visible stream regression with the underlying error. Token-bearing errors are already redacted at the BotClient layer.
+    /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. The plain fallback is derived from `html_body` via `dispatcher::html_to_plain` so the user sees readable prose (matching `send_text`'s fallback shape) rather than literal markdown / HTML markup. `message is not modified` is treated as success on both paths. Other failures are logged; token-bearing errors are already redacted at the BotClient layer.
     async fn edit_with_fallback(
         client: &BotClient,
         chat_id: i64,
         message_id: i64,
         html_body: &str,
-        plain_body: &str,
     ) {
         match client
             .edit_message_text(chat_id, message_id, html_body, Some("HTML"), None)
@@ -84,16 +83,19 @@ impl TelegramAdapter {
         {
             Ok(_) => {}
             Err(e) if is_message_not_modified(&e) => {}
-            Err(e) if is_parse_entities_error(&e) => match client
-                .edit_message_text(chat_id, message_id, plain_body, None, None)
-                .await
-            {
-                Ok(_) => {}
-                Err(e2) if is_message_not_modified(&e2) => {}
-                Err(e2) => {
-                    eprintln!("[telegram] stream edit (plain fallback) failed: {e2}");
+            Err(e) if is_parse_entities_error(&e) => {
+                let plain = crate::dispatcher::html_to_plain(html_body);
+                match client
+                    .edit_message_text(chat_id, message_id, &plain, None, None)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e2) if is_message_not_modified(&e2) => {}
+                    Err(e2) => {
+                        eprintln!("[telegram] stream edit (plain fallback) failed: {e2}");
+                    }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("[telegram] stream edit failed: {e}");
             }
@@ -216,11 +218,9 @@ impl SidecarAdapter for TelegramAdapter {
                     let chat_id = state.chat_id;
                     let message_id = state.message_id;
                     let body = crate::format::format_and_sanitize(&state.buf);
-                    let plain = state.buf.clone();
                     state.last_edit = Instant::now();
                     drop(map);
-                    Self::edit_with_fallback(&self.client, chat_id, message_id, &body, &plain)
-                        .await;
+                    Self::edit_with_fallback(&self.client, chat_id, message_id, &body).await;
                 }
                 Ok(())
             }
@@ -230,11 +230,10 @@ impl SidecarAdapter for TelegramAdapter {
                     return Ok(());
                 };
                 let body = crate::format::format_and_sanitize(&state.buf);
-                let plain = state.buf.clone();
                 let chat_id = state.chat_id;
                 let message_id = state.message_id;
                 drop(map);
-                Self::edit_with_fallback(&self.client, chat_id, message_id, &body, &plain).await;
+                Self::edit_with_fallback(&self.client, chat_id, message_id, &body).await;
                 Ok(())
             }
             // Unknown / forward-compat commands are silently tolerated.

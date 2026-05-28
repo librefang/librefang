@@ -178,20 +178,28 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<String> {
         let trimmed = strip_mid_tag(&combined);
         let trimmed = adjust_html_entity_boundary(trimmed);
         let trimmed_len = trimmed.len();
-        // Choose what to emit: either the entity/tag-trimmed combined slice (normal path) or, if that left no progress to make on `remaining`, the carry plus one forced char of input. Either way we run the SAME tag-rebalancing on the emitted text so open tags from `carry` get matching close tags appended and propagate forward via `next_carry`.
+        // Choose what to emit: either the entity/tag-trimmed combined slice (normal path) or, if that left no progress to make on `remaining`, the carry plus one forced unit of input. Either way we run the SAME tag-rebalancing on the emitted text so open tags from `carry` get matching close tags appended and propagate forward via `next_carry`.
         let emitted_text: String;
         let consumed_from_input: usize;
         if trimmed_len <= carry.len() {
-            let one_char_end = remaining
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| i)
-                .unwrap_or(remaining.len());
-            let mut t = String::with_capacity(carry.len() + one_char_end);
+            // Degenerate: budget too small for any safe progress. If `remaining` starts with `<`, consume up to AND including the matching `>` so the next tag is intact — emitting a bare leading `<` would produce HTML Telegram cannot parse. Otherwise force one Unicode scalar.
+            let take = if remaining.starts_with('<') {
+                remaining
+                    .find('>')
+                    .map(|gt| gt + 1)
+                    .unwrap_or(remaining.len())
+            } else {
+                remaining
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len())
+            };
+            let mut t = String::with_capacity(carry.len() + take);
             t.push_str(&carry);
-            t.push_str(&remaining[..one_char_end]);
+            t.push_str(&remaining[..take]);
             emitted_text = t;
-            consumed_from_input = one_char_end;
+            consumed_from_input = take;
         } else {
             emitted_text = trimmed.to_string();
             consumed_from_input = trimmed_len - carry.len();
@@ -295,5 +303,80 @@ mod tests {
         // First chunk should end with </b> (the close suffix); subsequent chunks should begin with <b>.
         assert!(chunks[0].ends_with("</b>"));
         assert!(chunks[1].starts_with("<b>"));
+    }
+
+    #[test]
+    fn tag_carry_preserves_anchor_href_with_attributes() {
+        // Anchor with attributes — the carry must preserve `href="..."` verbatim when reopening.
+        let s = format!("<a href=\"https://example.com\">{}</a>", "x".repeat(40));
+        let chunks = split_to_utf16_chunks(&s, 30);
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks[0].ends_with("</a>"),
+            "chunk 0 must close: {:?}",
+            chunks[0]
+        );
+        assert!(
+            chunks[1].starts_with("<a href=\"https://example.com\">"),
+            "chunk 1 must reopen with attrs: {:?}",
+            chunks[1]
+        );
+    }
+
+    #[test]
+    fn tag_carry_nested_bold_italic_order_inside_out() {
+        // Nested formatting: close tags emit inside-out, reopens emit outside-in.
+        let inner = "x".repeat(40);
+        let s = format!("<b><i>{inner}</i></b>");
+        let chunks = split_to_utf16_chunks(&s, 25);
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks[0].ends_with("</i></b>"),
+            "wrong close order: {:?}",
+            chunks[0]
+        );
+        assert!(
+            chunks[1].starts_with("<b><i>"),
+            "wrong reopen order: {:?}",
+            chunks[1]
+        );
+    }
+
+    #[test]
+    fn degenerate_branch_consumes_whole_tag_when_remaining_starts_with_lt() {
+        // Deep-nested unclosed tags + remaining starts with `<` of the closing tag. Previously the degenerate path force-advanced one char, emitting a bare `<` inside the chunk. With the whole-tag consume fix every chunk stays balanced.
+        let s = "<b><i><u>xyz</u></i></b>";
+        let chunks = split_to_utf16_chunks(s, 10);
+        for c in &chunks {
+            assert_eq!(
+                c.matches('<').count(),
+                c.matches('>').count(),
+                "chunk has stray angle bracket: {c:?}",
+            );
+            // Sanity: no chunk contains `><` with nothing between (an artefact of the old degenerate path emitting carry directly).
+            assert!(
+                !c.contains("<>"),
+                "empty tag span produced by chunker: {c:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn entity_prefix_trims_back_named() {
+        assert_eq!(adjust_html_entity_boundary("abc&am"), "abc");
+        assert_eq!(adjust_html_entity_boundary("abc&lt"), "abc");
+        assert_eq!(adjust_html_entity_boundary("abc&quot"), "abc");
+        // Closed entity stays put.
+        assert_eq!(adjust_html_entity_boundary("abc&lt;def"), "abc&lt;def");
+    }
+
+    #[test]
+    fn entity_prefix_trims_back_numeric() {
+        assert_eq!(adjust_html_entity_boundary("abc&#39"), "abc");
+        assert_eq!(adjust_html_entity_boundary("abc&#x1F"), "abc");
+        // Bare `&` at the very end is ambiguous — treat as a potentially-truncated entity and trim back.
+        assert_eq!(adjust_html_entity_boundary("abc&"), "abc");
+        // `&` followed by clearly non-entity content (punctuation, not a known prefix) is preserved.
+        assert_eq!(adjust_html_entity_boundary("abc&!"), "abc&!");
     }
 }

@@ -310,4 +310,22 @@ mod tests {
     fn escape_html_basic() {
         assert_eq!(escape_html("<a&b>"), "&lt;a&amp;b&gt;");
     }
+
+    #[test]
+    fn escape_html_strips_code_placeholder_sentinels() {
+        // U+E000 and U+E001 are the placeholder bookends; without the strip an attacker could put `\u{E000}C0\u{E001}` into a message containing a real code span and have render_inline_markdown's restore pass swap it for the captured `<code>...</code>`, bypassing sanitize_telegram_html's tag allowlist. The strip removes only the BOOKENDS — the `C<digits>` content between them stays as plain text, which means the post-escape string no longer matches any real placeholder pattern.
+        assert_eq!(escape_html("a\u{E000}C0\u{E001}b"), "aC0b");
+        assert_eq!(escape_html("\u{E000}\u{E001}"), "");
+        // Adjacent normal escaping still works.
+        assert_eq!(escape_html("<\u{E000}>"), "&lt;&gt;");
+    }
+
+    #[test]
+    fn placeholder_collision_attempt_does_not_inject_code() {
+        // Full end-to-end: adversarial input contains the sentinel bytes AND a real backtick code span. The restore pass must not re-substitute the user's literal bytes.
+        let html = markdown_to_telegram_html("\u{E000}C0\u{E001} then `x`");
+        // The literal `\u{E000}C0\u{E001}` should be stripped (escape_html eats the sentinels), and only the real backtick span should render as <code>.
+        assert!(html.contains("<code>x</code>"));
+        assert_eq!(html.matches("<code>").count(), 1);
+    }
 }

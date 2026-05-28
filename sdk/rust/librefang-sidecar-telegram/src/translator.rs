@@ -59,7 +59,9 @@ fn sender_from_chat(chat: &Chat) -> Sender {
 /// Parse a leading bot-command entity (e.g. `/start arg1 arg2`).
 /// Returns `(name, args)` when the message text starts with a `bot_command` at offset 0, `None` otherwise.
 ///
-/// Bot API documents `MessageEntity.length` as a UTF-16 code-unit count, so to slice `text` correctly we walk Unicode scalars accumulating their `len_utf16()` until we've consumed `cmd_len` code units. This is correct for ASCII (the only kind Telegram currently emits for bot_command) AND survives any future extension to non-BMP characters. After the slice, the trailing text (everything past the entity, NOT past the first whitespace) is split into args by whitespace.
+/// Bot API documents `MessageEntity.length` as a UTF-16 code-unit count, so to slice `text` correctly we walk Unicode scalars accumulating their `len_utf16()` until we've consumed `cmd_len` code units. This is correct for ASCII (the only kind Telegram currently emits for bot_command) AND survives any future extension to non-BMP characters.
+///
+/// **Deliberate divergence from the Python reference adapter**: Python uses `txt.split(" ", 1)` and ignores `entity.length`, so `/help:foo` yields name=`"help:foo"` and args=`[]` (bug — the `:foo` folds into the command name). This Rust impl honours the Bot API entity boundary instead, so the same input yields name=`"help"` and args=`[":foo"]`. The supervisor's command router benefits from the more accurate split; downstream code that grepped logs for the Python-shaped buggy command name will need to update its pattern.
 fn parse_command(msg: &Message) -> Option<(String, Vec<String>)> {
     let text = msg.text.as_deref()?;
     let first = msg.entities.first()?;
@@ -67,6 +69,10 @@ fn parse_command(msg: &Message) -> Option<(String, Vec<String>)> {
         return None;
     }
     let cmd_len_u16 = usize::try_from(first.length).ok()?;
+    // Defensive clamp: a misbehaving proxy could report a length larger than the actual text. Without the clamp the loop walks to end-of-text and `head` ends up containing the entire message including spaces — `bare` would then be `"foo bar baz"` instead of `"foo"`.
+    if cmd_len_u16 > text.encode_utf16().count() {
+        return None;
+    }
     let mut units = 0usize;
     let mut byte_end = 0usize;
     for ch in text.chars() {
@@ -90,14 +96,17 @@ fn parse_command(msg: &Message) -> Option<(String, Vec<String>)> {
     Some((bare.to_string(), args))
 }
 
-/// Build a `[Kind received: optional caption]` text placeholder. Used when getFile fails so the user's caption (often the actual question) survives even though the media URL is unavailable.
-fn media_placeholder(kind: &str, caption: Option<&str>) -> TgContent {
+/// Build a text placeholder used when getFile fails so the user's caption (often the actual question) survives even though the media URL is unavailable.
+///
+/// Label / shape mirrors the Python adapter so cross-language grep over conversation logs sees the same strings: `[Photo received: cap]`, `[Document received: cap]`, `[Audio received, Ns: cap]`, `[Voice message, Ns]` (Python form — no caption is appended), `[Animation received, Ns: cap]`, `[Video received, Ns: cap]`, `[Video note, Ns]`. Duration-bearing variants always include `Ns`; the caption suffix is only added when non-empty AND the Python adapter includes one for that media type.
+fn media_placeholder(label: &str, duration_secs: Option<u32>, caption: Option<&str>) -> TgContent {
     let cap = caption
         .map(str::trim)
         .filter(|c| !c.is_empty())
         .map(|c| format!(": {c}"))
         .unwrap_or_default();
-    TgContent::Text(format!("[{kind} received{cap}]"))
+    let dur = duration_secs.map(|d| format!(", {d}s")).unwrap_or_default();
+    TgContent::Text(format!("[{label}{dur}{cap}]"))
 }
 
 /// Best-effort file-id → public URL. Returns None on lookup failure (the caller falls back to a text placeholder).
@@ -126,7 +135,7 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 caption,
                 mime_type: Some("image/jpeg".into()),
             },
-            None => media_placeholder("Photo", caption.as_deref()),
+            None => media_placeholder("Photo received", None, caption.as_deref()),
         });
     }
     if let Some(doc) = &msg.document {
@@ -136,7 +145,7 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
             None => {
                 // Prefer the user's caption over the filename — captions usually carry the question; the filename is best-effort.
                 let cap = msg.caption.as_deref().or(Some(&filename));
-                media_placeholder("Document", cap)
+                media_placeholder("Document received", None, cap)
             }
         });
     }
@@ -149,7 +158,11 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 title: audio.title.clone(),
                 performer: audio.performer.clone(),
             },
-            None => media_placeholder("Audio", msg.caption.as_deref()),
+            None => media_placeholder(
+                "Audio received",
+                Some(audio.duration),
+                msg.caption.as_deref(),
+            ),
         });
     }
     if let Some(voice) = &msg.voice {
@@ -159,7 +172,8 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 caption: msg.caption.clone(),
                 duration_seconds: voice.duration,
             },
-            None => media_placeholder("Voice", msg.caption.as_deref()),
+            // Python's `[Voice message, Ns]` does NOT append the caption — match for parity.
+            None => media_placeholder("Voice message", Some(voice.duration), None),
         });
     }
     if let Some(anim) = &msg.animation {
@@ -169,7 +183,11 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 caption: msg.caption.clone(),
                 duration_seconds: anim.duration,
             },
-            None => media_placeholder("Animation", msg.caption.as_deref()),
+            None => media_placeholder(
+                "Animation received",
+                Some(anim.duration),
+                msg.caption.as_deref(),
+            ),
         });
     }
     if let Some(video) = &msg.video {
@@ -180,7 +198,11 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 duration_seconds: video.duration,
                 filename: video.file_name.clone(),
             },
-            None => media_placeholder("Video", msg.caption.as_deref()),
+            None => media_placeholder(
+                "Video received",
+                Some(video.duration),
+                msg.caption.as_deref(),
+            ),
         });
     }
     if let Some(vn) = &msg.video_note {
@@ -191,7 +213,8 @@ pub async fn extract_content(client: &BotClient, msg: &Message) -> Option<TgCont
                 duration_seconds: vn.duration,
                 filename: None,
             },
-            None => media_placeholder("VideoNote", None),
+            // Python's `[Video note, Ns]` — note the lowercase 'note' and no caption.
+            None => media_placeholder("Video note", Some(vn.duration), None),
         });
     }
     if let Some(loc) = &msg.location {
@@ -629,6 +652,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_rejects_bogus_overrun_length() {
+        // Defensive: a misbehaving proxy reports length larger than text. Without the clamp, the function would return ("foo bar baz", []) (args folded into name). With the clamp it returns None.
+        let msg = cmd_msg("/foo bar baz", 999);
+        assert_eq!(parse_command(&msg), None);
+    }
+
+    #[test]
     fn parse_command_rejects_bare_at() {
         let msg = cmd_msg("/@my_bot", 8);
         assert_eq!(parse_command(&msg), None);
@@ -643,5 +673,49 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_command(&msg), None);
+    }
+
+    fn assert_text(c: TgContent, expected: &str) {
+        match c {
+            TgContent::Text(s) => assert_eq!(s, expected),
+            _ => panic!("expected TgContent::Text"),
+        }
+    }
+
+    #[test]
+    fn media_placeholder_matches_python_labels() {
+        // Cross-language parity: the strings have to match `sdk/python/librefang/sidecar/adapters/telegram.py:1224,1231,1242,1250,1260,1271,1279`.
+        assert_text(
+            media_placeholder("Photo received", None, Some("look")),
+            "[Photo received: look]",
+        );
+        assert_text(
+            media_placeholder("Photo received", None, None),
+            "[Photo received]",
+        );
+        assert_text(
+            media_placeholder("Document received", None, Some("report.pdf")),
+            "[Document received: report.pdf]",
+        );
+        assert_text(
+            media_placeholder("Audio received", Some(60), Some("song.mp3")),
+            "[Audio received, 60s: song.mp3]",
+        );
+        assert_text(
+            media_placeholder("Voice message", Some(5), None),
+            "[Voice message, 5s]",
+        );
+        assert_text(
+            media_placeholder("Animation received", Some(3), None),
+            "[Animation received, 3s]",
+        );
+        assert_text(
+            media_placeholder("Video received", Some(12), Some("a clip")),
+            "[Video received, 12s: a clip]",
+        );
+        assert_text(
+            media_placeholder("Video note", Some(8), None),
+            "[Video note, 8s]",
+        );
     }
 }

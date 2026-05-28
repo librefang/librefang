@@ -66,7 +66,7 @@ static RE_HTML_TAG: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"<[^>]+>").expect("html-strip tag regex"));
 
 /// Strip HTML tags and decode the small set of entities our markdown pipeline ever emits. Used by the plain-text fallback when Telegram rejects our HTML — we want the user to see readable text, not the raw markup. Entity-decode order matters: replace `&lt;` / `&gt;` / `&quot;` / `&#39;` before `&amp;` so a literal `&amp;lt;` round-trips back to `&lt;` rather than collapsing to `<`.
-fn html_to_plain(s: &str) -> String {
+pub(crate) fn html_to_plain(s: &str) -> String {
     let no_tags = RE_HTML_TAG.replace_all(s, "");
     no_tags
         .replace("&lt;", "<")
@@ -420,7 +420,17 @@ pub async fn dispatch_content(
                 .get("items")
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::Other("MediaGroup.items missing".into()))?;
-            // Bot API requires 2..=10 items per sendMediaGroup. Outside that range, fall back to per-item dispatch (1 item → single send; >10 → chunk into batches of 10) so the user's media still ships.
+            // Reject nested MediaGroup BEFORE recursing — an adversarial / buggy agent payload like `MediaGroup{items:[MediaGroup{items:[...]}]}` would otherwise recurse via Box::pin without depth bound and overflow the heap-allocated future stack.
+            for item in items_array {
+                if let Some(obj) = item.as_object() {
+                    if matches!(obj.keys().next().map(String::as_str), Some("MediaGroup")) {
+                        return Err(Error::Other(
+                            "MediaGroup may not contain nested MediaGroup items".into(),
+                        ));
+                    }
+                }
+            }
+            // Bot API requires 2..=10 items per sendMediaGroup. Outside that range, fall back to per-item dispatch (1 item → single send; >10 → chunk into batches of 10) so the user's media still ships. NOTE: the Python reference adapter raises ValueError on >10; this Rust port is deliberately more permissive.
             if items_array.len() == 1 {
                 Box::pin(dispatch_content(
                     client,
