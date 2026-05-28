@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Kanban,
@@ -98,7 +98,7 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
 
   return (
     <div
-      draggable={actions.includes("requeue") || actions.includes("cancel")}
+      draggable={actions.includes("requeue")}
       onDragStart={() => { if (id) onDragStart(id); }}
       className={`rounded-xl border p-3 text-sm transition-shadow cursor-default select-none
         ${isDragTarget ? "border-brand/60 bg-brand/5" : "border-border-subtle bg-surface hover:shadow-sm"}
@@ -322,16 +322,16 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   }
 
   // Reset form when modal opens
-  const prevOpenRef = useRef(false);
-  if (isOpen && !prevOpenRef.current) {
-    prevOpenRef.current = true;
-    setTitle("");
-    setDescription("");
-    setAssignee("");
-  }
-  if (!isOpen && prevOpenRef.current) {
-    prevOpenRef.current = false;
-  }
+  // Reset form when modal opens. The previous `if (isOpen && !prev.current)
+  // setX(...)` block called setState during render, which React strict-mode
+  // warns against and can misbehave under Suspense / concurrent rendering.
+  useEffect(() => {
+    if (isOpen) {
+      setTitle("");
+      setDescription("");
+      setAssignee("");
+    }
+  }, [isOpen]);
 
   const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40";
 

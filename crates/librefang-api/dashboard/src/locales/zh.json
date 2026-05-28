@@ -3783,7 +3783,7 @@
     "empty": "暂无任务",
     "load_error": "加载任务失败",
     "retry_load": "重试",
-    "drag_hint": "将失败或进行中的卡片拖到此列以重新入队",
+    "drag_hint": "将已取消的卡片拖到此列以重新入队",
     "status_total": "总计",
     "status_pending": "待处理",
     "status_in_progress": "进行中",

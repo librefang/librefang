@@ -3783,7 +3783,7 @@
     "empty": "No tasks",
     "load_error": "Failed to load tasks",
     "retry_load": "Retry",
-    "drag_hint": "Drag a failed or pending card here to re-queue it",
+    "drag_hint": "Drag a cancelled card here to re-queue it",
     "status_total": "Total",
     "status_pending": "Pending",
     "status_in_progress": "In Progress",
