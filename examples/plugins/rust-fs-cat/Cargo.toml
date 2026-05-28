@@ -1,0 +1,36 @@
+[package]
+name = "rust-fs-cat"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Phase-6 plugin example: reads a file via librefang:plugin/fs.read"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Phase-6 isolation: this example crate is intentionally OUTSIDE the
+# workspace so `cargo build` at the workspace root does NOT try to
+# compile it (it targets wasm32-wasip2 with a dedicated workspace).
+# Build via:  cargo xtask plugins-rebuild rust-fs-cat
+[workspace]
+
+[dependencies]
+wit-bindgen = "0.36"
+wit-bindgen-rt = "0.36"
+
+[package.metadata.component]
+package = "local:rust-fs-cat"
+
+# Point at the workspace-wide WIT directory landed in Phase-5 C-002
+# (librefang:plugin@0.1.0). Relative path is to this manifest dir.
+[package.metadata.component.target]
+path = "../../../crates/librefang-skills/wit"
+world = "plugin"
+
+[profile.release]
+# Smallest reasonable artefact within Phase-6's 200 KB budget.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"

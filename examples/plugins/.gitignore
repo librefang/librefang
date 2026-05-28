@@ -1,0 +1,39 @@
+# Phase-6 examples/plugins/ — keep build outputs out of the index;
+# whitelist each example's checked-in pre-built artefact.
+#
+# Each per-language example has its own build outputs that should
+# NOT be committed (Rust target/, Node node_modules/, TinyGo
+# binaries in the source dir, etc.). The ONE committed artefact per
+# example is `pre-built/plugin.wasm` — explicitly whitelisted below.
+
+# Rust
+**/target/
+**/Cargo.lock
+**/*.rs.bk
+
+# Node / pnpm / bun
+**/node_modules/
+**/dist/
+**/.pnpm-store/
+**/pnpm-lock.yaml
+**/package-lock.json
+**/.bun/
+
+# Go
+**/go.sum
+**/gen/
+
+# C / wit-bindgen-c
+**/*.o
+**/Makefile.depend
+
+# Generic wasm outputs at the example root — only the curated
+# pre-built/plugin.wasm is the committed artefact.
+*.wasm
+*.cwasm
+
+# Whitelist the canonical checked-in artefact path per example.
+# Negation patterns are matched after the includes above, so the
+# pre-built/ directory's plugin.wasm survives.
+!*/pre-built/
+!*/pre-built/plugin.wasm

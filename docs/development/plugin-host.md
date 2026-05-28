@@ -263,6 +263,51 @@ The per-language smoke (`test-wasm-toolchain.sh`) reports a
 `[load: OK | WARN | SKIP]` annotation for each Component-producing
 language on top of the existing `compile + validate` checks.
 
+## Walking examples (Phase-6)
+
+Per-language minimal plugins live under
+[`examples/plugins/`](../../examples/plugins/). Each ships a
+checked-in `pre-built/plugin.wasm` (regen via
+`cargo xtask plugins-rebuild <name>`) plus an integration test under
+[`crates/librefang-runtime/tests/plugin_example_*.rs`](../../crates/librefang-runtime/tests/).
+
+| Example | Language | Capability | Toolchain | Pre-built size | Integration test |
+|---|---|---|---|---:|---|
+| [`c-noop`](../../examples/plugins/c-noop/) | C | none | LLVM clang + `wasm-ld` + wit-bindgen-c | 1,072 B | runs (load + invoke + Ok proof) |
+| [`rust-fs-cat`](../../examples/plugins/rust-fs-cat/) | Rust | `fs` | cargo-component | 54,736 B | skipped pending `wasi:io/poll` |
+| [`python-hello-time`](../../examples/plugins/python-hello-time/) | Python | `time` | componentize-py | 18,368,830 B | skipped pending `wasi:cli/environment` |
+| [`js-kv-counter`](../../examples/plugins/js-kv-counter/) | JavaScript | `kv` | jco componentize | 12,660,894 B | skipped pending `librefang:plugin/fs` (StarlingMonkey shim auto-imports it) |
+| [`go-env-greet`](../../examples/plugins/go-env-greet/) | Go | `env` | TinyGo + wasi P1 adapter | 404,950 B | skipped pending `wasi:cli/environment` |
+
+The four skips share a root cause: non-trivial language runtimes
+(CPython, StarlingMonkey, Go runtime, cargo-component's wasi-rt) pull
+WASI Preview 2 host imports for their init code. The Phase-6 component
+linker only binds `librefang:plugin/*` — wiring `wasmtime-wasi` into
+[`sandbox_component.rs`](../../crates/librefang-runtime/src/sandbox_component.rs)
+is the Phase-7 work that activates the four ignored tests. Each test's
+`#[ignore = "..."]` reason names the precise missing interface so the
+follow-up is mechanical.
+
+c-noop runs cleanly today because its noop body never reaches a WASI
+syscall — it's the load-bearing proof that the Component Model load,
+fuel/epoch wiring, capability gate, and `run()` invocation are end-to-end
+correct on the BossFang sandbox.
+
+### Phase-6 sandbox fixes that landed alongside the examples
+
+- **`execute_component` now seeds fuel + epoch on every store** —
+  `engine_config()` enables `consume_fuel(true)` and
+  `epoch_interruption(true)`, but the Component path was instantiating
+  stores without `set_fuel(...)` / `set_epoch_deadline(...)`. Result:
+  fuel = 0, first wasm instruction trapped with an opaque "wasm function
+  N" error. Fixed in
+  [Phase-6 C-007](../../.kbd-orchestrator/phases/phase-6-plugin-examples/progress.json);
+  parity with the core-module `execute()` path.
+- **C plugins with `-nostdlib` need `--initial-memory=131072`** to
+  give RET_AREA a valid home past the default 1-page boundary —
+  documented in [`examples/plugins/c-noop/README.md`](../../examples/plugins/c-noop/README.md)
+  so the next C example author doesn't re-discover it.
+
 ## Phase-5 traceability
 
 Per-change records: [`.kbd-orchestrator/changes/C-001…C-008-*.md`](../../.kbd-orchestrator/changes/).

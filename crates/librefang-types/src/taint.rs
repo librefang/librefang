@@ -338,28 +338,39 @@ pub fn check_outbound_text_violation_with_skip(
     None
 }
 
+pub const SECRET_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "proxy-authorization",
+    "access_token",
+    "refresh_token",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "bearer",
+    "x-api-key",
+];
+
+pub const SECRET_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "apikey",
+    "x-auth-token",
+    "cookie",
+    "set-cookie",
+];
+
 /// Returns the secret-shaped rule that fires for the given payload, if any.
 /// Order: AuthorizationLiteral → KeyValueSecret → OpaqueToken → WellKnownPrefix.
 fn detect_secret_rule_with_skip(
     payload: &str,
     skip_rules: &HashSet<TaintRuleId>,
 ) -> Option<TaintRuleId> {
-    const SECRET_KEYS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "api-key",
-        "authorization",
-        "proxy-authorization",
-        "access_token",
-        "refresh_token",
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "bearer",
-        "x-api-key",
-    ];
-
     let lower = payload.to_lowercase();
 
     // 1. `Authorization:` header literal — unambiguous.

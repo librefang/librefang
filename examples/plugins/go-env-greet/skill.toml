@@ -1,0 +1,19 @@
+# Phase-6 plugin example: go-env-greet
+#
+# Reads the GREETING_NAME env var via librefang:plugin/env.read and
+# returns Ok. Exercises the `env` host capability.
+
+[skill]
+name = "go-env-greet"
+version = "0.1.0"
+description = "Phase-6 example: read an env var via librefang:plugin/env."
+author = "librefang"
+license = "Apache-2.0"
+tags = ["example", "phase-6", "wasm-component", "env", "go"]
+
+[runtime]
+type = "wasm"
+entry = "pre-built/plugin.wasm"
+
+# Phase-5 C-005 link-time capability gate. Only "env".
+host_capabilities = ["env"]

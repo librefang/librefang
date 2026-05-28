@@ -200,6 +200,25 @@ RUN set -eux; \
     cp -a /tmp/wasmtime-c-api/include/. /usr/local/include/; \
     rm -rf /tmp/wasmtime-c-api /tmp/wasmtime-c-api.tar.xz; \
     ldconfig
+# ── GitHub CLI (`gh`) ─────────────────────────────────────────────────────────
+# Required by `cargo xtask release` (changelog generation hard-fails with
+# "gh CLI required" at xtask/src/changelog.rs:421 if absent), `cargo xtask
+# changelog`, `release.rs` (for the version-bump PR), and `cargo xtask
+# contributors`. Installed from GitHub's official apt repo so the version
+# tracks upstream stable rather than Debian's archive. The release wrapper
+# at scripts/run-xtask.sh forwards `GH_TOKEN` from the host so this `gh`
+# authenticates without re-running `gh auth login` inside the container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
 # The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
 # via named volumes, so we don't pre-create anything here. `rustup` /

@@ -7,32 +7,10 @@
 //! `docs/architecture/error-contracts.md` for the migration sequence.
 
 use super::error::{ToolError, ToolResult};
-use super::require_kernel_typed;
+use super::{caller_agent_id_missing, require_kernel_typed};
 use crate::kernel_handle::prelude::*;
+use std::collections::HashSet;
 use std::sync::Arc;
-
-/// Build the `ToolError` returned when no caller agent id reaches a cron tool.
-///
-/// Two legitimate dispatchers feed these tools:
-///   * The direct agent-loop dispatcher always attributes a caller — `None`
-///     here is a wiring bug, but the LLM cannot recover from it either way.
-///   * The MCP HTTP route (`/mcp`) intentionally passes `None` when the
-///     `X-LibreFang-Agent-Id` header is missing or names an unknown agent;
-///     external clients are expected to receive a user-recoverable error.
-///
-/// `MissingParameter("agent_id")` is the honest user-facing mapping for the
-/// second case (lifts to `LibreFangError::InvalidInput` → HTTP 400) and is
-/// not worse than `Internal` for the first: in both cases the immediate LLM
-/// turn cannot patch the wiring. The tool name (and the fact that it dropped
-/// attribution) is preserved on the operator-facing tracing channel so a
-/// real direct-loop regression can still be traced.
-fn caller_agent_id_missing(tool: &'static str) -> ToolError {
-    tracing::warn!(
-        tool,
-        "caller agent_id missing — surfaced as MissingParameter to the LLM"
-    );
-    ToolError::MissingParameter("agent_id")
-}
 
 pub(super) async fn tool_cron_create(
     input: &serde_json::Value,
@@ -43,12 +21,19 @@ pub(super) async fn tool_cron_create(
     let kh = require_kernel_typed(kernel)?;
     let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_create"))?;
     let mut job = input.clone();
-    if let (Some(pid), Some(obj)) = (sender_id, job.as_object_mut()) {
-        if !pid.is_empty() && !obj.contains_key("peer_id") {
-            obj.insert(
-                "peer_id".to_string(),
-                serde_json::Value::String(pid.to_string()),
-            );
+    if let Some(obj) = job.as_object_mut() {
+        match sender_id {
+            Some(pid) if !pid.is_empty() => {
+                // Always override peer_id with authenticated sender_id —
+                // caller cannot inject arbitrary peer_id.
+                obj.insert(
+                    "peer_id".to_string(),
+                    serde_json::Value::String(pid.to_string()),
+                );
+            }
+            _ => {
+                obj.remove("peer_id");
+            }
         }
     }
     kh.cron_create(agent_id, job)
@@ -74,25 +59,23 @@ pub(super) async fn tool_cron_cancel(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> ToolResult {
-    let kh = require_kernel_typed(kernel)?;
     let job_id = input["job_id"]
         .as_str()
         .ok_or(ToolError::MissingParameter("job_id"))?;
+    if job_id.is_empty() {
+        return Err(ToolError::InvalidParameter {
+            name: "job_id",
+            reason: "must not be empty".to_string(),
+        });
+    }
+    let kh = require_kernel_typed(kernel)?;
     let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_cancel"))?;
-    // Authorize: the caller may only cancel jobs that belong to them.
-    // Otherwise an agent with the cron_cancel tool could delete any other
-    // agent's jobs as long as it learns their UUID (via side-channel or
-    // social engineering).
     let owned = kh.cron_list(agent_id).await.map_err(ToolError::upstream)?;
-    let owns_job = owned.iter().any(|job| {
-        job.get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| id == job_id)
-    });
-    if !owns_job {
-        // Collapse "not owned" and "doesn't exist" into one NotFound — see
-        // the variant doc on `ToolError::NotFound` for the side-channel
-        // rationale.
+    let owned_ids: HashSet<&str> = owned
+        .iter()
+        .filter_map(|job| job.get("id").and_then(|v| v.as_str()))
+        .collect();
+    if !owned_ids.contains(job_id) {
         return Err(ToolError::NotFound {
             kind: "Cron job",
             id: job_id.to_string(),
@@ -134,6 +117,21 @@ mod tests {
     async fn cron_cancel_without_kernel_returns_unavailable() {
         let r = tool_cron_cancel(&json!({"job_id": "x"}), None, Some("agent-a")).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
+    }
+
+    #[tokio::test]
+    async fn cron_cancel_empty_job_id_rejected() {
+        let r = tool_cron_cancel(&json!({"job_id": ""}), None, Some("agent-a")).await;
+        match r {
+            Err(ToolError::InvalidParameter { name, reason }) => {
+                assert_eq!(name, "job_id");
+                assert!(
+                    reason.contains("empty"),
+                    "reason should mention empty: {reason}"
+                );
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,0 +1,23 @@
+# Phase-6 plugin example: python-hello-time
+#
+# Calls time.now() via librefang:plugin/time to obtain the current
+# Unix epoch. Exercises the `time` host capability — the only
+# interface this plugin imports.
+#
+# `host_capabilities = ["time"]` declares the coarse Component-Model
+# capability the linker should bind at instantiation.
+
+[skill]
+name = "python-hello-time"
+version = "0.1.0"
+description = "Phase-6 example: fetch the current time via librefang:plugin/time."
+author = "librefang"
+license = "Apache-2.0"
+tags = ["example", "phase-6", "wasm-component", "time", "python"]
+
+[runtime]
+type = "wasm"
+entry = "pre-built/plugin.wasm"
+
+# Phase-5 C-005 link-time capability gate. Only "time".
+host_capabilities = ["time"]

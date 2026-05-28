@@ -660,6 +660,14 @@ func (r *BudgetResource) UpdateAgentBudget(id string, data map[string]interface{
 	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data, nil)
 }
 
+func (r *BudgetResource) ProviderBudgetList() (interface{}, error) {
+	return r.client.request("GET", "/api/budget/providers", nil, nil)
+}
+
+func (r *BudgetResource) UpdateProviderBudget(provider_id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/budget/providers/%s", provider_id), data, nil)
+}
+
 func (r *BudgetResource) UserBudgetRanking(query map[string]string) (interface{}, error) {
 	return r.client.request("GET", "/api/budget/users", nil, query)
 }

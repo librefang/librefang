@@ -1,12 +1,13 @@
 {
-  "active_phase": "phase-5-plugin-host-crate",
+  "active_phase": null,
+  "previous_phase": "phase-6-plugin-examples",
   "active_change": null,
-  "last_updated": "2026-05-27T00:00:00Z",
+  "last_updated": "2026-05-28T00:00:00Z",
   "last_updated_by": "kbd-reflect",
   "backend": "native-tool",
-  "phase_progress": "Phase 5: 8/8 changes done; reflection written.",
+  "phase_progress": "Phase 6 closed: 8/8 changes DONE; reflection.md written. wasmtime-wasi linker integration is the headline Phase-7 lever — activates 4 ignored plugin_example tests.",
   "next_action": {
-    "command": "Commit + PR",
-    "description": "Suggested split: feat(runtime,skills): WIT + wit_host + sandbox_component; feat(runtime): AOT cache + capabilities; chore(kbd): record phase-5 + docs"
+    "command": "/kbd-new-phase",
+    "description": "Start the next KBD phase. Recommended next focus per phase-6 reflection: wasmtime-wasi integration in sandbox_component.rs, store.limiter wiring for Component path, surrealdb-core =3.0.5 workspace pin, net+agent example plugins."
   }
 }

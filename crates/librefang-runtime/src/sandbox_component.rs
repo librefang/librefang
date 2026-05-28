@@ -410,6 +410,35 @@ impl crate::sandbox::WasmSandbox {
         let tokio_handle = tokio::runtime::Handle::current();
         let state = PluginHostState::new(new_guest_state(&config, kernel, agent_id, tokio_handle));
         let mut store = Store::new(&engine, state);
+
+        // Phase-6 C-007: the shared `engine_config()` enables
+        // `consume_fuel(true)` and `epoch_interruption(true)`, so the store
+        // must be seeded with both before the first wasm instruction runs
+        // — otherwise fuel starts at 0 and the very first op traps with
+        // an opaque "wasm function 2" error. The core-module `execute()`
+        // path (sandbox.rs ~L483) does the same thing.
+        //
+        // Use `fuel_limit > 0` as the gate (0 = "unlimited", same convention
+        // as `SandboxConfig` / the core path). When the caller asks for
+        // unlimited fuel we seed a very large value rather than calling
+        // `Store::set_fuel(u64::MAX)` because wasmtime treats anything
+        // > i64::MAX as a configuration error.
+        let fuel_to_set = if config.fuel_limit > 0 {
+            config.fuel_limit
+        } else {
+            u64::MAX / 2
+        };
+        store
+            .set_fuel(fuel_to_set)
+            .map_err(|e| SandboxError::Execution(e.to_string()))?;
+        // Epoch deadline: set to "+1 tick" so a runaway component can be
+        // interrupted by an external `Engine::increment_epoch()` ticker.
+        // The Phase-6 path doesn't install that ticker yet (see TODO at the
+        // top of this fn for the watchdog follow-up), so in practice this
+        // deadline is never hit — but the call is mandatory whenever
+        // `epoch_interruption(true)` is set in the engine config.
+        store.set_epoch_deadline(1);
+
         // TODO(phase-5 follow-up): wire `store.limiter(|s| &mut
         // s.guest.<limiter>)` once a small public accessor lands on
         // GuestState. Today the limiter field is module-private to
@@ -449,11 +478,7 @@ mod tests {
     /// `scripts/test-wasm-toolchain.sh` (Phase-5 C-007).
     #[test]
     fn bindgen_emits_plugin_and_add_to_linker() {
-        let engine = Engine::new(&{
-            let cfg = engine_config();
-            cfg
-        })
-        .unwrap();
+        let engine = Engine::new(&engine_config()).unwrap();
         let mut linker = Linker::<PluginHostState>::new(&engine);
         Plugin::add_to_linker::<_, wasmtime::component::HasSelf<PluginHostState>>(
             &mut linker,

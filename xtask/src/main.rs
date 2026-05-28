@@ -26,6 +26,7 @@ mod license_check;
 mod loc;
 mod local_check_mode;
 mod migrate;
+mod plugins;
 mod pre_commit;
 mod publish_npm_binaries;
 mod publish_pypi_binaries;
@@ -112,6 +113,13 @@ enum Command {
     /// Migrate agents from other frameworks (OpenClaw, OpenFang)
     Migrate(migrate::MigrateArgs),
 
+    /// Rebuild the per-language WASM Component plugin examples under
+    /// `examples/plugins/`. Phase-6 deliverable — used to regenerate
+    /// committed `pre-built/plugin.wasm` artefacts inside the
+    /// librefang-rust-dev image. Pass `<example>` to target a single
+    /// language (e.g. `rust-fs-cat`); omit to rebuild all.
+    PluginsRebuild(plugins::PluginsRebuildArgs),
+
     /// Check or fix formatting (Rust + web)
     Fmt(fmt::FmtCheckArgs),
 
@@ -181,6 +189,7 @@ fn main() {
         Command::BuildTimings(args) => build_timings::run_collect(args),
         Command::CompareBuildTimings(args) => build_timings::run_compare(args),
         Command::Migrate(args) => migrate::run(args),
+        Command::PluginsRebuild(args) => plugins::run(args),
         Command::Fmt(args) => fmt::run(args),
         Command::CleanAll(args) => clean_all::run(args),
         Command::Doctor(args) => doctor::run(args),

@@ -47,7 +47,35 @@ pub(crate) const ENVELOPE_LINE_PREFIXES: &[&str] = &[
 ];
 
 /// Standalone envelope markers that occupy their own line.
-pub(crate) const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Stranger]", "[Forwarded]", "[User]"];
+pub(crate) const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Forwarded]", "[Stranger]", "[User]"];
+
+/// True when an `ENVELOPE_STANDALONE_MARKER` appears as a **line-leader**
+/// preceded by `\n` AND followed by whitespace. This is the canonical
+/// chat-template tokenizer-bleed signature: the model emits a silent sentinel
+/// then the chat template continues with `[User]\n<fake_question>`.
+///
+/// Gated on `is_silent_response(text_before_marker)` so legitimate replies
+/// that quote a marker on its own line are not silenced.
+fn has_envelope_marker_as_line_leader(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for m in ENVELOPE_STANDALONE_MARKERS {
+        let mut offset = 0;
+        while let Some(rel_idx) = text[offset..].find(m) {
+            let idx = offset + rel_idx;
+            let starts_line = idx > 0 && bytes[idx - 1] == b'\n';
+            let after = &text[idx + m.len()..];
+            let leads_content = matches!(after.chars().next(), Some(c) if c.is_whitespace());
+            if starts_line && leads_content {
+                let before = &text[..idx];
+                if is_silent_response(before) {
+                    return true;
+                }
+            }
+            offset = idx + m.len();
+        }
+    }
+    false
+}
 
 /// Prompt section headers that, when paired with a structural marker,
 /// indicate cascade scaffolding regurgitation.
@@ -97,6 +125,10 @@ const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past 
 /// Used both by the assembled-response guard (non-streaming and streaming
 /// EndTurn) and by the incremental streaming abort path.
 pub fn is_cascade_leak(text: &str) -> bool {
+    if has_envelope_marker_as_line_leader(text) {
+        return true;
+    }
+
     let mut structural_hits = 0u8;
 
     for m in STRUCTURAL_TURN_FRAMES
@@ -905,5 +937,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- Chat-template tokenizer-bleed tests (2026-05-20 WhatsApp incident) --
+
+    #[test]
+    fn cascade_leak_observed_no_reply_then_user_template_bleed() {
+        let observed =
+            "NO_REPLY\n\n[User]\nEhi puoi dirmi che skill hai e in linea di massima cosa sai fare?";
+        assert!(
+            is_cascade_leak(observed),
+            "observed NO_REPLY + [User] line-leader template bleed must trip"
+        );
+    }
+
+    #[test]
+    fn cascade_leak_line_leader_requires_silent_sentinel_before() {
+        assert!(is_cascade_leak("NO_REPLY\n[User]\nfake question"));
+        assert!(is_cascade_leak("[no reply needed]\n[User]\nfake question"));
+        assert!(is_cascade_leak(
+            "NO_REPLY\n\n[Stranger]\nciao da sconosciuto"
+        ));
+        assert!(is_cascade_leak("NO_REPLY\n[Forwarded]\nti inoltro questo"));
+    }
+
+    #[test]
+    fn cascade_leak_line_leader_without_sentinel_does_not_trip_alone() {
+        assert!(!is_cascade_leak("preamble\n[User]\nfake question"));
+        assert!(!is_cascade_leak("[User]\nfake question"));
+        assert!(!is_cascade_leak("[User] inline content on same line"));
+    }
+
+    #[test]
+    fn cascade_leak_bare_user_marker_at_end_not_leak() {
+        assert!(!is_cascade_leak("the [User]"));
+        assert!(!is_cascade_leak("see [Stranger]"));
+    }
+
+    #[test]
+    fn cascade_leak_marker_substring_not_line_leader() {
+        assert!(!is_cascade_leak("the [User] tag is documented in the spec"));
+        assert!(!is_cascade_leak(
+            "see the [Forwarded] convention used by gateways"
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_explanatory_envelope_mid_text_not_silenced() {
+        assert!(!is_cascade_leak(
+            "Here is what an inbound looks like:\n\n[User]\nHello, can you help?"
+        ));
+    }
+
+    #[test]
+    fn incremental_fires_on_user_template_bleed() {
+        let deltas = [
+            "NO_REPLY",
+            "\n\n",
+            "[User]\n",
+            "Ehi puoi dirmi che skill hai…",
+        ];
+        let (fired, idx) = feed_deltas(&deltas);
+        assert!(
+            fired,
+            "[User] line-leader bleed should trip incremental guard"
+        );
+        assert!(
+            idx <= 2,
+            "should fire no later than after the [User]\\n delta, fired at {idx}"
+        );
+    }
+
+    #[test]
+    fn cascade_leak_crlf_and_tab_after_marker() {
+        assert!(is_cascade_leak(
+            "NO_REPLY\n[User]\r\nfake question via CRLF"
+        ));
+        assert!(is_cascade_leak("NO_REPLY\n[Stranger]\tcontent after tab"));
+    }
+
+    #[test]
+    fn lowercase_marker_not_detected_by_design() {
+        assert!(!is_cascade_leak("NO_REPLY\n[user]\nfake question"));
+        assert!(!is_cascade_leak("NO_REPLY\n[stranger]\nciao"));
     }
 }
