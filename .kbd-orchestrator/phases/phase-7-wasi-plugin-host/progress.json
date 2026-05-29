@@ -31,9 +31,18 @@
   ],
   "critical_path": "C-001 -> C-003 -> C-004 -> C-005 -> C-006 -> C-008",
   "changes_total": 8,
-  "changes_completed": 0,
-  "active_change": "C-001",
+  "changes_completed": 1,
+  "active_change": "C-002",
   "execution_started_at": "2026-05-28T00:00:00Z",
+  "changes": {
+    "C-001": {
+      "status": "DONE",
+      "files_touched": 4,
+      "completed_at": "2026-05-28T00:00:00Z",
+      "qa_skip_reason": "< 3 files modified in behaviour-bearing code; dep addition + smoke test",
+      "verification": "cargo test -p librefang-runtime --lib wasi_version_alias_smoke: PASSED 17.36s; clippy -D warnings clean; cargo check --workspace --lib exit 0; D4 confirmed — wasmtime-wasi 45.0.0 version-aliases wasi:cli/environment@0.2.0→0.2.6 correctly"
+    }
+  },
   "scope_in": [
     "wire wasmtime-wasi into sandbox_component.rs (async, deny-by-default WasiCtx, always-on linker)",
     "attach ResourceLimiter to Component stores (parity with execute())",

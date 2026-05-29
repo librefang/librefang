@@ -206,6 +206,11 @@ wasmtime = { version = "45", features = [
 # (no preopens / no env / no stdio inherit / no network) per phase-7
 # assessment.md D2.
 wasmtime-wasi = "=45.0.0"
+# WASI HTTP bindings — required by the component linker so StarlingMonkey
+# (jco componentize) components that import `wasi:http/types@0.2.10` find
+# the interface bound at instantiation time. Without this, js-kv-counter
+# fails to instantiate even though the JS source never uses HTTP.
+wasmtime-wasi-http = "=45.0.0"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }

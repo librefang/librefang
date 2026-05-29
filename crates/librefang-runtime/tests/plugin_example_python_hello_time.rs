@@ -6,10 +6,8 @@
 //!
 //! Size note: componentize-py bundles CPython (~18 MB). Wasmtime JIT-compiles
 //! this on first load; the test may take 10–30 s depending on the machine.
-//! It is marked `#[ignore]` in CI environments where the pre-built binary
-//! is not present (the plugin is only rebuilt with TINYGOROOT set), but
-//! runs locally when `examples/plugins/python-hello-time/pre-built/plugin.wasm`
-//! exists.
+//! The pre-built artefact is committed; if absent, the test skips with a
+//! message rather than failing.
 
 #[path = "support/plugin_example_harness.rs"]
 #[allow(dead_code)]
@@ -20,12 +18,7 @@ use librefang_runtime::sandbox::WasmSandbox;
 use librefang_runtime::sandbox_component::ComponentExecuteOptions;
 use librefang_skills::HostCapability;
 
-// C-007 known-skip: componentize-py embeds CPython, whose init reads
-// the process env via `wasi:cli/environment@0.2.0`. Our Phase-6 linker
-// only binds `librefang:plugin/*` — wiring `wasmtime-wasi` is a Phase-7
-// candidate. Drop the `#[ignore]` once that lands.
 #[tokio::test]
-#[ignore = "requires wasi:cli/environment@0.2.0 host import (CPython init — Phase-7)"]
 async fn python_hello_time_returns_ok() {
     // Skip if the pre-built wasm is absent (e.g., componentize-py not installed).
     let wasm_path =
