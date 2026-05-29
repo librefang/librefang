@@ -476,6 +476,7 @@ impl ContextEngine for SidecarContextEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_types::message::{ContentBlock, MessageContent};
 
     /// Minimal inner engine for tests: identity `assemble`, empty `ingest`,
     /// no-op `after_turn`/`bootstrap`. Avoids constructing a real
@@ -638,5 +639,99 @@ while True:
             .await
             .unwrap();
         assert_eq!(messages.len(), 1);
+    }
+
+    /// Build an engine whose sidecar runs `body` (a Python script), with the
+    /// given per-request timeout. `StubEngine` is the inner/fallback engine and
+    /// leaves the window untouched, so a fallback is observable as "messages
+    /// unchanged".
+    fn spawn_with(py: &str, dir: &std::path::Path, body: &str, timeout_secs: u64) -> SidecarContextEngine {
+        let script = dir.join("s.py");
+        std::fs::write(&script, body).unwrap();
+        SidecarContextEngine::spawn(
+            Box::new(StubEngine),
+            &ContextEngineSidecarConfig {
+                command: py.to_string(),
+                args: vec![script.to_str().unwrap().to_string()],
+                request_timeout_secs: timeout_secs,
+            },
+        )
+    }
+
+    /// `assemble` falls back to the inner engine (window unchanged) for every
+    /// non-happy sidecar behaviour: timeout, error reply, and malformed reply.
+    #[tokio::test]
+    async fn assemble_falls_back_on_timeout_error_and_malformed() {
+        let Some(py) = python3() else {
+            eprintln!("skipping: no python3 on this runner");
+            return;
+        };
+
+        // (a) Timeout: reads the request but never replies. 1s timeout keeps the
+        //     test quick; the call must time out and fall back.
+        let dir_t = tempfile::tempdir().unwrap();
+        let slow = "import sys, time\nwhile True:\n    if not sys.stdin.readline():\n        break\n    time.sleep(30)\n";
+        let engine = spawn_with(py, dir_t.path(), slow, 1);
+        let mut m = vec![Message::user("hi")];
+        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        assert_eq!(m.len(), 1, "timeout must fall back to inner (window unchanged)");
+
+        // (b) Error reply: sidecar returns {"id":N,"error":"boom"}.
+        let dir_e = tempfile::tempdir().unwrap();
+        let err = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    sys.stdout.write(json.dumps({\"id\": rid, \"error\": \"boom\"}) + \"\\n\")\n    sys.stdout.flush()\n";
+        let engine = spawn_with(py, dir_e.path(), err, 5);
+        let mut m = vec![Message::user("hi")];
+        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        assert_eq!(m.len(), 1, "error reply must fall back");
+
+        // (c) Malformed reply: `messages` is a string, not an array.
+        let dir_m = tempfile::tempdir().unwrap();
+        let bad = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    sys.stdout.write(json.dumps({\"id\": rid, \"ok\": {\"messages\": \"not-an-array\"}}) + \"\\n\")\n    sys.stdout.flush()\n";
+        let engine = spawn_with(py, dir_m.path(), bad, 5);
+        let mut m = vec![Message::user("hi")];
+        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        assert_eq!(m.len(), 1, "malformed reply must fall back");
+    }
+
+    /// A sidecar that exits immediately: spawn succeeds, but the transport is
+    /// dead, so calls fall back rather than hang.
+    #[tokio::test]
+    async fn assemble_falls_back_when_sidecar_exits_immediately() {
+        let Some(py) = python3() else {
+            eprintln!("skipping: no python3 on this runner");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = spawn_with(py, dir.path(), "import sys\nsys.exit(0)\n", 5);
+        let mut m = vec![Message::user("hi")];
+        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        assert_eq!(m.len(), 1, "dead sidecar must fall back to inner");
+    }
+
+    /// The sidecar window is run through validate_and_repair before it reaches
+    /// the provider: an orphan tool_result (its tool_use trimmed away by the
+    /// sidecar) must be dropped rather than handed to the LLM (#5849 review).
+    #[tokio::test]
+    async fn assemble_repairs_orphan_tool_result_from_sidecar() {
+        let Some(py) = python3() else {
+            eprintln!("skipping: no python3 on this runner");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // Sidecar returns a window that is ONLY a tool_result (the matching
+        // tool_use was dropped) — a malformed sequence a naive window can emit.
+        let body = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    win = [{\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"orphan\", \"content\": \"x\"}]}]\n    sys.stdout.write(json.dumps({\"id\": rid, \"ok\": {\"messages\": win, \"recovery\": \"None\"}}) + \"\\n\")\n    sys.stdout.flush()\n";
+        let engine = spawn_with(py, dir.path(), body, 5);
+        let mut m = vec![Message::user("first")];
+        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        // The orphan tool_result must not survive into the prompt.
+        let has_orphan = m.iter().any(|msg| {
+            if let MessageContent::Blocks(blocks) = &msg.content {
+                blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan"))
+            } else {
+                false
+            }
+        });
+        assert!(!has_orphan, "validate_and_repair must drop the orphan tool_result");
     }
 }

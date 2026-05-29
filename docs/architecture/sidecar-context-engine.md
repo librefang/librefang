@@ -82,7 +82,8 @@ Note the two stdio pitfalls it avoids: read with `sys.stdin.readline()` (not `fo
 
 - **No auto-respawn.** A crashed sidecar degrades to the built-in engine until the daemon restarts. The exit is logged at WARN and counted (`context_engine_sidecar_exited`) so it is visible rather than silent.
 - **Per-turn serialization cost.** `assemble` ships the whole message window (and tool definitions) to the sidecar and reads a rewritten window back, each turn. This is the price of letting an external process decide the window; for very large histories it is a real per-turn cost. A delta/keep-drop protocol is a possible future optimization.
-- **Unbounded reply line.** The reader reads a full line before parsing, so a buggy sidecar that emits output without newlines can grow memory. The sidecar is trusted operator config, but a defensive line-length cap is a reasonable hardening follow-up (the channels sidecar has the same shape).
+- **Reply-line size cap.** The reader caps a single newline-delimited reply at 16 MiB; a buggy sidecar that streams without ever emitting `\n` trips the cap, the transport is dropped, and calls fall back to the built-in engine rather than growing memory without bound.
+- **Deterministic ordering is the sidecar's responsibility.** The sidecar fully controls the order of the `assemble` window and the `ingest` memories it returns, both of which reach the LLM prompt. The built-in engine re-runs `validate_and_repair` on the sidecar's window (so a malformed `tool_use`/`tool_result` pairing or a missing leading-user turn can never reach the provider), but it does **not** re-sort otherwise-valid content. A sidecar that emits non-deterministic ordering across identical inputs will silently invalidate provider prompt caches (refs #3298) — emit a stable order.
 
 ## What stays in Rust (the substrate line)
 
