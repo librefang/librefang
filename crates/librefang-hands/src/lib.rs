@@ -315,7 +315,7 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 base_url: legacy.base_url,
                 context_window: None,
                 max_output_tokens: None,
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             },
             autonomous: legacy.max_iterations.map(|max_iter| AutonomousConfig {
                 max_iterations: max_iter,

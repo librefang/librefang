@@ -51,7 +51,7 @@ fn boot(users: Vec<UserConfig>, groups: Vec<ToolGroup>) -> std::sync::Arc<LibreF
             api_key_env: "RBAC_M3_TEST_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 60,
-            extra_params: HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()

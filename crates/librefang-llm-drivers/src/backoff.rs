@@ -151,6 +151,34 @@ pub fn tool_use_retry_delay(attempt: u32) -> Duration {
     )
 }
 
+/// Decide whether a `reqwest` transport-layer error (returned by
+/// `RequestBuilder::send().await` *before* any HTTP status was received) is
+/// safe to retry.
+///
+/// Before #10 every driver returned these errors immediately via `?`, so a
+/// single connection-refused / TLS hiccup / read-timeout on the only
+/// configured provider surfaced as a hard turn failure — the in-driver retry
+/// loop only ever covered server-side 429 / 529 / 503 statuses, never the
+/// transport layer. A transport `send()` failure means the server never
+/// accepted (let alone processed) the request, so re-issuing it cannot
+/// duplicate a completed generation; these are the canonically retryable
+/// failure class.
+///
+/// We classify retryable via reqwest's structured predicates first
+/// (`is_timeout` / `is_connect` / `is_request`), then fall back to the
+/// shared substring classifier ([`crate::llm_errors::is_transient`]) so
+/// TLS-record-layer alerts and other transient network strings that reqwest
+/// surfaces as a generic error are still caught. Non-transient transport
+/// errors (e.g. an invalid URL built from misconfiguration, or a `Builder`
+/// error) return `false` and propagate immediately rather than burning
+/// retries on a deterministically-failing request.
+pub fn transport_error_is_retryable(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() || err.is_request() {
+        return true;
+    }
+    crate::llm_errors::is_transient(&err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +317,56 @@ mod tests {
         let d = jittered_backoff(1, base, max, f64::INFINITY, Duration::ZERO);
         // attempt=1 → exp_delay = base * 2^0 = 2s, no jitter added.
         assert_eq!(d, Duration::from_secs(2));
+    }
+
+    // -- #10: transport-layer error retry classification ------------------
+
+    // A real connection-refused error (port 1 on loopback is never listening)
+    // must be classified as retryable. Before #10 this class of error was
+    // returned immediately via `?` and never reached the retry loop, so a
+    // single-provider deployment failed hard on one network hiccup.
+    #[tokio::test]
+    async fn connection_refused_is_retryable() {
+        let client = reqwest::Client::new();
+        let err = client
+            .get("http://127.0.0.1:1/")
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("connecting to a closed loopback port must fail");
+        assert!(
+            super::transport_error_is_retryable(&err),
+            "connection-refused / connect error must be retryable, got: {err:?}"
+        );
+    }
+
+    // A client-side read timeout (server accepts but never answers) is a
+    // transport-layer transient and must be retryable too.
+    #[tokio::test]
+    async fn read_timeout_is_retryable() {
+        // Bind a listener that accepts the connection but never writes a
+        // response, forcing reqwest's per-request timeout to fire.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept-and-hold task so the connect() succeeds and we time out on read.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock); // keep the socket open, never respond
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let err = client
+            .get(format!("http://{addr}/"))
+            .timeout(Duration::from_millis(150))
+            .send()
+            .await
+            .expect_err("a server that never responds must trigger a read timeout");
+        assert!(err.is_timeout(), "expected a timeout error, got: {err:?}");
+        assert!(
+            super::transport_error_is_retryable(&err),
+            "read-timeout transport error must be retryable, got: {err:?}"
+        );
     }
 }

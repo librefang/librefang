@@ -39,6 +39,10 @@ pub struct GeminiDriver {
     /// trace headers are emitted regardless of whether `CompletionRequest`'s
     /// caller-id fields are populated.
     emit_caller_trace_headers: bool,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl GeminiDriver {
@@ -78,7 +82,16 @@ impl GeminiDriver {
             client,
             request_timeout_secs,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         }
+    }
+
+    /// Override the max in-driver retry count (#10). Default is 3 (four total
+    /// attempts). Pass 0 to disable in-driver retries and rely on the outer
+    /// `FallbackChain`. Sourced from `DriverConfig.max_retries`.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
     }
 
     /// Override the trace-header emission flag (mirrors
@@ -887,7 +900,8 @@ impl LlmDriver for GeminiDriver {
         let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
         crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "Gemini")?;
 
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = format!(
                 "{}/v1beta/models/{}:generateContent?key={}",
@@ -916,10 +930,25 @@ impl LlmDriver for GeminiDriver {
                 .or(self.request_timeout_secs)
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as
+            // 429/503 instead of returning immediately via `?`.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
 
@@ -1024,7 +1053,8 @@ impl LlmDriver for GeminiDriver {
             "Gemini streaming",
         )?;
 
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = format!(
                 "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
@@ -1054,10 +1084,25 @@ impl LlmDriver for GeminiDriver {
                 .or(self.request_timeout_secs)
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as
+            // 429/503 instead of returning immediately via `?`.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
 
