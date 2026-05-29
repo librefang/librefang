@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/librefang-types",
+    "crates/librefang-subprocess",
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",

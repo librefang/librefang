@@ -108,26 +108,68 @@ pub fn init_proactive_memory_full_with_extractor(
         return None;
     }
 
-    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) =
-        if let Some((driver, model)) = llm {
-            // Hold two handles to the same extractor: one as the concrete
-            // type (so the kernel can install its weak self-ref on it
-            // later), one as the trait object (so the store can invoke it
-            // via `MemoryExtractor`).
-            let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
-                driver,
-                model,
-                prompt_caching,
-            ));
-            let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
-                Arc::clone(&extractor_concrete) as _;
-            (
-                ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
-                Some(extractor_concrete),
-            )
-        } else {
-            (ProactiveMemoryStore::new(memory, config), None)
-        };
+    // A configured-but-commandless [extractor_sidecar] table is a
+    // misconfiguration: spawning "" would fail on every turn and silently
+    // memorize nothing. Warn and fall through to the built-in path instead.
+    if let Some(s) = &config.extractor_sidecar {
+        if s.command.trim().is_empty() {
+            tracing::warn!(
+                "Proactive memory: [extractor_sidecar] has no command; ignoring it \
+                 and using the built-in extractor"
+            );
+        }
+    }
+    let sidecar_cfg = config
+        .extractor_sidecar
+        .clone()
+        .filter(|s| !s.command.trim().is_empty());
+
+    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) = if let Some(sidecar) =
+        sidecar_cfg
+    {
+        // An out-of-process extractor takes precedence over the built-in
+        // LLM/rule-based path. There is no concrete `LlmMemoryExtractor` to
+        // return (the sidecar needs no kernel handle), so the second tuple
+        // element is `None`. The sidecar bypasses the built-in LLM extractor
+        // wholesale, including any per-agent `extraction_model` override — warn
+        // so an operator who set both isn't surprised which one wins.
+        if llm.is_some() {
+            tracing::warn!(
+                "Proactive memory: extractor_sidecar is configured, so the built-in LLM \
+                 extractor and any per-agent extraction_model override are bypassed"
+            );
+        }
+        tracing::info!(command = %sidecar.command, "Proactive memory: out-of-process extractor");
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> = Arc::new(
+            crate::proactive_memory_sidecar::SidecarMemoryExtractor::new(
+                sidecar.command,
+                sidecar.args,
+                sidecar.request_timeout_secs,
+            ),
+        );
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            None,
+        )
+    } else if let Some((driver, model)) = llm {
+        // Hold two handles to the same extractor: one as the concrete
+        // type (so the kernel can install its weak self-ref on it
+        // later), one as the trait object (so the store can invoke it
+        // via `MemoryExtractor`).
+        let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
+            driver,
+            model,
+            prompt_caching,
+        ));
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
+            Arc::clone(&extractor_concrete) as _;
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            Some(extractor_concrete),
+        )
+    } else {
+        (ProactiveMemoryStore::new(memory, config), None)
+    };
 
     if let Some(emb) = embedding {
         store = store.with_embedding(Arc::new(EmbeddingBridge(emb)));
@@ -1085,6 +1127,75 @@ mod tests {
         let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
         let store = init_proactive_memory_with_defaults(Arc::new(substrate));
         assert!(store.is_some());
+    }
+
+    #[test]
+    fn empty_sidecar_command_is_ignored_and_falls_through_to_llm() {
+        // A `[extractor_sidecar]` table with no (or whitespace-only) command is
+        // a misconfiguration; it must be ignored rather than spawning "" on
+        // every turn. With an LLM present, the built-in LLM extractor is then
+        // selected — proven by the concrete `Some(extractor)` second element
+        // (the sidecar branch returns `None`).
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_memorize: true,
+            extractor_sidecar: Some(librefang_types::memory::MemoryExtractorSidecarConfig {
+                command: "   ".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)> = Some((
+            Arc::new(CannedLlmDriver {
+                response: "[]".into(),
+            }),
+            "model".into(),
+        ));
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
+        assert!(
+            llm_extractor.is_some(),
+            "commandless sidecar must fall through to the LLM extractor"
+        );
+    }
+
+    #[test]
+    fn configured_sidecar_command_takes_precedence_over_llm() {
+        // A real command means the sidecar wins and no concrete LLM extractor
+        // is returned (`None`), even when an LLM driver is also supplied.
+        let substrate = librefang_memory::MemorySubstrate::open_in_memory(0.1).unwrap();
+        let config = ProactiveMemoryConfig {
+            auto_memorize: true,
+            extractor_sidecar: Some(librefang_types::memory::MemoryExtractorSidecarConfig {
+                command: "/nonexistent/extractor".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)> = Some((
+            Arc::new(CannedLlmDriver {
+                response: "[]".into(),
+            }),
+            "model".into(),
+        ));
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
+        assert!(
+            llm_extractor.is_none(),
+            "a configured sidecar command must take precedence over the LLM extractor"
+        );
     }
 
     #[test]
