@@ -260,6 +260,43 @@ pub struct ProactiveMemoryConfig {
     /// purely-text similarity score might miss.
     #[serde(default = "default_update_threshold_cross_category")]
     pub update_threshold_cross_category: f32,
+    /// Out-of-process memory extractor. When set, extraction is delegated to
+    /// the configured subprocess (which may use its own LLM, a local model,
+    /// embeddings, etc.) instead of the built-in LLM/rule-based extractor; the
+    /// store and the dedup decision stay in Rust. Takes precedence over
+    /// `extraction_model`.
+    #[serde(default)]
+    pub extractor_sidecar: Option<MemoryExtractorSidecarConfig>,
+}
+
+/// Configuration for an out-of-process memory extractor (see
+/// [`ProactiveMemoryConfig::extractor_sidecar`]).
+///
+/// ```toml
+/// [proactive_memory.extractor_sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/memory/extract.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MemoryExtractorSidecarConfig {
+    /// Executable to launch (resolved via `PATH`).
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-extraction wall-clock timeout. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for MemoryExtractorSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -307,6 +344,7 @@ impl Default for ProactiveMemoryConfig {
             format_context_max_chars: default_format_context_max_chars(),
             update_threshold_same_category: default_update_threshold_same_category(),
             update_threshold_cross_category: default_update_threshold_cross_category(),
+            extractor_sidecar: None,
         }
     }
 }

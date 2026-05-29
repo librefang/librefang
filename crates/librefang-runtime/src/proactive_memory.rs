@@ -108,26 +108,44 @@ pub fn init_proactive_memory_full_with_extractor(
         return None;
     }
 
-    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) =
-        if let Some((driver, model)) = llm {
-            // Hold two handles to the same extractor: one as the concrete
-            // type (so the kernel can install its weak self-ref on it
-            // later), one as the trait object (so the store can invoke it
-            // via `MemoryExtractor`).
-            let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
-                driver,
-                model,
-                prompt_caching,
-            ));
-            let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
-                Arc::clone(&extractor_concrete) as _;
-            (
-                ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
-                Some(extractor_concrete),
-            )
-        } else {
-            (ProactiveMemoryStore::new(memory, config), None)
-        };
+    let (mut store, llm_extractor): (_, Option<Arc<LlmMemoryExtractor>>) = if let Some(sidecar) =
+        config.extractor_sidecar.clone()
+    {
+        // An out-of-process extractor takes precedence over the built-in
+        // LLM/rule-based path. There is no concrete `LlmMemoryExtractor` to
+        // return (the sidecar needs no kernel handle), so the second tuple
+        // element is `None`.
+        tracing::info!(command = %sidecar.command, "Proactive memory: out-of-process extractor");
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> = Arc::new(
+            crate::proactive_memory_sidecar::SidecarMemoryExtractor::new(
+                sidecar.command,
+                sidecar.args,
+                sidecar.request_timeout_secs,
+            ),
+        );
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            None,
+        )
+    } else if let Some((driver, model)) = llm {
+        // Hold two handles to the same extractor: one as the concrete
+        // type (so the kernel can install its weak self-ref on it
+        // later), one as the trait object (so the store can invoke it
+        // via `MemoryExtractor`).
+        let extractor_concrete = Arc::new(LlmMemoryExtractor::with_prompt_caching(
+            driver,
+            model,
+            prompt_caching,
+        ));
+        let extractor_dyn: Arc<dyn librefang_types::memory::MemoryExtractor> =
+            Arc::clone(&extractor_concrete) as _;
+        (
+            ProactiveMemoryStore::with_extractor(memory, config, extractor_dyn),
+            Some(extractor_concrete),
+        )
+    } else {
+        (ProactiveMemoryStore::new(memory, config), None)
+    };
 
     if let Some(emb) = embedding {
         store = store.with_embedding(Arc::new(EmbeddingBridge(emb)));
