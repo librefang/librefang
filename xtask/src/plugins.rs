@@ -180,10 +180,62 @@ fn enforce_size_budget(workspace_root: &Path, name: &str) -> XtaskResult<()> {
 /// Requirements on $PATH: `tinygo`, `wasm-tools`.
 /// TINYGOROOT env var must point at the TinyGo installation root if tinygo
 /// can't auto-detect it (e.g. /tmp/tinygo).
+/// Locate the WASI Preview 1 reactor adapter from the cargo registry.
+///
+/// The adapter is shipped by `wasi-preview1-component-adapter-provider@45.0.0`
+/// (a dev-dep of xtask) and is downloaded into ~/.cargo/registry on
+/// `cargo fetch`. By reading it from the registry rather than committing the
+/// binary, the adapter version automatically tracks the workspace
+/// `wasmtime = "45"` pin.
+///
+/// Resolution order:
+///   1. `CARGO_HOME` env var (CI / custom install paths)
+///   2. `~/.cargo` (default)
+///
+/// The exact crate name + version is hard-coded here — update when bumping wasmtime.
+fn wasi_reactor_adapter() -> XtaskResult<PathBuf> {
+    const CRATE: &str = "wasi-preview1-component-adapter-provider-45.0.0";
+    const ADAPTER: &str = "wasi_snapshot_preview1.reactor.wasm";
+
+    let cargo_home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_next::home_dir()
+                .expect("could not determine home dir")
+                .join(".cargo")
+        });
+
+    // The registry layout is ~/.cargo/registry/src/<hash>/<crate>/artefacts/<adapter>
+    // There may be multiple hash dirs (different registries); scan all.
+    let registry_src = cargo_home.join("registry/src");
+    if registry_src.exists() {
+        for hash_dir in std::fs::read_dir(&registry_src)
+            .map_err(|e| format!("read_dir {}: {e}", registry_src.display()))?
+            .flatten()
+        {
+            let candidate = hash_dir.path().join(CRATE).join("artefacts").join(ADAPTER);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(format!(
+        "WASI reactor adapter not found in cargo registry ({registry_src:?}).\n\
+         Run `cargo fetch` first, or check that `wasi-preview1-component-adapter-provider@45.0.0`\n\
+         is listed as a [dev-dependencies] of xtask/Cargo.toml.\n\
+         Expected path: <CARGO_HOME>/registry/src/*/{CRATE}/artefacts/{ADAPTER}"
+    )
+    .into())
+}
+
 fn build_go_env_greet(workspace_root: &Path) -> XtaskResult<()> {
     let dir = workspace_root.join("examples/plugins/go-env-greet");
     let wit = workspace_root.join("crates/librefang-skills/wit");
-    let adapter = dir.join("wasi-adapter/wasi_snapshot_preview1.reactor.wasm");
+    // Adapter resolved from the cargo registry (Phase-8 C-002).
+    // The hard-coded wasi-adapter/ directory is no longer used; the adapter is
+    // fetched at build time from `wasi-preview1-component-adapter-provider@45.0.0`.
+    let adapter = wasi_reactor_adapter()?;
     let dst = dir.join("pre-built/plugin.wasm");
     std::fs::create_dir_all(dst.parent().unwrap())
         .map_err(|e| format!("mkdir {}: {e}", dst.parent().unwrap().display()))?;
@@ -203,6 +255,12 @@ fn build_go_env_greet(workspace_root: &Path) -> XtaskResult<()> {
     // With `-buildmode=c-shared`, TinyGo generates `_initialize` (WASI
     // reactor semantics) — the adapter calls it during component instantiation,
     // the Go runtime initialises, and `run()` works as expected.
+    // Phase-8 C-002: also pass -scheduler=none -gc=leaking.
+    // -scheduler=none: no goroutine/asyncify overhead; our plugin is single-threaded.
+    // -gc=leaking: simplest allocator; cabi_realloc uses make() which delegates to
+    //   the leaking heap. make() is safe here because the v45 reactor adapter
+    //   initialises its State LAZILY (on first WASI call), which happens during
+    //   initRand() — after initHeap() has already run inside wasmEntryReactor.
     let core_wasm = std::env::temp_dir().join("go-env-greet-core.wasm");
     let status = Command::new(&tinygo_bin)
         .args([
@@ -210,6 +268,8 @@ fn build_go_env_greet(workspace_root: &Path) -> XtaskResult<()> {
             "-target",
             "wasip1",
             "-buildmode=c-shared",
+            "-scheduler=none",
+            "-gc=leaking",
             "-o",
             core_wasm.to_str().unwrap(),
             ".",
@@ -266,18 +326,30 @@ fn build_go_env_greet(workspace_root: &Path) -> XtaskResult<()> {
     Ok(())
 }
 
-/// C-004: js-kv-counter — jco componentize (StarlingMonkey) → wasm32-wasip2.
+/// C-004: js-kv-counter — componentize-js@0.19.3 via npx → WASI 0.2.3 component.
 ///
-/// `jco componentize app.js --wit <wit> --world-name plugin -o <dst>`
+/// Phase-8 C-003 discovery: `jco 1.20.0` bundles `componentize-js@0.21.0` whose
+/// embedded StarlingMonkey targets WASI 0.2.10. wasmtime-wasi 45 serves WASI 0.2.6;
+/// the version aliasing resolves link-time imports but StarlingMonkey's JIT has
+/// hard-coded WASI 0.2.10 ABI offsets that differ from 0.2.6 layouts → runtime trap.
+///
+/// Fix: use `@bytecodealliance/componentize-js@0.19.3` via npx. This version's
+/// StarlingMonkey targets WASI 0.2.3, which wasmtime-wasi 45 aliases correctly at
+/// both link time and runtime. The resulting component is ~11.7 MB (vs 12.6 MB for
+/// the 0.21.0 build).
+///
+/// NOTE: jco must still be on PATH for other xtask commands (jco print, jco wit, etc.)
+/// but `jco componentize` is explicitly NOT used for js-kv-counter rebuilds.
 fn build_js_kv_counter(workspace_root: &Path) -> XtaskResult<()> {
     let dir = workspace_root.join("examples/plugins/js-kv-counter");
     let wit = workspace_root.join("crates/librefang-skills/wit");
     let dst = dir.join("pre-built/plugin.wasm");
     std::fs::create_dir_all(dst.parent().unwrap())
         .map_err(|e| format!("mkdir {}: {e}", dst.parent().unwrap().display()))?;
-    let status = Command::new("jco")
+    let status = Command::new("npx")
         .args([
-            "componentize",
+            "--yes",
+            "@bytecodealliance/componentize-js@0.19.3",
             "app.js",
             "--wit",
             wit.to_str().unwrap(),
@@ -288,9 +360,14 @@ fn build_js_kv_counter(workspace_root: &Path) -> XtaskResult<()> {
         .arg(&dst)
         .current_dir(&dir)
         .status()
-        .map_err(|e| format!("spawn jco in {}: {e}", dir.display()))?;
+        .map_err(|e| {
+            format!(
+                "spawn npx @bytecodealliance/componentize-js@0.19.3 in {}: {e}",
+                dir.display()
+            )
+        })?;
     if !status.success() {
-        return Err(format!("jco componentize failed in {}", dir.display()).into());
+        return Err(format!("componentize-js@0.19.3 failed in {}", dir.display()).into());
     }
     Ok(())
 }

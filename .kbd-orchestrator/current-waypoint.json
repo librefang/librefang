@@ -1,13 +1,13 @@
 {
-  "active_phase": null,
+  "active_phase": "phase-8-fixture-rebuilds",
   "previous_phase": "phase-7-wasi-plugin-host",
   "active_change": null,
   "last_updated": "2026-05-29T00:00:00Z",
-  "last_updated_by": "kbd-reflect",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
-  "phase_progress": "Phase 7 closed: 8/8 changes DONE; reflection.md written. 3/5 plugin_example tests active-green; 2 Phase-8 fixture rebuilds needed (go-env-greet: wasmtime v45 reactor adapter; js-kv-counter: jco WASI 0.2.6-compatible rebuild). PR #59 open.",
+  "phase_progress": "Phase 8 planned: D1..D4 decisions baked. 5 changes ordered. Critical path: C-002 + C-003 (parallel fixture rebuilds) → C-004 (remove #[ignore] markers). C-001 (surrealdb-core pin) and C-005 (KernelHandleStub) are independent.",
   "next_action": {
-    "command": "/kbd-new-phase",
-    "description": "Merge PR #59. Phase-8 priority list: (1) wasmtime v45 reactor adapter for go-env-greet, (2) jco rebuild for js-kv-counter, (3) surrealdb-core =3.0.5 workspace pin, (4) KernelHandleStub promotion, (5) net+agent examples."
+    "command": "/kbd-execute C-001",
+    "description": "surrealdb-core =3.0.5 workspace pin (XS, independent, do first)"
   }
 }

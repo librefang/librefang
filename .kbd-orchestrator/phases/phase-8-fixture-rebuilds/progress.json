@@ -1,0 +1,40 @@
+{
+  "phase": "phase-8-fixture-rebuilds",
+  "status": "planned",
+  "assessment_complete": true,
+  "assessment_completed_at": "2026-05-29T00:00:00Z",
+  "assessed_by": "claude-code /kbd-assess",
+  "plan_complete": true,
+  "plan_completed_at": "2026-05-29T00:00:00Z",
+  "planned_by": "claude-code /kbd-plan",
+  "decisions_baked": {
+    "D1_adapter_source": "wasi-preview1-component-adapter-provider@45.0.0 from cargo registry (no committed binary)",
+    "D2_js_rebuild": "npx @bytecodealliance/componentize-js@0.19.4 (verify-first: confirm wasi:io/poll@0.2.6 in rebuilt component)",
+    "D3_surrealdb_pin": "surrealdb-core = { version = '=3.0.5', default-features = false } in [workspace.dependencies]",
+    "D4_stub_target": "librefang-kernel-handle with feature=test-stub"
+  },
+  "ordered_changes": [
+    {"id": "C-001", "title": "surrealdb-core =3.0.5 workspace pin", "depends_on": [], "effort": "XS"},
+    {"id": "C-002", "title": "go-env-greet fixture rebuild — correct WASI P1 reactor adapter", "depends_on": [], "effort": "M"},
+    {"id": "C-003", "title": "js-kv-counter fixture rebuild — componentize-js@0.19.4 (WASI 0.2.6)", "depends_on": [], "effort": "M"},
+    {"id": "C-004", "title": "Remove #[ignore] markers + verify 5/5 plugin_example_* green", "depends_on": ["C-002", "C-003"], "effort": "S-M"},
+    {"id": "C-005", "title": "KernelHandleStub promotion to librefang-kernel-handle (feature=test-stub)", "depends_on": [], "effort": "M"}
+  ],
+  "critical_path": "C-002 + C-003 (parallel) → C-004",
+  "changes_total": 5,
+  "changes_completed": 0,
+  "active_change": "C-001",
+  "execution_started_at": "2026-05-29T00:00:00Z",
+  "execute_complete": false,
+  "reflect_complete": false,
+  "decisions_required": [
+    "D1: adapter source — cargo wasi-preview1-component-adapter-provider@45.0.0 (recommended) vs committed binary",
+    "D2: js-kv-counter rebuild — npx componentize-js@0.19.4 (recommended) vs global jco downgrade vs wasmtime upgrade",
+    "D3: surrealdb-core =3.0.5 explicit workspace pin (recommended)",
+    "D4: KernelHandleStub target — librefang-kernel-handle feature=test-stub (recommended) vs librefang-testing"
+  ],
+  "next_action": {
+    "command": "/kbd-plan phase-8-fixture-rebuilds",
+    "description": "Bake D1..D4 decisions and emit ordered change list"
+  }
+}
