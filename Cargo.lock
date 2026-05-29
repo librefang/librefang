@@ -3863,6 +3863,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs-next"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
+dependencies = [
+ "cfg-if",
+ "dirs-sys-next",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8135,6 +8145,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "surrealdb",
+ "surrealdb-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -16738,6 +16749,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasi-preview1-component-adapter-provider"
+version = "45.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f912a3f8ead075800ffaaa13cb978bbcaa359c427688a753b10cd2f1e01fdf28"
+
+[[package]]
 name = "wasip2"
 version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18671,12 +18688,14 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "dirs-next",
  "librefang-import",
  "regex",
  "serde_json",
  "sha2 0.10.9",
  "sysinfo 0.39.2",
  "toml_edit 0.25.12+spec-1.1.0",
+ "wasi-preview1-component-adapter-provider",
 ]
 
 [[package]]

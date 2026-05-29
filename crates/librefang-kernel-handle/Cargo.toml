@@ -13,6 +13,14 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# Enable the `KernelHandleStub` in `librefang_kernel_handle::test_stub`.
+# Promoted from `crates/librefang-runtime/tests/support/plugin_example_harness.rs`
+# (Phase-8 C-005). The stub implements all 19 KernelHandle role traits with an
+# in-memory KV store for MemoryAccess; all other traits use default no-op impls.
+# Use in integration tests: `librefang-kernel-handle = { features = ["test-stub"] }`.
+test-stub = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 

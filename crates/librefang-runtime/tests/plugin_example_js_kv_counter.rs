@@ -38,18 +38,11 @@ fn kv_sandbox_config() -> SandboxConfig {
     }
 }
 
-// Phase-7 status: the link-time `librefang:plugin/fs` issue (Phase-6 cause) is
-// fixed by C-005's dispatch-layer binding. The link-time `wasi:http` issue is
-// fixed by the wasmtime-wasi-http wiring (C-006 follow-on). However, StarlingMonkey
-// runtime-traps deep in its JIT engine during `run()` — likely because the
-// bundled js-kv-counter was compiled against jco 1.20 + StarlingMonkey which
-// embeds WASI 0.2.10, but wasmtime-wasi 45 serves WASI 0.2.6. The version
-// aliasing appears to work at link time but causes a data-structure mismatch
-// at runtime inside StarlingMonkey's engine. Fix: rebuild js-kv-counter with a
-// jco version whose StarlingMonkey targets WASI 0.2.6 or ≤ wasmtime-wasi 45's
-// version. Tracked as Phase-8 fixture-rebuild task.
+// Phase-8 C-003 + C-004: fixture rebuilt with componentize-js@0.19.3 (via npx)
+// whose embedded StarlingMonkey targets WASI 0.2.3 — correctly aliased by
+// wasmtime-wasi 45's 0.2.6 host at both link time and runtime. Regenerate with:
+//   cargo xtask plugins-rebuild js-kv-counter
 #[tokio::test]
-#[ignore = "js-kv-counter: StarlingMonkey WASI 0.2.10 vs wasmtime-wasi 0.2.6 runtime mismatch — Phase-8 fixture rebuild"]
 async fn js_kv_counter_increments_from_zero() {
     // Skip if the pre-built wasm is absent (jco not installed in CI).
     let wasm_path = workspace_root().join("examples/plugins/js-kv-counter/pre-built/plugin.wasm");

@@ -22,6 +22,10 @@ sha2 = { workspace = true }
 # 0.38.4 needs only rustc 1.88 and exposes the same probe API we use.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 librefang-import = { path = "../crates/librefang-import" }
+dirs-next = "2.0.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+wasi-preview1-component-adapter-provider = "45.0.0"

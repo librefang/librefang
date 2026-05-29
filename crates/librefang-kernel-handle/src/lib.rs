@@ -1767,6 +1767,12 @@ impl<T> KernelHandle for T where
 /// Prelude — glob-import this to bring `KernelHandle` plus every role trait
 /// into scope so that method calls like `kernel.send_channel_message(...)`
 /// resolve. Replaces the pre-#3746 single-trait import pattern.
+/// Canonical `KernelHandleStub` for integration tests.
+/// Enabled by `feature = "test-stub"`.
+/// See [`test_stub::KernelHandleStub`] for usage.
+#[cfg(feature = "test-stub")]
+pub mod test_stub;
+
 pub mod prelude {
     pub use super::{
         A2ARegistry, AcpFsBridge, AcpFsClient, AcpTerminalBridge, AcpTerminalClient,

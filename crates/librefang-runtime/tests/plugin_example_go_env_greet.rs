@@ -21,21 +21,13 @@ use librefang_runtime::sandbox_component::ComponentExecuteOptions;
 use librefang_skills::HostCapability;
 use librefang_types::capability::Capability;
 
-// Phase-7 known limitation: go-env-greet's pre-built plugin.wasm was compiled
-// with TinyGo wasip1 command semantics (-buildmode=default, _start only).
-// Rebuilding with -buildmode=c-shared produces _initialize, but TinyGo's
-// asyncify goroutine scheduler panics during _initialize when run via the
-// component-model sandbox (runtime.scanConservative GC fault). With
-// -scheduler=none the binary builds correctly, but the bundled WASI P1
-// reactor adapter (from wit-bindgen-cli, 94 KB) fails to bridge
-// clock_time_get during _initialize — a version mismatch vs the wasmtime v45
-// release adapter (52 KB). Requires fetching wasi_snapshot_preview1.reactor.wasm
-// from the wasmtime v45 GitHub release, then rebuilding with:
+// Phase-8 C-002 + C-004: fixture rebuilt with -buildmode=c-shared -scheduler=none
+// -gc=leaking + wasi-preview1-component-adapter-provider@45.0.0 reactor adapter.
+// The pre-built wasm now exports _initialize (reactor semantics) and cabi_realloc
+// uses make() (safe because the v45 adapter initialises its State lazily, after
+// initHeap() has run). Regenerate with:
 //   TINYGOROOT=/tmp/tinygo cargo xtask plugins-rebuild go-env-greet
-// (the xtask builder now uses -buildmode=c-shared -scheduler=none).
-// Tracked as Phase-8 fixture-rebuild task.
 #[tokio::test]
-#[ignore = "go-env-greet: TinyGo reactor adapter mismatch — Phase-8 fixture rebuild"]
 async fn go_env_greet_returns_ok_with_env_var() {
     // Skip if the pre-built wasm is absent (TinyGo not installed in CI).
     let wasm_path = workspace_root().join("examples/plugins/go-env-greet/pre-built/plugin.wasm");
