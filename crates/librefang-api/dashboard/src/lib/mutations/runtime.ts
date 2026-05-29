@@ -10,7 +10,11 @@ import {
   deleteBackup,
   deleteTaskFromQueue,
   retryTask,
+  createTask,
+  updateTaskStatus,
   cleanupSessions,
+  type CreateTaskPayload,
+  type CreateTaskResult,
 } from "../../api";
 import { runtimeKeys, sessionKeys } from "../queries/keys";
 
@@ -88,6 +92,36 @@ export function useRetryTask() {
       qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
       qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
       qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+    },
+  });
+}
+
+export function useCreateTask(
+  options?: Partial<UseMutationOptions<CreateTaskResult, Error, CreateTaskPayload>>,
+) {
+  const qc = useQueryClient();
+  return useMutation<CreateTaskResult, Error, CreateTaskPayload>({
+    ...options,
+    mutationFn: createTask,
+    onSuccess: (...args) => {
+      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      options?.onSuccess?.(...args);
+    },
+  });
+}
+
+export function useUpdateTaskStatus(
+  options?: Partial<UseMutationOptions<{ status?: string; id?: string }, Error, { id: string; status: "pending" | "cancelled" }>>,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ status?: string; id?: string }, Error, { id: string; status: "pending" | "cancelled" }>({
+    ...options,
+    mutationFn: ({ id, status }) => updateTaskStatus(id, status),
+    onSuccess: (...args) => {
+      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      options?.onSuccess?.(...args);
     },
   });
 }

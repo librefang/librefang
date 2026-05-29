@@ -187,7 +187,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `memory` | R | Memory substrate config (restarts SQLite connections). |
 | `memory_wiki` | R | Memory wiki vault (constructed once at boot). |
-| `proactive_memory` | H | mem0-style proactive memory config — updated in place. |
+| `proactive_memory` | H | mem0-style proactive memory config — updated in place. Also pushes `duplicate_threshold` into the background `ConsolidationEngine` so the kernel-wide sweep and the per-agent on-demand consolidate stay in lockstep (audit findings #5839 H5). |
 | `auto_dream` | R | Background memory-consolidation config. |
 | `session` | R | Session retention policy. |
 

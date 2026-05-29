@@ -467,6 +467,82 @@ async fn post_memory_add_returns_json_error_on_empty_store() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// No-auth loopback (default `librefang start`) — RBAC regression guard (#5839).
+// With no api_key configured, a loopback caller is a fully-trusted local
+// operator and must be attributed Owner, so memory WRITES are not 403.
+// ---------------------------------------------------------------------------
+
+fn loopback_json(method: Method, path: &str, body: serde_json::Value) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    req
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_auth_loopback_memory_write_is_not_forbidden() {
+    // Empty api_key = no auth configured (the default single-user dev setup).
+    let harness = boot_router_with_api_key("").await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(loopback_json(
+            Method::POST,
+            "/api/memory",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "remember this"}],
+                "user_id": "u1",
+                "agent_id": "a1",
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    // The #5839 regression downgraded the unattributed loopback caller to the
+    // anonymous Viewer fallback, returning 403 on every memory write. Owner
+    // attribution must prevent that. (The embedding step may still 4xx/5xx on
+    // an empty store, but it must NOT be an auth/ACL denial.)
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no-auth loopback write must be Owner-attributed, not Viewer-denied"
+    );
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "loopback no-auth must bypass");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_auth_non_loopback_memory_write_still_401() {
+    // Same no-auth config, but no ConnectInfo → treated as non-loopback. The
+    // Owner attribution must NOT leak to LAN/WAN callers: fail closed (#1034).
+    let harness = boot_router_with_api_key("").await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            // authed_json sends a Bearer, but no api_key is configured so it
+            // matches nothing; the point is the request carries no ConnectInfo.
+            Method::POST,
+            "/api/memory",
+            serde_json::json!({"messages": [], "user_id": "u1", "agent_id": "a1"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no-auth non-loopback must fail closed, not inherit Owner"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn put_memory_update_rejects_empty_content_with_400() {
     // Whitespace-only content trips the bad_request guard at the top of
