@@ -40,6 +40,10 @@ pub struct OpenAIDriver {
     /// trace headers are emitted regardless of whether `CompletionRequest`'s
     /// caller-id fields are populated.
     emit_caller_trace_headers: bool,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl OpenAIDriver {
@@ -81,6 +85,7 @@ impl OpenAIDriver {
             moonshot_file_cache: Default::default(),
             request_timeout_secs,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         }
     }
 
@@ -126,6 +131,7 @@ impl OpenAIDriver {
             moonshot_file_cache: Default::default(),
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         }
     }
 
@@ -436,6 +442,14 @@ impl OpenAIDriver {
     /// (non-trace) `extra_headers` are unaffected by this flag.
     pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
         self.emit_caller_trace_headers = emit;
+        self
+    }
+
+    /// Override the max in-driver retry count (#10). Default is 3 (four total
+    /// attempts). Pass 0 to disable in-driver retries and rely on the outer
+    /// `FallbackChain`. Sourced from `DriverConfig.max_retries`.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 }
@@ -1130,7 +1144,8 @@ impl LlmDriver for OpenAIDriver {
         let guard_key_id = self.shared_guard_key_id();
         crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "OpenAI")?;
 
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
                 Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
@@ -1177,10 +1192,26 @@ impl LlmDriver for OpenAIDriver {
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as 429
+            // instead of returning immediately via `?`, so a single network
+            // hiccup on the only configured provider no longer fails the turn.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
             if status == 429 {
@@ -1550,7 +1581,8 @@ impl LlmDriver for OpenAIDriver {
         )?;
 
         // Retry loop for the initial HTTP request
-        let max_retries = 3;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
                 Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
@@ -1595,10 +1627,26 @@ impl LlmDriver for OpenAIDriver {
                 .unwrap_or(300);
             req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
-            let resp = req_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as 429
+            // instead of returning immediately via `?`, so a single network
+            // hiccup on the only configured provider no longer fails the turn.
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let delay = standard_retry_delay(attempt + 1, std::time::Duration::ZERO);
+                        warn!(
+                            error = %e,
+                            delay_ms = delay.as_millis(),
+                            "Transport error, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
             if status == 429 {
@@ -4046,5 +4094,126 @@ mod tests {
             result_upper.is_err(),
             "IMAGE/jpeg (upper-case) must NOT be skipped — upload arm must be entered and fail with no real server"
         );
+    }
+
+    // ── #10: transport-error retry behaviour ────────────────────────────
+
+    /// Spawn a fake HTTP server that drops (resets) its first `drop_first`
+    /// connections — surfacing as a transport-layer `send()` error on the
+    /// client before any HTTP status — then serves a valid OpenAI
+    /// chat-completions 200 on the next connection. Returns the bound
+    /// `http://127.0.0.1:PORT` base URL (no `/v1` suffix; the driver appends
+    /// `/chat/completions`).
+    async fn spawn_drop_then_ok_server(drop_first: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let body = serde_json::json!({
+            "id": "cmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut dropped = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                if dropped < drop_first {
+                    dropped += 1;
+                    // Drop the socket without responding — the in-flight client
+                    // request fails at the transport layer (reset / incomplete
+                    // message), which before #10 bypassed the retry loop.
+                    drop(sock);
+                    continue;
+                }
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn transport_retry_request() -> librefang_llm_driver::CompletionRequest {
+        use librefang_types::message::{Message, MessageContent, Role};
+        librefang_llm_driver::CompletionRequest {
+            model: "test-model".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".to_string()),
+                pinned: false,
+                timestamp: None,
+            }]),
+            max_tokens: 16,
+            ..Default::default()
+        }
+    }
+
+    // The transport-layer error (a reset connection before any HTTP status)
+    // used to return immediately via `?`, never entering the retry loop. With
+    // #10 it is routed through the same attempt/backoff decision as a 429, so a
+    // single dropped connection followed by a healthy response succeeds. The
+    // OpenAI transport-retry path uses `standard_retry_delay`, so the test
+    // zero-backoff guard keeps this fast.
+    #[tokio::test]
+    async fn transport_error_is_retried_then_succeeds() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let base = spawn_drop_then_ok_server(1).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let resp = driver
+            .complete(transport_retry_request())
+            .await
+            .expect("driver must retry past one transport error and succeed");
+        assert_eq!(resp.text(), "ok");
+    }
+
+    // `max_retries = 0` disables the in-driver retry loop, so the first
+    // transport error propagates without a second attempt — proving both that
+    // the cap is honoured and that 0 is a meaningful disable value.
+    #[tokio::test]
+    async fn max_retries_zero_does_not_retry_transport_error() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        // Drop far more connections than any retry budget would cover.
+        let base = spawn_drop_then_ok_server(10).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base).with_max_retries(0);
+        let err = driver
+            .complete(transport_retry_request())
+            .await
+            .expect_err("max_retries(0) must not retry a transport error");
+        assert!(
+            matches!(err, LlmError::Http(_)),
+            "expected a transport (Http) error, got: {err:?}"
+        );
+    }
+
+    // The default driver (max_retries = 3) keeps retrying past several
+    // consecutive transport errors and still succeeds — exercising the loop
+    // body more than once, not just the first re-attempt.
+    #[tokio::test]
+    async fn default_retries_survive_multiple_transport_errors() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let base = spawn_drop_then_ok_server(3).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let resp = driver
+            .complete(transport_retry_request())
+            .await
+            .expect("default max_retries=3 must survive 3 transport errors");
+        assert_eq!(resp.text(), "ok");
     }
 }

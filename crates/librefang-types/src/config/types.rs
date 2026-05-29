@@ -3319,6 +3319,21 @@ pub struct KernelConfig {
     /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
     pub provider_request_timeout_secs: BTreeMap<String, u64>,
+    /// Per-provider in-driver retry-count overrides (provider ID → retries).
+    ///
+    /// Caps the number of re-attempts the HTTP-API driver makes for a single
+    /// LLM call on retryable failures — server throttling (429 / 529 / 503),
+    /// transient overloads, and transport-layer errors (connection refused /
+    /// TLS / read timeout, #10). The request is issued at most `retries + 1`
+    /// times. Absent providers use the compiled default of 3 (four total
+    /// attempts); set `0` to disable in-driver retries for a provider and rely
+    /// solely on the `FallbackChain`. e.g. `openai = 5`, `ollama = 0`.
+    ///
+    /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini,
+    /// Vertex AI, Bedrock). CLI-based providers do not run the retry loop and
+    /// ignore this. Uses `BTreeMap` for deterministic serialisation (see #3757).
+    #[serde(default)]
+    pub provider_max_retries: BTreeMap<String, u32>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -5905,6 +5920,7 @@ impl Default for KernelConfig {
             provider_urls: BTreeMap::new(),
             provider_proxy_urls: BTreeMap::new(),
             provider_request_timeout_secs: BTreeMap::new(),
+            provider_max_retries: BTreeMap::new(),
             provider_regions: BTreeMap::new(),
             provider_api_keys: BTreeMap::new(),
             local_probe_interval_secs: default_local_probe_interval_secs(),
