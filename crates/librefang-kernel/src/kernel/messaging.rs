@@ -1905,15 +1905,48 @@ impl LibreFangKernel {
         // to a healthy slot. See the ephemeral-path explanation
         // above for the full rationale.
 
+        // Reserve the global USD budget up front, mirroring the
+        // non-streaming path (#3616). Without this hold, N concurrent
+        // streaming turns all observe the same pre-call total and only the
+        // post-call `check_all_and_record` gate runs, so the global `[budget]`
+        // cap can be overshot under concurrency. The reservation is held for
+        // the duration of the spawned task and settled/released alongside the
+        // token reservation below.
+        let estimated_usd = {
+            let max_out = entry.manifest.model.max_tokens as u64;
+            let est_in = max_out;
+            let catalog = self.llm.model_catalog.load();
+            MeteringEngine::estimate_cost_with_catalog(
+                &catalog,
+                &entry.manifest.model.model,
+                est_in,
+                max_out,
+                0,
+                0,
+            )
+        };
+        let usd_reservation = self
+            .metering
+            .engine
+            .reserve_global_budget(&self.current_budget(), estimated_usd)
+            .map_err(KernelError::LibreFang)?;
+
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation = self
+        let token_reservation = match self
             .agents
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
-            .map_err(KernelError::LibreFang)?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Roll back the USD reservation — the call never dispatched.
+                usd_reservation.release();
+                return Err(KernelError::LibreFang(e));
+            }
+        };
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");
@@ -1961,6 +1994,9 @@ impl LibreFangKernel {
                             token_reservation,
                             &result.total_usage,
                         );
+                        // Release the global USD hold — non-LLM modules incur
+                        // no provider cost, so there is nothing to settle.
+                        usd_reservation.release();
                         let _ = kernel_clone
                             .agents
                             .registry
@@ -1975,6 +2011,7 @@ impl LibreFangKernel {
                             .agents
                             .scheduler
                             .release_reservation(agent_id, token_reservation);
+                        usd_reservation.release();
                         kernel_clone.agents.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
@@ -2830,6 +2867,10 @@ impl LibreFangKernel {
                         token_reservation,
                         &result.total_usage,
                     );
+                    // Settle the global USD hold (#3616) — actual spend is
+                    // recorded via `check_all_and_record`; this frees the
+                    // pre-call ceiling that throttled concurrent fires.
+                    usd_reservation.settle();
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
@@ -3060,6 +3101,7 @@ impl LibreFangKernel {
                         .agents
                         .scheduler
                         .release_reservation(agent_id, token_reservation);
+                    usd_reservation.release();
                     kernel_clone.agents.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
