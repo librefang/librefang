@@ -615,7 +615,9 @@ impl ProactiveMemoryStore {
         // Read-only listing: a polled list/get must not bump access_count /
         // accessed_at, or the decay engine would never see these memories as
         // idle (#5839).
-        let frags = self.semantic.recall_readonly("", RECALL_CAP, Some(filter))?;
+        let frags = self
+            .semantic
+            .recall_readonly("", RECALL_CAP, Some(filter))?;
 
         let mut items: Vec<MemoryItem> = frags
             .into_iter()

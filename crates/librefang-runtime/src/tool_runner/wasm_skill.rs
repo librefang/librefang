@@ -159,10 +159,7 @@ pub async fn execute_wasm_skill(
     // surfaces for the Python/Node runtimes). Detect that envelope so the
     // shared dispatch arm reports it to the agent as an error rather than a
     // success — keeping `is_error` consistent across all skill runtimes.
-    let is_error = result
-        .output
-        .get("error")
-        .is_some_and(|v| !v.is_null());
+    let is_error = result.output.get("error").is_some_and(|v| !v.is_null());
 
     Ok(SkillToolResult {
         output: result.output,
