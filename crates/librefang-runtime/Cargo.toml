@@ -8,6 +8,7 @@ readme = "README.md"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-subprocess = { path = "../librefang-subprocess" }
 librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-runtime-audit = { path = "../librefang-runtime-audit" }

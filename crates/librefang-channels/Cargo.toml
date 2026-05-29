@@ -17,6 +17,7 @@ default = []
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-subprocess = { path = "../librefang-subprocess" }
 bitflags = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

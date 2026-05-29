@@ -1558,6 +1558,14 @@ impl HookProcessPool {
             return run_wasm_hook(script_path, input, config).await;
         }
 
+        // Bound each call's write + read. `timeout_secs` defaults to 30; guard
+        // an explicit 0 so it doesn't degenerate into an instant timeout.
+        let timeout = Duration::from_secs(if config.timeout_secs == 0 {
+            30
+        } else {
+            config.timeout_secs
+        });
+
         let slot = {
             let mut map = self.procs.lock().unwrap();
             map.entry(script_path.to_string())
@@ -1581,7 +1589,7 @@ impl HookProcessPool {
         }
 
         // Try to call; on failure, evict the dead slot then restart and retry once.
-        let result = Self::do_call(guard.as_mut().unwrap(), input).await;
+        let result = Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
         if result.is_err() {
             // Probe exit status before evicting so we can produce a classified label.
             let exit_label = if let Some(ref mut proc) = *guard {
@@ -1600,7 +1608,7 @@ impl HookProcessPool {
             // even if the spawn below fails (returns Err and drops the guard).
             *guard = None;
             *guard = Some(Self::spawn(script_path, runtime, config).await?);
-            return Self::do_call(guard.as_mut().unwrap(), input).await;
+            return Self::do_call(guard.as_mut().unwrap(), input, timeout).await;
         }
         result
     }
@@ -1683,42 +1691,77 @@ impl HookProcessPool {
     async fn do_call(
         proc: &mut PersistentProcess,
         input: &serde_json::Value,
+        timeout: Duration,
     ) -> Result<serde_json::Value, PluginRuntimeError> {
+        // 4 MiB cap, enforced *during* the read (the shared transport caps as it
+        // accumulates) rather than after — a hook streaming without a newline
+        // can't grow memory without bound.
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
         let mut line =
             serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
         line.push('\n');
 
-        proc.stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
-        proc.stdin
-            .flush()
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("flush stdin: {e}")))?;
+        // The persistent pool previously enforced no timeout on either the
+        // write or the read; a hook that stopped reading its stdin or never
+        // replied would wedge the call forever. Both are now bounded by
+        // `timeout`.
+        //
+        // Review-followup C: write and read share a single deadline so the
+        // configured `timeout` is the *total* wall-clock budget, not
+        // 2× as it would be if we passed `timeout` to each stage
+        // independently. A slow write that consumes 25/30s leaves only
+        // 5s for the reply — exactly what an operator who configured
+        // "30s per call" expects. The split-timeout interpretation
+        // (the prior commit's version) made the configured value an
+        // odd half-budget instead.
+        let deadline = tokio::time::Instant::now() + timeout;
 
-        let mut response = String::new();
-        proc.stdout
-            .read_line(&mut response)
-            .await
-            .map_err(|e| PluginRuntimeError::Io(format!("read stdout: {e}")))?;
-
-        if response.is_empty() {
-            return Err(PluginRuntimeError::Io(
-                "persistent process closed stdout".into(),
-            ));
-        }
-
-        // Guard against misbehaving scripts that emit enormous outputs.
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-        if response.len() > MAX_OUTPUT_BYTES {
-            return Err(PluginRuntimeError::InvalidOutput(format!(
-                "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
-                 Truncate your hook's JSON response.",
-                response.len(),
-                MAX_OUTPUT_BYTES
+        let write_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if write_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before write)",
+                timeout.as_secs()
             )));
         }
+        librefang_subprocess::write_line_timeout(&mut proc.stdin, line.as_bytes(), write_budget)
+            .await
+            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
+
+        let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if read_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before read)",
+                timeout.as_secs()
+            )));
+        }
+        let mut buf = Vec::new();
+        let response = match tokio::time::timeout(
+            read_budget,
+            librefang_subprocess::read_capped_line(&mut proc.stdout, &mut buf, MAX_OUTPUT_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(librefang_subprocess::Line::Data(s))) => s,
+            Ok(Ok(librefang_subprocess::Line::Eof)) => {
+                return Err(PluginRuntimeError::Io(
+                    "persistent process closed stdout".into(),
+                ));
+            }
+            Ok(Ok(librefang_subprocess::Line::TooLong)) => {
+                return Err(PluginRuntimeError::InvalidOutput(format!(
+                    "Hook output exceeds maximum size ({MAX_OUTPUT_BYTES} bytes limit). \
+                     Truncate your hook's JSON response."
+                )));
+            }
+            Ok(Err(e)) => return Err(PluginRuntimeError::Io(format!("read stdout: {e}"))),
+            Err(_) => {
+                return Err(PluginRuntimeError::Io(format!(
+                    "persistent hook timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+        };
 
         // The persistent process is still running, so /proc/{pid}/status is valid.
         if let Some(pid) = proc.child.id() {

@@ -21,6 +21,31 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
+/// Cap on a single inbound event line from a sidecar adapter. The inbound
+/// stream was previously read with the unbounded `lines()`, so a runaway
+/// adapter emitting bytes without a newline could grow the reader's buffer
+/// without bound and OOM the daemon. 64 MiB is far above any real platform
+/// event (media is referenced, not inlined); an over-cap line drops the
+/// connection and the supervisor restarts the adapter.
+const MAX_EVENT_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one event line via the shared bounded reader, mapped back to the
+/// `AsyncBufReadExt::next_line()` shape the reader's `select!` already matches
+/// on (`Ok(Some)` / `Ok(None)` / `Err`). An over-cap line surfaces as an error
+/// so the existing error arm tears the connection down and respawns.
+async fn read_event_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<Option<String>> {
+    match librefang_subprocess::read_capped_line(reader, buf, MAX_EVENT_LINE_BYTES).await? {
+        librefang_subprocess::Line::Data(s) => Ok(Some(s)),
+        librefang_subprocess::Line::Eof => Ok(None),
+        librefang_subprocess::Line::TooLong => Err(std::io::Error::other(
+            "sidecar event line exceeded the 64 MiB cap",
+        )),
+    }
+}
+
 /// Deserialize `T`, mapping an explicit JSON `null` to `T::default()`.
 ///
 /// `#[serde(default)]` alone only covers an *omitted* field; a present
@@ -757,12 +782,12 @@ async fn spawn_once(
     let handle = tokio::spawn(async move {
         let mut ready_tx = Some(ready_tx);
         let mut dropped: u64 = 0;
-        let reader = BufReader::new(child_stdout);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(child_stdout);
+        let mut event_buf: Vec<u8> = Vec::new();
         let exit;
         loop {
             tokio::select! {
-                result = lines.next_line() => {
+                result = read_event_line(&mut reader, &mut event_buf) => {
                     match result {
                         Ok(Some(line)) => {
                             let line = line.trim().to_string();

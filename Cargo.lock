@@ -4187,6 +4187,7 @@ dependencies = [
  "futures",
  "image",
  "include_dir",
+ "librefang-subprocess",
  "librefang-types",
  "pdf-extract",
  "regex",
@@ -4601,6 +4602,7 @@ dependencies = [
  "librefang-runtime-media",
  "librefang-runtime-sandbox-docker",
  "librefang-skills",
+ "librefang-subprocess",
  "librefang-types",
  "metrics",
  "metrics-util",
@@ -4736,6 +4738,18 @@ dependencies = [
  "walkdir",
  "webpki-roots",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "librefang-subprocess"
+version = "2026.5.28-beta.14"
+dependencies = [
+ "metrics",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

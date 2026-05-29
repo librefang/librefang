@@ -7,6 +7,13 @@
 //! must stay in Rust (LLM-bearing `compact`, the cheap synchronous hooks,
 //! metrics) on a wrapped built-in engine.
 //!
+//! The subprocess plumbing — spawn, the background reply reader, id-matching,
+//! the reply-line cap, the write timeout, stderr draining, child reaping, and
+//! lazy auto-respawn after a crash — lives in
+//! [`librefang_subprocess::SupervisedTransport`] (which wraps
+//! [`librefang_subprocess::SubprocessTransport`]). This module is just the
+//! context-engine policy on top of it.
+//!
 //! # Why this split
 //!
 //! Context **policy** (what to recall, how to trim/reorder the window, what to
@@ -20,10 +27,12 @@
 //!
 //! The context engine is on the per-turn critical path, so a flaky sidecar must
 //! never break a turn. Every bridged call falls back to the inner engine on any
-//! failure (spawn failure, write error, timeout, malformed reply, or a crashed
-//! process). A crash degrades to the built-in engine for the rest of the
-//! daemon's lifetime (restart re-spawns); this is deliberate — see the design
-//! doc `docs/architecture/sidecar-context-engine.md`.
+//! failure (spawn failure, write timeout, reply timeout, a `{"error": …}`
+//! reply, a malformed reply, or a crashed process). A crash degrades only the
+//! calls made during the respawn cooldown to the built-in engine;
+//! `SupervisedTransport` re-spawns the child lazily on the next call once the
+//! cooldown elapses, so a transient crash self-heals without a daemon restart.
+//! See `docs/architecture/sidecar-context-engine.md`.
 //!
 //! # Wire protocol
 //!
@@ -31,13 +40,13 @@
 //! `{"id": <u64>, "method": "<name>", "params": {…}}`.
 //! Sidecar → daemon (stdout), one per line:
 //! `{"id": <u64>, "ok": {…}}` or `{"id": <u64>, "error": "<msg>"}`.
-//! stderr is free-form and forwarded to the daemon log.
 
 use super::{AssembleResult, ContextEngine, ContextEngineConfig, IngestResult};
 use crate::compactor::CompactionResult;
 use crate::context_overflow::RecoveryStage;
 use crate::llm_driver::LlmDriver;
 use async_trait::async_trait;
+use librefang_subprocess::{SupervisedTransport, TransportConfig};
 use librefang_types::agent::AgentId;
 use librefang_types::config::ContextEngineSidecarConfig;
 use librefang_types::error::LibreFangResult;
@@ -45,285 +54,52 @@ use librefang_types::memory::MemoryFragment;
 use librefang_types::message::Message;
 use librefang_types::tool::ToolDefinition;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
-use tracing::{debug, warn};
-
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
-
-/// Hard cap on a single newline-delimited reply line from the sidecar. The
-/// sidecar is trusted operator config, but a *buggy* trusted sidecar that
-/// streams without ever emitting `\n` would otherwise grow the reader task's
-/// buffer without bound and OOM the daemon. On overflow we treat the transport
-/// as dead so every call falls back to the in-process engine.
-const MAX_REPLY_LINE_BYTES: usize = 16 * 1024 * 1024;
-
-/// Outcome of a bounded line read from the sidecar's stdout.
-enum SidecarLine {
-    Data(String),
-    Eof,
-    TooLong,
-}
-
-/// Read one `\n`-terminated line, capping accumulation at [`MAX_REPLY_LINE_BYTES`].
-/// `reader` is a `BufReader`, so the per-byte reads are served from its buffer
-/// (no syscall per byte); this bounds memory without the unbounded-line risk of
-/// `AsyncBufReadExt::lines()` / `read_until`.
-async fn read_capped_line<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    buf: &mut Vec<u8>,
-) -> std::io::Result<SidecarLine> {
-    buf.clear();
-    let mut byte = [0u8; 1];
-    loop {
-        if reader.read(&mut byte).await? == 0 {
-            return Ok(if buf.is_empty() {
-                SidecarLine::Eof
-            } else {
-                SidecarLine::Data(String::from_utf8_lossy(buf).into_owned())
-            });
-        }
-        if byte[0] == b'\n' {
-            return Ok(SidecarLine::Data(String::from_utf8_lossy(buf).into_owned()));
-        }
-        if buf.len() >= MAX_REPLY_LINE_BYTES {
-            return Ok(SidecarLine::TooLong);
-        }
-        buf.push(byte[0]);
-    }
-}
-
-/// Live connection to the sidecar subprocess. Absent when the process could
-/// not be spawned or has died — in both cases the engine serves from `inner`.
-struct Transport {
-    stdin: Mutex<ChildStdin>,
-    pending: Pending,
-    next_id: AtomicU64,
-    alive: Arc<AtomicBool>,
-    timeout: Duration,
-    // Retain the child handle so the process lives as long as the engine.
-    // `kill_on_drop(true)` reaps it when the engine drops. Wrapped in a
-    // `std::sync::Mutex` purely to make `Transport: Sync` (we never lock it).
-    _child: std::sync::Mutex<tokio::process::Child>,
-}
+use tracing::warn;
 
 /// A context engine backed by an out-of-process implementation, with a built-in
 /// engine as both the LLM-bearing path and the fallback for every bridged call.
 pub struct SidecarContextEngine {
     inner: Box<dyn ContextEngine>,
-    transport: Option<Transport>,
+    transport: SupervisedTransport,
 }
 
 impl SidecarContextEngine {
-    /// Spawn the sidecar described by `cfg`, wrapping `inner` for delegation and
-    /// fallback. A spawn failure is logged and yields an engine that behaves
-    /// exactly like `inner`.
+    /// Wrap `inner`, configuring an out-of-process sidecar described by `cfg`.
+    ///
+    /// The sidecar is spawned lazily on the first call and re-spawned after a
+    /// crash (with a cooldown), so a flaky or initially-unavailable sidecar
+    /// degrades to the built-in engine for individual calls rather than for the
+    /// daemon's whole lifetime.
     pub fn spawn(inner: Box<dyn ContextEngine>, cfg: &ContextEngineSidecarConfig) -> Self {
         let timeout = Duration::from_secs(if cfg.request_timeout_secs == 0 {
             30
         } else {
             cfg.request_timeout_secs
         });
-        match Self::try_spawn(cfg, timeout) {
-            Ok(transport) => {
-                debug!(command = %cfg.command, "context engine sidecar spawned");
-                Self {
-                    inner,
-                    transport: Some(transport),
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, command = %cfg.command,
-                    "context engine sidecar spawn failed; using built-in engine");
-                Self {
-                    inner,
-                    transport: None,
-                }
-            }
-        }
-    }
-
-    fn try_spawn(
-        cfg: &ContextEngineSidecarConfig,
-        timeout: Duration,
-    ) -> std::io::Result<Transport> {
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Reap the subprocess when the engine (and thus this handle) drops.
-            .kill_on_drop(true)
-            .spawn()?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("sidecar stdin unavailable"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| std::io::Error::other("sidecar stdout unavailable"))?;
-        let stderr = child.stderr.take();
-
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let alive = Arc::new(AtomicBool::new(true));
-
-        // Reader task: match replies to waiters by id. On EOF / error, mark the
-        // transport dead and fail every outstanding waiter so callers fall back.
-        {
-            let pending = Arc::clone(&pending);
-            let alive = Arc::clone(&alive);
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout);
-                let mut buf: Vec<u8> = Vec::new();
-                // Loop ends on EOF, a read error, or an over-cap line — all mean
-                // the transport can no longer be trusted, so we fall through to
-                // marking it dead and draining waiters.
-                loop {
-                    let line = match read_capped_line(&mut reader, &mut buf).await {
-                        Ok(SidecarLine::Data(line)) => line,
-                        Ok(SidecarLine::Eof) => break,
-                        Ok(SidecarLine::TooLong) => {
-                            warn!(
-                                cap = MAX_REPLY_LINE_BYTES,
-                                "context engine sidecar: reply line exceeded cap; \
-                                 dropping transport and falling back"
-                            );
-                            break;
-                        }
-                        Err(_) => break,
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let Ok(reply) = serde_json::from_str::<Value>(&line) else {
-                        warn!("context engine sidecar: non-JSON reply line dropped");
-                        continue;
-                    };
-                    let Some(id) = reply.get("id").and_then(Value::as_u64) else {
-                        warn!("context engine sidecar: reply without id dropped");
-                        continue;
-                    };
-                    if let Some(tx) = pending.lock().await.remove(&id) {
-                        let result = if let Some(ok) = reply.get("ok") {
-                            Ok(ok.clone())
-                        } else if let Some(err) = reply.get("error") {
-                            Err(err
-                                .as_str()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| err.to_string()))
-                        } else {
-                            Err("reply has neither ok nor error".to_string())
-                        };
-                        let _ = tx.send(result);
-                    }
-                }
-                alive.store(false, Ordering::SeqCst);
-                // Fail any waiters still parked so their calls fall back.
-                let mut map = pending.lock().await;
-                for (_, tx) in map.drain() {
-                    let _ = tx.send(Err("sidecar process exited".to_string()));
-                }
-                // Operator-actionable: silent fallback otherwise looks like
-                // normal operation. WARN (not debug) + a metric so a dead
-                // sidecar is visible — every call now uses the built-in engine
-                // until the daemon is restarted.
-                metrics::counter!("context_engine_sidecar_exited").increment(1);
-                warn!(
-                    "context engine sidecar process exited; all context calls now \
-                     fall back to the built-in engine until the daemon is restarted"
-                );
-            });
-        }
-
-        // stderr → daemon log.
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!(target: "context_engine_sidecar", "{line}");
-                }
-            });
-        }
-
-        Ok(Transport {
-            stdin: Mutex::new(stdin),
-            pending,
-            next_id: AtomicU64::new(1),
-            alive,
+        let transport = SupervisedTransport::new(TransportConfig::new(
+            cfg.command.clone(),
+            cfg.args.clone(),
             timeout,
-            _child: std::sync::Mutex::new(child),
-        })
+            "context_engine",
+        ));
+        Self { inner, transport }
     }
 
-    /// Send one request and await its reply. `Err(())` means "fall back to the
-    /// inner engine" — the caller never surfaces a sidecar error to the loop.
+    /// Send one bridged call to the sidecar, returning its `ok` payload.
+    /// `Err(())` means "fall back to the inner engine" — a sidecar failure
+    /// (including one that is down and awaiting re-spawn) is never surfaced to
+    /// the agent loop.
     async fn call(&self, method: &str, params: Value) -> Result<Value, ()> {
-        let t = self.transport.as_ref().ok_or(())?;
-        if !t.alive.load(Ordering::SeqCst) {
-            return Err(());
-        }
-        let id = t.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        t.pending.lock().await.insert(id, tx);
-
-        let line =
-            match serde_json::to_string(&json!({"id": id, "method": method, "params": params})) {
-                Ok(mut s) => {
-                    s.push('\n');
-                    s
-                }
-                Err(e) => {
-                    warn!(error = %e, method, "context engine sidecar: request serialize failed");
-                    t.pending.lock().await.remove(&id);
-                    return Err(());
-                }
-            };
-
+        match self
+            .transport
+            .request(json!({ "method": method, "params": params }))
+            .await
         {
-            let mut w = t.stdin.lock().await;
-            // Bound the write itself, not just the reply wait: if the sidecar
-            // stops reading its stdin the pipe buffer fills and `write_all`
-            // blocks indefinitely, which would hang the turn past the timeout
-            // and defeat the never-break-a-turn guarantee. On timeout the
-            // future (and the stdin guard) drops, freeing the lock. A flush
-            // error is treated as a write failure rather than swallowed.
-            let write = async {
-                w.write_all(line.as_bytes()).await?;
-                w.flush().await
-            };
-            let wrote = matches!(tokio::time::timeout(t.timeout, write).await, Ok(Ok(())));
-            if !wrote {
-                warn!(method, "context engine sidecar: write timed out or failed");
-                t.alive.store(false, Ordering::SeqCst);
-                t.pending.lock().await.remove(&id);
-                return Err(());
-            }
-        }
-
-        match tokio::time::timeout(t.timeout, rx).await {
-            Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(msg))) => {
-                warn!(method, error = %msg, "context engine sidecar returned an error");
-                Err(())
-            }
-            // Channel dropped (process died) or timed out.
-            other => {
-                if other.is_err() {
-                    warn!(
-                        method,
-                        timeout_secs = t.timeout.as_secs(),
-                        "context engine sidecar call timed out"
-                    );
-                }
-                t.pending.lock().await.remove(&id);
+            Ok(value) => Ok(value),
+            Err(e) => {
+                warn!(method, error = %e, "context engine sidecar call failed; falling back");
                 Err(())
             }
         }
@@ -625,14 +401,10 @@ while True:
                 request_timeout_secs: 5,
             },
         );
-        assert!(
-            engine.transport.is_none(),
-            "spawn failure must yield no transport"
-        );
-
-        // The call path still works via the inner (stub) engine, which leaves
-        // the window untouched — proving the fallback ran, not the sidecar
-        // (there is none). `Message` has no `PartialEq`, so assert on length.
+        // The sidecar command does not exist, so the lazy (re)spawn fails on
+        // the first call and every call falls back to the inner (stub) engine,
+        // which leaves the window untouched — proving the fallback ran rather
+        // than a sidecar. `Message` has no `PartialEq`, so assert on length.
         let mut messages = vec![Message::user("hi")];
         engine
             .assemble(AgentId(uuid::Uuid::nil()), &mut messages, "sys", &[], 1000)

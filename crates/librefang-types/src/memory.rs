@@ -236,6 +236,84 @@ pub struct ProactiveMemoryConfig {
     /// reported via a footer; the cap is a hard ceiling on the section.
     #[serde(default = "default_format_context_max_chars")]
     pub format_context_max_chars: usize,
+    /// Similarity threshold above which `decide_action` returns UPDATE
+    /// instead of ADD when the new and existing memory share a
+    /// category (M14). Lower than `update_threshold_cross_category`
+    /// because same-category memories share semantic context, so a
+    /// modest similarity bump is enough evidence to fold them
+    /// together. Default 0.7 — empirically the cut-off where
+    /// embedding cosine starts catching genuine paraphrases without
+    /// merging unrelated facts.
+    ///
+    /// Conceptually distinct from `duplicate_threshold` (which gates
+    /// the post-hoc consolidation sweep — "should two existing
+    /// memories be merged into one?"). The two serve different
+    /// purposes: UPDATE is per-insertion conflict resolution; dedup
+    /// is batch cleanup. Pre-fix both used the same hardcoded
+    /// values, which conflated the contracts.
+    #[serde(default = "default_update_threshold_same_category")]
+    pub update_threshold_same_category: f32,
+    /// Same as `update_threshold_same_category` but for memories with
+    /// *different* categories. Higher (default 0.8) because
+    /// cross-category merges require stronger evidence — the
+    /// categories themselves carry semantic distinction that a
+    /// purely-text similarity score might miss.
+    #[serde(default = "default_update_threshold_cross_category")]
+    pub update_threshold_cross_category: f32,
+    /// Out-of-process memory extractor. When set, extraction is delegated to
+    /// the configured subprocess (which may use its own LLM, a local model,
+    /// embeddings, etc.) instead of the built-in LLM/rule-based extractor; the
+    /// store and the dedup decision stay in Rust. Takes precedence over
+    /// `extraction_model`.
+    #[serde(default)]
+    pub extractor_sidecar: Option<MemoryExtractorSidecarConfig>,
+}
+
+/// Configuration for an out-of-process memory extractor (see
+/// [`ProactiveMemoryConfig::extractor_sidecar`]).
+///
+/// **Precedence (review-followup G).** When this table is present
+/// AND `command` is non-empty, the sidecar handles every
+/// `auto_memorize` call — the kernel's built-in `LlmMemoryExtractor`
+/// is **not constructed at all**, and any per-agent
+/// [`ProactiveMemoryOverrides::extraction_model`] is silently
+/// shadowed. The kernel emits a `WARN` at boot in that case so an
+/// operator who set both isn't surprised which wins. A
+/// configured-but-empty `command` is treated as a no-op (the kernel
+/// falls back to the LLM/rule-based path with a separate `WARN`).
+///
+/// The sidecar only handles **extraction**. The store, the dedup
+/// `decide_action` decision, and the prompt-context formatting all
+/// stay in Rust, so the sidecar's output cannot influence retrieval
+/// ranking or storage layout — only what gets *proposed* to remember.
+///
+/// ```toml
+/// [proactive_memory.extractor_sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/memory/extract.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MemoryExtractorSidecarConfig {
+    /// Executable to launch (resolved via `PATH`). Empty string disables
+    /// the sidecar (operator typo or commented-out args field) — see
+    /// the precedence note on the struct.
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-extraction wall-clock timeout. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for MemoryExtractorSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -248,6 +326,14 @@ fn default_max_memories_per_agent() -> usize {
 
 fn default_format_context_max_chars() -> usize {
     8000
+}
+
+fn default_update_threshold_same_category() -> f32 {
+    0.7
+}
+
+fn default_update_threshold_cross_category() -> f32 {
+    0.8
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -273,6 +359,9 @@ impl Default for ProactiveMemoryConfig {
             confidence_decay_rate: 0.01,
             max_memories_per_agent: 1000,
             format_context_max_chars: default_format_context_max_chars(),
+            update_threshold_same_category: default_update_threshold_same_category(),
+            update_threshold_cross_category: default_update_threshold_cross_category(),
+            extractor_sidecar: None,
         }
     }
 }
@@ -649,6 +738,14 @@ pub trait MemoryExtractor: Send + Sync {
             // mem0's recommended cut-offs (≈ 0.7 same-category, ≈ 0.8
             // cross-category) and keep the 0.95 NOOP gate for near-exact
             // duplicates.
+            //
+            // M14: the per-call threshold pair is read from the new
+            // memory's metadata, where `add_with_decision` stashes
+            // `update_threshold_same_category` /
+            // `update_threshold_cross_category` from
+            // `ProactiveMemoryConfig`. Falls back to the const defaults
+            // for callers that invoke `decide_action` directly
+            // (without going through the store).
             let new_cat = new_memory.category.as_deref().unwrap_or("");
             let old_cat = existing
                 .metadata
@@ -656,10 +753,22 @@ pub trait MemoryExtractor: Send + Sync {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
+            let same_cat_threshold = new_memory
+                .metadata
+                .get("_update_threshold_same_cat")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(default_update_threshold_same_category());
+            let cross_cat_threshold = new_memory
+                .metadata
+                .get("_update_threshold_cross_cat")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(default_update_threshold_cross_category());
             let update_threshold = if !new_cat.is_empty() && new_cat == old_cat {
-                0.7 // Same category — still need substantial similarity to UPDATE
+                same_cat_threshold
             } else {
-                0.8 // Cross-category UPDATE requires stronger evidence
+                cross_cat_threshold
             };
 
             if similarity > update_threshold
