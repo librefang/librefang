@@ -5148,7 +5148,13 @@ async fn download_file_to_blocks(
         }]);
     }
 
-    let client = crate::http_client::new_client();
+    // Use the redirect-revalidating client: `new_client()` follows up to 10
+    // redirects with NO per-hop SSRF check, so a forged attachment URL on a
+    // public host could `302` to `http://169.254.169.254/...` and bypass the
+    // entry-time `validate_url_scheme` guard. `safe_fetch_client()` re-runs
+    // `validate_url_for_fetch` on every redirect target (cap 5), matching the
+    // image path (`fetch_url_bytes`).
+    let client = crate::http_client::safe_fetch_client();
     let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
     for (name, value) in extra_headers {
         req = req.header(name.as_str(), value.as_str());
