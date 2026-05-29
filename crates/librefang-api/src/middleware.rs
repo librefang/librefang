@@ -1288,6 +1288,21 @@ pub async fn auth(
             .map(|ci| ci.0.ip().is_loopback())
             .unwrap_or(false);
         if is_loopback || auth_state.allow_no_auth {
+            // No auth configured + trusted origin (loopback, or explicit
+            // LIBREFANG_ALLOW_NO_AUTH opt-in) means a fully-trusted local
+            // operator — the same trust level as the root master credential.
+            // Attribute an Owner-equivalent user so RBAC-gated handlers (memory
+            // write ACL, KV owner checks, …) treat the caller as privileged.
+            // Without this, guard_for_user(None) downgrades to the anonymous
+            // Viewer fallback and every POST/PUT/DELETE /api/memory* returns
+            // 403 — breaking the default `librefang start` → `curl POST
+            // /api/memory` workflow. Uses the same sentinel as the root-key
+            // path below (ROOT_API_KEY_USER_ID → fail-open Owner-default ACL).
+            request.extensions_mut().insert(AuthenticatedApiUser {
+                name: "root".to_string(),
+                role: UserRole::Owner,
+                user_id: UserId(ROOT_API_KEY_USER_ID),
+            });
             return next.run(request).await;
         }
         return Response::builder()
