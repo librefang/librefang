@@ -458,4 +458,82 @@ mod tests {
         let pruned = prune_soft_deleted_memories(&pool, 0).unwrap();
         assert_eq!(pruned, 0);
     }
+
+    /// `SemanticStore::forget*` must stamp `deleted_at`; without it, the
+    /// retention sweep (filter `deleted_at IS NOT NULL`) would skip user- /
+    /// API-initiated deletions forever, leaking the embedding BLOB.
+    #[test]
+    fn forget_variants_stamp_deleted_at_so_prune_sees_them() {
+        use crate::semantic::SemanticStore;
+        use librefang_types::agent::AgentId;
+        use librefang_types::memory::MemorySource;
+        use std::collections::HashMap;
+
+        let pool = make_pool();
+        let store = SemanticStore::new(pool.clone());
+        let agent = AgentId::new();
+
+        let mid_forget = store
+            .remember(
+                agent,
+                "single forget",
+                MemorySource::Conversation,
+                "agent_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        let mid_by_agent = store
+            .remember(
+                agent,
+                "agent-wide forget",
+                MemorySource::Conversation,
+                "agent_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        let mid_by_scope = store
+            .remember(
+                agent,
+                "scope forget",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        store.forget(mid_forget).unwrap();
+        store.forget_by_agent(agent).unwrap();
+        store.forget_by_scope(agent, "session_memory").unwrap();
+
+        let db = pool.get().unwrap();
+        for id in [mid_forget, mid_by_agent, mid_by_scope] {
+            let (deleted, deleted_at): (i64, Option<i64>) = db
+                .query_row(
+                    "SELECT deleted, deleted_at FROM memories WHERE id = ?1",
+                    rusqlite::params![id.0.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(deleted, 1, "forget* must soft-delete {id:?}");
+            assert!(
+                deleted_at.is_some(),
+                "forget* must stamp deleted_at for {id:?} so prune sweep picks it up"
+            );
+        }
+
+        // Wind deleted_at backwards so a 7-day prune captures the rows.
+        let ancient = Utc::now().timestamp() - 30 * 86_400;
+        db.execute(
+            "UPDATE memories SET deleted_at = ?1 WHERE deleted = 1",
+            rusqlite::params![ancient],
+        )
+        .unwrap();
+        drop(db);
+
+        let pruned = prune_soft_deleted_memories(&pool, 7).unwrap();
+        assert_eq!(
+            pruned, 3,
+            "all three forget* variants must produce prune-eligible rows"
+        );
+    }
 }

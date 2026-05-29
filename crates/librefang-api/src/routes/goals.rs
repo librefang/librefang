@@ -17,6 +17,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/goals/{id}/children",
             axum::routing::get(get_goal_children),
         )
+        .route("/goals/{id}/run", axum::routing::get(get_goal_run))
+        .route("/goals/{id}/start", axum::routing::post(start_goal_run))
+        .route("/goals/{id}/stop", axum::routing::post(stop_goal_run))
 }
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -31,15 +34,14 @@ use crate::types::ApiErrorResponse;
 // Goals endpoints
 // ---------------------------------------------------------------------------
 
-/// The well-known shared-memory key for goals storage.
-const GOALS_KEY: &str = "__librefang_goals";
+/// The well-known shared-memory key for goals storage. Single source of truth
+/// lives in `librefang_types::goal` so the kernel goal runner reads/writes the
+/// same store (#5744).
+const GOALS_KEY: &str = librefang_types::goal::GOALS_STORAGE_KEY;
 
 /// Shared agent ID for goals KV storage.
 fn goals_shared_agent_id() -> AgentId {
-    AgentId(uuid::Uuid::from_bytes([
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01,
-    ]))
+    librefang_types::goal::goals_storage_agent_id()
 }
 
 /// GET /api/goals — List all goals.
@@ -120,6 +122,124 @@ pub async fn get_goal_children(
             Json(serde_json::json!({"children": [], "total": 0, "error": format!("{e}")}))
         }
     }
+}
+
+/// GET /api/goals/{id}/run — Observe the autonomous run state for a goal.
+pub async fn get_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
+        Ok(g) => g,
+        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    };
+    match state.kernel.goal_run_state(goal_id) {
+        Some(run) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "running": true, "run": run })),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "running": false })),
+        ),
+    }
+}
+
+/// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
+/// drives the goal's assigned agent toward completion (#5744).
+///
+/// Optional body: `{ "max_iterations": <u32> }`.
+pub async fn start_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
+        Ok(g) => g,
+        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    };
+
+    let arr = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(goals_shared_agent_id(), GOALS_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
+    let goal = match arr.iter().find(|g| g["id"].as_str() == Some(&id)) {
+        Some(g) => g.clone(),
+        None => {
+            return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
+        }
+    };
+    let agent_id = match goal["agent_id"]
+        .as_str()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+    {
+        Some(u) => AgentId(u),
+        None => {
+            return ApiErrorResponse::bad_request(
+                "Assign an agent to this goal before starting a run",
+            )
+            .into_json_tuple();
+        }
+    };
+
+    let max_iterations = body
+        .as_ref()
+        .and_then(|b| b.0.get("max_iterations"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    // Flip the goal to in_progress so the dashboard reflects the active run.
+    let _ = state.kernel.memory_substrate().structured_modify(
+        goals_shared_agent_id(),
+        GOALS_KEY,
+        |cur| {
+            let mut goals = match cur {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            for g in goals.iter_mut() {
+                if g["id"].as_str() == Some(id.as_str()) {
+                    if let Some(o) = g.as_object_mut() {
+                        o.insert("status".into(), serde_json::json!("in_progress"));
+                        o.insert(
+                            "updated_at".into(),
+                            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                        );
+                    }
+                }
+            }
+            Ok((serde_json::Value::Array(goals), ()))
+        },
+    );
+
+    state
+        .kernel
+        .start_goal_run(goal_id, agent_id, max_iterations);
+    let run = state.kernel.goal_run_state(goal_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "run": run })),
+    )
+}
+
+/// POST /api/goals/{id}/stop — Stop an active autonomous run for a goal.
+pub async fn stop_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
+        Ok(g) => g,
+        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    };
+    let stopped = state.kernel.stop_goal_run(goal_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "stopped": stopped })),
+    )
 }
 
 /// POST /api/goals — Create a new goal.

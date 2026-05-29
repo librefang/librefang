@@ -111,6 +111,27 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext;
     fn workflow_engine(&self) -> &WorkflowEngine;
 
+    // ====================================================================
+    // Autonomous goal runner (#5744)
+    // ====================================================================
+
+    /// Start a long-horizon autonomous run driving `agent_id` toward
+    /// `goal_id`. `max_iterations` bounds the run (default
+    /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    fn start_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    );
+    /// Stop an active goal run. Returns whether a run was stopped.
+    fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Snapshot the observable state of a goal's run, if one is active.
+    fn goal_run_state(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+    ) -> Option<librefang_types::goal::GoalRunState>;
+
     // `*_ref` accessors that expose internal state for mutation. These are
     // necessary for routes that need to read or mutate live kernel state
     // (model catalog, MCP wiring, event bus, …).
@@ -788,6 +809,24 @@ impl KernelApi for LibreFangKernel {
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
+    }
+
+    fn start_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    ) {
+        self.goal_run_start(goal_id, agent_id, max_iterations);
+    }
+    fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_stop(goal_id)
+    }
+    fn goal_run_state(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+    ) -> Option<librefang_types::goal::GoalRunState> {
+        self.goal_run_status(goal_id)
     }
 
     fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
