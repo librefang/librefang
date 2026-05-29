@@ -79,6 +79,7 @@ pub mod pii_filter;
 pub mod plugin_manager;
 pub mod plugin_runtime;
 pub mod proactive_memory;
+pub mod proactive_memory_sidecar;
 pub mod process_manager;
 pub mod process_registry;
 pub mod prompt_builder;

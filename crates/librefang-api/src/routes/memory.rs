@@ -1667,14 +1667,48 @@ pub async fn memory_config_patch(
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
-    tracing::info!("Memory config updated via API");
+    // M12: hot-reload the new config so the running kernel picks up the
+    // change without an operator restart. Pre-fix the endpoint just
+    // wrote the file and returned `restart_required: true`, which
+    // confused dashboard users who saw GET return new values but the
+    // live behaviour (ProactiveMemoryStore::config, decay engine, etc.)
+    // stayed on the boot snapshot.
+    //
+    // **Response contract — clients MUST inspect `body.status`, not
+    // just the HTTP status.** PATCH always returns 200 OK on disk
+    // write; `status` discriminates:
+    //   - `"applied"` — file written + live config hot-reloaded.
+    //                   `restart_required` reflects whether any
+    //                   diff field needed a restart anyway.
+    //   - `"partial"` — file written but live reload failed (e.g.
+    //                   operator hand-edited an unrelated section
+    //                   into an invalid shape between PATCH writes).
+    //                   The new values are on disk for the next boot;
+    //                   `reload_error` carries the validator output
+    //                   for the operator. `restart_required` is
+    //                   always `true` in this branch.
+    //
+    // Review-followup #3: 207 / 500 were both considered for the
+    // partial case and both rejected. 500 implies the operator's
+    // PATCH was rejected, which is false — the disk write succeeded.
+    // 207 Multi-Status is awkward for a single-resource PATCH and
+    // would force every existing client to re-classify success. The
+    // body-status pattern mirrors `import_agent_memory` (the
+    // post-#3832 partial-import contract).
+    let reload_result = state.kernel.reload_config().await;
+    let (status, restart_required, reload_error) = match reload_result {
+        Ok(plan) => ("applied", plan.restart_required, None),
+        Err(e) => {
+            tracing::warn!("Memory config PATCH wrote disk but reload failed: {e}");
+            ("partial", true, Some(e))
+        }
+    };
+
+    tracing::info!(status, "Memory config updated via API");
 
     // Return the canonical entity (matches GET /api/memory/config shape) sourced
     // from the freshly-written TOML table so callers can `setQueryData` without a
-    // follow-up GET. The in-memory `KernelConfig` is not hot-reloaded for this
-    // endpoint, so values reflect what is now persisted on disk; `restart_required`
-    // surfaces that the running kernel still uses the previous values until reboot.
-    // See issue #3832.
+    // follow-up GET. See issue #3832.
     let memory_section = table.get("memory").and_then(|v| v.as_table());
     let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
 
@@ -1717,7 +1751,9 @@ pub async fn memory_config_patch(
             "max_retrieve": toml_u64(proactive_section, "max_retrieve")
                 .unwrap_or(live.proactive_memory.max_retrieve as u64),
         },
-        "restart_required": true,
+        "status": status,
+        "restart_required": restart_required,
+        "reload_error": reload_error,
     });
     drop(live);
 

@@ -870,7 +870,11 @@ async fn test_capability_enforcement_allowed() {
             || result.content.contains("Failed to resolve")
             || result.content.contains("not found")
             || result.content.contains("No such file")
-            || result.content.contains("does not exist"),
+            || result.content.contains("does not exist")
+            // Windows: a missing intermediate dir yields ERROR_PATH_NOT_FOUND
+            // (os error 3) and the file form yields ERROR_FILE_NOT_FOUND (os
+            // error 2); both render as "cannot find the path/file specified".
+            || result.content.contains("cannot find"),
         "Expected file-not-found error, got: {}",
         result.content
     );
