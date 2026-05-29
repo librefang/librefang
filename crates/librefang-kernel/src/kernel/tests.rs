@@ -2799,9 +2799,7 @@ system_prompt = "BASE PROMPT"
         .find(|s| s.hand_id == hand_id)
         .expect("hand_state.json must carry the persisted instance");
 
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,
@@ -2951,9 +2949,7 @@ system_prompt = "WORKER PROMPT"
         .into_iter()
         .find(|s| s.hand_id == hand_id)
         .expect("hand_state.json must carry the persisted instance");
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,
@@ -3145,9 +3141,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
 
     // Replay exactly what `start_background_agents` does for hand restoration,
     // minus the async prelude.
-    let timestamps = saved_hand
-        .activated_at
-        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let timestamps = saved_hand.activated_at.zip(saved_hand.updated_at);
     let restored_instance = kernel
         .activate_hand_with_id(
             &saved_hand.hand_id,

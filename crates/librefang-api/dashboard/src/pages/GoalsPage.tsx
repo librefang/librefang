@@ -1,8 +1,14 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type GoalItem, type GoalTemplate } from "../api";
-import { useGoals, useGoalTemplates } from "../lib/queries/goals";
-import { useCreateGoal, useUpdateGoal, useDeleteGoal } from "../lib/mutations/goals";
+import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
+import {
+  useCreateGoal,
+  useUpdateGoal,
+  useDeleteGoal,
+  useStartGoalRun,
+  useStopGoalRun,
+} from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { Card } from "../components/ui/Card";
@@ -10,7 +16,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, ChevronDown, ChevronRight } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -21,6 +27,90 @@ const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>
   users: Users,
   alert: AlertTriangle,
 };
+
+/**
+ * Start / stop the autonomous long-horizon run for a single goal (#5744).
+ * Only meaningful when the goal has an agent assigned — without one there is
+ * nothing to drive the loop, so the control prompts to assign an agent.
+ */
+function GoalRunControl({ goal }: { goal: GoalItem }) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const hasAgent = !!goal.agent_id;
+  // Poll the run state only while a run could be active; cheap GET otherwise.
+  const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
+  const startMutation = useStartGoalRun();
+  const stopMutation = useStopGoalRun();
+
+  const run = runQuery.data?.run;
+  const isRunning = runQuery.data?.running === true && run?.phase === "running";
+
+  if (!hasAgent) {
+    return (
+      <button
+        type="button"
+        disabled
+        className="p-1.5 rounded-lg text-text-dim/40 cursor-not-allowed"
+        title={t("goals.run_needs_agent")}
+      >
+        <Play className="h-3.5 w-3.5" />
+      </button>
+    );
+  }
+
+  const onStart = async () => {
+    try {
+      await startMutation.mutateAsync({ id: goal.id });
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onStop = async () => {
+    try {
+      await stopMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+
+  if (isRunning) {
+    return (
+      <button
+        type="button"
+        onClick={() => void onStop()}
+        disabled={stopMutation.isPending}
+        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+        title={
+          run
+            ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
+            : t("goals.run_stop")
+        }
+      >
+        {stopMutation.isPending ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Square className="h-3.5 w-3.5" />
+        )}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void onStart()}
+      disabled={startMutation.isPending}
+      className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+      title={t("goals.run_start")}
+    >
+      {startMutation.isPending ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Play className="h-3.5 w-3.5" />
+      )}
+    </button>
+  );
+}
 
 export function GoalsPage() {
   const { t } = useTranslation();
@@ -403,6 +493,7 @@ export function GoalsPage() {
                               </Badge>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
+                              {status !== "completed" && <GoalRunControl goal={r.goal} />}
                               <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors" title={t("common.edit")}>
                                 <Edit2 className="h-3.5 w-3.5" />
                               </button>

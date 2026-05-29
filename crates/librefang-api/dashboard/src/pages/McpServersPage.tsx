@@ -1918,8 +1918,12 @@ export function McpServersPage() {
       />
 
       {/* Issue #3050: granular taint-policy editor */}
+      {/* key ensures the component fully remounts when a different server is
+          selected, so useState initializers always see the correct server's
+          taint_scanning value. Fixes #5799. */}
       {taintEditingServer && (
         <TaintPolicyEditor
+          key={taintEditingServer.id ?? taintEditingServer.name}
           server={taintEditingServer}
           isOpen={!!taintEditingServer}
           onClose={() => setTaintEditingServer(null)}
