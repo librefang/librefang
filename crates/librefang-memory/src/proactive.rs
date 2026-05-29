@@ -434,12 +434,11 @@ impl ProactiveMemoryStore {
         // (truncate-to-500 by count DESC), which both delays cleanup
         // until the leak is observable AND deletes the highest-count
         // entries — exactly the agents about to fire a real consolidate.
-        // The new sweep instead drops every counter that hasn't passed
-        // the halfway mark on each maintenance tick: still cheap
-        // (HashMap::retain in-place), evicts cold entries first, never
-        // touches an entry that's about to fire.
+        // The new sweep drops counters below `STALE_COUNTER_FLOOR` on
+        // every maintenance tick: still cheap (HashMap::retain in-place),
+        // evicts cold entries first, never touches an entry that's
+        // about to fire.
         if let Ok(mut counters) = self.consolidation_counters.lock() {
-            const STALE_COUNTER_FLOOR: u32 = AUTO_CONSOLIDATE_EVERY / 2;
             let before = counters.len();
             counters.retain(|_, &mut count| count >= STALE_COUNTER_FLOOR);
             let dropped = before - counters.len();
@@ -712,6 +711,20 @@ impl ProactiveMemoryStore {
             // (recall takes one LIKE pattern); we dedup by memory id
             // and cap at fetch_limit at the end so the caller sees the
             // same shape as the embedding path.
+            //
+            // Review-followup #4: this is up to 4 SQLite roundtrips per
+            // insertion (one per keyword), versus the pre-fix 1.
+            // Operators running with an embedding driver never hit this
+            // branch (the `if let Some(qe)` above takes the vector
+            // path). Operators on the no-embedding fallback — CI, local
+            // dev without an embedding API, resource-constrained
+            // deployments — eat the 4× round-trip cost on writes. The
+            // `content` column is unindexed substring scan either way,
+            // so the marginal cost is proportional to row count, not
+            // catastrophic in absolute terms. Loop short-circuits as
+            // soon as the union hits `fetch_limit`, so the common case
+            // ("first keyword already filled the slate") still runs a
+            // single query.
             let keywords = extract_search_keywords(&item.content);
             let mut acc: Vec<MemoryFragment> = Vec::new();
             let mut seen_ids: std::collections::HashSet<MemoryId> =
@@ -791,6 +804,21 @@ impl ProactiveMemoryStore {
                 .metadata
                 .insert("_embedding".to_string(), serde_json::json!(emb_json));
         }
+        // Review-followup #5: callers MUST NOT pre-populate the
+        // `_update_threshold_*` keys — they're a private channel between
+        // `add_with_decision` and the default `decide_action` heuristic.
+        // The `item.metadata` we cloned into `enriched_item` is the
+        // caller's untouched input; a hit here would either signal a
+        // tooling bug (caller leaking internal stash) or a security
+        // probe trying to influence the dedup decision.
+        debug_assert!(
+            !item.metadata.contains_key("_update_threshold_same_cat"),
+            "_update_threshold_same_cat is private to add_with_decision; caller leaked it"
+        );
+        debug_assert!(
+            !item.metadata.contains_key("_update_threshold_cross_cat"),
+            "_update_threshold_cross_cat is private to add_with_decision; caller leaked it"
+        );
         let (same_cat_thresh, cross_cat_thresh) = {
             let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
             (
@@ -813,6 +841,18 @@ impl ProactiveMemoryStore {
             .extractor
             .decide_action(decision_item, &existing)
             .await?;
+
+        // Review-followup #5: strip the per-call threshold keys from the
+        // enriched clone the moment they stop being useful. Today both
+        // ADD and UPDATE branches build their stored metadata from the
+        // original `item.metadata` (NOT `enriched_item.metadata`), so
+        // the threshold keys never reach the `metadata` column. The
+        // strip is defensive insurance for the next refactorer: if
+        // someone repoints either branch at `enriched_item` (e.g. to
+        // pass extraction metadata through), the threshold pollution
+        // gets caught at the strip site, not silently persisted.
+        enriched_item.metadata.remove("_update_threshold_same_cat");
+        enriched_item.metadata.remove("_update_threshold_cross_cat");
 
         match action {
             MemoryAction::Noop => {
@@ -2155,13 +2195,29 @@ fn parse_relation_type(s: &str) -> RelationType {
     }
 }
 
-/// Negation/contradiction words that suggest content is contradictory, not a refinement.
 /// Number of `auto_memorize` calls per agent between consolidate ticks.
 /// Each call increments `consolidation_counters[agent]`; when the entry
 /// hits this floor a background `consolidate` task is spawned and the
 /// entry is removed.
 const AUTO_CONSOLIDATE_EVERY: u32 = 10;
 
+/// Per-agent counters below this floor are considered cold on the
+/// periodic `consolidation_counters` sweep (M11). Set to
+/// `AUTO_CONSOLIDATE_EVERY / 4` (= 2) so even a slow-burning agent that
+/// fires `auto_memorize` once every few maintenance ticks still gets a
+/// chance to climb past the floor before being reset.
+///
+/// Review-followup #2: the original /2 (= 5) threshold trimmed any
+/// agent below 5, which made an "every-N-hours" cadence (single call,
+/// then maintenance, then prune) effectively never consolidate.
+/// Dropping to /4 keeps the prune directionally correct (still evicts
+/// truly idle slots) without starving sub-burst agents of the
+/// consolidate they'd otherwise reach. Review-followup #8: lives at
+/// module scope per repo convention; the same value is referenced by
+/// the prune sweep at the top of the file.
+const STALE_COUNTER_FLOOR: u32 = AUTO_CONSOLIDATE_EVERY / 4;
+
+/// Negation/contradiction words that suggest content is contradictory, not a refinement.
 const NEGATION_WORDS: &[&str] = &[
     "not",
     "don't",
@@ -3473,16 +3529,15 @@ mod tests {
             other => panic!("default thresholds should UPDATE or NOOP; got {other:?}"),
         }
 
-        // Same input but with the threshold pushed to 0.99 via the
-        // metadata channel `add_with_decision` uses → ADD wins.
+        // Same input but with the same-category threshold pushed to
+        // 0.99 via the metadata channel `add_with_decision` uses → ADD
+        // wins. We only set the same-cat key — both candidate
+        // memories share the "preference" category, so the cross-cat
+        // branch is unreachable (review-followup #7).
         let mut new_strict = new.clone();
         new_strict
             .metadata
             .insert("_update_threshold_same_cat".into(), serde_json::json!(0.99));
-        new_strict.metadata.insert(
-            "_update_threshold_cross_cat".into(),
-            serde_json::json!(0.99),
-        );
         let action = extractor
             .decide_action(&new_strict, std::slice::from_ref(&existing))
             .await
@@ -3822,11 +3877,19 @@ mod tests {
     fn extract_search_keywords_returns_multiple_ordered_longest_first() {
         let kws = extract_search_keywords("I prefer Python for data analysis and machine learning");
         // Pre-fix: returned only the single longest word ("analysis").
-        // Post-fix: top 4 distinctive words, longest-first. We assert
-        // exactly four survive (cap) and the longest-first invariant
-        // holds, but don't pin the exact contents because stable-sort
-        // within a length bucket is implementation-detail.
-        assert_eq!(kws.len(), 4, "should yield exactly 4 keywords; got {kws:?}");
+        // Post-fix: at most 4 distinctive words, longest-first. We
+        // don't pin the exact contents because stable-sort within a
+        // length bucket is implementation-detail, and we don't pin
+        // the exact count either (review-followup #6) so that
+        // additions to STOP_WORDS don't silently break this test.
+        assert!(
+            !kws.is_empty(),
+            "should yield at least one keyword; got {kws:?}"
+        );
+        assert!(
+            kws.len() <= 4,
+            "must respect the 4-keyword cap; got {kws:?}"
+        );
         assert!(
             kws.iter().any(|k| k == "analysis"),
             "longest distinctive word must survive; got {kws:?}"
