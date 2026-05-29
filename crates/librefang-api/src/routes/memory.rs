@@ -1667,14 +1667,36 @@ pub async fn memory_config_patch(
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
+    // M12: hot-reload the new config so the running kernel picks up the
+    // change without an operator restart. Pre-fix the endpoint just
+    // wrote the file and returned `restart_required: true`, which
+    // confused dashboard users who saw GET return new values but the
+    // live behaviour (ProactiveMemoryStore::config, decay engine, etc.)
+    // stayed on the boot snapshot.
+    //
+    // Best-effort: if reload validation fails (e.g. operator hand-edited
+    // an unrelated section into an invalid state between writes), keep
+    // the disk write and surface the error in the response — the
+    // operator can then either fix the unrelated section or restart.
+    // Reload-classification semantics still apply: only fields tagged H
+    // in `docs/operations/config-reload.md` take effect live; fields
+    // tagged R remain reflected in the response as restart-required.
+    let reload_result = state.kernel.reload_config().await;
+    let (restart_required, reload_error) = match reload_result {
+        Ok(plan) => (plan.restart_required, None),
+        Err(e) => {
+            tracing::warn!("Memory config PATCH wrote disk but reload failed: {e}");
+            (true, Some(e))
+        }
+    };
+
     tracing::info!("Memory config updated via API");
 
     // Return the canonical entity (matches GET /api/memory/config shape) sourced
     // from the freshly-written TOML table so callers can `setQueryData` without a
-    // follow-up GET. The in-memory `KernelConfig` is not hot-reloaded for this
-    // endpoint, so values reflect what is now persisted on disk; `restart_required`
-    // surfaces that the running kernel still uses the previous values until reboot.
-    // See issue #3832.
+    // follow-up GET. `restart_required` reflects the reload plan — false when
+    // every diffed field hot-reloaded, true when at least one needs a restart
+    // or the reload itself failed. See issue #3832.
     let memory_section = table.get("memory").and_then(|v| v.as_table());
     let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
 
@@ -1717,7 +1739,8 @@ pub async fn memory_config_patch(
             "max_retrieve": toml_u64(proactive_section, "max_retrieve")
                 .unwrap_or(live.proactive_memory.max_retrieve as u64),
         },
-        "restart_required": true,
+        "restart_required": restart_required,
+        "reload_error": reload_error,
     });
     drop(live);
 

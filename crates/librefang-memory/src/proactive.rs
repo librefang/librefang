@@ -33,7 +33,7 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     memory_scope_allows_recall, text_similarity, DefaultMemoryExtractor, Entity, EntityType,
     ExtractionResult, GraphPattern, MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor,
-    MemoryFilter, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
+    MemoryFilter, MemoryFragment, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
     ProactiveMemoryConfig, ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
     CHAT_SCOPE_METADATA_KEY,
 };
@@ -421,14 +421,35 @@ impl ProactiveMemoryStore {
         self.maybe_decay_confidence();
         self.maybe_cleanup_expired();
 
-        // Prevent unbounded growth of consolidation_counters HashMap.
-        // Agents that call auto_memorize < 10 times accumulate stale entries.
+        // M11: keep `consolidation_counters` from holding stale entries.
+        //
+        // The auto_memorize counter is incremented every turn and
+        // *removed* when it hits `AUTO_CONSOLIDATE_EVERY` (10). Agents
+        // that get fewer than 10 calls per their lifetime never trigger
+        // the removal, so a long-running daemon with many short-lived
+        // chat-burst agents accumulates a tail of forever-stuck-at-1..9
+        // entries — small (~50 bytes each) but unbounded.
+        //
+        // The pre-fix sweep only fired once the map crossed 1000 entries
+        // (truncate-to-500 by count DESC), which both delays cleanup
+        // until the leak is observable AND deletes the highest-count
+        // entries — exactly the agents about to fire a real consolidate.
+        // The new sweep instead drops every counter that hasn't passed
+        // the halfway mark on each maintenance tick: still cheap
+        // (HashMap::retain in-place), evicts cold entries first, never
+        // touches an entry that's about to fire.
         if let Ok(mut counters) = self.consolidation_counters.lock() {
-            if counters.len() > 1000 {
-                let mut entries: Vec<(String, u32)> = counters.drain().collect();
-                entries.sort_by_key(|b| std::cmp::Reverse(b.1));
-                entries.truncate(500);
-                *counters = entries.into_iter().collect();
+            const STALE_COUNTER_FLOOR: u32 = AUTO_CONSOLIDATE_EVERY / 2;
+            let before = counters.len();
+            counters.retain(|_, &mut count| count >= STALE_COUNTER_FLOOR);
+            let dropped = before - counters.len();
+            if dropped > 0 {
+                tracing::debug!(
+                    dropped,
+                    remaining = counters.len(),
+                    floor = STALE_COUNTER_FLOOR,
+                    "Pruned stale consolidation counters"
+                );
             }
         }
     }
@@ -615,7 +636,9 @@ impl ProactiveMemoryStore {
         // Read-only listing: a polled list/get must not bump access_count /
         // accessed_at, or the decay engine would never see these memories as
         // idle (#5839).
-        let frags = self.semantic.recall_readonly("", RECALL_CAP, Some(filter))?;
+        let frags = self
+            .semantic
+            .recall_readonly("", RECALL_CAP, Some(filter))?;
 
         let mut items: Vec<MemoryItem> = frags
             .into_iter()
@@ -683,14 +706,38 @@ impl ProactiveMemoryStore {
                 Some(qe),
             )?
         } else {
-            let search_query = extract_search_keywords(&item.content);
-            let mut results = self
-                .semantic
-                .recall(&search_query, fetch_limit, filter.clone())?;
-            if results.is_empty() {
-                results = self.semantic.recall(&item.content, fetch_limit, filter)?;
+            // M13: union the result sets across the top distinctive
+            // keywords instead of LIKE-substring matching on just the
+            // single longest one. Each keyword is a separate recall
+            // (recall takes one LIKE pattern); we dedup by memory id
+            // and cap at fetch_limit at the end so the caller sees the
+            // same shape as the embedding path.
+            let keywords = extract_search_keywords(&item.content);
+            let mut acc: Vec<MemoryFragment> = Vec::new();
+            let mut seen_ids: std::collections::HashSet<MemoryId> =
+                std::collections::HashSet::new();
+            for kw in &keywords {
+                let rows = self.semantic.recall(kw, fetch_limit, filter.clone())?;
+                for row in rows {
+                    if seen_ids.insert(row.id) {
+                        acc.push(row);
+                    }
+                    if acc.len() >= fetch_limit {
+                        break;
+                    }
+                }
+                if acc.len() >= fetch_limit {
+                    break;
+                }
             }
-            results
+            // Last-resort fallback (content yielded no distinctive
+            // keywords at all — e.g. all stop words or single short
+            // word). Substring-match the raw content so a near-verbatim
+            // duplicate is still detectable.
+            if acc.is_empty() {
+                acc = self.semantic.recall(&item.content, fetch_limit, filter)?;
+            }
+            acc
         };
 
         // Apply the cross-chat isolation filter to the candidate set
@@ -729,21 +776,37 @@ impl ProactiveMemoryStore {
         // hand it 20 candidates when it was tuned for 5.
         existing.truncate(5);
 
-        // Stash the query embedding in a temporary metadata key so the
-        // default decide_action heuristic can use vector cosine similarity
-        // against existing memories' stored embeddings (mem0-style dedup).
-        let mut enriched_item;
-        let decision_item = if let Some(ref qe) = query_embedding {
-            enriched_item = item.clone();
+        // Stash per-call inputs the default `decide_action` heuristic
+        // needs (the query embedding for cosine similarity, and the
+        // M14 update thresholds for the UPDATE / NOOP gate) in a
+        // throwaway clone's metadata. Keeps the trait signature stable
+        // without forcing every implementor to take a config handle —
+        // the LLM-backed extractor falls back to the default heuristic
+        // on driver failure, so it sees the same metadata.
+        let mut enriched_item = item.clone();
+        if let Some(ref qe) = query_embedding {
             let emb_json: Vec<serde_json::Value> =
                 qe.iter().map(|&v| serde_json::json!(v)).collect();
             enriched_item
                 .metadata
                 .insert("_embedding".to_string(), serde_json::json!(emb_json));
-            &enriched_item
-        } else {
-            item
+        }
+        let (same_cat_thresh, cross_cat_thresh) = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            (
+                cfg.update_threshold_same_category,
+                cfg.update_threshold_cross_category,
+            )
         };
+        enriched_item.metadata.insert(
+            "_update_threshold_same_cat".to_string(),
+            serde_json::json!(same_cat_thresh),
+        );
+        enriched_item.metadata.insert(
+            "_update_threshold_cross_cat".to_string(),
+            serde_json::json!(cross_cat_thresh),
+        );
+        let decision_item = &enriched_item;
 
         // Ask the extractor to decide: ADD, UPDATE, or NOOP
         let action = self
@@ -2015,7 +2078,16 @@ fn extract_entity_candidates(query: &str) -> Vec<String> {
 ///
 /// Instead of searching for the full content string (which requires exact substring match),
 /// pick the most distinctive words to find related memories.
-fn extract_search_keywords(content: &str) -> String {
+///
+/// Returns up to 4 distinctive keywords ordered longest-first. Pre-fix
+/// (M13) this collapsed the four to the single longest keyword, which
+/// (a) wasted the work of the stop-word filter on the other three and
+/// (b) gave the dedup-candidate scan a single LIKE substring to match
+/// against, frequently a generic word like "analysis" that matched too
+/// many unrelated rows OR a long compound term that matched none. The
+/// caller iterates and unions per-keyword results, which is closer to
+/// what a real FTS index would do for the no-embedding fallback path.
+fn extract_search_keywords(content: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
         "i", "a", "an", "the", "is", "am", "are", "was", "were", "be", "been", "being", "have",
         "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
@@ -2024,25 +2096,26 @@ fn extract_search_keywords(content: &str) -> String {
         "with", "from", "all", "very", "just", "also", "than",
     ];
 
-    let words: Vec<&str> = content
+    let mut words: Vec<String> = content
         .split_whitespace()
-        .filter(|w| {
+        .filter_map(|w| {
             let lower = w.to_lowercase();
-            lower.len() > 2 && !STOP_WORDS.contains(&lower.as_str())
+            if lower.len() > 2 && !STOP_WORDS.contains(&lower.as_str()) {
+                Some(lower)
+            } else {
+                None
+            }
         })
-        .take(4) // Use up to 4 significant words
         .collect();
-
-    if words.is_empty() {
-        content.to_string()
-    } else {
-        // Return the longest keyword for LIKE matching; decide_action handles dedup
-        words
-            .iter()
-            .max_by_key(|w| w.len())
-            .unwrap_or(&words[0])
-            .to_string()
-    }
+    // Dedup while preserving first-occurrence order.
+    let mut seen = std::collections::HashSet::new();
+    words.retain(|w| seen.insert(w.clone()));
+    // Longest-first ordering — long words tend to be more distinctive
+    // than short common ones. Stable sort preserves original order
+    // within a length bucket.
+    words.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    words.truncate(4);
+    words
 }
 
 /// Normalize an entity name into a stable ID (lowercase, spaces → underscores).
@@ -2083,6 +2156,12 @@ fn parse_relation_type(s: &str) -> RelationType {
 }
 
 /// Negation/contradiction words that suggest content is contradictory, not a refinement.
+/// Number of `auto_memorize` calls per agent between consolidate ticks.
+/// Each call increments `consolidation_counters[agent]`; when the entry
+/// hits this floor a background `consolidate` task is spawned and the
+/// entry is removed.
+const AUTO_CONSOLIDATE_EVERY: u32 = 10;
+
 const NEGATION_WORDS: &[&str] = &[
     "not",
     "don't",
@@ -2280,7 +2359,9 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             self.store_relations(&extraction_result.relations, user_id);
         }
 
-        // Auto-consolidation: merge duplicates every 10 auto_memorize calls per agent
+        // Auto-consolidation: merge duplicates every AUTO_CONSOLIDATE_EVERY
+        // auto_memorize calls per agent. Detached to a background task
+        // by H6 so this branch never blocks the agent's hot path.
         let should_consolidate = {
             let mut counters = self
                 .consolidation_counters
@@ -2288,7 +2369,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 .unwrap_or_else(|e| e.into_inner());
             let entry = counters.entry(user_id.to_string()).or_insert(0);
             *entry += 1;
-            if *entry >= 10 {
+            if *entry >= AUTO_CONSOLIDATE_EVERY {
                 // Remove the entry to prevent unbounded HashMap growth
                 counters.remove(user_id);
                 true
@@ -3345,6 +3426,73 @@ mod tests {
         assert!(results[0].content.contains("data analysis"));
     }
 
+    /// M14 regression: `decide_action` reads
+    /// `update_threshold_same_category` /
+    /// `update_threshold_cross_category` from the new memory's metadata
+    /// (where `add_with_decision` stashes the live config values), so
+    /// raising the threshold above the Jaccard similarity between two
+    /// memories flips the decision from UPDATE back to ADD.
+    #[tokio::test]
+    async fn decide_action_honors_config_update_thresholds() {
+        let extractor = DefaultMemoryExtractor;
+        let agent = AgentId::new();
+        let existing = MemoryFragment {
+            id: MemoryId::new(),
+            agent_id: agent,
+            content: "Prefers Python for scripting".to_string(),
+            source: MemorySource::Conversation,
+            scope: "session_memory".to_string(),
+            confidence: 1.0,
+            metadata: {
+                let mut m = HashMap::new();
+                m.insert("category".to_string(), serde_json::json!("preference"));
+                m
+            },
+            created_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            embedding: None,
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
+        };
+
+        // A new memory with similar content + same category. With the
+        // default 0.7 same-cat threshold this should UPDATE.
+        let new = MemoryItem::new(
+            "Prefers Python for data scripting".to_string(),
+            MemoryLevel::Session,
+        )
+        .with_category("preference");
+        let action = extractor
+            .decide_action(&new, std::slice::from_ref(&existing))
+            .await
+            .unwrap();
+        match action {
+            MemoryAction::Update { .. } | MemoryAction::Noop => {}
+            other => panic!("default thresholds should UPDATE or NOOP; got {other:?}"),
+        }
+
+        // Same input but with the threshold pushed to 0.99 via the
+        // metadata channel `add_with_decision` uses → ADD wins.
+        let mut new_strict = new.clone();
+        new_strict
+            .metadata
+            .insert("_update_threshold_same_cat".into(), serde_json::json!(0.99));
+        new_strict.metadata.insert(
+            "_update_threshold_cross_cat".into(),
+            serde_json::json!(0.99),
+        );
+        let action = extractor
+            .decide_action(&new_strict, std::slice::from_ref(&existing))
+            .await
+            .unwrap();
+        assert!(
+            matches!(action, MemoryAction::Add),
+            "raising _update_threshold_same_cat to 0.99 must demote UPDATE → ADD; got {action:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_version_history_tracking() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
@@ -3662,6 +3810,54 @@ mod tests {
         assert!(candidates.contains(&"Alice".to_string()));
         assert!(candidates.contains(&"Rust".to_string()));
         assert!(candidates.contains(&"alice".to_string())); // normalized
+    }
+
+    /// M13 regression: `extract_search_keywords` returns multiple
+    /// distinctive keywords ordered longest-first (the caller unions
+    /// per-keyword LIKE recalls on the no-embedding fallback path) —
+    /// pre-fix it collapsed the top 4 to the single longest word,
+    /// wasting the other three and giving the no-embedding scan a
+    /// frequently-too-generic substring to match against.
+    #[test]
+    fn extract_search_keywords_returns_multiple_ordered_longest_first() {
+        let kws = extract_search_keywords("I prefer Python for data analysis and machine learning");
+        // Pre-fix: returned only the single longest word ("analysis").
+        // Post-fix: top 4 distinctive words, longest-first. We assert
+        // exactly four survive (cap) and the longest-first invariant
+        // holds, but don't pin the exact contents because stable-sort
+        // within a length bucket is implementation-detail.
+        assert_eq!(kws.len(), 4, "should yield exactly 4 keywords; got {kws:?}");
+        assert!(
+            kws.iter().any(|k| k == "analysis"),
+            "longest distinctive word must survive; got {kws:?}"
+        );
+        // Stop words must not leak (catches stop-list regressions).
+        for stop in ["i", "for", "and", "the", "a"] {
+            assert!(
+                !kws.iter().any(|k| k == stop),
+                "stop word '{stop}' leaked into keywords: {kws:?}"
+            );
+        }
+        // Longest-first ordering.
+        for window in kws.windows(2) {
+            assert!(
+                window[0].len() >= window[1].len(),
+                "keywords not sorted longest-first: {kws:?}"
+            );
+        }
+    }
+
+    /// Content with no distinctive words returns an empty list — caller
+    /// falls back to a raw-content LIKE.
+    #[test]
+    fn extract_search_keywords_empty_for_all_stop_words() {
+        // Stop list covers "i", "am", "the". Short words (<= 2 chars)
+        // are dropped by length. Use only such tokens here.
+        let kws = extract_search_keywords("I am the");
+        assert!(
+            kws.is_empty(),
+            "all-stop-word content must yield no keywords; got {kws:?}"
+        );
     }
 
     /// RBAC M3 (#3054) regression: when the user's `UserMemoryAccess`

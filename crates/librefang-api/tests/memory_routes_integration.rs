@@ -515,7 +515,11 @@ async fn no_auth_loopback_memory_write_is_not_forbidden() {
         StatusCode::FORBIDDEN,
         "no-auth loopback write must be Owner-attributed, not Viewer-denied"
     );
-    assert_ne!(status, StatusCode::UNAUTHORIZED, "loopback no-auth must bypass");
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "loopback no-auth must bypass"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
