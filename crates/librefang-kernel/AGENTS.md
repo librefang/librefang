@@ -11,7 +11,7 @@ Agent orchestration. Scheduling. Permissions. Inter-agent communication. Owns th
 
 - Owns: registry, scheduling, approval, auth, auto_dream, cron, event_bus, inbox, pairing, scheduler, session_lifecycle, metering, router (last two re-exported from `librefang-kernel-metering` / `librefang-kernel-router`).
 - Does NOT own: agent loop body, tool dispatch, channel adapters, HTTP routing, dashboard SPA. Those live in `librefang-runtime`, `librefang-channels`, `librefang-api` respectively.
-- Does NOT depend on: `librefang-api`, `librefang-extensions`. Reverse the dependency via the `KernelHandle` trait (defined in `librefang-runtime`) when runtime / extensions need a kernel callback.
+- Does NOT depend on: `librefang-api`, `librefang-extensions`. Reverse the dependency via the `KernelHandle` trait (defined in `librefang-kernel-handle`) when runtime / extensions need a kernel callback.
 
 ## Module map
 
