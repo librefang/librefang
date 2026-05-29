@@ -36,6 +36,10 @@ pub struct BedrockDriver {
     /// When set, replaces `https://bedrock-runtime.{region}.amazonaws.com` as
     /// the URL base. Used only in tests to redirect requests to a mock server.
     base_url_override: Option<String>,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl BedrockDriver {
@@ -64,6 +68,7 @@ impl BedrockDriver {
             client: librefang_http::proxied_client(),
             emit_caller_trace_headers: true,
             base_url_override: None,
+            max_retries: 3,
         })
     }
 
@@ -74,6 +79,14 @@ impl BedrockDriver {
     /// to suppress them entirely.
     pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
         self.emit_caller_trace_headers = emit;
+        self
+    }
+
+    /// Override the max in-driver retry count (#10). Default is 3 (four total
+    /// attempts). Pass 0 to disable in-driver retries and rely on the outer
+    /// `FallbackChain`. Sourced from `DriverConfig.max_retries`.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 
@@ -99,6 +112,7 @@ impl BedrockDriver {
             client: librefang_http::proxied_client(),
             emit_caller_trace_headers: true,
             base_url_override: Some(base_url),
+            max_retries: 3,
         }
     }
 }
@@ -777,7 +791,8 @@ impl LlmDriver for BedrockDriver {
         let url = self.build_endpoint(&request.model);
         debug!(url = %url, "Sending Bedrock Converse request");
 
-        let max_retries = 3u32;
+        // Configurable in-driver retry cap (#10); default 3.
+        let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
             let request_builder = self
                 .client
@@ -795,10 +810,26 @@ impl LlmDriver for BedrockDriver {
                 ))
                 .body(body.clone());
 
-            let resp = request_builder
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same attempt/backoff decision as the
+            // server-side transient statuses instead of returning via `?`.
+            let resp = match request_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        let wait_ms = (attempt + 1) as u64 * 2000;
+                        warn!(
+                            error = %e,
+                            wait_ms,
+                            attempt,
+                            "Bedrock transport error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status().as_u16();
 
