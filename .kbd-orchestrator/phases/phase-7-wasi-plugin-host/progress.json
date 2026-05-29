@@ -31,9 +31,21 @@
   ],
   "critical_path": "C-001 -> C-003 -> C-004 -> C-005 -> C-006 -> C-008",
   "changes_total": 8,
-  "changes_completed": 1,
-  "active_change": "C-002",
+  "changes_completed": 8,
+  "active_change": null,
+  "execute_complete": true,
   "execution_started_at": "2026-05-28T00:00:00Z",
+  "execution_completed_at": "2026-05-29T00:00:00Z",
+  "changes": {
+    "C-001": {"status": "DONE", "verification": "wasi_version_alias_smoke passed; wasmtime aliases wasi:cli/environment@0.2.0 → 0.2.6"},
+    "C-002": {"status": "DONE", "verification": "component_respects_max_memory_bytes passes; limiter rejects 2-page component with 1-page cap"},
+    "C-003": {"status": "DONE", "verification": "WasiView impl satisfies wasmtime_wasi::p2::add_to_linker_async bound"},
+    "C-004": {"status": "DONE", "verification": "8/8 sandbox_component::tests pass; c-noop integration test still green"},
+    "C-005": {"status": "DONE", "note": "capability_gate_is_idempotent_for_duplicate_caps replaces old capability_gate_rejects_duplicate_caps"},
+    "C-006": {"status": "DONE", "active_green": "c-noop, rust-fs-cat, python-hello-time (3/5)", "ignored_phase8": "go-env-greet (TinyGo reactor adapter mismatch), js-kv-counter (StarlingMonkey WASI 0.2.10 vs 0.2.6)"},
+    "C-007": {"status": "DONE", "verification": "tight 1-page cap → Err; 4-page cap → Ok"},
+    "C-008": {"status": "DONE"}
+  },
   "changes": {
     "C-001": {
       "status": "DONE",
@@ -61,7 +73,7 @@
     "AOT cache invalidation deep-dive"
   ],
   "next_action": {
-    "command": "/kbd-execute C-001",
-    "description": "Add wasmtime-wasi workspace dep + run the version-alias verify-first smoke (D4 risk gate)"
+    "command": "/kbd-reflect phase-7-wasi-plugin-host",
+    "description": "All 8 changes DONE; push PR then run reflection"
   }
 }
