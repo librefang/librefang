@@ -546,7 +546,8 @@ pub struct HookConfig {
     ///
     /// When `false`: on Linux, wraps the launch with `unshare --net` if that
     /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
-    /// into the subprocess env. Defaults to `true`.
+    /// into the subprocess env. Defaults to `false` (secure-by-default — a
+    /// plugin that needs outbound network must opt in with `allow_network = true`).
     pub allow_network: bool,
     /// Whether hook subprocesses are allowed filesystem write access.
     ///
@@ -559,6 +560,9 @@ pub struct HookConfig {
     /// - Applied unconditionally on Linux when feature is enabled
     /// - Allowlist of ~60 syscalls; any other syscall kills the process with SIGSYS
     /// - Does not require root or user namespaces
+    ///
+    /// Defaults to `false` (secure-by-default — a plugin that needs filesystem
+    /// write access must opt in with `allow_filesystem = true`).
     pub allow_filesystem: bool,
     /// Path to the per-plugin shared state JSON file.
     ///
@@ -593,8 +597,8 @@ impl Default for HookConfig {
             allowed_env_vars: Vec::new(),
             plugin_env: Vec::new(),
             max_memory_mb: None,
-            allow_network: true,
-            allow_filesystem: true,
+            allow_network: false,
+            allow_filesystem: false,
             state_file: None,
             hook_timeouts: std::collections::HashMap::new(),
             retry_delay_ms: 500,
@@ -741,24 +745,44 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
     }
 }
 
-/// On Linux, attempt to wrap a command with `unshare --net` for true network
-/// namespace isolation when `allow_network == false`.
+/// On Linux, probe whether `unshare` can actually create the given namespace
+/// in the current environment.
 ///
-/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
-/// we are not on Linux. The probe uses `--help` (which exits 0 on modern util-linux)
-/// rather than `--version` because some older builds don't support `--version`.
+/// The probe runs `unshare --<ns> -- true` and checks for a clean exit.
+/// Probing the *operation* (not merely `unshare --help`) matters because
+/// `unshare` being installed does not imply the kernel will grant the
+/// namespace: unprivileged containers (Docker without `--privileged`),
+/// hardened CI runners, and seccomp-restricted hosts routinely have the
+/// binary present but reject `CLONE_NEWNET` / `CLONE_NEWNS` with EPERM.
+/// If we wrapped on `--help` alone, every locked-down hook would be spawned
+/// behind an `unshare` that exits non-zero before exec — killing the child
+/// (surfacing as a "Broken pipe" when the parent writes stdin) instead of
+/// merely failing open to the env-var soft isolation. With deny-by-default
+/// now the default posture (#2), that would break essentially every plugin
+/// in those environments, so the probe must reflect reality.
 #[cfg(target_os = "linux")]
-fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
-    let available = std::process::Command::new("unshare")
-        .arg("--help")
+fn unshare_namespace_works(ns_flag: &str) -> bool {
+    std::process::Command::new("unshare")
+        .arg(ns_flag)
+        .args(["--", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if available {
+/// On Linux, attempt to wrap a command with `unshare --net` for true network
+/// namespace isolation when `allow_network == false`.
+///
+/// Returns `(launcher, args)` unchanged if the kernel will not grant a network
+/// namespace here (see `unshare_namespace_works`) or if we are not on Linux.
+/// In that case the env-var soft isolation applied by the caller is the only
+/// network restriction — best-effort, never fatal to the hook.
+#[cfg(target_os = "linux")]
+fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    if unshare_namespace_works("--net") {
         let mut new_args = vec!["--net".to_string(), "--".to_string(), launcher.to_string()];
         new_args.extend_from_slice(args);
         return ("unshare".to_string(), new_args);
@@ -774,20 +798,13 @@ fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String
 /// On Linux, attempt to wrap a command with `unshare --mount` for mount namespace
 /// isolation when `allow_filesystem == false`.
 ///
-/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
-/// we are not on Linux. Best-effort: falls back silently.
+/// Returns `(launcher, args)` unchanged if the kernel will not grant a mount
+/// namespace here (see `unshare_namespace_works`) or if we are not on Linux.
+/// Best-effort: falls back to the env-var / Landlock isolation the caller
+/// applies; never fatal to the hook.
 #[cfg(target_os = "linux")]
 fn try_wrap_with_unshare_mount(launcher: &str, args: &[String]) -> (String, Vec<String>) {
-    let available = std::process::Command::new("unshare")
-        .arg("--help")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if available {
+    if unshare_namespace_works("--mount") {
         let mut new_args = vec![
             "--mount".to_string(),
             "--".to_string(),
@@ -978,6 +995,25 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_setgroups,
         // prlimit64 is the universal replacement for getrlimit/setrlimit;
         // the legacy syscalls are x86_64-only (see cfg block below).
+        //
+        // Runtime / glibc start-up syscalls. Modern glibc (>= 2.35) and the
+        // language runtimes we launch (sh, python3, node, go) issue these
+        // during thread / process bring-up; omitting them makes the
+        // KillProcess filter SIGSYS the child before it ever reads stdin,
+        // which surfaces to the parent as a "Broken pipe". These were the
+        // missing entries that blocked enabling `seccomp-sandbox` in the
+        // default feature set — without them every hook child died on
+        // aarch64. Universal variants (present on both x86_64 and aarch64).
+        libc::SYS_rseq,            // glibc >= 2.35 restartable sequences (per-thread)
+        libc::SYS_set_robust_list, // pthread robust-mutex bookkeeping at thread start
+        libc::SYS_get_robust_list,
+        libc::SYS_rt_sigtimedwait, // signal waits in runtimes (Go scheduler, Python)
+        libc::SYS_restart_syscall, // kernel-injected on EINTR resume
+        libc::SYS_clock_getres,
+        libc::SYS_sched_getaffinity, // CPU topology probe (Go/Node thread pools)
+        libc::SYS_sched_yield,
+        libc::SYS_statx,      // glibc stat family routes through statx on new kernels
+        libc::SYS_membarrier, // memory-barrier sync used by some runtimes
     ];
 
     // x86_64-only syscalls: these were replaced by *at / newer variants on
