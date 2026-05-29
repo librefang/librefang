@@ -4121,6 +4121,60 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
+/// The GC sweep must NOT reclaim a dead agent's `agent_msg_locks` entry while
+/// an in-flight turn still holds the Arc (`Arc::strong_count > 1`). Pre-fix the
+/// sweep filtered on dead-agent membership alone and dropped the slot out from
+/// under the live turn; a subsequent turn then `or_insert_with`-ed a fresh
+/// Mutex that no longer serialized against the in-flight one, silently losing
+/// mutual exclusion. This mirrors the symmetric strong_count guard already used
+/// for `session_msg_locks`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_preserves_agent_msg_lock_with_inflight_holder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-agent-lock");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Agent NOT in the registry → the sweep classifies it as dead.
+    let dead_agent = AgentId(uuid::Uuid::new_v4());
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    kernel
+        .agents
+        .agent_msg_locks
+        .insert(dead_agent, lock.clone());
+
+    // `lock` simulates an in-flight turn's cloned Arc: strong_count == 2
+    // (map slot + this holder). The sweep must leave the entry in place.
+    assert_eq!(
+        Arc::strong_count(&lock),
+        2,
+        "sanity: in-flight holder present"
+    );
+    kernel.gc_sweep();
+    assert!(
+        kernel.agents.agent_msg_locks.get(&dead_agent).is_some(),
+        "GC sweep must NOT reclaim an agent_msg_locks entry whose Arc is still \
+         held by an in-flight turn (strong_count > 1)"
+    );
+
+    // Drop the in-flight holder → strong_count drops to 1 (map slot only).
+    // The next sweep must now reclaim the stale entry.
+    drop(lock);
+    kernel.gc_sweep();
+    assert!(
+        kernel.agents.agent_msg_locks.get(&dead_agent).is_none(),
+        "GC sweep must reclaim a dead agent's agent_msg_locks entry once the \
+         last in-flight holder has dropped (strong_count == 1)"
+    );
+
+    kernel.shutdown();
+}
+
 /// `/api/sessions` joins the SQLite session list with this snapshot to set
 /// the per-row `active` flag (#4290). Verify it surfaces every running
 /// session across agents and shrinks back to empty after stops.

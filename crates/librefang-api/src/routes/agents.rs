@@ -429,11 +429,17 @@ async fn spawn_agent_inner(
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
-            json_error(
-                status,
-                code,
-                t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
-            )
+            // 409 (duplicate name) echoes the kernel message — useful
+            // to the caller and free of internal detail. The 500
+            // catch-all scrubs (audit: rusqlite-errors-leak): a spawn
+            // failure rooted in the memory substrate would otherwise
+            // leak SQL detail. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                t.t("api-error-internal")
+            } else {
+                t.t_args("api-error-agent-error", &[("error", &e.to_string())])
+            };
+            json_error(status, code, body)
         }
     }
 }
@@ -617,7 +623,7 @@ pub async fn bulk_delete_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some(scrub_500(&e, &t)),
                 });
             }
         }
@@ -768,7 +774,7 @@ pub async fn bulk_stop_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
+                    error: Some(scrub_500(&e, &t)),
                 });
             }
         }
@@ -2109,11 +2115,21 @@ pub async fn send_message(
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed"),
             };
             let t = ErrorTranslator::new(l);
-            ApiErrorResponse {
-                error: t.t_args(
+            // 4xx / 429 echo the kernel reason (caller-useful: not
+            // found, budget exceeded, session mismatch). The 500
+            // catch-all scrubs the reason (audit: rusqlite-errors-leak)
+            // so a delivery failure rooted in the memory substrate does
+            // not leak SQL detail. Full error already logged above.
+            let error = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                t.t("api-error-internal")
+            } else {
+                t.t_args(
                     "api-error-message-delivery-failed",
                     &[("reason", &e.to_string())],
-                ),
+                )
+            };
+            ApiErrorResponse {
+                error,
                 code: Some(code.to_string()),
                 r#type: Some(code.to_string()),
                 details: None,
@@ -3176,11 +3192,14 @@ pub async fn attach_session_stream(
     };
     if !session_valid {
         if let Err(e) = session_lookup {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .with_code("session_load_failed")
-            .into_response();
+            // Scrub the raw session-load error (audit:
+            // rusqlite-errors-leak) — the failure originates in the
+            // memory substrate, so the chain carries SQL detail. The
+            // full error reaches `error!`; the client sees the generic
+            // body plus the stable `session_load_failed` code.
+            return ApiErrorResponse::internal_scrub(&e)
+                .with_code("session_load_failed")
+                .into_response();
         }
         return ApiErrorResponse::not_found("session not found for this agent")
             .with_code("session_agent_mismatch")
@@ -3315,12 +3334,13 @@ pub async fn list_agent_sessions(
             StatusCode::OK,
             Json(serde_json::json!({"sessions": sessions})),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3354,12 +3374,13 @@ pub async fn create_agent_session(
     let label = req.get("label").and_then(|v| v.as_str());
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3405,12 +3426,13 @@ pub async fn switch_agent_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session switched"})),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3458,12 +3480,13 @@ pub async fn export_session(
             StatusCode::OK,
             Json(serde_json::to_value(export).unwrap_or_default()),
         ),
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -3651,9 +3674,7 @@ pub async fn import_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -3716,9 +3737,7 @@ pub async fn reset_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3780,9 +3799,7 @@ pub async fn reboot_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3836,9 +3853,7 @@ pub async fn clear_agent_history(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3882,9 +3897,7 @@ pub async fn compact_session(
             let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
         }
     }
@@ -3926,9 +3939,7 @@ pub async fn stop_agent(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -4015,9 +4026,7 @@ pub async fn stop_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -4093,12 +4102,13 @@ pub async fn set_model(
                 ),
             )
         }
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -4284,9 +4294,7 @@ pub async fn set_agent_tools(
         },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         ),
     }
 }
@@ -5222,9 +5230,7 @@ pub async fn patch_agent_config(
             {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                    ),
+                    Json(serde_json::json!({"error": scrub_500(&e, &t)})),
                 );
             }
         }
@@ -5370,6 +5376,42 @@ fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
     }
 }
 
+/// Build the localized error-body string for a kernel error that has
+/// already been mapped to `status`.
+///
+/// 4xx statuses echo the kernel message back (caller-useful detail
+/// such as "agent not found" / "already exists"). A 500 status scrubs
+/// the raw error to the generic localized "Internal server error"
+/// *after* logging the full chain at `error!` (audit:
+/// rusqlite-errors-leak). `librefang-memory` wraps every rusqlite
+/// error in `LibreFangError::Internal(e.to_string())`, so echoing the
+/// raw text into a 500 body leaks SQL schema, column / constraint
+/// names, and lock state to any caller able to trigger an internal
+/// error. Operators keep forensics via the `error!` log.
+fn kernel_err_body(
+    status: StatusCode,
+    e: &crate::error::KernelError,
+    t: &ErrorTranslator,
+) -> String {
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %e, "kernel error scrubbed before response");
+        t.t("api-error-internal")
+    } else {
+        t.t_args("api-error-generic", &[("error", &e.to_string())])
+    }
+}
+
+/// Scrub an unconditional 500-path error: log the full chain at
+/// `error!` for operators, return the generic localized "Internal
+/// server error" so the response body leaks no internal detail
+/// (audit: rusqlite-errors-leak). Use at sites whose status is always
+/// `INTERNAL_SERVER_ERROR`; for sites whose status varies with the
+/// error variant, prefer [`kernel_err_body`].
+fn scrub_500(e: &impl std::fmt::Display, t: &ErrorTranslator) -> String {
+    tracing::error!(error = %e, "internal error scrubbed before response");
+    t.t("api-error-internal")
+}
+
 /// Translate a kernel error from `update_hand_agent_runtime_override` or
 /// `clear_hand_agent_runtime_override` into a `(StatusCode, message)` pair.
 ///
@@ -5391,7 +5433,17 @@ fn map_hand_runtime_override_err(err: &crate::error::KernelError) -> (StatusCode
         {
             (StatusCode::CONFLICT, err.to_string())
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        // Scrub the catch-all 500 (audit: rusqlite-errors-leak): the
+        // full chain reaches `error!` for operators, the client sees a
+        // generic body. The 404 / 409 arms above intentionally echo
+        // the kernel message (caller-useful, no internal detail).
+        _ => {
+            tracing::error!(error = %err, "hand runtime override error scrubbed before response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        }
     }
 }
 
@@ -5676,15 +5728,17 @@ pub async fn clone_agent(
     let new_id = match state.kernel.spawn_agent_typed(cloned_manifest) {
         Ok(id) => id,
         Err(e) => {
+            // Map AgentAlreadyExists → 409 Conflict (audit:
+            // agent-not-found-returns-500). Pre-fix this branch
+            // returned 500 for every `spawn_agent_typed` error
+            // including the well-known duplicate-name case. The 500
+            // catch-all is scrubbed via `kernel_err_body` so a clone
+            // failure rooted in a kernel/SQL error never leaks the raw
+            // chain.
+            let status = kernel_err_to_status(&e);
             return (
-                // Map AgentAlreadyExists → 409 Conflict (audit:
-                // agent-not-found-returns-500). Pre-fix this branch
-                // returned 500 for every `spawn_agent_typed` error
-                // including the well-known duplicate-name case.
-                kernel_err_to_status(&e),
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-clone-failed", &[("error", &e.to_string())])}),
-                ),
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
             );
         }
     };
@@ -5774,12 +5828,13 @@ pub async fn reload_agent_manifest(
         // (an unknown id is a missing resource, not a malformed request), and
         // on-disk config faults (missing/unreadable/invalid agent.toml) → 500
         // (the request is well-formed; the server-side state is the problem).
-        Err(e) => (
-            kernel_err_to_status(&e),
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let status = kernel_err_to_status(&e);
+            (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            )
+        }
     }
 }
 
@@ -6083,9 +6138,7 @@ pub async fn set_agent_file(
     if let Err(e) = std::fs::create_dir_all(&identity_dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
     let file_path = identity_dir.join(&filename);
@@ -6107,9 +6160,7 @@ pub async fn set_agent_file(
     if let Err(e) = std::fs::write(&tmp_path, &req.content) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
@@ -6118,9 +6169,7 @@ pub async fn set_agent_file(
         }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-rename-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
 
@@ -6228,9 +6277,7 @@ pub async fn delete_agent_file(
     if let Err(e) = std::fs::remove_file(&canonical) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-file-delete-failed", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": scrub_500(&e, &t)})),
         );
     }
 
@@ -6743,7 +6790,10 @@ pub async fn inject_message(
         Err(e) => if e.to_string().contains("not found") {
             ApiErrorResponse::not_found(e.to_string())
         } else {
-            ApiErrorResponse::internal(e.to_string())
+            // Scrub the catch-all 500 (audit: rusqlite-errors-leak):
+            // an inject failure rooted in the memory substrate would
+            // otherwise leak SQL detail. Full error logged in scrub.
+            ApiErrorResponse::internal_scrub(&e)
         }
         .into_response(),
     }

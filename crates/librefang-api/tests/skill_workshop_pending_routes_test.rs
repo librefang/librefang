@@ -787,6 +787,75 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
     );
 }
 
+/// Internal-error scrub regression (#3): a corrupt pending file on
+/// disk makes `storage::load_candidate` fail at the TOML-parse step
+/// (`toml::from_str`), which surfaces as a `WorkshopError` other than
+/// `NotFound` / `InvalidId` — i.e. the route's catch-all 500 arm.
+/// Before the fix that arm echoed `format!("failed to load candidate:
+/// {e}")`, leaking the raw deserialize error (struct field names like
+/// `agent_id`, parser position, "missing field"). The body must now be
+/// the generic "Internal server error" with no parser / schema detail.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_show_corrupt_file_returns_scrubbed_500() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let id = "ffffffff-0000-0000-0000-00000000000c";
+    let root = skills_root(&h);
+
+    // Stage a syntactically-valid-TOML file under the candidate's
+    // expected path whose contents do NOT satisfy `CandidateSkill`'s
+    // required fields. `toml::from_str::<CandidateSkill>` fails with a
+    // "missing field `…`" deserialize error — the catch-all 500 arm.
+    let pending_dir = root.join("pending").join(agent);
+    std::fs::create_dir_all(&pending_dir).unwrap();
+    std::fs::write(
+        pending_dir.join(format!("{id}.toml")),
+        "name = \"only_a_name_no_other_required_fields\"\n",
+    )
+    .unwrap();
+
+    let (status, body) = json_request(&h, Method::GET, &format!("/api/skills/pending/{id}")).await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "corrupt candidate must surface as a 500: {body:?}"
+    );
+    // `internal_scrub` returns the canonical `ApiErrorResponse`, which
+    // serializes to the #3639 nested envelope: the scrubbed message
+    // lives at `error.message` (and the flat deprecated `message`
+    // alias), not as a bare `error` string. Assert the generic text at
+    // both surfaces.
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "500 nested `error.message` must be the generic scrubbed message: {body:?}"
+    );
+    assert_eq!(
+        body["message"].as_str().unwrap_or_default(),
+        "Internal server error",
+        "500 flat `message` must be the generic scrubbed message: {body:?}"
+    );
+    // Explicit leak guard: scan the *entire* serialized body, not one
+    // field — none of the raw-deserialize / schema tokens that the
+    // pre-fix `format!("failed to load candidate: {e}")` body carried
+    // may appear anywhere in the response.
+    let whole = body.to_string().to_lowercase();
+    for needle in [
+        "missing field",
+        "agent_id",
+        "toml",
+        "expected",
+        "failed to load",
+        "deserialize",
+    ] {
+        assert!(
+            !whole.contains(needle),
+            "scrubbed 500 body leaked internal token {needle:?}: {body:?}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_list_non_uuid_agent_filter_returns_400() {
     // `?agent=…` with a non-UUID value used to 500 with whatever
