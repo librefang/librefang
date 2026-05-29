@@ -645,7 +645,12 @@ while True:
     /// given per-request timeout. `StubEngine` is the inner/fallback engine and
     /// leaves the window untouched, so a fallback is observable as "messages
     /// unchanged".
-    fn spawn_with(py: &str, dir: &std::path::Path, body: &str, timeout_secs: u64) -> SidecarContextEngine {
+    fn spawn_with(
+        py: &str,
+        dir: &std::path::Path,
+        body: &str,
+        timeout_secs: u64,
+    ) -> SidecarContextEngine {
         let script = dir.join("s.py");
         std::fs::write(&script, body).unwrap();
         SidecarContextEngine::spawn(
@@ -673,15 +678,25 @@ while True:
         let slow = "import sys, time\nwhile True:\n    if not sys.stdin.readline():\n        break\n    time.sleep(30)\n";
         let engine = spawn_with(py, dir_t.path(), slow, 1);
         let mut m = vec![Message::user("hi")];
-        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
-        assert_eq!(m.len(), 1, "timeout must fall back to inner (window unchanged)");
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
+        assert_eq!(
+            m.len(),
+            1,
+            "timeout must fall back to inner (window unchanged)"
+        );
 
         // (b) Error reply: sidecar returns {"id":N,"error":"boom"}.
         let dir_e = tempfile::tempdir().unwrap();
         let err = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    sys.stdout.write(json.dumps({\"id\": rid, \"error\": \"boom\"}) + \"\\n\")\n    sys.stdout.flush()\n";
         let engine = spawn_with(py, dir_e.path(), err, 5);
         let mut m = vec![Message::user("hi")];
-        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
         assert_eq!(m.len(), 1, "error reply must fall back");
 
         // (c) Malformed reply: `messages` is a string, not an array.
@@ -689,7 +704,10 @@ while True:
         let bad = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    sys.stdout.write(json.dumps({\"id\": rid, \"ok\": {\"messages\": \"not-an-array\"}}) + \"\\n\")\n    sys.stdout.flush()\n";
         let engine = spawn_with(py, dir_m.path(), bad, 5);
         let mut m = vec![Message::user("hi")];
-        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
         assert_eq!(m.len(), 1, "malformed reply must fall back");
     }
 
@@ -704,7 +722,10 @@ while True:
         let dir = tempfile::tempdir().unwrap();
         let engine = spawn_with(py, dir.path(), "import sys\nsys.exit(0)\n", 5);
         let mut m = vec![Message::user("hi")];
-        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
         assert_eq!(m.len(), 1, "dead sidecar must fall back to inner");
     }
 
@@ -723,7 +744,10 @@ while True:
         let body = "import sys, json\nwhile True:\n    line = sys.stdin.readline()\n    if not line:\n        break\n    line = line.strip()\n    if not line:\n        continue\n    rid = json.loads(line).get(\"id\")\n    win = [{\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"orphan\", \"content\": \"x\"}]}]\n    sys.stdout.write(json.dumps({\"id\": rid, \"ok\": {\"messages\": win, \"recovery\": \"None\"}}) + \"\\n\")\n    sys.stdout.flush()\n";
         let engine = spawn_with(py, dir.path(), body, 5);
         let mut m = vec![Message::user("first")];
-        engine.assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000).await.unwrap();
+        engine
+            .assemble(AgentId(uuid::Uuid::nil()), &mut m, "sys", &[], 1000)
+            .await
+            .unwrap();
         // The orphan tool_result must not survive into the prompt.
         let has_orphan = m.iter().any(|msg| {
             if let MessageContent::Blocks(blocks) = &msg.content {
@@ -732,6 +756,9 @@ while True:
                 false
             }
         });
-        assert!(!has_orphan, "validate_and_repair must drop the orphan tool_result");
+        assert!(
+            !has_orphan,
+            "validate_and_repair must drop the orphan tool_result"
+        );
     }
 }
