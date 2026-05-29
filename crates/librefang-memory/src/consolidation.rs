@@ -9,19 +9,86 @@ use librefang_types::memory::{text_similarity, ConsolidationReport};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Memory consolidation engine.
+///
+/// Runs as a periodic kernel-wide sweep (see
+/// `kernel/background_lifecycle.rs::memory_consolidation`). Decays the
+/// confidence of stale memories and merges near-verbatim duplicates
+/// using `text_similarity` (Jaccard word overlap).
+///
+/// This engine is intentionally *text-only* — it operates on every
+/// agent's memories in a single pass and does not have access to
+/// per-call embeddings, so it can't use cosine similarity. For
+/// embedding-aware, per-agent dedup, see
+/// `librefang_memory::ProactiveMemoryStore::consolidate`, which the
+/// `/api/memory/agents/{id}/consolidate` route uses.
+///
+/// Both engines now read from the same configured
+/// `duplicate_threshold` (H5) so an operator who tightens the knob in
+/// `config.toml` gets consistent behaviour from both the periodic
+/// global sweep and the per-agent on-demand call.
 #[derive(Clone)]
 pub struct ConsolidationEngine {
     pool: Pool<SqliteConnectionManager>,
     /// Decay rate: how much to reduce confidence per consolidation cycle.
     decay_rate: f32,
+    /// Similarity threshold for merging near-duplicates (Jaccard 0..=1),
+    /// stored as `f32::to_bits` in an atomic so [`Self::set_duplicate_threshold`]
+    /// can update it through an `Arc<MemorySubstrate>` (hot-reload path —
+    /// no `&mut` available there) without taking a lock on the read side.
+    /// Mirrors `ProactiveMemoryConfig::duplicate_threshold` so the global
+    /// sweep and the per-agent on-demand consolidate agree (H5).
+    duplicate_threshold_bits: Arc<AtomicU32>,
 }
 
+/// Default merge threshold when the kernel has not yet pushed the
+/// configured value down via [`ConsolidationEngine::set_duplicate_threshold`].
+/// Matches the post-fix `ProactiveMemoryConfig::duplicate_threshold`
+/// default so a freshly-constructed engine behaves the same as the
+/// on-demand per-agent consolidator.
+const DEFAULT_DUPLICATE_THRESHOLD: f32 = 0.85;
+
 impl ConsolidationEngine {
-    /// Create a new consolidation engine.
+    /// Create a new consolidation engine with the default duplicate threshold.
+    ///
+    /// The threshold can be updated post-construction via
+    /// [`Self::set_duplicate_threshold`] — the kernel boot path does this
+    /// once it has parsed `[proactive_memory] duplicate_threshold`, and the
+    /// hot-reload path
+    /// (`config_reload_ops.rs::HotAction::UpdateProactiveMemory`) repeats
+    /// the same call when the config is edited at runtime. The 142
+    /// existing call sites (mostly tests on
+    /// `MemorySubstrate::open_in_memory(decay_rate)`) do not need to pass
+    /// a second number.
     pub fn new(pool: Pool<SqliteConnectionManager>, decay_rate: f32) -> Self {
-        Self { pool, decay_rate }
+        Self {
+            pool,
+            decay_rate,
+            duplicate_threshold_bits: Arc::new(AtomicU32::new(
+                DEFAULT_DUPLICATE_THRESHOLD.to_bits(),
+            )),
+        }
+    }
+
+    /// Update the merge threshold (H5). Clamped to `0.0..=1.0`.
+    ///
+    /// Takes `&self` so the hot-reload code path
+    /// (`config_reload_ops::HotAction::UpdateProactiveMemory`) can push a
+    /// new value through `Arc<MemorySubstrate>` without needing
+    /// `Arc::get_mut` — the substrate is shared across the kernel and
+    /// cannot reliably be unique-borrowed at reload time.
+    pub fn set_duplicate_threshold(&self, threshold: f32) {
+        let clamped = threshold.clamp(0.0, 1.0);
+        self.duplicate_threshold_bits
+            .store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Read the live merge threshold.
+    fn duplicate_threshold(&self) -> f32 {
+        f32::from_bits(self.duplicate_threshold_bits.load(Ordering::Relaxed))
     }
 
     /// Run a consolidation cycle: decay old memories.
@@ -136,7 +203,7 @@ impl ConsolidationEngine {
                         continue;
                     }
                     let sim = text_similarity(&lowered[i], &lowered[j]);
-                    if sim > 0.9 {
+                    if sim > self.duplicate_threshold() {
                         // Keep rows[i] (sorted by confidence DESC). Merge:
                         //   - access_count: keeper + loser (sum)
                         //   - metadata: union, keeper wins on key conflict
@@ -160,8 +227,9 @@ impl ConsolidationEngine {
 
                         outer_tx
                             .execute(
-                                "UPDATE memories SET deleted = 1 WHERE id = ?1",
-                                rusqlite::params![&rows[j].0],
+                                "UPDATE memories SET deleted = 1, deleted_at = ?1 \
+                                 WHERE id = ?2",
+                                rusqlite::params![Utc::now().timestamp(), &rows[j].0],
                             )
                             .map_err(LibreFangError::memory)?;
 

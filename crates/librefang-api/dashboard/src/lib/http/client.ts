@@ -234,6 +234,9 @@ export {
   createGoal,
   updateGoal,
   deleteGoal,
+  startGoalRun,
+  stopGoalRun,
+  getGoalRun,
   // hands
   activateHand,
   deactivateHand,

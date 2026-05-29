@@ -95,7 +95,11 @@ impl TtsEngine {
                     Err("google_tts provider requires the `media` feature".to_string())
                 }
             }
-            other => Err(format!("Unknown TTS provider: {other}")),
+            // Custom / self-hosted OpenAI-compatible TTS endpoint
+            _other => {
+                self.synthesize_custom(text, voice_override, format_override)
+                    .await
+            }
         }
     }
 
@@ -243,6 +247,114 @@ impl TtsEngine {
         })
     }
 
+    /// Synthesize via a custom / self-hosted OpenAI-compatible TTS endpoint.
+    ///
+    /// Uses `[tts.custom]` for URL, auth, model, voice, and format.
+    /// A missing or empty `base_url` is rejected immediately so the error
+    /// message is actionable rather than producing a confusing HTTP failure.
+    async fn synthesize_custom(
+        &self,
+        text: &str,
+        voice_override: Option<&str>,
+        format_override: Option<&str>,
+    ) -> Result<TtsResult, String> {
+        let cfg = &self.config.custom;
+
+        if cfg.base_url.is_empty() {
+            let provider = self.config.provider.as_deref().unwrap_or("<unknown>");
+            return Err(format!(
+                "TTS provider '{provider}' is not a built-in provider and \
+                 [tts.custom] base_url is not set. \
+                 Add `base_url = \"http://<host>/v1/audio/speech\"` \
+                 to [tts.custom] in config.toml."
+            ));
+        }
+
+        // Resolve API key: env var (if configured) → empty string (keyless)
+        let api_key: Option<String> = if cfg.api_key_env.is_empty() {
+            None
+        } else {
+            match std::env::var(&cfg.api_key_env) {
+                Ok(k) if !k.trim().is_empty() => Some(k),
+                _ if cfg.key_required => {
+                    return Err(format!(
+                        "Custom TTS provider requires an API key but env var '{}' is not set or empty.",
+                        cfg.api_key_env
+                    ));
+                }
+                _ => None,
+            }
+        };
+
+        let voice = voice_override.unwrap_or(&cfg.voice);
+        let format = format_override.unwrap_or(&cfg.format);
+
+        let body = serde_json::json!({
+            "model": cfg.model,
+            "input": text,
+            "voice": voice,
+            "response_format": format,
+        });
+
+        let client = crate::http_client::proxied_client();
+        let mut req = client
+            .post(&cfg.base_url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+
+        if let Some(ref key) = api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("Custom TTS request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = response.text().await.unwrap_or_default();
+            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            return Err(format!("Custom TTS failed (HTTP {status}): {truncated}"));
+        }
+
+        if let Some(len) = response.content_length() {
+            if len as usize > MAX_AUDIO_RESPONSE_BYTES {
+                return Err(format!(
+                    "Audio response too large: {len} bytes (max {MAX_AUDIO_RESPONSE_BYTES})"
+                ));
+            }
+        }
+
+        let audio_data = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read audio response: {e}"))?;
+
+        if audio_data.len() > MAX_AUDIO_RESPONSE_BYTES {
+            return Err(format!(
+                "Audio data exceeds {}MB limit",
+                MAX_AUDIO_RESPONSE_BYTES / 1024 / 1024
+            ));
+        }
+
+        let word_count = text.split_whitespace().count();
+        let duration_ms = (word_count as u64 * 400).max(500);
+        let provider = self
+            .config
+            .provider
+            .clone()
+            .unwrap_or_else(|| "custom".to_string());
+
+        Ok(TtsResult {
+            audio_data: audio_data.to_vec(),
+            format: format.to_string(),
+            provider,
+            duration_estimate_ms: duration_ms,
+        })
+    }
+
     /// Synthesize via Google Cloud TTS API.
     /// Delegates to `GoogleTtsMediaDriver` to avoid duplicating SSML handling.
     #[cfg(feature = "media")]
@@ -376,5 +488,84 @@ mod tests {
     #[test]
     fn test_max_audio_constant() {
         assert_eq!(MAX_AUDIO_RESPONSE_BYTES, 10 * 1024 * 1024);
+    }
+
+    // ── Custom TTS config tests ──────────────────────────────────────────
+
+    #[test]
+    fn tts_config_default_has_empty_custom() {
+        let config = TtsConfig::default();
+        assert!(config.custom.base_url.is_empty());
+        assert!(config.custom.api_key_env.is_empty());
+        assert!(!config.custom.key_required);
+        assert_eq!(config.custom.model, "tts-1");
+        assert_eq!(config.custom.voice, "alloy");
+        assert_eq!(config.custom.format, "mp3");
+    }
+
+    #[test]
+    fn tts_config_round_trips_custom() {
+        use librefang_types::config::CustomTtsConfig;
+        let config = TtsConfig {
+            enabled: true,
+            provider: Some("local-piper".to_string()),
+            custom: CustomTtsConfig {
+                base_url: "http://localhost:5000/v1/audio/speech".to_string(),
+                api_key_env: String::new(),
+                key_required: false,
+                model: "tts-1".to_string(),
+                voice: "en_US-lessac-medium".to_string(),
+                format: "mp3".to_string(),
+            },
+            ..TtsConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TtsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.custom.base_url,
+            "http://localhost:5000/v1/audio/speech"
+        );
+        assert_eq!(parsed.custom.voice, "en_US-lessac-medium");
+        assert_eq!(parsed.provider.as_deref(), Some("local-piper"));
+    }
+
+    #[tokio::test]
+    async fn test_synthesize_custom_no_base_url_returns_err() {
+        // Provider is set to a custom name but [tts.custom] base_url is empty.
+        let mut config = default_config();
+        config.enabled = true;
+        config.provider = Some("local-piper".to_string());
+        // custom.base_url is empty (default)
+        let engine = TtsEngine::new(config);
+        let result = engine.synthesize("Hello", None, None).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("local-piper"),
+            "error should name the provider"
+        );
+        assert!(msg.contains("base_url"), "error should mention base_url");
+    }
+
+    #[tokio::test]
+    async fn test_synthesize_custom_key_required_missing_env_returns_err() {
+        use librefang_types::config::CustomTtsConfig;
+        let mut config = default_config();
+        config.enabled = true;
+        config.provider = Some("local-piper".to_string());
+        config.custom = CustomTtsConfig {
+            base_url: "http://localhost:5000/v1/audio/speech".to_string(),
+            api_key_env: "LIBREFANG_TEST_MISSING_KEY_ZXQ99".to_string(), // pragma: allowlist secret
+            key_required: true,
+            ..Default::default()
+        };
+        let engine = TtsEngine::new(config);
+        let result = engine.synthesize("Hello", None, None).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("LIBREFANG_TEST_MISSING_KEY_ZXQ99"),
+            "error should name the env var"
+        );
     }
 }

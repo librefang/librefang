@@ -242,6 +242,15 @@ impl LibreFangKernel {
                     if let Some(pm) = self.memory.proactive_memory.get() {
                         pm.update_config(new_config.proactive_memory.clone());
                     }
+                    // H5 follow-up: also propagate the new
+                    // `duplicate_threshold` to the periodic global
+                    // consolidation sweep. Without this the on-demand
+                    // per-agent consolidate picks up the new value but
+                    // the kernel-wide sweep keeps the old one — exactly
+                    // the inconsistency H5 set out to remove.
+                    self.memory.substrate.set_consolidation_duplicate_threshold(
+                        new_config.proactive_memory.duplicate_threshold,
+                    );
                 }
                 HotAction::ReloadChannels => {
                     // Channel adapters are registered at bridge startup. Clear

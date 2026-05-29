@@ -152,6 +152,41 @@ pub fn init_proactive_memory_with_defaults(
 
 const MAX_MEMORY_CONTENT_LENGTH: usize = 2000;
 
+/// Cap on memories accepted per extraction call (H2). A misbehaving
+/// extractor can dump dozens of low-quality fragments per turn; this
+/// stops one bad turn from blowing past the per-agent memory cap and
+/// the prompt-injection budget in `format_context`.
+const MAX_MEMORIES_PER_EXTRACTION: usize = 20;
+
+/// Snap a model-emitted category to the configured allowlist when the
+/// match is close enough that an exact-string compare would be brittle
+/// noise (H2 review-followup #7).
+///
+/// Two-pass:
+/// 1. Case-insensitive exact match — handles `"Preference"`.
+/// 2. Case-insensitive match after dropping a trailing `s` on either
+///    side — handles `"preferences"` vs configured `"preference"`,
+///    or `"preference"` vs configured `"preferences"` (rare, but
+///    operators do declare plural forms sometimes).
+///
+/// Returns the *configured* string so the canonical spelling lands in
+/// the column, regardless of what the model wrote.
+fn match_category_fuzzy<'a>(raw: &str, configured: &'a [String]) -> Option<&'a str> {
+    let raw_l = raw.to_ascii_lowercase();
+    let raw_stem = raw_l.strip_suffix('s').unwrap_or(&raw_l);
+    for c in configured {
+        let c_l = c.to_ascii_lowercase();
+        if c_l == raw_l {
+            return Some(c.as_str());
+        }
+        let c_stem = c_l.strip_suffix('s').unwrap_or(&c_l);
+        if c_stem == raw_stem {
+            return Some(c.as_str());
+        }
+    }
+    None
+}
+
 fn build_extraction_prompt(categories: &[String]) -> String {
     let categories_list = if categories.is_empty() {
         "any relevant category".to_string()
@@ -197,6 +232,7 @@ Respond with a JSON object containing two arrays:
    - "content": the extracted memory (concise, one natural sentence with actionable nuance)
    - "category": one of: {categories_list}
    - "level": "user" for personal/preference info, "session" for current task context, "agent" for agent-specific learnings
+   - "confidence": float in [0.0, 1.0]. How sure are you the user stated or strongly demonstrated this fact? 1.0 = explicitly stated by the user this turn; 0.7 = strongly implied; 0.4 = inferred from partial evidence. Memories scoring below the configured extraction_threshold are dropped, so be calibrated rather than uniformly confident.
 
 2. "relations" - Entity relationships (knowledge graph triples):
    - "subject": entity name (e.g., "Alice")
@@ -208,8 +244,8 @@ Respond with a JSON object containing two arrays:
 Example:
 {{
   "memories": [
-    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user"}},
-    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user"}}
+    {{"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "{first_cat}", "level": "user", "confidence": 0.95}},
+    {{"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "{second_cat}", "level": "user", "confidence": 0.85}}
   ],
   "relations": [
     {{"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"}}
@@ -495,7 +531,7 @@ impl LlmMemoryExtractor {
         })?;
 
         let text = response.text();
-        parse_llm_extraction_response(&text)
+        parse_llm_extraction_response(&text, categories)
     }
 }
 
@@ -629,29 +665,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
     }
 
     fn format_context(&self, memories: &[MemoryItem]) -> String {
-        if memories.is_empty() {
-            return String::new();
-        }
-
-        let mut context = String::from(
-            "You have the following understanding of this person from previous conversations. \
-             This is knowledge you have — not a list to recite. Let it naturally shape how you \
-             respond:\n\
-             \n\
-             - Reference relevant context when it helps (\"since you're working in Rust...\", \
-             \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
-             - Let remembered preferences silently guide your style, format, and depth — you \
-             don't need to announce that you're doing so.\n\
-             - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
-             or mechanically list what you know. A friend doesn't preface every remark with \
-             \"I remember you told me...\".\n\
-             - If a memory is clearly outdated or the user contradicts it, trust the current \
-             conversation over stored context.\n\n",
-        );
-        for mem in memories {
-            context.push_str(&format!("- {}\n", mem.content));
-        }
-        context
+        // Trait method has no config access — fall back to the const
+        // default. The store's `format_context*` methods read the
+        // configured `format_context_max_chars` and pass it explicitly.
+        librefang_types::memory::format_memories_with_budget(
+            memories,
+            librefang_types::memory::FORMAT_CONTEXT_MAX_CHARS,
+        )
     }
 }
 
@@ -755,6 +775,7 @@ fn parse_decision_response(
 /// - Legacy: `[...]` (array of memory items, no relations)
 fn parse_llm_extraction_response(
     text: &str,
+    categories: &[String],
 ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
     use librefang_types::memory::RelationTriple;
 
@@ -786,35 +807,92 @@ fn parse_llm_extraction_response(
         .into_iter()
         .filter_map(|item| {
             let content = item.get("content")?.as_str()?;
-            let content = if content.len() > MAX_MEMORY_CONTENT_LENGTH {
+            // H2: minimum-content guard. Weak / over-eager extractors will
+            // happily emit "ok", "ack", or single-word junk; without a floor
+            // these become useless rows that survive dedup (trivially unique)
+            // and pollute the store and the auto_retrieve prompt. 4 chars
+            // catches the worst of it ("ok", "no", "yes", "ack", single
+            // letters) while preserving short-but-real observations like
+            // "uses zsh" (8 chars — easily above the floor).
+            const MIN_MEMORY_CONTENT_CHARS: usize = 4;
+            let trimmed = content.trim();
+            if trimmed.chars().count() < MIN_MEMORY_CONTENT_CHARS {
+                tracing::debug!(
+                    "Extractor produced sub-minimum memory content (len={}), skipping: {:?}",
+                    trimmed.chars().count(),
+                    trimmed
+                );
+                return None;
+            }
+            let content = if trimmed.len() > MAX_MEMORY_CONTENT_LENGTH {
                 tracing::warn!(
                     "Memory content too long ({} chars), truncating to {}",
-                    content.len(),
+                    trimmed.len(),
                     MAX_MEMORY_CONTENT_LENGTH
                 );
-                let cutoff = content
+                let cutoff = trimmed
                     .char_indices()
                     .nth(MAX_MEMORY_CONTENT_LENGTH)
                     .map(|(i, _)| i)
-                    .unwrap_or(content.len());
-                &content[..cutoff]
+                    .unwrap_or(trimmed.len());
+                &trimmed[..cutoff]
             } else {
-                content
+                trimmed
             };
             let content = content.to_string();
-            let category = item
+            let raw_category = item
                 .get("category")
                 .and_then(|v| v.as_str())
                 .unwrap_or("general")
-                .to_string();
+                .trim();
+            // H2: category validation. When the agent has a configured
+            // `extract_categories` allowlist, anything outside it is
+            // downgraded to "general" so prompt-tuning the extractor
+            // can't smuggle unknown buckets into the dashboard's
+            // category facets. Empty / all-whitespace categories also
+            // collapse to "general". When the allowlist is empty
+            // (legacy / unconfigured agents) the LLM's raw category
+            // value is preserved.
+            let category = if raw_category.is_empty() {
+                "general".to_string()
+            } else if categories.is_empty() {
+                raw_category.to_string()
+            } else if let Some(matched) = match_category_fuzzy(raw_category, categories) {
+                // Snap "preferences"/"PREFERENCE" back to the canonical
+                // configured "preference" (H2 review-followup #7). Strict
+                // string match was too brittle: every model variation in
+                // case / number caused an unnecessary "general" downgrade.
+                matched.to_string()
+            } else {
+                tracing::debug!(
+                    "Extractor produced category '{raw_category}' not in allowlist; \
+                     downgrading to 'general'"
+                );
+                "general".to_string()
+            };
             let level = match item.get("level").and_then(|v| v.as_str()) {
                 Some("user") => MemoryLevel::User,
                 Some("agent") => MemoryLevel::Agent,
                 _ => MemoryLevel::Session,
             };
 
+            // C3 follow-up: the LLM extractor now asks each memory for a
+            // `confidence` field (see `build_extraction_prompt`). Clamp
+            // to [0, 1] and stash in metadata under the key that
+            // `SemanticStore::remember_with_embedding_and_peer` reads
+            // when populating the `confidence` column. Missing field →
+            // default 1.0 (preserves the "rule-based extractor always
+            // passes" behaviour and never silently drops a memory just
+            // because a model forgot to emit the field).
+            let confidence = item
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .map(|f| f.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("extracted_by".to_string(), serde_json::json!("llm"));
+            metadata.insert("confidence".to_string(), serde_json::json!(confidence));
 
             Some(MemoryItem {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -824,12 +902,19 @@ fn parse_llm_extraction_response(
                 metadata,
                 created_at: chrono::Utc::now(),
                 source: None,
-                confidence: None,
+                confidence: Some(confidence as f32),
                 accessed_at: None,
                 access_count: None,
                 agent_id: None,
             })
         })
+        // H2: cap memories per extraction. A misbehaving extractor can
+        // dump dozens of low-quality fragments per turn; this cap
+        // protects the eviction loop from churning and the prompt cap
+        // (H4) from being trivially hit. Operators that legitimately
+        // need more granular extraction can tighten the per-agent
+        // memory cap to manage volume instead.
+        .take(MAX_MEMORIES_PER_EXTRACTION)
         .collect();
 
     // Extract relations (knowledge graph triples)
@@ -1006,7 +1091,7 @@ mod tests {
     fn test_parse_llm_extraction_json() {
         let json =
             r#"[{"content": "User prefers Rust", "category": "user_preference", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "User prefers Rust");
@@ -1020,7 +1105,7 @@ mod tests {
     #[test]
     fn test_parse_llm_extraction_code_block() {
         let json = "```json\n[{\"content\": \"Works at Acme\", \"category\": \"important_fact\", \"level\": \"user\"}]\n```";
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "Works at Acme");
@@ -1028,27 +1113,28 @@ mod tests {
 
     #[test]
     fn test_parse_llm_extraction_empty() {
-        let result = parse_llm_extraction_response("[]").unwrap();
+        let result = parse_llm_extraction_response("[]", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
     }
 
     #[test]
     fn test_parse_llm_extraction_invalid() {
-        let result = parse_llm_extraction_response("not json at all").unwrap();
+        let result = parse_llm_extraction_response("not json at all", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
     }
 
     #[test]
     fn test_parse_llm_extraction_levels() {
+        // Content strings must clear MIN_MEMORY_CONTENT_CHARS=4 (H2).
         let json = r#"[
-            {"content": "a", "level": "user"},
-            {"content": "b", "level": "session"},
-            {"content": "c", "level": "agent"},
-            {"content": "d"}
+            {"content": "user-level fact", "level": "user"},
+            {"content": "session-scoped note", "level": "session"},
+            {"content": "agent-scoped note", "level": "agent"},
+            {"content": "no level field"}
         ]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories.len(), 4);
         assert_eq!(result.memories[0].level, MemoryLevel::User);
         assert_eq!(result.memories[1].level, MemoryLevel::Session);
@@ -1066,7 +1152,7 @@ mod tests {
                 {"subject": "User", "subject_type": "person", "relation": "prefers", "object": "Rust", "object_type": "tool"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content);
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "User prefers Rust");
@@ -1085,7 +1171,7 @@ mod tests {
                 {"subject": "Alice", "subject_type": "person", "relation": "works_at", "object": "Google", "object_type": "organization"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert!(result.has_content); // relations count as content
         assert!(result.memories.is_empty());
         assert_eq!(result.relations.len(), 1);
@@ -1313,7 +1399,7 @@ mod tests {
     fn test_parse_extraction_content_truncation_over_2000() {
         let long_content = "A".repeat(3000);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, long_content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content.len(), MAX_MEMORY_CONTENT_LENGTH);
     }
@@ -1322,7 +1408,7 @@ mod tests {
     fn test_parse_extraction_content_exactly_2000_not_truncated() {
         let content = "A".repeat(2000);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert_eq!(result.memories[0].content.len(), 2000);
         assert_eq!(result.memories[0].content, content);
     }
@@ -1331,7 +1417,7 @@ mod tests {
     fn test_parse_extraction_content_truncation_utf8_boundary() {
         let content = "ą".repeat(2500);
         let json = format!(r#"[{{"content": "{}", "level": "user"}}]"#, content);
-        let result = parse_llm_extraction_response(&json).unwrap();
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
         assert!(result.memories[0].content.chars().count() <= MAX_MEMORY_CONTENT_LENGTH);
         // Verify valid UTF-8 — no panics
         assert!(std::str::from_utf8(result.memories[0].content.as_bytes()).is_ok());
@@ -1340,7 +1426,7 @@ mod tests {
     #[test]
     fn test_parse_extraction_default_category() {
         let json = r#"[{"content": "test", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories[0].category, Some("general".to_string()));
     }
 
@@ -1352,7 +1438,7 @@ mod tests {
                 {"subject": "X", "relation": "relates_to", "object": "Y"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.relations[0].subject_type, "concept");
         assert_eq!(result.relations[0].object_type, "concept");
     }
@@ -1366,7 +1452,7 @@ mod tests {
                 {"subject": "B", "relation": "knows", "object": "C"}
             ]
         }"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.relations.len(), 1);
         assert_eq!(result.relations[0].subject, "B");
     }
@@ -1374,7 +1460,7 @@ mod tests {
     #[test]
     fn test_parse_extraction_memory_missing_content_skipped() {
         let json = r#"[{"category": "x", "level": "user"}, {"content": "valid", "level": "user"}]"#;
-        let result = parse_llm_extraction_response(json).unwrap();
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].content, "valid");
     }
@@ -1387,17 +1473,160 @@ mod tests {
     "relations": [{"subject": "A", "relation": "r", "object": "B"}]
 }
 ```"#;
-        let result = parse_llm_extraction_response(input).unwrap();
+        let result = parse_llm_extraction_response(input, &[]).unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.relations.len(), 1);
     }
 
     #[test]
     fn test_parse_extraction_empty_string() {
-        let result = parse_llm_extraction_response("").unwrap();
+        let result = parse_llm_extraction_response("", &[]).unwrap();
         assert!(!result.has_content);
         assert!(result.memories.is_empty());
         assert!(result.relations.is_empty());
+    }
+
+    // --- H2 extraction-validation regression tests ---
+
+    /// Sub-minimum content strings must be filtered out (H2). A weak
+    /// extractor that emits "ok" / "no" / "ack" should NOT pollute the
+    /// store with single-word "memories".
+    #[test]
+    fn parse_extraction_drops_sub_minimum_content() {
+        let json = r#"[
+            {"content": "ok", "level": "user"},
+            {"content": "yes", "level": "user"},
+            {"content": "  a  ", "level": "user"},
+            {"content": "real fact about preferences", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(
+            result.memories.len(),
+            1,
+            "only the long content should survive"
+        );
+        assert_eq!(result.memories[0].content, "real fact about preferences");
+    }
+
+    /// Review-followup #7: fuzzy category match accepts case + plural
+    /// variations from the model. "Preferences" / "PREFERENCE" /
+    /// "preferences" all snap to configured "preference".
+    #[test]
+    fn parse_extraction_fuzzy_matches_category_case_and_plural() {
+        let categories = vec!["preference".to_string(), "frustration".to_string()];
+        let json = r#"[
+            {"content": "case variation pref", "category": "Preference", "level": "user"},
+            {"content": "all caps pref", "category": "PREFERENCE", "level": "user"},
+            {"content": "plural pref", "category": "preferences", "level": "user"},
+            {"content": "plural frust", "category": "frustrations", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &categories).unwrap();
+        for m in &result.memories {
+            assert!(
+                matches!(
+                    m.category.as_deref(),
+                    Some("preference") | Some("frustration")
+                ),
+                "fuzzy-matched category must snap to canonical configured spelling; got {:?}",
+                m.category
+            );
+        }
+    }
+
+    /// When `extract_categories` is non-empty, categories outside the
+    /// allowlist are downgraded to "general" (H2). Prompt-tuning the
+    /// extractor can't smuggle unknown buckets onto the dashboard.
+    #[test]
+    fn parse_extraction_downgrades_unknown_category() {
+        let categories = vec!["preference".to_string(), "frustration".to_string()];
+        let json = r#"[
+            {"content": "uses dark mode editor", "category": "preference", "level": "user"},
+            {"content": "loves rust language", "category": "spam_category", "level": "user"},
+            {"content": "no category emitted", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &categories).unwrap();
+        assert_eq!(result.memories.len(), 3);
+        assert_eq!(result.memories[0].category.as_deref(), Some("preference"));
+        assert_eq!(
+            result.memories[1].category.as_deref(),
+            Some("general"),
+            "out-of-allowlist category must be downgraded to 'general'"
+        );
+        assert_eq!(
+            result.memories[2].category.as_deref(),
+            Some("general"),
+            "missing category must default to 'general'"
+        );
+    }
+
+    /// When `extract_categories` is empty (unconfigured agent), the LLM's
+    /// raw category is preserved — H2's allowlist is opt-in.
+    #[test]
+    fn parse_extraction_preserves_category_when_allowlist_empty() {
+        let json =
+            r#"[{"content": "loves rust language", "category": "custom_bucket", "level": "user"}]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(
+            result.memories[0].category.as_deref(),
+            Some("custom_bucket")
+        );
+    }
+
+    /// C3 follow-up: when the LLM emits a per-memory `confidence` field
+    /// (the prompt now asks for it), the parser must propagate it to
+    /// `MemoryItem.confidence` AND to `metadata["confidence"]` so the
+    /// `remember_with_embedding_and_peer` insert path can land it in the
+    /// `confidence` column. Missing → default 1.0.
+    #[test]
+    fn parse_extraction_propagates_confidence_to_metadata() {
+        let json = r#"[
+            {"content": "rust developer", "level": "user", "confidence": 0.62},
+            {"content": "missing confidence field", "level": "user"}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert_eq!(result.memories.len(), 2);
+        // Explicit confidence round-trips.
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.62).abs() < 1e-6));
+        let meta_conf = result.memories[0]
+            .metadata
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .expect("confidence metadata key present");
+        assert!((meta_conf - 0.62).abs() < 1e-9);
+        // Missing field falls back to 1.0 so legacy extractors don't
+        // suddenly start dropping memories under extraction_threshold.
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
+    }
+
+    /// Out-of-range confidence values are clamped, never propagated
+    /// unsafely into the column (which is REAL with no constraint).
+    #[test]
+    fn parse_extraction_clamps_confidence_to_unit_interval() {
+        let json = r#"[
+            {"content": "negative confidence", "level": "user", "confidence": -0.5},
+            {"content": "wild confidence", "level": "user", "confidence": 7.0}
+        ]"#;
+        let result = parse_llm_extraction_response(json, &[]).unwrap();
+        assert!(matches!(result.memories[0].confidence, Some(c) if (c - 0.0).abs() < 1e-6));
+        assert!(matches!(result.memories[1].confidence, Some(c) if (c - 1.0).abs() < 1e-6));
+    }
+
+    /// A runaway extractor cannot blow past the per-call cap (H2). 50
+    /// candidates → exactly MAX_MEMORIES_PER_EXTRACTION survive.
+    #[test]
+    fn parse_extraction_caps_total_memories_per_call() {
+        let items: Vec<String> = (0..50)
+            .map(|i| {
+                format!(r#"{{"content": "fact number {i:02} about something", "level": "user"}}"#)
+            })
+            .collect();
+        let json = format!("[{}]", items.join(","));
+        let result = parse_llm_extraction_response(&json, &[]).unwrap();
+        assert_eq!(
+            result.memories.len(),
+            MAX_MEMORIES_PER_EXTRACTION,
+            "extractor cap must bound a runaway response"
+        );
     }
 
     // --- format_context tests ---
@@ -1459,6 +1688,34 @@ mod tests {
         assert!(ctx.contains("based on my memory"));
         // But the memory content itself should appear as a bullet, not as a recitation
         assert!(ctx.contains("- test"));
+    }
+
+    /// H4 regression: even a runaway list of fat memories must not push
+    /// the formatted prompt past FORMAT_CONTEXT_MAX_CHARS, and the user
+    /// is told how many got dropped.
+    #[test]
+    fn format_context_caps_prompt_budget_with_truncation_marker() {
+        use librefang_types::memory::FORMAT_CONTEXT_MAX_CHARS;
+        let extractor = LlmMemoryExtractor::new(
+            Arc::new(CannedLlmDriver {
+                response: String::new(),
+            }),
+            "test".to_string(),
+        );
+        // 50 memories × ~600 chars each = ~30 KB raw — well past the
+        // ~8 KB cap. We expect the cap to clip the list well before 50.
+        let fat = "x".repeat(600);
+        let mems: Vec<_> = (0..50).map(|_| make_memory_item(&fat)).collect();
+        let ctx = extractor.format_context(&mems);
+        assert!(
+            ctx.len() <= FORMAT_CONTEXT_MAX_CHARS,
+            "context len {} must not exceed budget {FORMAT_CONTEXT_MAX_CHARS}",
+            ctx.len()
+        );
+        assert!(
+            ctx.contains("omitted to keep the prompt within budget"),
+            "truncation footer must tell the prompt builder rows were dropped"
+        );
     }
 
     // --- EmbeddingBridge tests ---

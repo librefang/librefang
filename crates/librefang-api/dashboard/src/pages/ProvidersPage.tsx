@@ -759,11 +759,15 @@ const EMPTY_MODEL: ModelEntry = {
   input_cost_per_m: "", output_cost_per_m: "",
 };
 
+// Values must match the backend `ModelTier` enum
+// (crates/librefang-types/src/model_catalog.rs). "reasoning" is NOT a tier —
+// it was rejected by the catalog TOML parser and made the provider silently
+// vanish (#5822); "frontier" is the real top-capability tier.
 const TIER_OPTIONS = [
   { value: "fast", label: "Fast" },
   { value: "balanced", label: "Balanced" },
   { value: "smart", label: "Smart" },
-  { value: "reasoning", label: "Reasoning" },
+  { value: "frontier", label: "Frontier" },
 ];
 
 function CreateProviderWizard({

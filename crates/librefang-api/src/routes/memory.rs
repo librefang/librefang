@@ -314,15 +314,64 @@ fn guard_for_request(
     state: &AppState,
     extensions: &axum::http::Extensions,
 ) -> librefang_memory::namespace_acl::MemoryNamespaceGuard {
+    guard_for_user(
+        state,
+        extensions.get::<crate::middleware::AuthenticatedApiUser>(),
+    )
+}
+
+/// Same fail-closed logic as [`guard_for_request`] but takes the user
+/// directly. Used by handlers that extract `Option<Extension<...>>` instead
+/// of pulling the whole [`axum::extract::Request`].
+///
+/// Resolution order for an attributed user:
+///   1. Explicit `memory_access` block on the registered user (kernel ACL).
+///   2. Role-default ACL when the user is attributed but not registered —
+///      this is the path the middleware-synthesised "root" user takes
+///      (Owner role, never registered in `AuthManager`).
+///   3. Fail-closed anonymous fallback (only when no `AuthenticatedApiUser`
+///      was attached at all — e.g. loopback no-token dashboard SPA).
+fn guard_for_user(
+    state: &AppState,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+) -> librefang_memory::namespace_acl::MemoryNamespaceGuard {
     use librefang_memory::namespace_acl::MemoryNamespaceGuard;
 
-    if let Some(api_user) = extensions.get::<crate::middleware::AuthenticatedApiUser>() {
+    if let Some(api_user) = api_user {
         let user_id = librefang_types::agent::UserId::from_name(&api_user.name);
         if let Some(acl) = state.kernel.auth_manager().memory_acl_for(user_id) {
             return MemoryNamespaceGuard::new(acl);
         }
+        return MemoryNamespaceGuard::new(role_default_memory_acl(api_user.role));
     }
     MemoryNamespaceGuard::new(anonymous_fallback_acl())
+}
+
+/// Role-default memory ACL — mirrors `default_memory_acl` in
+/// `librefang_kernel::auth` (kept private there). Inlined here so the
+/// API-layer fail-closed contract is self-contained and visible at the
+/// only call site, exactly like [`anonymous_fallback_acl`].
+fn role_default_memory_acl(
+    role: crate::middleware::UserRole,
+) -> librefang_types::user_policy::UserMemoryAccess {
+    use crate::middleware::UserRole;
+    match role {
+        UserRole::Owner | UserRole::Admin => librefang_types::user_policy::UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            pii_access: true,
+            export_allowed: true,
+            delete_allowed: true,
+        },
+        UserRole::User => librefang_types::user_policy::UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into(), "kv:*".into(), "wiki".into()],
+            writable_namespaces: vec!["kv:*".into(), "wiki".into()],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        },
+        UserRole::Viewer => anonymous_fallback_acl(),
+    }
 }
 
 /// Least-privilege ACL handed out when the request has no authenticated
@@ -362,8 +411,21 @@ fn auth_denied(
     extensions: &axum::http::Extensions,
     reason: impl std::fmt::Display,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    auth_denied_for(
+        state,
+        extensions.get::<crate::middleware::AuthenticatedApiUser>(),
+        reason,
+    )
+}
+
+/// User-direct variant of [`auth_denied`] for handlers that extract
+/// `Option<Extension<AuthenticatedApiUser>>` rather than the whole request.
+fn auth_denied_for(
+    state: &AppState,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+    reason: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
     let reason_str = reason.to_string();
-    let api_user = extensions.get::<crate::middleware::AuthenticatedApiUser>();
     let (user_id, detail) = match api_user {
         Some(u) => (
             Some(u.user_id),
@@ -549,12 +611,16 @@ pub async fn memory_get_user(
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<MemoryAddBody>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
 
     // In the proactive memory system, user_id maps to agent_id internally.
     // If agent_id is provided, prefer it; otherwise use user_id.
@@ -563,11 +629,17 @@ pub async fn memory_add(
         .or(body.user_id)
         .unwrap_or_else(default_user_id);
 
-    match store.add(&body.messages, &effective_id).await {
+    match store
+        .add_with_guard(&body.messages, &effective_id, &guard)
+        .await
+    {
         Ok(items) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "added": items.len(), "memories": items })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -587,6 +659,7 @@ pub async fn memory_add(
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(memory_id): Path<String>,
     Json(body): Json<MemoryUpdateBody>,
 ) -> impl IntoResponse {
@@ -594,6 +667,15 @@ pub async fn memory_update(
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+    // PUT mutates content in place → write capability on `proactive`.
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_write("proactive")
+    {
+        return auth_denied_for(&state, user_ref, reason);
+    }
 
     if body.content.trim().is_empty() {
         return ApiErrorResponse::bad_request("Content must not be empty").into_json_tuple();
@@ -637,12 +719,16 @@ pub async fn memory_update(
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
     let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
@@ -655,9 +741,15 @@ pub async fn memory_delete(
         }
     };
 
-    match store.delete(&memory_id, &real_agent_id).await {
+    match store
+        .delete_with_guard(&memory_id, &real_agent_id, &guard)
+        .await
+    {
         Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -676,12 +768,16 @@ pub async fn memory_delete(
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
 
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
         Some(arr) => arr
@@ -695,6 +791,8 @@ pub async fn memory_bulk_delete(
 
     let mut deleted = 0usize;
     let mut failed = 0usize;
+    let mut denied = false;
+    let mut denial_reason: Option<String> = None;
     for id in &ids {
         let agent_id = match store.find_agent_id_for_memory(id) {
             Ok(Some(aid)) => aid.0.to_string(),
@@ -703,10 +801,26 @@ pub async fn memory_bulk_delete(
                 continue;
             }
         };
-        match store.delete(id, &agent_id).await {
+        match store.delete_with_guard(id, &agent_id, &guard).await {
             Ok(true) => deleted += 1,
-            _ => failed += 1,
+            Ok(false) => failed += 1,
+            Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+                denied = true;
+                denial_reason = Some(reason);
+                break;
+            }
+            Err(_) => failed += 1,
         }
+    }
+
+    if denied {
+        // Single ACL denial fails the whole batch — Viewer can't delete
+        // anything, and partial success would be misleading.
+        return auth_denied_for(
+            &state,
+            user_ref,
+            denial_reason.unwrap_or_else(|| "bulk-delete denied".to_string()),
+        );
     }
 
     (
@@ -777,6 +891,7 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -784,8 +899,14 @@ pub async fn memory_reset_agent(
         Err(e) => return e,
     };
 
-    match store.reset(&agent_id) {
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store.reset_with_guard(&agent_id, &guard) {
         Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -807,12 +928,16 @@ pub async fn memory_reset_agent(
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path((agent_id, level_str)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
 
     // Validate the level string before conversion to avoid silently
     // defaulting to Session and deleting the wrong memories.
@@ -833,8 +958,11 @@ pub async fn memory_clear_level(
         }
     };
 
-    match store.clear_level(&agent_id, level) {
+    match store.clear_level_with_guard(&agent_id, level, &guard) {
         Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -1050,12 +1178,22 @@ pub async fn memory_history(
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+    // Consolidate merges and soft-deletes duplicate memories → delete capability.
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_delete("proactive")
+    {
+        return auth_denied_for(&state, user_ref, reason);
+    }
 
     match store.consolidate(&agent_id).await {
         Ok(merged) => (
@@ -1083,11 +1221,23 @@ pub async fn memory_consolidate(
     tag = "proactive-memory",
     responses((status = 200, description = "Cleanup result", body = crate::types::JsonObject))
 )]
-pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_cleanup(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+    // cleanup_expired soft-deletes session memories across every agent → delete capability.
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_delete("proactive")
+    {
+        return auth_denied_for(&state, user_ref, reason);
+    }
 
     match store.cleanup_expired() {
         Ok(deleted) => (
@@ -1116,6 +1266,7 @@ pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1123,7 +1274,10 @@ pub async fn memory_export_agent(
         Err(e) => return e,
     };
 
-    match store.export_all(&agent_id) {
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store.export_all_with_guard(&agent_id, &guard) {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1132,6 +1286,9 @@ pub async fn memory_export_agent(
                 "memories": items,
             })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -1151,6 +1308,7 @@ pub async fn memory_export_agent(
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
     Json(body): Json<Vec<librefang_memory::MemoryExportItem>>,
 ) -> impl IntoResponse {
@@ -1159,7 +1317,13 @@ pub async fn memory_import_agent(
         Err(e) => return e,
     };
 
-    match store.import_memories(&agent_id, body).await {
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store
+        .import_memories_with_guard(&agent_id, body, &guard)
+        .await
+    {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1167,6 +1331,9 @@ pub async fn memory_import_agent(
                 "agent_id": agent_id,
             })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -1187,13 +1354,19 @@ pub async fn memory_import_agent(
     tag = "proactive-memory",
     responses((status = 200, description = "Decay result", body = crate::types::JsonObject))
 )]
-pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_decay(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.decay_confidence() {
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store.decay_confidence_with_guard(&guard) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1201,6 +1374,9 @@ pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 "decay_rate": store.config().confidence_decay_rate,
             })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied_for(&state, user_ref, reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -1273,6 +1449,7 @@ pub async fn memory_count_agent(
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
     Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
 ) -> impl IntoResponse {
@@ -1280,6 +1457,14 @@ pub async fn memory_store_relations(
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_write("proactive")
+    {
+        return auth_denied_for(&state, user_ref, reason);
+    }
 
     let count = triples.len();
     store.store_relations(&triples, &agent_id);

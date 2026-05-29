@@ -11,6 +11,7 @@ use librefang_runtime::command_lane::CommandQueue;
 
 use crate::background::BackgroundExecutor;
 use crate::cron::CronScheduler;
+use crate::goal_runner::GoalRunner;
 use crate::triggers::TriggerEngine;
 use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
 
@@ -39,6 +40,8 @@ pub struct WorkflowSubsystem {
     pub(crate) triggers: TriggerEngine,
     /// Background agent executor.
     pub(crate) background: BackgroundExecutor,
+    /// Autonomous long-horizon goal runner (#5744).
+    pub(crate) goal_runner: GoalRunner,
     /// Cron job scheduler.
     pub(crate) cron_scheduler: CronScheduler,
     /// Command queue with lane-based concurrency control.
@@ -50,6 +53,7 @@ impl WorkflowSubsystem {
         engine: WorkflowEngine,
         triggers: TriggerEngine,
         background: BackgroundExecutor,
+        goal_runner: GoalRunner,
         cron_scheduler: CronScheduler,
         command_queue: CommandQueue,
     ) -> Self {
@@ -58,6 +62,7 @@ impl WorkflowSubsystem {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers,
             background,
+            goal_runner,
             cron_scheduler,
             command_queue,
         }

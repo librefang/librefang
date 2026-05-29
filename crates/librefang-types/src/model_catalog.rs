@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// A model's capability tier.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum ModelTier {
@@ -22,6 +22,33 @@ pub enum ModelTier {
     Local,
     /// User-defined custom models added at runtime.
     Custom,
+}
+
+impl<'de> Deserialize<'de> for ModelTier {
+    /// Deserialize leniently: an unrecognized tier string maps to
+    /// [`ModelTier::Custom`] rather than failing the whole file.
+    ///
+    /// Catalog files are loaded one-per-provider, and a single hard parse
+    /// error makes the entire provider vanish (see `from_sources` /
+    /// `load_catalog_file`). A dashboard or hand-edited file carrying an
+    /// out-of-vocabulary tier (e.g. `tier = "reasoning"`, #5822) must not
+    /// take the provider down with it — treat the unknown label as a custom
+    /// tier and keep the provider usable.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.trim().to_ascii_lowercase().as_str() {
+            "frontier" => ModelTier::Frontier,
+            "smart" => ModelTier::Smart,
+            "balanced" => ModelTier::Balanced,
+            "fast" => ModelTier::Fast,
+            "local" => ModelTier::Local,
+            // "custom" and anything unrecognized collapse to Custom.
+            _ => ModelTier::Custom,
+        })
+    }
 }
 
 impl fmt::Display for ModelTier {
@@ -629,6 +656,42 @@ mod tests {
     #[test]
     fn test_model_tier_default() {
         assert_eq!(ModelTier::default(), ModelTier::Balanced);
+    }
+
+    #[test]
+    fn model_tier_deserializes_known_values() {
+        for (s, want) in [
+            ("frontier", ModelTier::Frontier),
+            ("smart", ModelTier::Smart),
+            ("balanced", ModelTier::Balanced),
+            ("fast", ModelTier::Fast),
+            ("local", ModelTier::Local),
+            ("custom", ModelTier::Custom),
+        ] {
+            let parsed: ModelTier = toml::from_str(&format!("tier = {s:?}"))
+                .map(|w: TierWrap| w.tier)
+                .unwrap_or_else(|e| panic!("{s} must parse: {e}"));
+            assert_eq!(parsed, want, "tier {s:?}");
+        }
+    }
+
+    /// #5822: an out-of-vocabulary tier (the dashboard once offered
+    /// `"reasoning"`) must NOT fail the parse — it collapses to `Custom` so
+    /// the provider stays loadable instead of silently vanishing.
+    #[test]
+    fn model_tier_deserializes_unknown_value_as_custom() {
+        let w: TierWrap = toml::from_str(r#"tier = "reasoning""#).expect("unknown tier must parse");
+        assert_eq!(w.tier, ModelTier::Custom);
+        let w2: TierWrap = toml::from_str(r#"tier = "totally-made-up""#).expect("must parse");
+        assert_eq!(w2.tier, ModelTier::Custom);
+        // Case-insensitive on the known set, too.
+        let w3: TierWrap = toml::from_str(r#"tier = "FRONTIER""#).expect("must parse");
+        assert_eq!(w3.tier, ModelTier::Frontier);
+    }
+
+    #[derive(Deserialize)]
+    struct TierWrap {
+        tier: ModelTier,
     }
 
     #[test]

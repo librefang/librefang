@@ -1,0 +1,22 @@
+[workspace]
+# Own workspace root so this example is not pulled into the kernel workspace
+# (it targets wasm32-unknown-unknown) and builds standalone.
+
+[package]
+name = "word-counter-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# Fixed name so the artifact is always `skill.wasm`.
+name = "skill"
+crate-type = ["cdylib"]
+
+[dependencies]
+# In-repo example: path dependency so it builds from a checkout. An external
+# skill would instead use the published crate: librefang-skill = "0.1"
+librefang-skill = { path = "../../sdk/rust/librefang-skill" }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
