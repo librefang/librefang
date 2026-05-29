@@ -747,6 +747,32 @@ pub(super) async fn execute_single_tool_call_inner(
         content
     };
 
+    // Indirect prompt-injection guard (#1): tool results are the main vector
+    // for indirect injection — a fetched web page, an MCP server response, or
+    // a file read can carry "ignore previous instructions" style payloads the
+    // user never typed. Scan the *raw* tool output (`result.content`, before
+    // truncation / artifact-spill, which is the genuine attacker-controlled
+    // surface) with the strong skills scanner and, on a hit, prepend a safety
+    // prefix to the content the LLM sees. Warn-not-block, matching the direct
+    // user-message guard: a false positive must not corrupt a legitimate
+    // result. The prefix is added last so it survives the caller's per-result
+    // budget enforcer (the warning is tiny; a spilled stub is already small).
+    let final_content =
+        if let Some(warning) = crate::injection_guard::scan_tool_result(&result.content) {
+            warn!(
+                event = "injection_guard_tool_result",
+                tool = %tool_call.name,
+                threats = ?warning.threat_ids,
+                summary = %warning.summary,
+                agent = %ctx.manifest.name,
+                "Prompt injection indicators detected in tool result"
+            );
+            let prefix = crate::injection_guard::warning_prefix(&warning);
+            format!("{prefix}{final_content}")
+        } else {
+            final_content
+        };
+
     Ok(ExecutedToolCall {
         result,
         final_content,

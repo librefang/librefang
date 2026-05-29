@@ -768,14 +768,19 @@ jobs:
   # Windows runner I/O + cargo build cost roughly doubles Linux/macOS for the
   # same workspace, so a single full job sits at ~55min and tipped past the
   # 60min ceiling once the runtime crate-split (#3710) added new compile units.
-  # Two shards keep each fire well under budget while staying cheaper than
-  # mirroring Ubuntu's 4 (Windows runner minutes cost 2× Linux).
+  # Two shards keep each fire cheaper than mirroring Ubuntu's 4 (Windows runner
+  # minutes cost 2× Linux). The per-shard budget is still tight, though: a cold
+  # cache (any Cargo.lock change busts `test-windows-${hashFiles(Cargo.lock)}`)
+  # pays a ~22min full compile on top of ~22min of test execution per shard, so
+  # a warm run lands at ~45min and a cold one overran the old 45min cap. Match
+  # macOS at 60min — the headroom absorbs a cold compile without inflating the
+  # green-run cost (the job ends when nextest finishes, not at the ceiling).
   test-windows:
     name: Test / Windows (shard ${{ matrix.shard }}/2)
     needs: changes
     if: github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

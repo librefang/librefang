@@ -55,7 +55,7 @@ where
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
         mutate(cfg);
