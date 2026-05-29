@@ -540,7 +540,11 @@ mod tests {
         assert_eq!(stored.status, GoalStatus::InProgress);
     }
 
-    fn mk_state(goal_id: GoalId, agent_id: AgentId, max_iterations: u32) -> Arc<Mutex<GoalRunState>> {
+    fn mk_state(
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: u32,
+    ) -> Arc<Mutex<GoalRunState>> {
         Arc::new(Mutex::new(GoalRunState {
             goal_id,
             agent_id,
@@ -563,12 +567,27 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let state = mk_state(goal.id, agent_id, 10);
 
-        let send = |_a: AgentId, _p: String| async move { Ok("stuck\nGOAL_BLOCKED: need a key".to_string()) };
-        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+        let send = |_a: AgentId, _p: String| async move {
+            Ok("stuck\nGOAL_BLOCKED: need a key".to_string())
+        };
+        run_loop(
+            goal.id,
+            agent_id,
+            10,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+        )
+        .await;
 
         assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
         // Blocked must NOT mark the goal completed.
-        assert_eq!(load_goal(&substrate, goal.id).unwrap().status, GoalStatus::InProgress);
+        assert_eq!(
+            load_goal(&substrate, goal.id).unwrap().status,
+            GoalStatus::InProgress
+        );
     }
 
     #[tokio::test]
@@ -586,7 +605,17 @@ mod tests {
             #[allow(unreachable_code)]
             Ok(String::new())
         };
-        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(true)), rx).await;
+        run_loop(
+            goal.id,
+            agent_id,
+            10,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(true)),
+            rx,
+        )
+        .await;
 
         let s = state.lock().await;
         assert_eq!(s.phase, GoalRunPhase::Stopped);
@@ -608,7 +637,17 @@ mod tests {
             #[allow(unreachable_code)]
             Ok(String::new())
         };
-        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+        run_loop(
+            goal.id,
+            agent_id,
+            10,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+        )
+        .await;
 
         assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
     }
@@ -631,10 +670,23 @@ mod tests {
                 librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER
             ))
         };
-        run_loop(goal.id, agent_id, 100, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+        run_loop(
+            goal.id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+        )
+        .await;
 
         let s = state.lock().await;
         assert_eq!(s.phase, GoalRunPhase::RateLimited);
-        assert!(s.iteration < 100, "must trip the breaker, not run to the cap");
+        assert!(
+            s.iteration < 100,
+            "must trip the breaker, not run to the cap"
+        );
     }
 }
