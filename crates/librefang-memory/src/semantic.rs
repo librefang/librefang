@@ -199,9 +199,39 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
+        self.recall_impl(query, limit, filter, query_embedding, true)
+    }
+
+    /// Read-only listing recall: same query/filter semantics as [`Self::recall`]
+    /// but does **not** bump `access_count` / `accessed_at`.
+    ///
+    /// Use this for the dashboard list/get and any polled listing path. A
+    /// genuine semantic recall (a real query feeding a prompt) should track
+    /// access so the decay/consolidation engine sees the memory as "used"; but
+    /// a listing read must not — a dashboard auto-refreshing the memory list
+    /// would otherwise reset `accessed_at = now` on every poll and effectively
+    /// freeze those memories from ever decaying (#5839). Always uses the SQLite
+    /// path (no vector store), which is what listing wants.
+    pub fn recall_readonly(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: Option<MemoryFilter>,
+    ) -> LibreFangResult<Vec<MemoryFragment>> {
+        self.recall_impl(query, limit, filter, None, false)
+    }
+
+    fn recall_impl(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: Option<MemoryFilter>,
+        query_embedding: Option<&[f32]>,
+        track_access: bool,
+    ) -> LibreFangResult<Vec<MemoryFragment>> {
         // ── Delegate to external vector store when available ──────────
         if let (Some(vs), Some(qe)) = (&self.vector_store, query_embedding) {
-            return self.recall_via_vector_store(vs, qe, limit, filter.clone());
+            return self.recall_via_vector_store(vs, qe, limit, filter.clone(), track_access);
         }
 
         // mut: needed for the `transaction()` call inside
@@ -459,7 +489,9 @@ impl SemanticStore {
         // the per-row warn-on-failure log so silent loss of a
         // single row's bump (e.g. transient SQLite lock) still
         // surfaces.
-        bump_recall_access_counts(&mut conn, &fragments);
+        if track_access {
+            bump_recall_access_counts(&mut conn, &fragments);
+        }
 
         Ok(fragments)
     }
@@ -472,6 +504,7 @@ impl SemanticStore {
         query_embedding: &[f32],
         limit: usize,
         filter: Option<MemoryFilter>,
+        track_access: bool,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
         // VectorStore is async — run inside a small blocking-compatible context.
         let vs = Arc::clone(vs);
@@ -518,10 +551,12 @@ impl SemanticStore {
         // logic. Same tx-wrapped helper. The vector-store branch
         // has no other live conn handle at this point, so we
         // acquire one for the write.
-        if let Ok(mut write_conn) = self.pool.get() {
-            bump_recall_access_counts(&mut write_conn, &fragments);
-        } else {
-            warn!("memory recall (vector store): pool.get() for access-count bump failed");
+        if track_access {
+            if let Ok(mut write_conn) = self.pool.get() {
+                bump_recall_access_counts(&mut write_conn, &fragments);
+            } else {
+                warn!("memory recall (vector store): pool.get() for access-count bump failed");
+            }
         }
 
         Ok(fragments)
@@ -1270,6 +1305,34 @@ mod tests {
         let results = store.recall("Rust", 10, None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.contains("Rust"));
+    }
+
+    #[test]
+    fn recall_readonly_does_not_bump_access_count() {
+        // #5839 MEDIUM: listing reads must not reset the decay/idle clock.
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .remember(
+                agent_id,
+                "The user likes Rust programming",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // Read-only recalls leave access_count untouched no matter how often
+        // they run (e.g. a dashboard polling the list every few seconds).
+        let c0 = store.recall_readonly("Rust", 10, None).unwrap()[0].access_count;
+        store.recall_readonly("Rust", 10, None).unwrap();
+        let c1 = store.recall_readonly("Rust", 10, None).unwrap()[0].access_count;
+        assert_eq!(c0, c1, "recall_readonly must not bump access_count");
+
+        // A genuine tracking recall still bumps, so decay sees real usage.
+        store.recall("Rust", 10, None).unwrap();
+        let c2 = store.recall_readonly("Rust", 10, None).unwrap()[0].access_count;
+        assert_eq!(c2, c1 + 1, "tracking recall must bump access_count by 1");
     }
 
     #[test]

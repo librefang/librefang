@@ -221,7 +221,10 @@ impl ProactiveMemoryStore {
     /// "popular memories stick around longer" intent while keeping decay
     /// strictly monotonic (per tick, confidence never increases).
     ///
-    /// This is rate-limited to run at most once per hour.
+    /// Runs the decay pass immediately on every call — there is no internal
+    /// throttle. The once-per-hour cadence is enforced by the periodic
+    /// maintenance scheduler (see `run_periodic_maintenance`), so a direct
+    /// call (e.g. a manual `/decay` endpoint or a test) decays right away.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
         let decay_rate = self
             .config
@@ -435,8 +438,9 @@ impl ProactiveMemoryStore {
         let aid = Self::parse_agent_id(agent_id)?;
         let filter = Some(MemoryFilter::agent(aid));
 
-        // Fetch all non-deleted memories for this agent (up to 10k)
-        let frags = self.semantic.recall("", 10_000, filter)?;
+        // Fetch all non-deleted memories for this agent (up to 10k).
+        // Read-only: exporting must not bump access_count / accessed_at.
+        let frags = self.semantic.recall_readonly("", 10_000, filter)?;
 
         let items = frags
             .into_iter()
@@ -608,7 +612,10 @@ impl ProactiveMemoryStore {
         if let Some(target_level) = level {
             filter.scope = Some(target_level.scope_str().to_string());
         }
-        let frags = self.semantic.recall("", RECALL_CAP, Some(filter))?;
+        // Read-only listing: a polled list/get must not bump access_count /
+        // accessed_at, or the decay engine would never see these memories as
+        // idle (#5839).
+        let frags = self.semantic.recall_readonly("", RECALL_CAP, Some(filter))?;
 
         let mut items: Vec<MemoryItem> = frags
             .into_iter()
@@ -1162,9 +1169,11 @@ impl ProactiveMemoryStore {
     ///
     /// Used by the dashboard to show all memories without agent scoping.
     pub async fn list_all(&self, category: Option<&str>) -> LibreFangResult<Vec<MemoryItem>> {
-        // Use semantic recall with no agent filter to get all memories
-        // Limit to 10000 to avoid unbounded queries; increase if needed
-        let results = self.semantic.recall("", 10_000, None)?;
+        // Use semantic recall with no agent filter to get all memories.
+        // Limit to 10000 to avoid unbounded queries; increase if needed.
+        // Read-only: this dashboard listing must not bump access_count /
+        // accessed_at (#5839).
+        let results = self.semantic.recall_readonly("", 10_000, None)?;
 
         let items: Vec<MemoryItem> = results
             .into_iter()
