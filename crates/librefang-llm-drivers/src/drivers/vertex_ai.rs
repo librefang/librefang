@@ -569,6 +569,10 @@ pub struct VertexAiDriver {
     /// When set, replaces the full aiplatform base URL. Used by test
     /// constructors to redirect requests to a mock server.
     base_url_override: Option<String>,
+    /// Max in-driver retries for a single API call (#10). Counts re-attempts
+    /// after the first try, so the request is issued at most `max_retries + 1`
+    /// times. Sourced from `DriverConfig.max_retries` (default 3).
+    max_retries: u32,
 }
 
 impl VertexAiDriver {
@@ -585,6 +589,7 @@ impl VertexAiDriver {
             client: librefang_http::new_client(),
             emit_caller_trace_headers: true,
             base_url_override: None,
+            max_retries: config.max_retries,
         })
     }
 
@@ -612,6 +617,7 @@ impl VertexAiDriver {
             client: librefang_http::proxied_client(),
             emit_caller_trace_headers: true,
             base_url_override: Some(base_url),
+            max_retries: 3,
         }
     }
 
@@ -805,8 +811,11 @@ impl LlmDriver for VertexAiDriver {
             Some(request.max_tokens),
         );
 
+        // Configurable in-driver retry cap (#10); default 3 (four total
+        // attempts, including transport-error retries below).
+        let max_retries = self.max_retries as u64;
         let mut last_error = None;
-        for attempt in 0..3u64 {
+        for attempt in 0..=max_retries {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
@@ -826,8 +835,21 @@ impl LlmDriver for VertexAiDriver {
                 ))
                 .json(&body)
                 .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+                .await;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same retry decision as 429/503 rather
+            // than returning immediately via `?`.
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        tracing::warn!(error = %e, attempt, "Vertex AI transport error, retrying");
+                        last_error = Some(LlmError::Http(e.to_string()));
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status();
 
@@ -899,8 +921,11 @@ impl LlmDriver for VertexAiDriver {
             Some(request.max_tokens),
         );
 
+        // Configurable in-driver retry cap (#10); default 3 (four total
+        // attempts, including transport-error retries below).
+        let max_retries = self.max_retries as u64;
         let mut last_error = None;
-        for attempt in 0..3u64 {
+        for attempt in 0..=max_retries {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
@@ -920,8 +945,21 @@ impl LlmDriver for VertexAiDriver {
                 ))
                 .json(&body)
                 .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+                .await;
+            // #10: route transport-layer errors (connection refused, TLS,
+            // read timeout) through the same retry decision as 429/503 rather
+            // than returning immediately via `?`.
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt < max_retries && crate::backoff::transport_error_is_retryable(&e) {
+                        tracing::warn!(error = %e, attempt, "Vertex AI transport error, retrying");
+                        last_error = Some(LlmError::Http(e.to_string()));
+                        continue;
+                    }
+                    return Err(LlmError::Http(e.to_string()));
+                }
+            };
 
             let status = resp.status();
 
@@ -1017,6 +1055,7 @@ mod tests {
             client: librefang_http::new_client(),
             emit_caller_trace_headers: true,
             base_url_override: None,
+            max_retries: 3,
         };
 
         let url = driver.endpoint_url("vertex-ai/gemini-2.5-pro", false);
@@ -1045,6 +1084,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
@@ -1067,6 +1107,7 @@ mod tests {
             proxy_url: None,
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
+            max_retries: 3,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "europe-west4");
