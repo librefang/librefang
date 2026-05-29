@@ -1584,6 +1584,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "provider_request_timeout_secs",
         config.provider_request_timeout_secs
     );
+    set!("provider_max_retries", config.provider_max_retries);
     // Note: `provider_urls`, `provider_proxy_urls`, `provider_regions`, and
     // `provider_api_keys` are already inserted above. `tool_timeouts`:
     set!("tool_timeouts", config.tool_timeouts);
@@ -2265,6 +2266,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
         {"key": "provider_regions", "struct_field": "provider_regions"},
         {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
+        {"key": "provider_max_retries", "struct_field": "provider_max_retries"},
         {"key": "tool_timeouts", "struct_field": "tool_timeouts"},
         // Background autonomous-loop executor knobs (#5168).
         {"key": "background", "struct_field": "background"}
@@ -2799,6 +2801,7 @@ fn is_writable_config_path(path: &str) -> bool {
         "provider_regions",
         "provider_proxy_urls",
         "provider_request_timeout_secs",
+        "provider_max_retries",
         "tool_timeouts",
         // ── Round-5 review of #4678 — safe network knobs ──
         // The whole `network.` prefix was withdrawn (see SECTION_PREFIXES
@@ -2893,6 +2896,7 @@ fn is_writable_config_path(path: &str) -> bool {
         "provider_regions.",
         "provider_proxy_urls.",
         "provider_request_timeout_secs.",
+        "provider_max_retries.",
         // Vertex AI region + Azure OpenAI configuration knobs (the
         // SCRUB suffix list still blocks api_key/_env/client_secret
         // entries embedded in either section).

@@ -420,12 +420,12 @@ pub async fn transcribe_audio(
         .config_ref()
         .channels
         .effective_file_download_dir();
-    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
     let file_id = uuid::Uuid::new_v4().to_string();
     let file_path = upload_dir.join(&file_id);
-    if let Err(e) = std::fs::write(&file_path, &body) {
+    if let Err(e) = tokio::fs::write(&file_path, &body).await {
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
 
@@ -441,7 +441,7 @@ pub async fn transcribe_audio(
     match state.kernel.media().transcribe_audio(&attachment).await {
         Ok(result) => {
             // Clean up temp file
-            let _ = std::fs::remove_file(&file_path);
+            let _ = tokio::fs::remove_file(&file_path).await;
             Json(serde_json::json!({
                 "text": result.description,
                 "provider": result.provider,
@@ -450,7 +450,7 @@ pub async fn transcribe_audio(
             .into_response()
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&file_path);
+            let _ = tokio::fs::remove_file(&file_path).await;
             ApiErrorResponse::internal_scrub(e).into_response()
         }
     }

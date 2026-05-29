@@ -650,6 +650,10 @@ pub fn build_reload_plan_with_caps(
             "provider_request_timeout_secs",
         );
         restart_if_changed(
+            field_changed(&old.provider_max_retries, &new.provider_max_retries),
+            "provider_max_retries",
+        );
+        restart_if_changed(
             field_changed(&old.provider_proxy_urls, &new.provider_proxy_urls),
             "provider_proxy_urls",
         );
@@ -946,6 +950,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "azure_openai",
         "oauth",
         "provider_request_timeout_secs",
+        "provider_max_retries",
         "provider_proxy_urls",
         "local_probe_interval_secs",
         "health_check",
@@ -1063,6 +1068,32 @@ pub fn should_apply_hot(mode: ReloadMode, plan: &ReloadPlan) -> bool {
         ReloadMode::Restart => false, // caller must do a full restart
         ReloadMode::Hot => !plan.hot_actions.is_empty(),
         ReloadMode::Hybrid => !plan.hot_actions.is_empty(),
+    }
+}
+
+/// Given the configured [`ReloadMode`] and a [`ReloadPlan`], decide whether
+/// the freshly-validated config should be swapped into the live `ArcSwap`
+/// (and dependent snapshots — raw `config.toml`, taint rules, aux client —
+/// refreshed).
+///
+/// This is broader than [`should_apply_hot`]: in `Hot` / `Hybrid` modes it is
+/// `true` whenever the plan carries *any* effective change, not only
+/// `hot_actions`. A large class of fields is classified as `noop_changes`
+/// precisely because they are read live from `config.load()` on each
+/// message/request and rely on the swap itself to take effect (e.g.
+/// `max_history_messages`, `agent_max_iterations`, `compaction`,
+/// `prompt_caching`, default `language` / `mode`, `sanitize`). Gating the
+/// swap on `hot_actions` alone made those edits silently no-op while the
+/// reload response reported success.
+///
+/// `Off` / `Restart` modes still return `false` — the operator expects no
+/// runtime change until a full restart.
+pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
+    match mode {
+        ReloadMode::Off | ReloadMode::Restart => false,
+        ReloadMode::Hot | ReloadMode::Hybrid => {
+            !plan.hot_actions.is_empty() || !plan.noop_changes.is_empty()
+        }
     }
 }
 
@@ -1819,6 +1850,55 @@ mod tests {
             noop_changes: vec![],
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_store_config — the config swap must fire on noop-only changes too
+    // (read-live fields like max_history_messages rely on the ArcSwap swap)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_should_store_config_noop_only_swaps_in_hot_hybrid() {
+        // Plan with NO hot actions, only a read-live ("noop") field change.
+        let plan = ReloadPlan {
+            restart_required: false,
+            restart_reasons: vec![],
+            hot_actions: vec![],
+            noop_changes: vec!["max_history_messages".to_string()],
+        };
+        // `should_apply_hot` is false (no hot actions) — that was the bug:
+        // gating the swap on it left read-live edits unapplied.
+        assert!(!should_apply_hot(ReloadMode::Hot, &plan));
+        assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
+        // `should_store_config` is true — the new config is swapped in so the
+        // read-live field takes effect on the next message/request.
+        assert!(should_store_config(ReloadMode::Hot, &plan));
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
+    }
+
+    #[test]
+    fn test_should_store_config_off_restart_never_swap() {
+        let plan = ReloadPlan {
+            restart_required: false,
+            restart_reasons: vec![],
+            hot_actions: vec![HotAction::ReloadChannels],
+            noop_changes: vec!["max_history_messages".to_string()],
+        };
+        // Off / Restart must not apply runtime changes even with pending diffs.
+        assert!(!should_store_config(ReloadMode::Off, &plan));
+        assert!(!should_store_config(ReloadMode::Restart, &plan));
+    }
+
+    #[test]
+    fn test_should_store_config_empty_plan_no_swap() {
+        let plan = ReloadPlan {
+            restart_required: false,
+            restart_reasons: vec![],
+            hot_actions: vec![],
+            noop_changes: vec![],
+        };
+        assert!(!should_store_config(ReloadMode::Hot, &plan));
+        assert!(!should_store_config(ReloadMode::Hybrid, &plan));
     }
 
     // -----------------------------------------------------------------------
