@@ -111,6 +111,7 @@ classified differently — the row note spells out which is which.
 | `provider_api_keys` | H | Provider API-key env-var overrides (flushes driver cache). |
 | `provider_proxy_urls` | R | Per-provider proxy URL overrides (captured by cached drivers). |
 | `provider_request_timeout_secs` | R | Per-provider HTTP request timeout overrides. |
+| `provider_max_retries` | R | Per-provider in-driver retry-count overrides (captured by cached drivers at creation). |
 | `vertex_ai` | R | Vertex AI provider config. |
 | `azure_openai` | R | Azure OpenAI provider config. |
 | `llm` | R | `[llm]` section (auxiliary side-task chain config). |
