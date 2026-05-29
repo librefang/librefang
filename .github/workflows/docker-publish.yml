@@ -41,7 +41,12 @@ jobs:
   build-push:
     name: Build & push to GCR
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Was 60 min; bumped to 120 min after Phase 5–8 added wasmtime,
+    # wasmtime-wasi, wasmtime-wasi-http, and wasi-preview1-component-adapter-provider
+    # deps which pushed the Rust compile step past the 60-min cap.
+    # The last successful build under the 60-min budget was 2026-05-26
+    # (image 26fcfa51); PRs #57, #58, #59 all hit the 1h timeout.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
