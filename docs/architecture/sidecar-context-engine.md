@@ -26,7 +26,7 @@ Calls happen roughly once per turn, so the round-trip cost is acceptable; per-to
 
 The context engine is on the per-turn critical path, so a flaky sidecar must not break a turn.
 **Every bridged call falls back to the built-in engine on any failure** — spawn failure, write error, request timeout, malformed reply, or a crashed process.
-A crash degrades to the built-in engine for the rest of the daemon's lifetime (a restart re-spawns the sidecar); auto-respawn is a deliberate non-goal for the first version.
+A crash degrades that one call to the built-in engine; the sidecar is then re-spawned lazily on a later call (rate-limited by a cooldown so a persistently-broken command can't spawn-storm) via `librefang_subprocess::SupervisedTransport`.
 
 ## Wire protocol
 
@@ -80,7 +80,7 @@ Note the two stdio pitfalls it avoids: read with `sys.stdin.readline()` (not `fo
 
 ## Known limitations (v1)
 
-- **No auto-respawn.** A crashed sidecar degrades to the built-in engine until the daemon restarts. The exit is logged at WARN and counted (`context_engine_sidecar_exited`) so it is visible rather than silent.
+- **Lazy respawn, not active supervision.** A crashed sidecar is re-spawned on the next call (after a cooldown), not eagerly with a ready-handshake/backoff loop like the channels adapter. The exit is logged at WARN and counted (`subprocess_transport_exited{label="context_engine"}`) so it is visible rather than silent. Calls during a down window fall back to the built-in engine.
 - **Per-turn serialization cost.** `assemble` ships the whole message window (and tool definitions) to the sidecar and reads a rewritten window back, each turn. This is the price of letting an external process decide the window; for very large histories it is a real per-turn cost. A delta/keep-drop protocol is a possible future optimization.
 - **Reply-line size cap.** The reader caps a single newline-delimited reply at 16 MiB; a buggy sidecar that streams without ever emitting `\n` trips the cap, the transport is dropped, and calls fall back to the built-in engine rather than growing memory without bound.
 - **Deterministic ordering is the sidecar's responsibility.** The sidecar fully controls the order of the `assemble` window and the `ingest` memories it returns, both of which reach the LLM prompt. The built-in engine re-runs `validate_and_repair` on the sidecar's window (so a malformed `tool_use`/`tool_result` pairing or a missing leading-user turn can never reach the provider), but it does **not** re-sort otherwise-valid content. A sidecar that emits non-deterministic ordering across identical inputs will silently invalidate provider prompt caches (refs #3298) — emit a stable order.

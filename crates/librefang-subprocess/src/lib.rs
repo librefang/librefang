@@ -57,6 +57,7 @@ pub enum TransportError {
 }
 
 /// How to launch and frame a [`SubprocessTransport`].
+#[derive(Clone)]
 pub struct TransportConfig {
     /// Executable to launch (resolved via `PATH`).
     pub command: String,
@@ -284,6 +285,84 @@ impl SubprocessTransport {
     }
 }
 
+/// A [`SubprocessTransport`] that re-spawns the child after it dies.
+///
+/// Construction is lazy and never fails: the child is spawned on the first
+/// [`request`](Self::request) and re-spawned on the first request after a
+/// crash, so a consumer can hold one unconditionally and let calls fall back
+/// while the child is down — no "dead until the daemon restarts" cliff. A
+/// `respawn_cooldown` rate-limits attempts so a persistently-broken command
+/// can't spawn-storm.
+///
+/// `request` is the only contention point's gate: the brief liveness check /
+/// (re)spawn is serialized, but the request itself runs on a cloned handle
+/// outside that lock, so the underlying transport's id-matched concurrency is
+/// preserved.
+pub struct SupervisedTransport {
+    cfg: TransportConfig,
+    respawn_cooldown: Duration,
+    current: Mutex<Option<Arc<SubprocessTransport>>>,
+    last_attempt: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl SupervisedTransport {
+    /// Wrap `cfg` with a 5s respawn cooldown. Nothing is spawned until the
+    /// first [`request`](Self::request).
+    pub fn new(cfg: TransportConfig) -> Self {
+        Self::with_cooldown(cfg, Duration::from_secs(5))
+    }
+
+    /// As [`new`](Self::new) but with an explicit minimum interval between
+    /// (re)spawn attempts.
+    pub fn with_cooldown(cfg: TransportConfig, respawn_cooldown: Duration) -> Self {
+        Self {
+            cfg,
+            respawn_cooldown,
+            current: Mutex::new(None),
+            last_attempt: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Send a request, (re)spawning the child first if it is absent or dead.
+    pub async fn request(&self, request: Value) -> Result<Value, TransportError> {
+        let transport = self.ensure_live().await?;
+        transport.request(request).await
+    }
+
+    async fn ensure_live(&self) -> Result<Arc<SubprocessTransport>, TransportError> {
+        let mut current = self.current.lock().await;
+        if let Some(t) = current.as_ref() {
+            if t.is_alive() {
+                return Ok(Arc::clone(t));
+            }
+        }
+        // Absent or dead. Respect the cooldown so a broken command can't
+        // spawn-storm on every call.
+        {
+            let mut last = self.last_attempt.lock().unwrap();
+            if let Some(at) = *last {
+                if at.elapsed() < self.respawn_cooldown {
+                    return Err(TransportError::Dead);
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        match SubprocessTransport::spawn(self.cfg.clone()) {
+            Ok(t) => {
+                let arc = Arc::new(t);
+                *current = Some(Arc::clone(&arc));
+                Ok(arc)
+            }
+            Err(e) => {
+                *current = None;
+                warn!(label = %self.cfg.label, error = %e,
+                    "subprocess transport (re)spawn failed");
+                Err(TransportError::Dead)
+            }
+        }
+    }
+}
+
 /// Outcome of a [`read_capped_line`] call.
 pub enum Line {
     /// A `\n`-terminated line (terminator stripped), decoded lossily as UTF-8.
@@ -474,5 +553,68 @@ while True:
         let t = spawn_py(py, dir.path(), ECHO, 5);
         let err = t.request(json!("not-an-object")).await.unwrap_err();
         assert!(matches!(err, TransportError::BadRequest));
+    }
+
+    #[tokio::test]
+    async fn supervised_respawns_after_child_exits() {
+        let Some(py) = python() else {
+            return;
+        };
+        // Handles exactly one request, then exits — so the second call only
+        // succeeds if the supervisor re-spawned a fresh child.
+        let body = r#"
+import sys, json
+line = sys.stdin.readline()
+req = json.loads(line)
+sys.stdout.write(json.dumps({"id": req["id"], "ok": {"n": 1}}) + "\n")
+sys.stdout.flush()
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("once.py");
+        std::fs::write(&script, body).unwrap();
+        let cfg = TransportConfig::new(
+            py,
+            vec![script.to_str().unwrap().to_string()],
+            Duration::from_secs(5),
+            "test",
+        );
+        // Zero cooldown so the re-spawn isn't rate-limited within the test.
+        let t = SupervisedTransport::with_cooldown(cfg, Duration::ZERO);
+
+        assert_eq!(
+            t.request(json!({"method": "x"})).await.unwrap(),
+            json!({"n": 1})
+        );
+        // The child exited after replying; let the reader observe EOF.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Second call must re-spawn and succeed again.
+        assert_eq!(
+            t.request(json!({"method": "x"})).await.unwrap(),
+            json!({"n": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_cooldown_blocks_respawn_storm() {
+        // A command that never exists: the first call attempts a spawn (fails),
+        // and a second call within the cooldown returns Dead without a second
+        // spawn attempt.
+        let t = SupervisedTransport::with_cooldown(
+            TransportConfig::new(
+                "/nonexistent/transport-binary",
+                vec![],
+                Duration::from_secs(5),
+                "test",
+            ),
+            Duration::from_secs(3600),
+        );
+        assert!(matches!(
+            t.request(json!({"method": "x"})).await.unwrap_err(),
+            TransportError::Dead
+        ));
+        assert!(matches!(
+            t.request(json!({"method": "x"})).await.unwrap_err(),
+            TransportError::Dead
+        ));
     }
 }

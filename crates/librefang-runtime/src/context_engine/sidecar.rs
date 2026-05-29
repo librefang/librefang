@@ -42,7 +42,7 @@ use crate::compactor::CompactionResult;
 use crate::context_overflow::RecoveryStage;
 use crate::llm_driver::LlmDriver;
 use async_trait::async_trait;
-use librefang_subprocess::{SubprocessTransport, TransportConfig};
+use librefang_subprocess::{SupervisedTransport, TransportConfig};
 use librefang_types::agent::AgentId;
 use librefang_types::config::ContextEngineSidecarConfig;
 use librefang_types::error::LibreFangResult;
@@ -58,43 +58,38 @@ use tracing::warn;
 /// engine as both the LLM-bearing path and the fallback for every bridged call.
 pub struct SidecarContextEngine {
     inner: Box<dyn ContextEngine>,
-    transport: Option<SubprocessTransport>,
+    transport: SupervisedTransport,
 }
 
 impl SidecarContextEngine {
-    /// Spawn the sidecar described by `cfg`, wrapping `inner` for delegation and
-    /// fallback. A spawn failure is logged and yields an engine that behaves
-    /// exactly like `inner`.
+    /// Wrap `inner`, configuring an out-of-process sidecar described by `cfg`.
+    ///
+    /// The sidecar is spawned lazily on the first call and re-spawned after a
+    /// crash (with a cooldown), so a flaky or initially-unavailable sidecar
+    /// degrades to the built-in engine for individual calls rather than for the
+    /// daemon's whole lifetime.
     pub fn spawn(inner: Box<dyn ContextEngine>, cfg: &ContextEngineSidecarConfig) -> Self {
         let timeout = Duration::from_secs(if cfg.request_timeout_secs == 0 {
             30
         } else {
             cfg.request_timeout_secs
         });
-        let transport = match SubprocessTransport::spawn(TransportConfig::new(
+        let transport = SupervisedTransport::new(TransportConfig::new(
             cfg.command.clone(),
             cfg.args.clone(),
             timeout,
             "context_engine",
-        )) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                warn!(error = %e, command = %cfg.command,
-                    "context engine sidecar spawn failed; using built-in engine");
-                None
-            }
-        };
+        ));
         Self { inner, transport }
     }
 
     /// Send one bridged call to the sidecar, returning its `ok` payload.
-    /// `Err(())` means "fall back to the inner engine" — a sidecar failure is
-    /// never surfaced to the agent loop.
+    /// `Err(())` means "fall back to the inner engine" — a sidecar failure
+    /// (including one that is down and awaiting re-spawn) is never surfaced to
+    /// the agent loop.
     async fn call(&self, method: &str, params: Value) -> Result<Value, ()> {
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(());
-        };
-        match transport
+        match self
+            .transport
             .request(json!({ "method": method, "params": params }))
             .await
         {
@@ -402,14 +397,10 @@ while True:
                 request_timeout_secs: 5,
             },
         );
-        assert!(
-            engine.transport.is_none(),
-            "spawn failure must yield no transport"
-        );
-
-        // The call path still works via the inner (stub) engine, which leaves
-        // the window untouched — proving the fallback ran, not the sidecar
-        // (there is none). `Message` has no `PartialEq`, so assert on length.
+        // The sidecar command does not exist, so the lazy (re)spawn fails on
+        // the first call and every call falls back to the inner (stub) engine,
+        // which leaves the window untouched — proving the fallback ran rather
+        // than a sidecar. `Message` has no `PartialEq`, so assert on length.
         let mut messages = vec![Message::user("hi")];
         engine
             .assemble(AgentId(uuid::Uuid::nil()), &mut messages, "sys", &[], 1000)
