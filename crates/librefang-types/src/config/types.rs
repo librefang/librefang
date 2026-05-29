@@ -3801,11 +3801,54 @@ pub struct ContextEngineTomlConfig {
     /// content is no longer present in the history (#4971).
     #[serde(default = "default_deduplicate_file_reads")]
     pub deduplicate_file_reads: bool,
+    /// Out-of-process context engine, selected with `engine = "sidecar"`.
+    ///
+    /// The daemon spawns the configured command and delegates the async
+    /// lifecycle hooks (`ingest`, `assemble`, `after_turn`, `bootstrap`) to it
+    /// over a newline-delimited JSON request/reply protocol; LLM-bearing
+    /// compaction and the cheap synchronous hooks stay in Rust. Any sidecar
+    /// failure falls back to the built-in engine, so a flaky context process
+    /// never breaks a turn. See `docs/architecture/sidecar-context-engine.md`.
+    #[serde(default)]
+    pub sidecar: Option<ContextEngineSidecarConfig>,
 }
 
 /// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
 fn default_deduplicate_file_reads() -> bool {
     true
+}
+
+/// Configuration for an out-of-process context engine (`engine = "sidecar"`).
+///
+/// ```toml
+/// [context_engine]
+/// engine = "sidecar"
+///
+/// [context_engine.sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/context_engines/recall.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ContextEngineSidecarConfig {
+    /// Executable to launch (resolved via `PATH`).
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-request wall-clock timeout. A request that exceeds it falls back to
+    /// the built-in engine for that call. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for ContextEngineSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3818,6 +3861,7 @@ impl Default for ContextEngineTomlConfig {
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
             deduplicate_file_reads: default_deduplicate_file_reads(),
+            sidecar: None,
         }
     }
 }
