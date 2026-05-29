@@ -50,12 +50,54 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, warn};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+/// Hard cap on a single newline-delimited reply line from the sidecar. The
+/// sidecar is trusted operator config, but a *buggy* trusted sidecar that
+/// streams without ever emitting `\n` would otherwise grow the reader task's
+/// buffer without bound and OOM the daemon. On overflow we treat the transport
+/// as dead so every call falls back to the in-process engine.
+const MAX_REPLY_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Outcome of a bounded line read from the sidecar's stdout.
+enum SidecarLine {
+    Data(String),
+    Eof,
+    TooLong,
+}
+
+/// Read one `\n`-terminated line, capping accumulation at [`MAX_REPLY_LINE_BYTES`].
+/// `reader` is a `BufReader`, so the per-byte reads are served from its buffer
+/// (no syscall per byte); this bounds memory without the unbounded-line risk of
+/// `AsyncBufReadExt::lines()` / `read_until`.
+async fn read_capped_line<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<SidecarLine> {
+    buf.clear();
+    let mut byte = [0u8; 1];
+    loop {
+        if reader.read(&mut byte).await? == 0 {
+            return Ok(if buf.is_empty() {
+                SidecarLine::Eof
+            } else {
+                SidecarLine::Data(String::from_utf8_lossy(buf).into_owned())
+            });
+        }
+        if byte[0] == b'\n' {
+            return Ok(SidecarLine::Data(String::from_utf8_lossy(buf).into_owned()));
+        }
+        if buf.len() >= MAX_REPLY_LINE_BYTES {
+            return Ok(SidecarLine::TooLong);
+        }
+        buf.push(byte[0]);
+    }
+}
 
 /// Live connection to the sidecar subprocess. Absent when the process could
 /// not be spawned or has died — in both cases the engine serves from `inner`.
@@ -139,10 +181,25 @@ impl SidecarContextEngine {
             let pending = Arc::clone(&pending);
             let alive = Arc::clone(&alive);
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                // Loop ends on `Ok(None)` (EOF) or `Err` (read error) — both
-                // mean the process is gone.
-                while let Ok(Some(line)) = lines.next_line().await {
+                let mut reader = BufReader::new(stdout);
+                let mut buf: Vec<u8> = Vec::new();
+                // Loop ends on EOF, a read error, or an over-cap line — all mean
+                // the transport can no longer be trusted, so we fall through to
+                // marking it dead and draining waiters.
+                loop {
+                    let line = match read_capped_line(&mut reader, &mut buf).await {
+                        Ok(SidecarLine::Data(line)) => line,
+                        Ok(SidecarLine::Eof) => break,
+                        Ok(SidecarLine::TooLong) => {
+                            warn!(
+                                cap = MAX_REPLY_LINE_BYTES,
+                                "context engine sidecar: reply line exceeded cap; \
+                                 dropping transport and falling back"
+                            );
+                            break;
+                        }
+                        Err(_) => break,
+                    };
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -174,7 +231,15 @@ impl SidecarContextEngine {
                 for (_, tx) in map.drain() {
                     let _ = tx.send(Err("sidecar process exited".to_string()));
                 }
-                debug!("context engine sidecar reader stopped");
+                // Operator-actionable: silent fallback otherwise looks like
+                // normal operation. WARN (not debug) + a metric so a dead
+                // sidecar is visible — every call now uses the built-in engine
+                // until the daemon is restarted.
+                metrics::counter!("context_engine_sidecar_exited").increment(1);
+                warn!(
+                    "context engine sidecar process exited; all context calls now \
+                     fall back to the built-in engine until the daemon is restarted"
+                );
             });
         }
 
@@ -224,13 +289,23 @@ impl SidecarContextEngine {
 
         {
             let mut w = t.stdin.lock().await;
-            if let Err(e) = w.write_all(line.as_bytes()).await {
-                warn!(error = %e, method, "context engine sidecar: write failed");
+            // Bound the write itself, not just the reply wait: if the sidecar
+            // stops reading its stdin the pipe buffer fills and `write_all`
+            // blocks indefinitely, which would hang the turn past the timeout
+            // and defeat the never-break-a-turn guarantee. On timeout the
+            // future (and the stdin guard) drops, freeing the lock. A flush
+            // error is treated as a write failure rather than swallowed.
+            let write = async {
+                w.write_all(line.as_bytes()).await?;
+                w.flush().await
+            };
+            let wrote = matches!(tokio::time::timeout(t.timeout, write).await, Ok(Ok(())));
+            if !wrote {
+                warn!(method, "context engine sidecar: write timed out or failed");
                 t.alive.store(false, Ordering::SeqCst);
                 t.pending.lock().await.remove(&id);
                 return Err(());
             }
-            let _ = w.flush().await;
         }
 
         match tokio::time::timeout(t.timeout, rx).await {
@@ -326,7 +401,17 @@ impl ContextEngine for SidecarContextEngine {
                 .map(serde_json::from_value::<Vec<Message>>)
             {
                 Some(Ok(new_messages)) => {
-                    *messages = new_messages;
+                    // Repair the sidecar's window before it reaches the provider.
+                    // The in-process engines run validate_and_repair internally,
+                    // but the engine call site in run_streaming does NOT
+                    // re-validate engine output — so a sloppy sidecar (e.g. a
+                    // naive `messages[-N:]` window that splits a
+                    // tool_use/tool_result pair, or drops the leading user turn)
+                    // would otherwise hand the model a malformed sequence
+                    // (Anthropic 400s on an orphan tool_result). This makes the
+                    // doc's "the built-in engine still owns final ordering"
+                    // claim actually true regardless of sidecar quality.
+                    *messages = crate::session_repair::validate_and_repair(&new_messages);
                     let recovery = value
                         .get("recovery")
                         .cloned()

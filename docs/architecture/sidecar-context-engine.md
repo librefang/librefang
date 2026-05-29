@@ -78,6 +78,12 @@ Unlike third-party skills, the sidecar command is operator-supplied trusted conf
 A dependency-free Python reference that recalls nothing and keeps the most recent slice of the window is in [`docs/examples/context_engine_sidecar.py`](../examples/context_engine_sidecar.py).
 Note the two stdio pitfalls it avoids: read with `sys.stdin.readline()` (not `for line in sys.stdin`, which read-ahead-buffers) and `sys.stdout.flush()` after every reply (a long-lived process's block-buffered stdout would otherwise never reach the daemon).
 
+## Known limitations (v1)
+
+- **No auto-respawn.** A crashed sidecar degrades to the built-in engine until the daemon restarts. The exit is logged at WARN and counted (`context_engine_sidecar_exited`) so it is visible rather than silent.
+- **Per-turn serialization cost.** `assemble` ships the whole message window (and tool definitions) to the sidecar and reads a rewritten window back, each turn. This is the price of letting an external process decide the window; for very large histories it is a real per-turn cost. A delta/keep-drop protocol is a possible future optimization.
+- **Unbounded reply line.** The reader reads a full line before parsing, so a buggy sidecar that emits output without newlines can grow memory. The sidecar is trusted operator config, but a defensive line-length cap is a reasonable hardening follow-up (the channels sidecar has the same shape).
+
 ## What stays in Rust (the substrate line)
 
 - The LLM driver, streaming, and compaction (`compact`).
