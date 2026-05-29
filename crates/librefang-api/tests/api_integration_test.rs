@@ -191,7 +191,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -2943,7 +2943,7 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         proactive_memory: proactive,
