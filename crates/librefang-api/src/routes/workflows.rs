@@ -2066,13 +2066,13 @@ pub async fn save_workflow_as_template(
 
     // Persist template to TOML file under the active kernel home directory.
     let templates_dir = state.kernel.home_dir().join("workflows").join("templates");
-    if let Err(e) = std::fs::create_dir_all(&templates_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&templates_dir).await {
         warn!("Failed to create templates directory: {e}");
     } else {
         let toml_path = templates_dir.join(format!("{}.toml", &template.id));
         match toml::to_string_pretty(&template) {
             Ok(toml_str) => {
-                if let Err(e) = std::fs::write(&toml_path, toml_str) {
+                if let Err(e) = tokio::fs::write(&toml_path, toml_str).await {
                     warn!(
                         path = %toml_path.display(),
                         "Failed to write template file: {e}"
