@@ -71,19 +71,38 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
+                "source": "builtin",
             })
         })
         .collect();
 
-    // Include MCP tools so they're visible in Settings -> Tools
+    // Include MCP tools so they're visible in Settings -> Tools.
+    // Use `resolve_mcp_server_from_known` to map tool names back to their
+    // originating server — this handles multi-word server names like
+    // `my-server` that the naive `split_once('_')` approach breaks.
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
+        let configured_servers: Vec<String> = state
+            .kernel
+            .effective_mcp_servers_ref()
+            .read()
+            .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         for t in mcp_tools.iter() {
-            tools.push(serde_json::json!({
+            let mcp_server: Option<String> = librefang_kernel::mcp::resolve_mcp_server_from_known(
+                &t.name,
+                configured_servers.iter().map(String::as_str),
+            )
+            .map(|s| s.to_string());
+            let mut entry = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
                 "source": "mcp",
-            }));
+            });
+            if let Some(server) = mcp_server {
+                entry["mcp_server"] = serde_json::Value::String(server);
+            }
+            tools.push(entry);
         }
     }
 
@@ -107,6 +126,7 @@ pub async fn get_tool(
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.input_schema,
+                    "source": "builtin",
                 })),
             );
         }
@@ -114,17 +134,30 @@ pub async fn get_tool(
 
     // Search MCP tools
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
+        let configured_servers: Vec<String> = state
+            .kernel
+            .effective_mcp_servers_ref()
+            .read()
+            .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         for t in mcp_tools.iter() {
             if t.name == name {
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.input_schema,
-                        "source": "mcp",
-                    })),
-                );
+                let mcp_server: Option<String> =
+                    librefang_kernel::mcp::resolve_mcp_server_from_known(
+                        &t.name,
+                        configured_servers.iter().map(String::as_str),
+                    )
+                    .map(|s| s.to_string());
+                let mut entry = serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                    "source": "mcp",
+                });
+                if let Some(server) = mcp_server {
+                    entry["mcp_server"] = serde_json::Value::String(server);
+                }
+                return (StatusCode::OK, Json(entry));
             }
         }
     }

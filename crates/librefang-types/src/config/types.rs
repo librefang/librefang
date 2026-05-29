@@ -1220,13 +1220,87 @@ pub struct LlmConfig {
     pub auxiliary: AuxiliaryConfig,
 }
 
+/// Configuration for a self-hosted / custom-URL text-to-speech provider.
+///
+/// Points TTS at any OpenAI-compatible `/v1/audio/speech` endpoint — e.g. a
+/// local `openedai-speech` server, a Piper HTTP wrapper, or any other service
+/// that accepts the same JSON request shape. No new dependencies are needed.
+///
+/// ## Example (`config.toml`)
+/// ```toml
+/// [tts]
+/// enabled = true
+/// provider = "local-piper"
+///
+/// [tts.custom]
+/// base_url = "http://localhost:5000/v1/audio/speech"
+/// # api_key_env = "MY_LOCAL_TTS_KEY"  # omit for keyless servers  # pragma: allowlist secret
+/// key_required = false
+/// model = "tts-1"
+/// voice = "en_US-lessac-medium"
+/// format = "mp3"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CustomTtsConfig {
+    /// Full URL of the OpenAI-compatible TTS endpoint.
+    /// E.g. `"http://localhost:5000/v1/audio/speech"`.
+    pub base_url: String,
+    /// Environment variable that holds the API key for this endpoint.
+    /// When empty (default), no `Authorization` header is sent.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// When `true`, the request is rejected immediately if the env var named
+    /// by `api_key_env` is not set. When `false` (default), a missing key
+    /// simply means no auth header is added — suitable for keyless local
+    /// servers.
+    #[serde(default)]
+    pub key_required: bool,
+    /// Model identifier forwarded to the endpoint. Default: `"tts-1"`.
+    #[serde(default = "default_custom_tts_model")]
+    pub model: String,
+    /// Voice identifier forwarded to the endpoint. Default: `"alloy"`.
+    #[serde(default = "default_custom_tts_voice")]
+    pub voice: String,
+    /// Audio format: "mp3", "opus", "aac", "flac", "wav". Default: `"mp3"`.
+    #[serde(default = "default_custom_tts_format")]
+    pub format: String,
+}
+
+fn default_custom_tts_model() -> String {
+    "tts-1".to_string()
+}
+
+fn default_custom_tts_voice() -> String {
+    "alloy".to_string()
+}
+
+fn default_custom_tts_format() -> String {
+    "mp3".to_string()
+}
+
+impl Default for CustomTtsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key_env: String::new(),
+            key_required: false,
+            model: default_custom_tts_model(),
+            voice: default_custom_tts_voice(),
+            format: default_custom_tts_format(),
+        }
+    }
+}
+
 /// Text-to-speech configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
     pub enabled: bool,
-    /// Default provider: "openai", "elevenlabs", or "google_tts".
+    /// Default provider: "openai", "elevenlabs", "google_tts", or any custom
+    /// name. When set to a name other than the three built-in ones, the
+    /// `[tts.custom]` block must supply the endpoint URL.
     pub provider: Option<String>,
     /// OpenAI TTS settings.
     pub openai: TtsOpenAiConfig,
@@ -1234,6 +1308,13 @@ pub struct TtsConfig {
     pub elevenlabs: TtsElevenLabsConfig,
     /// Google Cloud TTS settings.
     pub google: TtsGoogleConfig,
+    /// Custom / self-hosted TTS endpoint configuration.
+    ///
+    /// Used when `provider` is set to a name that is not one of the built-in
+    /// providers (`openai`, `elevenlabs`, `google_tts`). The request is
+    /// forwarded to an OpenAI-compatible `/v1/audio/speech` endpoint.
+    #[serde(default)]
+    pub custom: CustomTtsConfig,
     /// Max text length for TTS (chars). Default: 4096.
     pub max_text_length: usize,
     /// Timeout per TTS request in seconds. Default: 30.
@@ -1248,6 +1329,7 @@ impl Default for TtsConfig {
             openai: TtsOpenAiConfig::default(),
             elevenlabs: TtsElevenLabsConfig::default(),
             google: TtsGoogleConfig::default(),
+            custom: CustomTtsConfig::default(),
             max_text_length: 4096,
             timeout_secs: 30,
         }
@@ -3728,11 +3810,54 @@ pub struct ContextEngineTomlConfig {
     /// content is no longer present in the history (#4971).
     #[serde(default = "default_deduplicate_file_reads")]
     pub deduplicate_file_reads: bool,
+    /// Out-of-process context engine, selected with `engine = "sidecar"`.
+    ///
+    /// The daemon spawns the configured command and delegates the async
+    /// lifecycle hooks (`ingest`, `assemble`, `after_turn`, `bootstrap`) to it
+    /// over a newline-delimited JSON request/reply protocol; LLM-bearing
+    /// compaction and the cheap synchronous hooks stay in Rust. Any sidecar
+    /// failure falls back to the built-in engine, so a flaky context process
+    /// never breaks a turn. See `docs/architecture/sidecar-context-engine.md`.
+    #[serde(default)]
+    pub sidecar: Option<ContextEngineSidecarConfig>,
 }
 
 /// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
 fn default_deduplicate_file_reads() -> bool {
     true
+}
+
+/// Configuration for an out-of-process context engine (`engine = "sidecar"`).
+///
+/// ```toml
+/// [context_engine]
+/// engine = "sidecar"
+///
+/// [context_engine.sidecar]
+/// command = "python3"
+/// args = ["/home/me/.librefang/context_engines/recall.py"]
+/// request_timeout_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ContextEngineSidecarConfig {
+    /// Executable to launch (resolved via `PATH`).
+    pub command: String,
+    /// Arguments passed to the command.
+    pub args: Vec<String>,
+    /// Per-request wall-clock timeout. A request that exceeds it falls back to
+    /// the built-in engine for that call. `0` means the compiled default (30s).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for ContextEngineSidecarConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3745,6 +3870,7 @@ impl Default for ContextEngineTomlConfig {
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
             deduplicate_file_reads: default_deduplicate_file_reads(),
+            sidecar: None,
         }
     }
 }

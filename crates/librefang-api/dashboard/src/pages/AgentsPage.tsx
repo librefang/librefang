@@ -26,7 +26,7 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -215,8 +215,10 @@ export function AgentsPage() {
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
+  const [toolsDraft, setToolsDraft] = useState<string[] | null>(null);
+  const [expandedToolGroup, setExpandedToolGroup] = useState<string | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -383,7 +385,8 @@ export function AgentsPage() {
   const toolsListQuery = useTools({
     enabled:
       (showToolsEditor && !!toolsEditorAgentId) ||
-      (showCreate && createMode === "form"),
+      (showCreate && createMode === "form") ||
+      (!!detailAgent && agentTab === "tools"),
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -497,6 +500,24 @@ export function AgentsPage() {
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });
+
+  useEffect(() => {
+    if (agentTab !== "tools") {
+      setToolsDraft(null);
+      setExpandedToolGroup(null);
+      return;
+    }
+    const cfg = tabAgentToolsQuery.data;
+    if (!cfg) return;
+    const declared = cfg.capabilities_tools ?? [];
+    if (declared.length > 0 && toolsDraft === null) {
+      setToolsDraft([...declared]);
+    }
+  }, [agentTab, tabAgentToolsQuery.data]);
+
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -830,6 +851,7 @@ export function AgentsPage() {
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
+      { id: "tools",        label: t("agents.tab.tools",        { defaultValue: "Tools" }),        Icon: Wrench },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -1074,6 +1096,7 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
+      case "tools":             return renderToolsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -1325,6 +1348,321 @@ export function AgentsPage() {
             ))}
           </div>
         )}
+      </div>
+    );
+  };
+
+  // ---------- Tools tab — group-level management (like Skills) + fine-grain per group
+  const renderToolsTab = (agent: AgentDetail) => {
+    const allTools = toolsListQuery.data ?? [];
+    const agentToolCfg = tabAgentToolsQuery.data;
+    const isLoading = toolsListQuery.isLoading || tabAgentToolsQuery.isLoading;
+
+    const grouped = new Map<string, ToolDefinition[]>();
+    for (const tool of allTools) {
+      let group: string;
+      if (tool.source === "builtin" || (!tool.source && !tool.name.startsWith("mcp_"))) {
+        group = "Builtin";
+      } else {
+        const server = tool.mcp_server
+          ?? tool.name.replace(/^mcp_/, "").split("_")[0];
+        group = `MCP: ${server}`;
+      }
+      if (!grouped.has(group)) grouped.set(group, []);
+      grouped.get(group)!.push(tool);
+    }
+    const sortedGroups = [...grouped.entries()].sort(([a], [b]) => {
+      if (a === "Builtin") return -1;
+      if (b === "Builtin") return 1;
+      return a.localeCompare(b);
+    });
+
+    const declared = agentToolCfg?.capabilities_tools ?? [];
+    const usesAll = declared.length === 0;
+    const draft = toolsDraft ?? [];
+    const draftSet = new Set(draft);
+    const isDirty = toolsDraft !== null &&
+      (draft.length !== declared.length || draft.some((n) => !declared.includes(n)));
+
+    const getGroupStatus = (groupTools: ToolDefinition[]): "full" | "partial" | "none" => {
+      const count = groupTools.filter((t) => draftSet.has(t.name)).length;
+      if (count === groupTools.length) return "full";
+      if (count > 0) return "partial";
+      return "none";
+    };
+
+    const handleCustomize = () => {
+      setToolsDraft(allTools.map((t) => t.name));
+    };
+
+    const handleUseAll = () => {
+      setToolsDraft([]);
+    };
+
+    const handleToggleGroup = (groupName: string) => {
+      const groupTools = grouped.get(groupName) ?? [];
+      const names = groupTools.map((t) => t.name);
+      const status = getGroupStatus(groupTools);
+      if (status !== "none") {
+        setToolsDraft((prev) => (prev ?? []).filter((n) => !names.includes(n)));
+        if (expandedToolGroup === groupName) setExpandedToolGroup(null);
+      } else {
+        setToolsDraft((prev) => {
+          const s = new Set(prev ?? []);
+          for (const n of names) s.add(n);
+          return [...s];
+        });
+      }
+    };
+
+    const handleToggleTool = (toolName: string) => {
+      setToolsDraft((prev) => {
+        const s = new Set(prev ?? []);
+        if (s.has(toolName)) s.delete(toolName);
+        else s.add(toolName);
+        return [...s];
+      });
+    };
+
+    const handleSave = () => {
+      if (!agent.id) return;
+      updateToolsMutation.mutate(
+        {
+          agentId: agent.id,
+          payload: {
+            capabilities_tools: draft,
+            tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+            tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+          },
+        },
+        {
+          onSuccess: () => {
+            addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+            setToolsDraft(null);
+            setExpandedToolGroup(null);
+          },
+          onError: (e) => {
+            addToast(
+              toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to save tool configuration" })),
+              "error",
+            );
+          },
+        },
+      );
+    };
+
+    const assignedGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) !== "none");
+    const availableGroups = sortedGroups.filter(([, tools]) => getGroupStatus(tools) === "none");
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.tools_label", { defaultValue: "Tools" })}
+            {" · "}
+            {isLoading
+              ? "…"
+              : usesAll && !isDirty
+                ? t("agents.detail.tools_all", { defaultValue: "all" })
+                : draft.length}
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll && !isDirty ? (
+          sortedGroups.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {sortedGroups.map(([groupName, groupTools]) => (
+                  <div
+                    key={groupName}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                        {groupName.startsWith("MCP:") ? (
+                          <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                        ) : (
+                          <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                        )}
+                        {groupName}
+                      </div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                        {" · "}{t("agents.detail.tools_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleCustomize}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.tools_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Wrench className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.tools_all_title", { defaultValue: "Using all available tools" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.tools_all_desc", { defaultValue: "no tools registered in the system yet" })}
+                </div>
+              </div>
+            </div>
+          )
+        ) : (
+          <>
+            {assignedGroups.length > 0 && (
+              <div className="flex flex-col gap-2.5">
+                {assignedGroups.map(([groupName, groupTools]) => {
+                  const status = getGroupStatus(groupTools);
+                  const activeCount = groupTools.filter((t) => draftSet.has(t.name)).length;
+                  const isExpanded = expandedToolGroup === groupName;
+                  return (
+                    <div key={groupName} className="flex flex-col">
+                      <div
+                        className={`px-3 py-2.5 rounded-md border flex items-start justify-between gap-2 ${
+                          status === "full"
+                            ? "border-brand/30 bg-main/40"
+                            : "border-amber-500/30 bg-amber-500/5"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                            {groupName.startsWith("MCP:") ? (
+                              <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            ) : (
+                              <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                            )}
+                            {groupName}
+                          </div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {status === "full"
+                              ? `${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}`
+                              : `${activeCount}/${groupTools.length} tools`}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0 mt-0.5">
+                          <button
+                            onClick={() => setExpandedToolGroup(isExpanded ? null : groupName)}
+                            className="text-text-dim hover:text-brand transition-colors p-0.5"
+                            title={t("agents.detail.tools_fine_grain", { defaultValue: "Configure individual tools" })}
+                          >
+                            <ChevronDown
+                              className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
+                            />
+                          </button>
+                          <button
+                            onClick={() => handleToggleGroup(groupName)}
+                            className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                            title={t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="ml-4 mt-1.5 flex flex-col gap-1">
+                          {groupTools.map((tool) => {
+                            const isActive = draftSet.has(tool.name);
+                            return (
+                              <div
+                                key={tool.name}
+                                onClick={() => handleToggleTool(tool.name)}
+                                className={`flex items-center gap-2 px-2.5 py-1.5 rounded border cursor-pointer transition-colors ${
+                                  isActive
+                                    ? "border-brand/20 bg-main/40 hover:border-red-400/30"
+                                    : "border-border-subtle bg-main/20 opacity-60 hover:border-brand/30 hover:opacity-100"
+                                }`}
+                              >
+                                <div
+                                  className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
+                                    isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
+                                  }`}
+                                >
+                                  {isActive && <Check className="w-2 h-2 text-brand" />}
+                                </div>
+                                <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
+                                  {tool.name}
+                                </span>
+                                {tool.description && (
+                                  <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
+                                    {tool.description}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {availableGroups.length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.tools_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {availableGroups.map(([groupName, groupTools]) => (
+                    <div
+                      key={groupName}
+                      onClick={() => handleToggleGroup(groupName)}
+                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
+                          {groupName.startsWith("MCP:") ? (
+                            <Cpu className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                          ) : (
+                            <Wrench className="w-3.5 h-3.5 text-text-dim/70 shrink-0" />
+                          )}
+                          {groupName}
+                        </div>
+                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                          {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
+                          {" · "}{t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                        </div>
+                      </div>
+                      <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.tools_reset_to_all", { defaultValue: "Reset to use all tools" })}
+            </button>
+          </>
+        )}
+
+        <div className="flex justify-end mt-2">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty || updateToolsMutation.isPending}
+          >
+            {updateToolsMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
       </div>
     );
   };

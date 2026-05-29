@@ -37,6 +37,7 @@ mod spill;
 mod system;
 mod taint;
 mod task;
+mod wasm_skill;
 mod web_legacy;
 mod wiki;
 mod workflow;
@@ -97,6 +98,7 @@ use self::taint::{
 use self::task::{
     tool_task_claim, tool_task_complete, tool_task_list, tool_task_post, tool_task_status,
 };
+pub use self::wasm_skill::execute_wasm_skill;
 use self::web_legacy::{tool_web_fetch_legacy, tool_web_search_legacy};
 use self::wiki::{tool_wiki_get, tool_wiki_search, tool_wiki_write};
 #[cfg(test)]

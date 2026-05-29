@@ -1667,11 +1667,18 @@ export function SkillsPage() {
 
   const fanghubItems = useMemo(
     () =>
-      filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory).map((s) => ({
-        ...s,
-        _hub: "fanghub" as const,
-      })),
-    [fanghubQuery.data, selectedCategory],
+      filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory)
+        .filter(
+          (s) =>
+            !search ||
+            s.name.toLowerCase().includes(search.toLowerCase()) ||
+            (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false),
+        )
+        .map((s) => ({
+          ...s,
+          _hub: "fanghub" as const,
+        })),
+    [fanghubQuery.data, selectedCategory, search],
   );
   const clawhubItems = useMemo(
     () => buildRemoteItems(clawhubQuery.data?.items, "clawhub"),
