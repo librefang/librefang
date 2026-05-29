@@ -1424,6 +1424,8 @@ export interface AgentToolsResponse {
 export interface ToolDefinition {
   name: string;
   description?: string;
+  source?: "builtin" | "mcp" | string;
+  mcp_server?: string;
 }
 
 export async function getAgentTools(agentId: string): Promise<AgentToolsResponse> {
@@ -2629,7 +2631,28 @@ export interface TaskQueueItem {
   status?: string;
   created_at?: string;
   updated_at?: string;
+  // Extended fields returned by GET /api/tasks and GET /api/tasks/list
+  title?: string;
+  description?: string;
+  assigned_to?: string;
+  created_by?: string;
+  completed_at?: string;
+  result?: string;
+  claimed_at?: string;
+  priority?: number;
   [key: string]: unknown;
+}
+
+export interface CreateTaskPayload {
+  title: string;
+  description: string;
+  assigned_to?: string;
+  created_by?: string;
+}
+
+export interface CreateTaskResult {
+  id: string;
+  status: string;
 }
 
 export async function getHealthDetail(): Promise<HealthDetailResponse> {
@@ -2829,6 +2852,14 @@ export async function getTaskQueueStatus(): Promise<TaskQueueStatusResponse> {
 export async function listTaskQueue(status?: string): Promise<{ tasks?: TaskQueueItem[]; total?: number }> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return get<{ tasks?: TaskQueueItem[]; total?: number }>(`/api/tasks/list${qs}`);
+}
+
+export async function createTask(payload: CreateTaskPayload): Promise<CreateTaskResult> {
+  return post<CreateTaskResult>("/api/tasks", payload);
+}
+
+export async function updateTaskStatus(id: string, status: "pending" | "cancelled"): Promise<{ status?: string; id?: string }> {
+  return patch<{ status?: string; id?: string }>(`/api/tasks/${encodeURIComponent(id)}`, { status });
 }
 
 export async function deleteTaskFromQueue(id: string): Promise<{ status?: string; id?: string }> {
@@ -3479,6 +3510,50 @@ export async function updateGoal(
 
 export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}`);
+}
+
+// ── Goal runner — long-horizon autonomous execution (#5744) ──────────
+
+export interface GoalRunState {
+  goal_id: string;
+  agent_id: string;
+  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  iteration: number;
+  max_iterations: number;
+  last_progress: number;
+  last_error?: string;
+  started_at: string;
+  updated_at: string;
+}
+
+/** Begin an autonomous run that drives the goal's assigned agent. */
+export async function startGoalRun(
+  goalId: string,
+  payload?: { max_iterations?: number }
+): Promise<{ ok: boolean; run: GoalRunState | null }> {
+  return post<{ ok: boolean; run: GoalRunState | null }>(
+    `/api/goals/${encodeURIComponent(goalId)}/start`,
+    payload ?? {}
+  );
+}
+
+/** Stop an active autonomous run for a goal. */
+export async function stopGoalRun(
+  goalId: string
+): Promise<{ ok: boolean; stopped: boolean }> {
+  return post<{ ok: boolean; stopped: boolean }>(
+    `/api/goals/${encodeURIComponent(goalId)}/stop`,
+    {}
+  );
+}
+
+/** Observe the autonomous run state for a goal. */
+export async function getGoalRun(
+  goalId: string
+): Promise<{ running: boolean; run?: GoalRunState }> {
+  return get<{ running: boolean; run?: GoalRunState }>(
+    `/api/goals/${encodeURIComponent(goalId)}/run`
+  );
 }
 
 // ── Network / Peers ──────────────────────────────────

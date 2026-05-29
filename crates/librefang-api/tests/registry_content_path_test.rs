@@ -200,3 +200,94 @@ async fn registry_content_accepts_dotted_and_dashed_identifiers() {
         Some("providers/my.provider-name_1.toml")
     );
 }
+
+async fn get_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// #5822: creating a custom provider whose model carries the out-of-vocabulary
+/// tier `"reasoning"` (which the dashboard used to offer) must succeed AND the
+/// model must actually load into the catalog. Previously the catalog TOML
+/// parser rejected the unknown tier, the merge was swallowed as a `warn!`, and
+/// the provider silently never appeared — the endpoint still returned 200, so
+/// asserting the status alone is not enough; we read the catalog back.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_with_reasoning_tier_model_loads_into_catalog() {
+    let h = boot().await;
+    let body = serde_json::json!({
+        "id": "myai-ds4",
+        "display_name": "My AI",
+        "api_key_env": "MYAI_DS4_API_KEY", // pragma: allowlist secret
+        "base_url": "https://example.invalid/v1",
+        "key_required": false,
+        "models": [{
+            "id": "myai-reasoner-x",
+            "display_name": "MyAI Reasoner X",
+            "tier": "reasoning",
+            "context_window": 128000,
+            "max_output_tokens": 8192,
+            "input_cost_per_m": 1.0,
+            "output_cost_per_m": 2.0
+        }]
+    });
+    let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+    assert_eq!(status, StatusCode::OK, "create must succeed: {resp}");
+
+    let (status, models) = get_json(&h.app, "/api/models").await;
+    assert_eq!(status, StatusCode::OK);
+    let raw = models.to_string();
+    assert!(
+        raw.contains("myai-reasoner-x"),
+        "the reasoning-tier model must be present in the catalog; got: {raw}"
+    );
+}
+
+/// A provider definition that fails to load into the catalog (here: a model
+/// whose `context_window` is the wrong TOML type) must be reported to the
+/// caller as a 400 — not swallowed as a success — and the rejected file must
+/// not be left behind on disk to break catalog parsing on every boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_rejected_by_catalog_returns_400_and_leaves_no_file() {
+    let h = boot().await;
+    let body = serde_json::json!({
+        "id": "broken-provider",
+        "display_name": "Broken",
+        "api_key_env": "BROKEN_PROVIDER_API_KEY", // pragma: allowlist secret
+        "base_url": "https://example.invalid/v1",
+        "key_required": false,
+        "models": [{
+            "id": "broken-model",
+            "display_name": "Broken Model",
+            "tier": "fast",
+            "context_window": "not-a-number",
+            "max_output_tokens": 8192,
+            "input_cost_per_m": 1.0,
+            "output_cost_per_m": 2.0
+        }]
+    });
+    let (status, resp) = post_json(&h.app, "/api/registry/content/provider", body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a provider the catalog rejects must surface a 400, got {status} / {resp}"
+    );
+
+    let file = h.home_dir.join("providers").join("broken-provider.toml");
+    assert!(
+        !file.exists(),
+        "the rejected provider file must be rolled back, not left at {file:?}"
+    );
+}
