@@ -6147,9 +6147,10 @@ pub struct DefaultModelConfig {
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: HashMap<String, serde_json::Value>,
+    pub extra_params: BTreeMap<String, serde_json::Value>,
     /// Claude Code CLI profile directories for token rotation.
     /// Each entry is a path to a `.claude/` config dir (e.g. `~/.claude-profiles/account-2`).
     /// When multiple profiles are configured, a TokenRotationDriver wraps them
@@ -6170,7 +6171,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
-            extra_params: HashMap::new(),
+            extra_params: BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         }
     }

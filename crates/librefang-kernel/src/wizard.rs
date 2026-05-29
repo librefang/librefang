@@ -162,7 +162,7 @@ impl SetupWizard {
                 base_url: None,
                 context_window: None,
                 max_output_tokens: None,
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             },
             resources: ResourceQuota::default(),
             priority: Priority::default(),

@@ -346,7 +346,7 @@ pub(crate) fn resolve_effective_fallbacks(
                     Some(gfb.api_key_env.clone())
                 },
                 base_url: gfb.base_url.clone(),
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             })
             .collect(),
     }
@@ -375,7 +375,7 @@ mod tests {
             model: model.to_string(),
             api_key_env: None,
             base_url: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         }
     }
 

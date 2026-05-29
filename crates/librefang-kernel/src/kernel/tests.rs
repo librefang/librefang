@@ -467,7 +467,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },
@@ -720,7 +720,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },
@@ -8797,7 +8797,7 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -9810,7 +9810,7 @@ fn sync_default_model_agents_reports_no_failures_and_migrates() {
                     base_url: None,
                     context_window: None,
                     max_output_tokens: None,
-                    extra_params: std::collections::HashMap::new(),
+                    extra_params: std::collections::BTreeMap::new(),
                 },
                 ..Default::default()
             },
