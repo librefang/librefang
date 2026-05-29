@@ -40,6 +40,15 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 wasmtime = { workspace = true }
+# Phase-7 C-001: WASI Preview 2 host. Bound by sandbox_component.rs into
+# the Component plugin host's linker so language-runtime init code
+# (CPython, StarlingMonkey, Go runtime, cargo-component's wasi-rt) finds
+# its `wasi:*` imports satisfied. WasiCtx is deny-by-default — the
+# librefang capability list remains the real gate (see assessment.md D2).
+wasmtime-wasi = { workspace = true }
+# Phase-7 C-006: StarlingMonkey (jco componentize) auto-imports wasi:http/types
+# even when JS source doesn't use HTTP. Wire the linker so instantiation succeeds.
+wasmtime-wasi-http = { workspace = true }
 dashmap = { workspace = true }
 regex-lite = { workspace = true }
 # Full `regex` (RE2-based) — used by `pii_filter` so operator-

@@ -133,7 +133,11 @@ impl Default for SandboxConfig {
 /// `ResourceLimiter` implementation that caps WASM linear-memory growth at a
 /// configured byte ceiling. Attached to every `Store` so that WASM plugins
 /// cannot allocate unbounded host memory regardless of their fuel budget.
-struct MemoryLimiter {
+///
+/// `pub(crate)` so `sandbox_component.rs` can wire `store.limiter(...)` via
+/// `GuestState::limiter_mut()` without the closure's inferred type hitting the
+/// `private-interfaces` lint. The type stays crate-internal.
+pub(crate) struct MemoryLimiter {
     max_bytes: usize,
 }
 
@@ -177,6 +181,18 @@ pub struct GuestState {
     start: std::time::Instant,
     /// Wall-clock budget for this guest. Set from `SandboxConfig::timeout_secs`.
     timeout: std::time::Duration,
+}
+
+impl GuestState {
+    /// Mutable accessor for the `MemoryLimiter` so the Component Model path
+    /// in `sandbox_component.rs` can wire `store.limiter(|s| s.guest.limiter_mut())`
+    /// without replicating the limiter construction logic.
+    ///
+    /// `pub(crate)` keeps this off the public API surface — it's a narrow seam
+    /// between the two sandbox paths in the same crate.
+    pub(crate) fn limiter_mut(&mut self) -> &mut MemoryLimiter {
+        &mut self.limiter
+    }
 }
 
 #[cfg(test)]

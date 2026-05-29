@@ -193,13 +193,23 @@ fn build_go_env_greet(workspace_root: &Path) -> XtaskResult<()> {
         .map(|root| PathBuf::from(root).join("bin/tinygo"))
         .unwrap_or_else(|_| PathBuf::from("tinygo"));
 
-    // Step 1: compile to WASI P1 core module
+    // Step 1: compile to WASI P1 reactor core module.
+    //
+    // `-buildmode=c-shared` is required (Phase-7 C-006 discovery): without it
+    // TinyGo generates `_start` (WASI command semantics), which the reactor
+    // adapter never calls. The adapter looks for `_initialize`, so the Go
+    // runtime is never initialized and every //go:wasmexport call panics with
+    // "//go:wasmexport function called before runtime initialization".
+    // With `-buildmode=c-shared`, TinyGo generates `_initialize` (WASI
+    // reactor semantics) — the adapter calls it during component instantiation,
+    // the Go runtime initialises, and `run()` works as expected.
     let core_wasm = std::env::temp_dir().join("go-env-greet-core.wasm");
     let status = Command::new(&tinygo_bin)
         .args([
             "build",
             "-target",
             "wasip1",
+            "-buildmode=c-shared",
             "-o",
             core_wasm.to_str().unwrap(),
             ".",

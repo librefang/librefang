@@ -273,25 +273,29 @@ checked-in `pre-built/plugin.wasm` (regen via
 
 | Example | Language | Capability | Toolchain | Pre-built size | Integration test |
 |---|---|---|---|---:|---|
-| [`c-noop`](../../examples/plugins/c-noop/) | C | none | LLVM clang + `wasm-ld` + wit-bindgen-c | 1,072 B | runs (load + invoke + Ok proof) |
-| [`rust-fs-cat`](../../examples/plugins/rust-fs-cat/) | Rust | `fs` | cargo-component | 54,736 B | skipped pending `wasi:io/poll` |
-| [`python-hello-time`](../../examples/plugins/python-hello-time/) | Python | `time` | componentize-py | 18,368,830 B | skipped pending `wasi:cli/environment` |
-| [`js-kv-counter`](../../examples/plugins/js-kv-counter/) | JavaScript | `kv` | jco componentize | 12,660,894 B | skipped pending `librefang:plugin/fs` (StarlingMonkey shim auto-imports it) |
-| [`go-env-greet`](../../examples/plugins/go-env-greet/) | Go | `env` | TinyGo + wasi P1 adapter | 404,950 B | skipped pending `wasi:cli/environment` |
+| [`c-noop`](../../examples/plugins/c-noop/) | C | none | LLVM clang + `wasm-ld` + wit-bindgen-c | 1,072 B | ✅ runs end-to-end |
+| [`rust-fs-cat`](../../examples/plugins/rust-fs-cat/) | Rust | `fs` | cargo-component | 54,736 B | ✅ runs end-to-end |
+| [`python-hello-time`](../../examples/plugins/python-hello-time/) | Python | `time` | componentize-py | 18,368,830 B | ✅ runs end-to-end |
+| [`js-kv-counter`](../../examples/plugins/js-kv-counter/) | JavaScript | `kv` | jco componentize | 12,660,894 B | ⏸ Phase-8 (WASI 0.2.10 runtime mismatch) |
+| [`go-env-greet`](../../examples/plugins/go-env-greet/) | Go | `env` | TinyGo + wasi P1 adapter | 409,819 B | ⏸ Phase-8 (TinyGo reactor adapter) |
 
-The four skips share a root cause: non-trivial language runtimes
-(CPython, StarlingMonkey, Go runtime, cargo-component's wasi-rt) pull
-WASI Preview 2 host imports for their init code. The Phase-6 component
-linker only binds `librefang:plugin/*` — wiring `wasmtime-wasi` into
-[`sandbox_component.rs`](../../crates/librefang-runtime/src/sandbox_component.rs)
-is the Phase-7 work that activates the four ignored tests. Each test's
-`#[ignore = "..."]` reason names the precise missing interface so the
-follow-up is mechanical.
+**Phase-7 status (post-wasmtime-wasi wiring):**
 
-c-noop runs cleanly today because its noop body never reaches a WASI
-syscall — it's the load-bearing proof that the Component Model load,
-fuel/epoch wiring, capability gate, and `run()` invocation are end-to-end
-correct on the BossFang sandbox.
+3 of 5 examples now run end-to-end. The remaining 2 are fixture build issues
+(not sandbox wiring issues) — their `#[ignore = "..."]` reasons name the
+exact Phase-8 fix:
+
+- **js-kv-counter**: compiled against jco 1.20 + StarlingMonkey that targets
+  WASI 0.2.10; wasmtime-wasi 45 provides 0.2.6. The version aliasing resolves
+  at link time but causes a runtime trap inside StarlingMonkey's JIT. Fix:
+  rebuild with a jco whose StarlingMonkey targets ≤ WASI 0.2.6.
+- **go-env-greet**: the Phase-6 xtask used `-buildmode=default` (→ `_start`,
+  command semantics); the reactor adapter needs `_initialize`. Rebuilt with
+  `-buildmode=c-shared -scheduler=none` in Phase-7, but the bundled
+  `wasi_snapshot_preview1.reactor.wasm` (from `wit-bindgen-cli-0.57.1`, 94 KB)
+  traps on `clock_time_get` during `_initialize`. Needs the wasmtime v45
+  reactor adapter (52 KB) from the GitHub release. Fix: `cargo xtask
+  plugins-rebuild go-env-greet` after bundling the correct adapter.
 
 ### Phase-6 sandbox fixes that landed alongside the examples
 
@@ -313,6 +317,72 @@ correct on the BossFang sandbox.
 Per-change records: [`.kbd-orchestrator/changes/C-001…C-008-*.md`](../../.kbd-orchestrator/changes/).
 Phase plan + assessment + reflection:
 [`.kbd-orchestrator/phases/phase-5-plugin-host-crate/`](../../.kbd-orchestrator/phases/phase-5-plugin-host-crate/).
+
+## WASI Preview 2 host integration (Phase-7)
+
+Phase-7 wired `wasmtime-wasi` and `wasmtime-wasi-http` into the Component
+plugin host so language runtimes can call `wasi:*` interfaces during init.
+
+### What's bound
+
+Every Component store now gets:
+- **`wasmtime_wasi::p2::add_to_linker_async`** — wires the full WASI Preview 2
+  surface (`wasi:cli`, `wasi:io`, `wasi:clocks`, `wasi:filesystem`,
+  `wasi:random`, `wasi:sockets`).
+- **`wasmtime_wasi_http::p2::add_only_http_to_linker_async`** — wires
+  `wasi:http/types` + `wasi:http/outgoing-handler` without re-binding the
+  base WASI interfaces that `add_to_linker_async` already registered.
+
+### Security posture (D2 — deny-by-default WasiCtx)
+
+The `WasiCtx` on every `PluginHostState` is constructed with
+`WasiCtxBuilder::new().build()` — **nothing** is enabled by default:
+
+- No preopened directories (filesystem calls return empty or WASI_ERRNO_BADF)
+- No environment variables (`get-environment` returns `[]`)
+- No inherited stdio (reads/writes to fd 0/1/2 fail)
+- No TCP/UDP networking
+- No outbound HTTP handler (`WasiHttpCtx::new()`)
+
+The librefang capability list (`SandboxConfig::capabilities`) remains the
+real gate. Plugins reach host capabilities through `librefang:plugin/*`
+(fs, kv, env, time, net, agent), not through WASI. WASI is present only to
+satisfy language runtime init code that calls `wasi:*` internally.
+
+### D6 — librefang interface binding
+
+All 6 `librefang:plugin/*` interfaces are unconditionally bound at link time
+(Phase-7 C-005). Capability gating happens at dispatch time in
+`host_functions::dispatch`, which returns `HostError::CapabilityDenied` for
+calls to ungranted interfaces. This replaced the Phase-5 link-time gating
+(which prevented StarlingMonkey's auto-imported `librefang:plugin/fs` from
+resolving at instantiation).
+
+### How to widen WASI access for a specific plugin
+
+If a future plugin legitimately needs to read an env var at the WASI level
+(vs via `librefang:plugin/env`), update `PluginHostState::new()` in
+[`sandbox_component.rs`](../../crates/librefang-runtime/src/sandbox_component.rs):
+
+```rust
+// Currently:
+wasi: WasiCtxBuilder::new().build(),
+
+// With a specific env var exposed:
+wasi: WasiCtxBuilder::new()
+    .env("MY_VAR", "my_value")
+    .build(),
+```
+
+Do NOT use `inherit_env()` — that would expose the host process's full
+environment (including secrets) to every plugin.
+
+### Memory limiter (D5 — Phase-7 C-002)
+
+Phase-7 C-002 wired `store.limiter(|s| s.guest.limiter_mut())` in
+`execute_component`, closing the Phase-5 TODO. `SandboxConfig::max_memory_bytes`
+is now enforced on Component plugins with the same semantics as the
+core-module `execute()` path.
 
 ## Deferred to follow-up KBD changes
 

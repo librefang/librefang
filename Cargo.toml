@@ -197,6 +197,21 @@ wasmtime = { version = "45", features = [
     "async",
 ] }
 
+# WASI Preview 2 host implementation — paired in lockstep with wasmtime.
+# Pinned `=` so a `cargo update` can't drift the WasiView trait signature
+# under us between minor releases (same reasoning as the surrealdb = "=3.0.5"
+# workspace pin). Phase-7 C-001 wires this into the Component plugin host so
+# language runtimes (CPython, StarlingMonkey, Go, cargo-component's wasi-rt)
+# find their `wasi:*` init imports satisfied. The WasiCtx is deny-by-default
+# (no preopens / no env / no stdio inherit / no network) per phase-7
+# assessment.md D2.
+wasmtime-wasi = "=45.0.0"
+# WASI HTTP bindings — required by the component linker so StarlingMonkey
+# (jco componentize) components that import `wasi:http/types@0.2.10` find
+# the interface bound at instantiation time. Without this, js-kv-counter
+# fails to instantiate even though the JS source never uses HTTP.
+wasmtime-wasi-http = "=45.0.0"
+
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
