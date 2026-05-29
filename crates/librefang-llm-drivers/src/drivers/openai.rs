@@ -12,7 +12,7 @@ use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -515,7 +515,7 @@ struct OaiRequest {
     /// `complete()` and `stream()` so that extra_body values **override** any
     /// standard field with the same name.
     #[serde(skip_serializing)]
-    extra_body: Option<HashMap<String, serde_json::Value>>,
+    extra_body: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// Merge `extra_body` provider-extension params into a serialized request
@@ -523,21 +523,16 @@ struct OaiRequest {
 ///
 /// Prompt-cache determinism (#3298, #5143): the body is sent on every LLM
 /// request, so its byte layout is part of the Anthropic/OpenAI prompt-cache
-/// key. `extra_body` is a `HashMap`, whose iteration order varies across
-/// processes. Today the merged result is still byte-stable *only* because
-/// the workspace `Cargo.toml` does not enable `serde_json`'s
-/// `preserve_order` feature, so `serde_json::Map` is a `BTreeMap` and
-/// re-sorts on insert. That is an implicit, fragile invariant — enabling
-/// `preserve_order` (e.g. for nicer dashboard JSON dumps) would silently
-/// re-introduce HashMap-order leakage into every request body with ≥2
-/// `extra_body` keys and invalidate the prompt cache.
-///
-/// This helper makes the invariant explicit and `preserve_order`-proof:
-/// the keys are collected and sorted before insertion, so the merge order
-/// is deterministic regardless of which `serde_json::Map` backend is
-/// active. See `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
+/// key. `extra_body` is now a `BTreeMap`, so its iteration order is already
+/// sorted and stable across processes — the explicit `keys.sort()` below is
+/// therefore redundant for the current type. It is kept as a cheap,
+/// self-documenting belt-and-suspenders guard: it costs nothing on a handful
+/// of provider-extension keys, and it keeps the merge order deterministic
+/// even if a future caller passes a different (e.g. `HashMap`-sourced)
+/// iteration order in. See
+/// `tests::extra_body_merge_is_byte_identical_across_insertion_orders`.
 fn merge_extra_body(
-    extra: &Option<HashMap<String, serde_json::Value>>,
+    extra: &Option<BTreeMap<String, serde_json::Value>>,
     body: &mut serde_json::Value,
 ) {
     if let (Some(extra), Some(obj)) = (extra, body.as_object_mut()) {
@@ -3526,7 +3521,7 @@ mod tests {
         // Value first, then merge extra_body on top so it overrides any
         // standard field with the same name.  This test verifies the merge
         // logic directly.
-        let mut extra = HashMap::new();
+        let mut extra = BTreeMap::new();
         extra.insert("temperature".to_string(), serde_json::json!(1.0));
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
 
@@ -3567,18 +3562,17 @@ mod tests {
         );
     }
 
-    // Issue #5143 — `extra_body` is a HashMap merged into the wire request
+    // Issue #5143 / #3298 — `extra_body` is merged into the wire request
     // body, which is part of the provider prompt-cache key. The merge MUST
-    // produce a byte-identical body regardless of HashMap insertion order,
-    // and MUST stay deterministic even if `serde_json/preserve_order` is
-    // ever enabled workspace-wide. `merge_extra_body` sorts keys before
-    // insertion to enforce this. This pins byte equality across two
-    // different insertion orders, mirroring
-    // `mcp_summary_is_byte_identical_across_input_orders`.
+    // produce a byte-identical body regardless of the order keys were
+    // inserted. `extra_body` is now a `BTreeMap`, so the sorted iteration
+    // order is a type-level guarantee; this test still pins byte equality
+    // across two different insertion orders so the property cannot silently
+    // regress, mirroring `mcp_summary_is_byte_identical_across_input_orders`.
     #[test]
     fn extra_body_merge_is_byte_identical_across_insertion_orders() {
         fn build(order: &[(&str, serde_json::Value)]) -> String {
-            let mut extra = HashMap::new();
+            let mut extra = BTreeMap::new();
             for (k, v) in order {
                 extra.insert((*k).to_string(), v.clone());
             }

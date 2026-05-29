@@ -2,7 +2,7 @@
 //!
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -322,7 +322,11 @@ pub struct CompletionRequest {
     ///
     /// When keys conflict with standard parameters (temperature, max_tokens, etc.),
     /// values from `extra_body` take precedence (last-wins in JSON serialization).
-    pub extra_body: Option<HashMap<String, serde_json::Value>>,
+    ///
+    /// `BTreeMap` (not `HashMap`) so the merged key order is deterministic
+    /// across processes — this map is flattened into the LLM wire request, and
+    /// unstable key order silently invalidates provider prompt caches (#3298).
+    pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
     /// Caller agent identity.
     ///
     /// When a CLI driver re-exposes LibreFang tools to the model through an

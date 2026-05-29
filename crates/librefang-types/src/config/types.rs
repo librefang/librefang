@@ -4007,8 +4007,9 @@ pub struct ContextEngineHooks {
     /// When `false` the runtime attempts soft network isolation: on Linux it
     /// wraps the hook with `unshare --net` (if available); on other platforms
     /// it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment.
-    /// Defaults to `true`.
-    #[serde(default = "default_true_bool")]
+    /// Defaults to `false` (secure-by-default — a plugin that needs outbound
+    /// network must declare `allow_network = true` in its `plugin.toml`).
+    #[serde(default)]
     pub allow_network: bool,
     /// Restrict the `ingest`/`after_turn`/`assemble` hooks to specific agent IDs.
     ///
@@ -4131,8 +4132,10 @@ pub struct ContextEngineHooks {
     #[serde(default)]
     pub prewarm_subprocesses: bool,
     /// Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`,
-    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `true` (no restriction).
-    #[serde(default = "default_true_bool")]
+    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `false` (secure-by-default —
+    /// a plugin that needs filesystem write access must declare
+    /// `allow_filesystem = true` in its `plugin.toml`).
+    #[serde(default)]
     pub allow_filesystem: bool,
     /// OTel OTLP gRPC endpoint for hook span export (overrides global setting).
     #[serde(default)]
@@ -4176,10 +4179,6 @@ fn default_cb_reset_secs() -> u64 {
 }
 fn default_after_turn_queue_depth() -> u32 {
     16
-}
-
-fn default_true_bool() -> bool {
-    true
 }
 
 /// Per-hook input/output JSON Schema definition.
@@ -6163,9 +6162,10 @@ pub struct DefaultModelConfig {
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: HashMap<String, serde_json::Value>,
+    pub extra_params: BTreeMap<String, serde_json::Value>,
     /// Claude Code CLI profile directories for token rotation.
     /// Each entry is a path to a `.claude/` config dir (e.g. `~/.claude-profiles/account-2`).
     /// When multiple profiles are configured, a TokenRotationDriver wraps them
@@ -6186,7 +6186,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
-            extra_params: HashMap::new(),
+            extra_params: BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         }
     }
@@ -7698,5 +7698,48 @@ rule_sets = ["browser_handles", "pii_baseline"]
     fn default_burst_ratio_defaults_to_zero_when_missing() {
         let cfg: BudgetConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.default_burst_ratio, 0.0);
+    }
+
+    // -------- Plugin sandbox secure-by-default (#2) --------
+
+    /// A `plugin.toml` `[hooks]` table that omits `allow_network` /
+    /// `allow_filesystem` must deserialize to the deny-by-default values.
+    /// This is the serde path; it must agree with the derived `Default`.
+    #[test]
+    fn context_engine_hooks_omitted_sandbox_flags_default_to_deny() {
+        let hooks: ContextEngineHooks = toml::from_str(
+            r#"
+            ingest = "hooks/ingest.py"
+        "#,
+        )
+        .unwrap();
+        assert!(
+            !hooks.allow_network,
+            "allow_network must default to false (secure-by-default)"
+        );
+        assert!(
+            !hooks.allow_filesystem,
+            "allow_filesystem must default to false (secure-by-default)"
+        );
+
+        // Derived `Default` must match the serde-omitted default.
+        let d = ContextEngineHooks::default();
+        assert_eq!(d.allow_network, hooks.allow_network);
+        assert_eq!(d.allow_filesystem, hooks.allow_filesystem);
+    }
+
+    /// Explicit opt-in still works — a plugin that needs network / filesystem
+    /// declares it in `plugin.toml`.
+    #[test]
+    fn context_engine_hooks_explicit_opt_in_is_honoured() {
+        let hooks: ContextEngineHooks = toml::from_str(
+            r#"
+            allow_network = true
+            allow_filesystem = true
+        "#,
+        )
+        .unwrap();
+        assert!(hooks.allow_network);
+        assert!(hooks.allow_filesystem);
     }
 }
