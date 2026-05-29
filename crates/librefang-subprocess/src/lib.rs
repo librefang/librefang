@@ -329,6 +329,20 @@ impl SupervisedTransport {
         transport.request(request).await
     }
 
+    /// Return the live transport, spawning (or re-spawning) if needed.
+    ///
+    /// Review-followup D: this holds `self.current` (a `tokio::Mutex`)
+    /// across `SubprocessTransport::spawn`. Spawn is a synchronous
+    /// syscall and is sub-millisecond in the common case, but it can
+    /// stretch into the seconds on slow filesystems (NFS, Windows AV
+    /// hooks, fork() under memory pressure). Concurrent `request`
+    /// callers serialise behind this lock while the (re)spawn is in
+    /// flight — acceptable because we *want* exactly one spawn per
+    /// crash event, not N parallel ones, and the cooldown gate above
+    /// already short-circuits the racers that wake up during the
+    /// guard window. Switching to a double-checked pattern would let
+    /// concurrent callers race past the cooldown check and is left as
+    /// future work if a slow-spawn profile shows up in practice.
     async fn ensure_live(&self) -> Result<Arc<SubprocessTransport>, TransportError> {
         let mut current = self.current.lock().await;
         if let Some(t) = current.as_ref() {
@@ -366,19 +380,36 @@ impl SupervisedTransport {
 /// Outcome of a [`read_capped_line`] call.
 pub enum Line {
     /// A `\n`-terminated line (terminator stripped), decoded lossily as UTF-8.
+    ///
+    /// **Includes partial lines at EOF.** If the stream closes after
+    /// emitting bytes but before a `\n`, those bytes are returned as
+    /// `Data` (review-followup E). For JSON-over-stdio consumers the
+    /// downstream `serde_json::from_str` will reject the truncated
+    /// payload, so this never lands as silent corruption — but callers
+    /// that care about the distinction (e.g. a strict line-protocol
+    /// parser) need to handle it explicitly.
     Data(String),
-    /// The stream reached EOF with no pending bytes.
+    /// The stream reached EOF with no pending bytes — a clean shutdown
+    /// of an idle protocol. Distinct from "EOF with bytes pending",
+    /// which surfaces as `Data` (see above).
     Eof,
-    /// The line exceeded the cap before a `\n` was seen; the caller should
-    /// treat the stream as untrustworthy and stop reading it.
+    /// The line exceeded the cap before a `\n` was seen; the caller
+    /// should treat the stream as untrustworthy and stop reading it.
     TooLong,
 }
 
 /// Read one `\n`-terminated line, capping accumulation at `max`.
-/// `reader` is typically a `BufReader`, so per-byte reads are served from its
-/// buffer (no syscall per byte); this bounds memory without the unbounded-line
-/// risk of `AsyncBufReadExt::lines()` / `read_until`.
-pub async fn read_capped_line<R: AsyncReadExt + Unpin>(
+///
+/// The bound is `AsyncBufRead` rather than the looser `AsyncRead` so
+/// the per-byte read loop is served from the reader's in-memory buffer
+/// — calling this on a raw `AsyncRead` (e.g. unbuffered `ChildStdout`)
+/// would issue one syscall per byte and is a footgun at 4–16 MiB
+/// message sizes. All in-tree callers wrap their stdout in
+/// `BufReader`; the tighter bound makes that requirement
+/// compile-time-checked rather than implicit
+/// (review-followup B). Bounds memory without the unbounded-line risk
+/// of `AsyncBufReadExt::lines()` / `read_until`.
+pub async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
@@ -390,6 +421,7 @@ pub async fn read_capped_line<R: AsyncReadExt + Unpin>(
             return Ok(if buf.is_empty() {
                 Line::Eof
             } else {
+                // Partial-line-at-EOF — see `Line::Data` docs.
                 Line::Data(String::from_utf8_lossy(buf).into_owned())
             });
         }
@@ -616,5 +648,71 @@ sys.stdout.flush()
             t.request(json!({"method": "x"})).await.unwrap_err(),
             TransportError::Dead
         ));
+    }
+
+    /// Review-followup F: strengthen the cooldown test by exercising the
+    /// actual gating behaviour rather than just "broken-stays-broken".
+    /// Uses a real, exits-after-one-call sidecar so the cooldown is the
+    /// only thing standing between the second call and a fresh spawn.
+    ///
+    /// Sequence:
+    /// 1. First call succeeds, child exits.
+    /// 2. Wait for the reader to observe EOF (alive → false).
+    /// 3. Second call *within* the cooldown must return Dead — proving
+    ///    the cooldown short-circuits the re-spawn attempt.
+    /// 4. Wait past the cooldown.
+    /// 5. Third call must succeed — proving the cooldown is a window,
+    ///    not a permanent latch.
+    #[tokio::test]
+    async fn supervised_cooldown_window_short_circuits_then_releases() {
+        let Some(py) = python() else {
+            eprintln!("skipping: no python3");
+            return;
+        };
+        let body = r#"
+import sys, json
+line = sys.stdin.readline()
+req = json.loads(line)
+sys.stdout.write(json.dumps({"id": req["id"], "ok": {"n": 1}}) + "\n")
+sys.stdout.flush()
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("once.py");
+        std::fs::write(&script, body).unwrap();
+        let cfg = TransportConfig::new(
+            py,
+            vec![script.to_str().unwrap().to_string()],
+            Duration::from_secs(5),
+            "test",
+        );
+        let cooldown = Duration::from_millis(400);
+        let t = SupervisedTransport::with_cooldown(cfg, cooldown);
+
+        // 1. First call: child handles + exits.
+        assert_eq!(
+            t.request(json!({"method": "x"})).await.unwrap(),
+            json!({"n": 1})
+        );
+        // 2. Let the reader see EOF.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // 3. Second call lands inside the cooldown window: Dead, not a
+        //    fresh spawn. The cooldown started ticking on the *first*
+        //    spawn attempt (during step 1), so we're still inside it.
+        let err = t.request(json!({"method": "x"})).await.unwrap_err();
+        assert!(
+            matches!(err, TransportError::Dead),
+            "in-cooldown request must short-circuit to Dead; got {err:?}"
+        );
+
+        // 4. Wait past the cooldown.
+        tokio::time::sleep(cooldown + Duration::from_millis(150)).await;
+
+        // 5. Third call must succeed — cooldown released, fresh spawn allowed.
+        assert_eq!(
+            t.request(json!({"method": "x"})).await.unwrap(),
+            json!({"n": 1}),
+            "post-cooldown request must succeed via a fresh spawn"
+        );
     }
 }

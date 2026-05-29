@@ -272,6 +272,21 @@ pub struct ProactiveMemoryConfig {
 /// Configuration for an out-of-process memory extractor (see
 /// [`ProactiveMemoryConfig::extractor_sidecar`]).
 ///
+/// **Precedence (review-followup G).** When this table is present
+/// AND `command` is non-empty, the sidecar handles every
+/// `auto_memorize` call — the kernel's built-in `LlmMemoryExtractor`
+/// is **not constructed at all**, and any per-agent
+/// [`ProactiveMemoryOverrides::extraction_model`] is silently
+/// shadowed. The kernel emits a `WARN` at boot in that case so an
+/// operator who set both isn't surprised which wins. A
+/// configured-but-empty `command` is treated as a no-op (the kernel
+/// falls back to the LLM/rule-based path with a separate `WARN`).
+///
+/// The sidecar only handles **extraction**. The store, the dedup
+/// `decide_action` decision, and the prompt-context formatting all
+/// stay in Rust, so the sidecar's output cannot influence retrieval
+/// ranking or storage layout — only what gets *proposed* to remember.
+///
 /// ```toml
 /// [proactive_memory.extractor_sidecar]
 /// command = "python3"
@@ -281,7 +296,9 @@ pub struct ProactiveMemoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryExtractorSidecarConfig {
-    /// Executable to launch (resolved via `PATH`).
+    /// Executable to launch (resolved via `PATH`). Empty string disables
+    /// the sidecar (operator typo or commented-out args field) — see
+    /// the precedence note on the struct.
     pub command: String,
     /// Arguments passed to the command.
     pub args: Vec<String>,

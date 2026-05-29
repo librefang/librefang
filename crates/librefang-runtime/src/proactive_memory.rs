@@ -1151,9 +1151,14 @@ mod tests {
             }),
             "model".into(),
         ));
-        let (_store, llm_extractor) =
-            init_proactive_memory_full_with_extractor(Arc::new(substrate), config, llm, None, false)
-                .expect("store should be created");
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
         assert!(
             llm_extractor.is_some(),
             "commandless sidecar must fall through to the LLM extractor"
@@ -1179,9 +1184,14 @@ mod tests {
             }),
             "model".into(),
         ));
-        let (_store, llm_extractor) =
-            init_proactive_memory_full_with_extractor(Arc::new(substrate), config, llm, None, false)
-                .expect("store should be created");
+        let (_store, llm_extractor) = init_proactive_memory_full_with_extractor(
+            Arc::new(substrate),
+            config,
+            llm,
+            None,
+            false,
+        )
+        .expect("store should be created");
         assert!(
             llm_extractor.is_none(),
             "a configured sidecar command must take precedence over the LLM extractor"

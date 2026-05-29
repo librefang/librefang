@@ -33,7 +33,7 @@ const MAX_EVENT_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// `AsyncBufReadExt::next_line()` shape the reader's `select!` already matches
 /// on (`Ok(Some)` / `Ok(None)` / `Err`). An over-cap line surfaces as an error
 /// so the existing error arm tears the connection down and respawns.
-async fn read_event_line<R: tokio::io::AsyncReadExt + Unpin>(
+async fn read_event_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<Option<String>> {

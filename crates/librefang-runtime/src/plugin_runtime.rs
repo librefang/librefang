@@ -1702,16 +1702,42 @@ impl HookProcessPool {
             serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
         line.push('\n');
 
-        // The persistent pool previously enforced no timeout on either the write
-        // or the read; a hook that stopped reading its stdin or never replied
-        // would wedge the call forever. Both are now bounded by `timeout`.
-        librefang_subprocess::write_line_timeout(&mut proc.stdin, line.as_bytes(), timeout)
+        // The persistent pool previously enforced no timeout on either the
+        // write or the read; a hook that stopped reading its stdin or never
+        // replied would wedge the call forever. Both are now bounded by
+        // `timeout`.
+        //
+        // Review-followup C: write and read share a single deadline so the
+        // configured `timeout` is the *total* wall-clock budget, not
+        // 2× as it would be if we passed `timeout` to each stage
+        // independently. A slow write that consumes 25/30s leaves only
+        // 5s for the reply — exactly what an operator who configured
+        // "30s per call" expects. The split-timeout interpretation
+        // (the prior commit's version) made the configured value an
+        // odd half-budget instead.
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        let write_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if write_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before write)",
+                timeout.as_secs()
+            )));
+        }
+        librefang_subprocess::write_line_timeout(&mut proc.stdin, line.as_bytes(), write_budget)
             .await
             .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
 
+        let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if read_budget.is_zero() {
+            return Err(PluginRuntimeError::Io(format!(
+                "persistent hook timed out after {}s (no budget left before read)",
+                timeout.as_secs()
+            )));
+        }
         let mut buf = Vec::new();
         let response = match tokio::time::timeout(
-            timeout,
+            read_budget,
             librefang_subprocess::read_capped_line(&mut proc.stdout, &mut buf, MAX_OUTPUT_BYTES),
         )
         .await
