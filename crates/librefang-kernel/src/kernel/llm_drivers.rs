@@ -180,6 +180,11 @@ impl LibreFangKernel {
                 .get(agent_provider)
                 .copied(),
             emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
+            max_retries: cfg
+                .provider_max_retries
+                .get(agent_provider)
+                .copied()
+                .unwrap_or_else(|| DriverConfig::default().max_retries),
         };
 
         // Check for a credential pool for this provider.
@@ -304,6 +309,11 @@ impl LibreFangKernel {
                         .get(&fb_provider)
                         .copied(),
                     emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
+                    max_retries: cfg
+                        .provider_max_retries
+                        .get(&fb_provider)
+                        .copied()
+                        .unwrap_or_else(|| DriverConfig::default().max_retries),
                 };
                 match self.llm.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
@@ -346,7 +356,7 @@ pub(crate) fn resolve_effective_fallbacks(
                     Some(gfb.api_key_env.clone())
                 },
                 base_url: gfb.base_url.clone(),
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             })
             .collect(),
     }
@@ -375,7 +385,7 @@ mod tests {
             model: model.to_string(),
             api_key_env: None,
             base_url: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         }
     }
 
