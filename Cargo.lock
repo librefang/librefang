@@ -4187,6 +4187,7 @@ dependencies = [
  "futures",
  "image",
  "include_dir",
+ "librefang-subprocess",
  "librefang-types",
  "pdf-extract",
  "regex",
