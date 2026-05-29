@@ -505,6 +505,126 @@ mod tests {
         assert!(matches!(result, Err(SandboxError::Compilation(_))));
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // Phase-7 C-001 — WASI 0.2.0 → 0.2.6 version-alias verify-first guard.
+    //
+    // Loads the Phase-6 python-hello-time pre-built artefact (which
+    // imports `wasi:cli/environment@0.2.0`, as captured by C-007's
+    // ignored-test reason string) against a linker that ONLY binds
+    // `wasmtime_wasi::p2::add_to_linker_async`. We expect either:
+    //   - `Plugin::instantiate_async` to fail on the librefang:plugin/*
+    //     imports (they're never bound by this smoke), which is fine —
+    //     it proves WASI imports resolved.
+    //   - Success (unlikely; python-hello-time also needs
+    //     librefang:plugin/time).
+    //
+    // What we MUST NOT see is an error mentioning `wasi:cli/environment`
+    // — that means the 0.2.0 → 0.2.6 version alias doesn't satisfy this
+    // interface and the entire Phase-7 plan needs a re-decision on D4
+    // (vendor older wasmtime-wasi, or rebuild the fixture against a
+    // newer WASI WIT). If the assertion below fires, STOP and re-plan.
+    //
+    // The smoke skips silently if the pre-built artefact isn't present
+    // (e.g. componentize-py not installed in CI) — Phase-6 c-noop is
+    // always available as the load-bearing end-to-end proof.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Local state type for the C-001 smoke. We DON'T modify
+    /// `PluginHostState` here (that's C-003); we just need something
+    /// that satisfies `WasiView` so the WASI linker can be wired.
+    struct WasiSmokeState {
+        wasi: wasmtime_wasi::WasiCtx,
+        table: wasmtime::component::ResourceTable,
+    }
+
+    impl wasmtime_wasi::WasiView for WasiSmokeState {
+        fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+            wasmtime_wasi::WasiCtxView {
+                ctx: &mut self.wasi,
+                table: &mut self.table,
+            }
+        }
+    }
+
+    fn python_hello_time_wasm_path() -> std::path::PathBuf {
+        // From `crates/librefang-runtime/src/sandbox_component.rs` walk
+        // up two directories (`src/`, `librefang-runtime/`) to the
+        // crate's parent (`crates/`), then up one more to the workspace
+        // root.
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/plugins/python-hello-time/pre-built/plugin.wasm")
+    }
+
+    #[tokio::test]
+    async fn wasi_version_alias_smoke() {
+        let wasm_path = python_hello_time_wasm_path();
+        if !wasm_path.exists() {
+            eprintln!(
+                "SKIP wasi_version_alias_smoke: {} not present (componentize-py not installed?). \
+                 The Phase-6 c-noop test exercises the load+invoke path independently.",
+                wasm_path.display()
+            );
+            return;
+        }
+        let wasm_bytes = std::fs::read(&wasm_path).unwrap_or_else(|e| {
+            panic!("read {}: {e}", wasm_path.display());
+        });
+
+        let engine = Engine::new(&engine_config()).unwrap();
+        let component = wasmtime::component::Component::from_binary(&engine, &wasm_bytes)
+            .expect("python-hello-time/pre-built/plugin.wasm is not a valid Component");
+
+        let mut linker = wasmtime::component::Linker::<WasiSmokeState>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .expect("wasmtime_wasi::p2::add_to_linker_async failed to wire its own interfaces");
+
+        let state = WasiSmokeState {
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
+            table: wasmtime::component::ResourceTable::new(),
+        };
+        let mut store = wasmtime::Store::new(&engine, state);
+        store.set_fuel(u64::MAX / 2).unwrap();
+        store.set_epoch_deadline(1);
+
+        // We deliberately do NOT bind `librefang:plugin/*` here — the
+        // smoke is "does WASI alias work in isolation?", not "can python-
+        // hello-time fully run?". An error mentioning `librefang:plugin`
+        // is the expected and acceptable failure mode.
+        let result =
+            wasmtime::component::Linker::instantiate_async(&linker, &mut store, &component).await;
+
+        match result {
+            Ok(_) => {
+                // Acceptable: the binary happens not to import anything
+                // we didn't bind. WASI alias clearly works.
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("wasi:cli/environment"),
+                    "WASI 0.2.0 -> 0.2.6 version alias is BROKEN for \
+                     wasi:cli/environment. Phase-7 D4 needs to be redecided \
+                     (vendor older wasmtime-wasi, or rebuild python-hello-time \
+                     against a newer WIT). Full instantiation error:\n  {msg}"
+                );
+                // Sanity check: the error should be about librefang:plugin
+                // imports (which we never bound). If it's about something
+                // else, surface it so the next reader knows the smoke saw
+                // an unexpected failure mode rather than the expected one.
+                assert!(
+                    msg.contains("librefang:plugin"),
+                    "Unexpected instantiation error from C-001 smoke — \
+                     expected complaint about unbound `librefang:plugin/*` \
+                     imports, got:\n  {msg}"
+                );
+            }
+        }
+    }
+
     // Phase-5 C-005 capability-gating tests.
     // Each test builds a linker with a different capability subset and
     // verifies `add_to_linker_per_capability` returns Ok. The

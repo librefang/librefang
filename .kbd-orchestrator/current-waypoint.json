@@ -1,13 +1,14 @@
 {
-  "active_phase": null,
+  "active_phase": "phase-7-wasi-plugin-host",
   "previous_phase": "phase-6-plugin-examples",
   "active_change": null,
   "last_updated": "2026-05-28T00:00:00Z",
-  "last_updated_by": "kbd-reflect",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
-  "phase_progress": "Phase 6 closed: 8/8 changes DONE; reflection.md written. wasmtime-wasi linker integration is the headline Phase-7 lever — activates 4 ignored plugin_example tests.",
+  "phase_progress": "Phase 7 planned: D1..D7 + scope decisions baked in plan.md; 8 changes ordered with C-001 as a verify-first guard for D4 (WASI 0.2.0->0.2.6 version aliasing). Critical path: C-001 -> C-003 -> C-004 -> C-005 -> C-006 -> C-008. C-002 and C-007 sit off the critical path.",
+  "scope_note": "Narrow scope per user selection: WASI linker wiring + store.limiter finish. Acceptance = 5/5 plugin_example_*.rs tests green (currently 1 pass + 4 ignored). Items 3-6 from phase-6 reflection (surrealdb-core pin, net+agent examples, KernelHandleStub promotion, dlmalloc) deferred to subsequent phases or out-of-band PRs.",
   "next_action": {
-    "command": "/kbd-new-phase",
-    "description": "Start the next KBD phase. Recommended next focus per phase-6 reflection: wasmtime-wasi integration in sandbox_component.rs, store.limiter wiring for Component path, surrealdb-core =3.0.5 workspace pin, net+agent example plugins."
+    "command": "/kbd-execute C-001",
+    "description": "Add wasmtime-wasi workspace dep + run the version-alias verify-first smoke (D4 risk gate)"
   }
 }
