@@ -113,8 +113,16 @@ pub struct ProactiveMemoryStore {
     /// When present, memories are stored with embeddings and search uses cosine similarity.
     /// When absent, falls back to LIKE text matching.
     embedding: Option<Arc<dyn EmbeddingFn>>,
-    /// Per-agent counters for auto-consolidation (runs every 10 auto_memorize calls per agent).
-    consolidation_counters: Arc<Mutex<HashMap<String, u32>>>,
+    /// Per-agent counters for auto-consolidation. Each entry tracks
+    /// both the running count (consolidate fires at
+    /// `AUTO_CONSOLIDATE_EVERY = 10`) and the last-touched timestamp,
+    /// so the maintenance sweep can evict slots that have been idle
+    /// for longer than `STALE_COUNTER_IDLE_WINDOW` regardless of
+    /// their count. Pre-fix this was `HashMap<String, u32>`, which
+    /// forced the sweep to use a count threshold and starved
+    /// slow-burn agents (1 call per maintenance window or less)
+    /// whose counter never climbed past the floor.
+    consolidation_counters: Arc<Mutex<HashMap<String, CounterEntry>>>,
     /// Timestamp of the last confidence decay run (at most once per hour).
     last_decay_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
     /// Timestamp of the last session TTL cleanup run (at most once per hour).
@@ -434,20 +442,30 @@ impl ProactiveMemoryStore {
         // (truncate-to-500 by count DESC), which both delays cleanup
         // until the leak is observable AND deletes the highest-count
         // entries — exactly the agents about to fire a real consolidate.
-        // The new sweep drops counters below `STALE_COUNTER_FLOOR` on
-        // every maintenance tick: still cheap (HashMap::retain in-place),
-        // evicts cold entries first, never touches an entry that's
-        // about to fire.
+        //
+        // Review-followup B: the sweep uses an *idle-window* check
+        // (`last_touched` older than `STALE_COUNTER_IDLE_WINDOW`)
+        // rather than a count threshold. A count threshold (followup
+        // #2's `count >= STALE_COUNTER_FLOOR`) mitigated the original
+        // wholesale reset but still starved slow-burn agents whose
+        // fire rate stayed below the floor — once-an-hour agents
+        // never climbed past 2 because the prune ran every
+        // maintenance tick and reset them. Last-touched fixes this:
+        // an active slot, however slow, is preserved as long as it's
+        // been touched within the window; a truly idle slot is
+        // reclaimed within ~2 hours of going quiet.
         if let Ok(mut counters) = self.consolidation_counters.lock() {
+            let now = Utc::now();
+            let cutoff = now - STALE_COUNTER_IDLE_WINDOW;
             let before = counters.len();
-            counters.retain(|_, &mut count| count >= STALE_COUNTER_FLOOR);
+            counters.retain(|_, entry| entry.last_touched >= cutoff);
             let dropped = before - counters.len();
             if dropped > 0 {
                 tracing::debug!(
                     dropped,
                     remaining = counters.len(),
-                    floor = STALE_COUNTER_FLOOR,
-                    "Pruned stale consolidation counters"
+                    idle_window_hours = STALE_COUNTER_IDLE_WINDOW.num_hours(),
+                    "Pruned idle consolidation counters"
                 );
             }
         }
@@ -712,19 +730,21 @@ impl ProactiveMemoryStore {
             // and cap at fetch_limit at the end so the caller sees the
             // same shape as the embedding path.
             //
-            // Review-followup #4: this is up to 4 SQLite roundtrips per
-            // insertion (one per keyword), versus the pre-fix 1.
+            // Review-followup #4 / #E: this is up to 4 SQLite roundtrips
+            // per insertion (one per keyword), versus the pre-fix 1.
             // Operators running with an embedding driver never hit this
             // branch (the `if let Some(qe)` above takes the vector
             // path). Operators on the no-embedding fallback — CI, local
             // dev without an embedding API, resource-constrained
-            // deployments — eat the 4× round-trip cost on writes. The
-            // `content` column is unindexed substring scan either way,
-            // so the marginal cost is proportional to row count, not
-            // catastrophic in absolute terms. Loop short-circuits as
-            // soon as the union hits `fetch_limit`, so the common case
-            // ("first keyword already filled the slate") still runs a
-            // single query.
+            // deployments — eat the round-trip cost on writes. The
+            // `content` column is an unindexed substring scan either
+            // way, so the marginal cost is proportional to row count,
+            // not catastrophic in absolute terms. Loop short-circuits
+            // as soon as the union hits `fetch_limit`: for agents with
+            // a sizeable memory store the first (longest) keyword often
+            // already fills the slate, dropping back to a single
+            // query; small / fresh stores still pay the full 4× since
+            // no individual keyword has enough matches to short-circuit.
             let keywords = extract_search_keywords(&item.content);
             let mut acc: Vec<MemoryFragment> = Vec::new();
             let mut seen_ids: std::collections::HashSet<MemoryId> =
@@ -804,20 +824,21 @@ impl ProactiveMemoryStore {
                 .metadata
                 .insert("_embedding".to_string(), serde_json::json!(emb_json));
         }
-        // Review-followup #5: callers MUST NOT pre-populate the
-        // `_update_threshold_*` keys — they're a private channel between
-        // `add_with_decision` and the default `decide_action` heuristic.
-        // The `item.metadata` we cloned into `enriched_item` is the
-        // caller's untouched input; a hit here would either signal a
-        // tooling bug (caller leaking internal stash) or a security
-        // probe trying to influence the dedup decision.
+        // Callers must not pre-populate the `_update_threshold_*` keys
+        // — they're a private channel between `add_with_decision` and
+        // the default `decide_action` heuristic. The `item.metadata`
+        // we cloned into `enriched_item` is the caller's untouched
+        // input; a hit here is a contract violation worth catching in
+        // dev. Production builds are still safe: even if a caller
+        // leaks the key, the unconditional `insert` below overwrites
+        // it before `decide_action` reads it.
         debug_assert!(
             !item.metadata.contains_key("_update_threshold_same_cat"),
-            "_update_threshold_same_cat is private to add_with_decision; caller leaked it"
+            "callers must not pre-populate `_update_threshold_same_cat` — it is private to add_with_decision"
         );
         debug_assert!(
             !item.metadata.contains_key("_update_threshold_cross_cat"),
-            "_update_threshold_cross_cat is private to add_with_decision; caller leaked it"
+            "callers must not pre-populate `_update_threshold_cross_cat` — it is private to add_with_decision"
         );
         let (same_cat_thresh, cross_cat_thresh) = {
             let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
@@ -2201,21 +2222,39 @@ fn parse_relation_type(s: &str) -> RelationType {
 /// entry is removed.
 const AUTO_CONSOLIDATE_EVERY: u32 = 10;
 
-/// Per-agent counters below this floor are considered cold on the
-/// periodic `consolidation_counters` sweep (M11). Set to
-/// `AUTO_CONSOLIDATE_EVERY / 4` (= 2) so even a slow-burning agent that
-/// fires `auto_memorize` once every few maintenance ticks still gets a
-/// chance to climb past the floor before being reset.
+/// Idle window before a `consolidation_counters` entry is considered
+/// stale and reclaimed by the maintenance sweep (M11). Any entry whose
+/// `last_touched` is older than this gets dropped on the next tick,
+/// regardless of its count value.
 ///
-/// Review-followup #2: the original /2 (= 5) threshold trimmed any
-/// agent below 5, which made an "every-N-hours" cadence (single call,
-/// then maintenance, then prune) effectively never consolidate.
-/// Dropping to /4 keeps the prune directionally correct (still evicts
-/// truly idle slots) without starving sub-burst agents of the
-/// consolidate they'd otherwise reach. Review-followup #8: lives at
-/// module scope per repo convention; the same value is referenced by
-/// the prune sweep at the top of the file.
-const STALE_COUNTER_FLOOR: u32 = AUTO_CONSOLIDATE_EVERY / 4;
+/// Set to 2 hours, which is `> 2× the rate-limit window` of the
+/// maintenance ticks themselves (decay + cleanup are gated at
+/// "at most once per hour" via `maybe_decay_confidence` /
+/// `maybe_cleanup_expired`). The double-window margin guarantees a
+/// slow-burn agent that fires `auto_memorize` once every maintenance
+/// window keeps its slot — its counter gets touched between every
+/// two consecutive prune passes — while a truly idle agent's slot
+/// is reclaimed within ~2 hours of going quiet.
+///
+/// The previous fix (followup #2) used a *count threshold*
+/// (`AUTO_CONSOLIDATE_EVERY / 4`), which mitigated but did not solve
+/// the slow-burn case: any agent firing ≤ 1× per maintenance window
+/// would still be reset before climbing past the floor. Using the
+/// last-touched timestamp instead — review followup B — closes the
+/// last gap by making "active" the real condition for keeping the
+/// slot, decoupled from how fast the counter climbs.
+const STALE_COUNTER_IDLE_WINDOW: chrono::Duration = chrono::Duration::hours(2);
+
+/// Per-agent auto-consolidation state. `count` ticks up to
+/// `AUTO_CONSOLIDATE_EVERY`; `last_touched` records when the counter
+/// was last incremented so the maintenance sweep can distinguish
+/// "actively accumulating" slots from "idle but never reached
+/// threshold" slots.
+#[derive(Debug, Clone, Copy)]
+struct CounterEntry {
+    count: u32,
+    last_touched: chrono::DateTime<Utc>,
+}
 
 /// Negation/contradiction words that suggest content is contradictory, not a refinement.
 const NEGATION_WORDS: &[&str] = &[
@@ -2423,9 +2462,14 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 .consolidation_counters
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let entry = counters.entry(user_id.to_string()).or_insert(0);
-            *entry += 1;
-            if *entry >= AUTO_CONSOLIDATE_EVERY {
+            let now = Utc::now();
+            let entry = counters.entry(user_id.to_string()).or_insert(CounterEntry {
+                count: 0,
+                last_touched: now,
+            });
+            entry.count += 1;
+            entry.last_touched = now;
+            if entry.count >= AUTO_CONSOLIDATE_EVERY {
                 // Remove the entry to prevent unbounded HashMap growth
                 counters.remove(user_id);
                 true
@@ -3546,6 +3590,61 @@ mod tests {
             matches!(action, MemoryAction::Add),
             "raising _update_threshold_same_cat to 0.99 must demote UPDATE → ADD; got {action:?}"
         );
+    }
+
+    /// M14 strip regression (review-followup C): a memory created via
+    /// `add()` (which goes through `add_with_decision`) must NOT have
+    /// the private `_update_threshold_*` keys in its stored metadata
+    /// column. Without this test, a future refactor that repoints the
+    /// ADD branch at `enriched_item.metadata` (instead of the original
+    /// `item.metadata`) would silently leak the threshold values into
+    /// the persisted row, and only the
+    /// `decide_action_honors_config_update_thresholds` direct-trait
+    /// test above would still pass — neither catches the persistence
+    /// path.
+    #[tokio::test]
+    async fn add_with_decision_does_not_leak_threshold_keys_to_stored_metadata() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Drive the full `add_with_decision` path. "I prefer X" is a
+        // canonical pattern the DefaultMemoryExtractor will pick up,
+        // so this goes through the ADD branch (no existing candidate
+        // → no UPDATE possible).
+        let added = store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode editors"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        assert!(!added.is_empty(), "extractor should accept a preference");
+
+        // Read back through the same `list()` path the dashboard /
+        // auto_retrieve consume.
+        let listed = store.list(&agent_id, None).await.unwrap();
+        assert!(
+            !listed.is_empty(),
+            "the row we just added must surface in list()"
+        );
+        for item in &listed {
+            assert!(
+                !item.metadata.contains_key("_update_threshold_same_cat"),
+                "_update_threshold_same_cat leaked into stored metadata: {:?}",
+                item.metadata
+            );
+            assert!(
+                !item.metadata.contains_key("_update_threshold_cross_cat"),
+                "_update_threshold_cross_cat leaked into stored metadata: {:?}",
+                item.metadata
+            );
+            assert!(
+                !item.metadata.contains_key("_embedding"),
+                "_embedding (sibling private key) leaked too: {:?}",
+                item.metadata
+            );
+        }
     }
 
     #[tokio::test]
