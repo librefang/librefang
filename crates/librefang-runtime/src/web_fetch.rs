@@ -36,30 +36,19 @@ impl WebFetchEngine {
     /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
     /// pinning on the builder, preventing DNS-rebinding TOCTOU attacks.
     ///
-    /// Installs a custom redirect policy so every 3xx target is re-validated
-    /// through `check_ssrf`. Without this, an attacker-controlled public
-    /// host could respond with `302 Location: http://169.254.169.254/...`
-    /// and reqwest's default policy would silently follow — the DNS pin
-    /// only protects the original hostname, not redirect targets.
+    /// Auto-redirects are **disabled** (`Policy::none`). A `Policy::custom`
+    /// that re-runs `check_ssrf` on each hop is not enough: reqwest
+    /// re-resolves the redirect target's hostname through its own connector,
+    /// and the DNS pin only covers the *original* hostname — so a cross-host
+    /// redirect to a TTL-0 rebinding name would be validated against one
+    /// resolution and connected against another (the DNS-rebinding TOCTOU,
+    /// #3563/#3782). Redirects are instead followed manually by
+    /// [`Self::send_with_pinned_redirects`], which re-validates AND re-pins
+    /// every hop so the IP we checked is the IP we connect to.
     pub(crate) fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
-        let allowed_hosts = self.config.ssrf_allowed_hosts.clone();
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many redirects");
-            }
-            // Clone target to String so we can still move `attempt` into
-            // attempt.error() on the SSRF-denied branch below.
-            let target = attempt.url().as_str().to_owned();
-            match check_ssrf(&target, &allowed_hosts) {
-                Ok(_) => attempt.follow(),
-                Err(reason) => {
-                    attempt.error(format!("SSRF blocked redirect to {target}: {reason}"))
-                }
-            }
-        });
         let builder = crate::http_client::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
-            .redirect(redirect_policy)
+            .redirect(reqwest::redirect::Policy::none())
             .gzip(true)
             .deflate(true)
             .brotli(true);
@@ -67,6 +56,92 @@ impl WebFetchEngine {
             .pin_dns(builder)
             .build()
             .expect("HTTP client build")
+    }
+
+    /// Send a request, following redirects manually with a fresh SSRF check +
+    /// DNS pin on **every** hop.
+    ///
+    /// This closes the DNS-rebinding window that `Policy::custom` cannot:
+    /// each hop resolves and validates its target, then connects to those
+    /// exact validated IPs via [`SsrfResolution::pin_dns`]. The validated
+    /// resolution and the connecting resolution are therefore identical for
+    /// every hop, not just the first.
+    pub(crate) async fn send_with_pinned_redirects(
+        &self,
+        method: &str,
+        url: &str,
+        headers: Option<&serde_json::Map<String, serde_json::Value>>,
+        body: Option<&str>,
+    ) -> Result<reqwest::Response, String> {
+        const MAX_REDIRECTS: usize = 10;
+        let mut current_url = url.to_string();
+        let mut current_method = method.to_uppercase();
+        let mut current_body = body.map(|s| s.to_string());
+
+        for _ in 0..=MAX_REDIRECTS {
+            // SSRF check + DNS pin happen together per hop so the IP we
+            // validated is the IP the pinned client connects to.
+            let resolution = check_ssrf(&current_url, &self.config.ssrf_allowed_hosts)?;
+            let client = self.pinned_client(resolution);
+            let mut req = match current_method.as_str() {
+                "POST" => client.post(&current_url),
+                "PUT" => client.put(&current_url),
+                "PATCH" => client.patch(&current_url),
+                "DELETE" => client.delete(&current_url),
+                "HEAD" => client.head(&current_url),
+                _ => client.get(&current_url),
+            };
+            req = req.header(
+                "User-Agent",
+                format!("Mozilla/5.0 (compatible; {})", crate::USER_AGENT),
+            );
+            if let Some(hdrs) = headers {
+                for (k, v) in hdrs {
+                    if let Some(val) = v.as_str() {
+                        req = req.header(k.as_str(), val);
+                    }
+                }
+            }
+            if let Some(ref b) = current_body {
+                if b.trim_start().starts_with('{') || b.trim_start().starts_with('[') {
+                    req = req.header("Content-Type", "application/json");
+                }
+                req = req.body(b.clone());
+            }
+
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("HTTP request failed: {e}"))?;
+            let status = resp.status();
+            if !status.is_redirection() {
+                return Ok(resp);
+            }
+
+            // Follow the redirect manually (the pinned client does not).
+            let Some(location) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            else {
+                // Redirect status with no usable Location — hand the response
+                // back to the caller rather than loop forever.
+                return Ok(resp);
+            };
+            let base =
+                url::Url::parse(&current_url).map_err(|e| format!("invalid request URL: {e}"))?;
+            let next = base
+                .join(location)
+                .map_err(|e| format!("invalid redirect Location '{location}': {e}"))?;
+            // 301/302/303 downgrade to GET and drop the body (browser
+            // behaviour); 307/308 preserve method and body.
+            if (301..=303).contains(&status.as_u16()) {
+                current_method = "GET".to_string();
+                current_body = None;
+            }
+            current_url = next.to_string();
+        }
+        Err(format!("Too many redirects (cap: {MAX_REDIRECTS})"))
     }
 
     /// Fetch a URL with full security pipeline (GET only, for backwards compat).
@@ -96,44 +171,15 @@ impl WebFetchEngine {
             }
         }
 
-        // Step 3: Build request using a DNS-pinned client to prevent
-        // TOCTOU / DNS-rebinding attacks (the resolved IPs from step 1
-        // are the only ones the HTTP stack will connect to).
-        let pinned_client = self.pinned_client(resolution);
-        let mut req = match method_upper.as_str() {
-            "POST" => pinned_client.post(url),
-            "PUT" => pinned_client.put(url),
-            "PATCH" => pinned_client.patch(url),
-            "DELETE" => pinned_client.delete(url),
-            _ => pinned_client.get(url),
-        };
-        req = req.header(
-            "User-Agent",
-            format!("Mozilla/5.0 (compatible; {})", crate::USER_AGENT),
-        );
-
-        // Add custom headers
-        if let Some(hdrs) = headers {
-            for (k, v) in hdrs {
-                if let Some(val) = v.as_str() {
-                    req = req.header(k.as_str(), val);
-                }
-            }
-        }
-
-        // Add body for non-GET methods
-        if let Some(b) = body {
-            // Auto-detect JSON body
-            if b.trim_start().starts_with('{') || b.trim_start().starts_with('[') {
-                req = req.header("Content-Type", "application/json");
-            }
-            req = req.body(b.to_string());
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        // Step 3: Send via the manual redirect loop, which re-runs the SSRF
+        // check + DNS pin on every hop (the client built per hop connects
+        // only to the IPs validated for that hop). The `resolution` from
+        // step 1 was the early-fail / cache-key gate; the loop re-validates
+        // the first hop too so there is a single source of truth.
+        let _ = resolution;
+        let resp = self
+            .send_with_pinned_redirects(&method_upper, url, headers, body)
+            .await?;
 
         let status = resp.status();
 
@@ -577,6 +623,47 @@ mod tests {
     fn test_ssrf_blocks_localhost() {
         assert!(check_ssrf("http://localhost/admin", &[]).is_err());
         assert!(check_ssrf("http://localhost:8080/api", &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_manual_redirect_loop_follows_and_repins() {
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // wiremock binds 127.0.0.1; allow the loopback range so the per-hop
+        // check_ssrf permits it (cloud-metadata stays blocked regardless).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("FINAL-OK"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/final"))
+            .mount(&server)
+            .await;
+
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            ..Default::default()
+        };
+        let engine = WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        );
+
+        // The manual redirect loop must follow the 302 to /final, re-running
+        // check_ssrf + pin on the second hop, and return the final body.
+        let out = engine
+            .fetch(&format!("{}/redirect", server.uri()))
+            .await
+            .expect("manual redirect loop should follow the 302");
+        assert!(
+            out.contains("FINAL-OK"),
+            "expected final body after redirect, got: {out}"
+        );
     }
 
     #[test]
