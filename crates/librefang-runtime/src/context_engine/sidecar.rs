@@ -8,9 +8,11 @@
 //! metrics) on a wrapped built-in engine.
 //!
 //! The subprocess plumbing — spawn, the background reply reader, id-matching,
-//! the reply-line cap, the write timeout, stderr draining, and child reaping —
-//! lives in [`librefang_subprocess::SubprocessTransport`]. This module is just
-//! the context-engine policy on top of it.
+//! the reply-line cap, the write timeout, stderr draining, child reaping, and
+//! lazy auto-respawn after a crash — lives in
+//! [`librefang_subprocess::SupervisedTransport`] (which wraps
+//! [`librefang_subprocess::SubprocessTransport`]). This module is just the
+//! context-engine policy on top of it.
 //!
 //! # Why this split
 //!
@@ -26,9 +28,11 @@
 //! The context engine is on the per-turn critical path, so a flaky sidecar must
 //! never break a turn. Every bridged call falls back to the inner engine on any
 //! failure (spawn failure, write timeout, reply timeout, a `{"error": …}`
-//! reply, a malformed reply, or a crashed process). A crash degrades to the
-//! built-in engine for the rest of the daemon's lifetime (restart re-spawns);
-//! this is deliberate — see `docs/architecture/sidecar-context-engine.md`.
+//! reply, a malformed reply, or a crashed process). A crash degrades only the
+//! calls made during the respawn cooldown to the built-in engine;
+//! `SupervisedTransport` re-spawns the child lazily on the next call once the
+//! cooldown elapses, so a transient crash self-heals without a daemon restart.
+//! See `docs/architecture/sidecar-context-engine.md`.
 //!
 //! # Wire protocol
 //!
