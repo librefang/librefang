@@ -428,10 +428,13 @@ impl LibreFangKernel {
         // per-provider operator cap trips) and consumed by the LLM
         // fallback chain (`FallbackDriver` + `FallbackChain`), so an
         // exhausted primary provider falls over to a healthy slot
-        // instead of refusing the whole call. Global `[budget]` caps
-        // and per-agent quotas still apply via `reserve_global_budget`
-        // / `check_quota_and_reserve` below — only the per-provider
-        // gate that #4807 explicitly asked to remove is gone.
+        // instead of refusing the whole call. Unlike the regular
+        // `send_message_full` path, this ephemeral path does NOT pre-reserve
+        // the global `[budget]` or per-agent token quota — it enforces them
+        // only post-call via `check_all_and_record` below. That is acceptable
+        // here because an ephemeral `/btw` turn is a tool-less single shot
+        // (no loop, no concurrent-fire amplification), so the pre-call
+        // overshoot hold that #3616 added to the main path is not needed.
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
