@@ -5363,8 +5363,22 @@ async fn download_file_to_blocks(
         // addition to the saved-path block. The path block is preserved
         // so tools that legitimately want raw bytes (media_transcribe,
         // custom file readers) still work.
-        let mut blocks =
-            crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, filename);
+        // enrich_saved_file does blocking std::fs reads and CPU-bound PDF
+        // text extraction (pdf_extract), which can stall the tokio worker for
+        // a large/complex document — offload it (refs blocking-fs-on-executor).
+        let mut blocks = {
+            let file_path = file_path.clone();
+            let media_type = media_type.clone();
+            let filename = filename.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, &filename)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("attachment enrichment task failed to join: {e}");
+                Vec::new()
+            })
+        };
         blocks.push(ContentBlock::Text {
             text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
             provider_metadata: None,
