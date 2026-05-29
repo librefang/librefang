@@ -2272,8 +2272,14 @@ fn extract_thinking_summary(thinking: &str) -> String {
         if last.len() <= 2000 {
             last.to_string()
         } else {
-            // Take the last 2000 chars
-            last[last.len() - 2000..].to_string()
+            // Take the last ~2000 bytes, snapped to a char boundary. A raw
+            // byte index can land inside a multi-byte UTF-8 char (common for
+            // non-ASCII reasoning) and panic; advance to the next boundary.
+            let mut start = last.len() - 2000;
+            while start < last.len() && !last.is_char_boundary(start) {
+                start += 1;
+            }
+            last[start..].to_string()
         }
     } else {
         "[The model produced reasoning but no final answer. Try rephrasing your question.]"
@@ -2439,6 +2445,14 @@ pub(crate) fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 /// with "trailing characters". This function finds the end of the first complete
 /// `{...}` JSON object via brace-depth tracking and parses only that slice.
 pub(crate) fn parse_tool_args(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    // No-argument tool calls: OpenAI streams `arguments: ""` (or omits the
+    // field) for parameterless tools, and Anthropic can emit a `tool_use`
+    // block with no `input_json_delta`. An empty string is a valid empty
+    // object, not truncation — treat it as `{}` so the caller doesn't
+    // mis-flag it via `malformed_tool_input`.
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
     // Fast path: the whole string is valid JSON.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         return Ok(v);
@@ -2528,6 +2542,20 @@ mod tests {
         let raw = r#"{"a":{"b":1},"c":"d"} trailing text"#;
         let v = parse_tool_args(raw).unwrap();
         assert_eq!(v["c"], "d");
+    }
+
+    #[test]
+    fn test_parse_tool_args_empty_string_is_empty_object() {
+        // No-argument tool calls stream `arguments: ""` — must parse to `{}`,
+        // not be mis-flagged as truncated/malformed.
+        for raw in ["", "   ", "\n", "\t "] {
+            let v = parse_tool_args(raw)
+                .unwrap_or_else(|e| panic!("empty args {raw:?} should parse, got {e}"));
+            assert!(
+                v.as_object().map(|o| o.is_empty()).unwrap_or(false),
+                "expected empty object for {raw:?}, got {v}"
+            );
+        }
     }
 
     #[test]
@@ -2736,6 +2764,20 @@ mod tests {
         let input = "First I need to consider X.\n\nThen I should check Y.\n\nThe answer is 42.";
         let summary = extract_thinking_summary(input);
         assert_eq!(summary, "The answer is 42.");
+    }
+
+    #[test]
+    fn test_extract_thinking_summary_long_multibyte_no_panic() {
+        // A long final paragraph of multi-byte chars must not panic when the
+        // 2000-byte cut lands inside a UTF-8 char. "好" is 3 bytes; 1500 of
+        // them is 4500 bytes (> 2000), and 4500 - 2000 = 2500 is not a char
+        // boundary.
+        let long = "好".repeat(1500);
+        let summary = extract_thinking_summary(&long);
+        // Returned slice must still be valid UTF-8 (no panic, no torn char)
+        // and bounded near the 2000-byte window.
+        assert!(summary.len() <= 2000 + 3);
+        assert!(summary.chars().all(|c| c == '好'));
     }
 
     // ----- reasoning_content deserialization test -----
