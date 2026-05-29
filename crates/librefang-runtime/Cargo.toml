@@ -62,8 +62,6 @@ toml = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
-landlock = { version = "0.4", optional = true }
-seccompiler = { version = "0.5", optional = true }
 pdf-extract = "0.10"
 # SSH transport for the optional remote-exec backend (#3332).
 # Locked behind the `ssh-backend` feature so the dependency tree stays
@@ -77,6 +75,16 @@ russh-keys = { version = "0.45", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Linux-only LSM / seccomp sandboxing backends. Platform-gated so the
+# `landlock-sandbox` / `seccomp-sandbox` features can ship in `default`
+# without dragging Linux-only crates into the macOS / Windows dependency
+# graph — the `dep:landlock` / `dep:seccompiler` feature activations are
+# simply no-ops on targets where these deps are not present, and the
+# code that touches them is already `#[cfg(all(target_os = "linux", feature = ...))]`.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { version = "0.4", optional = true }
+seccompiler = { version = "0.5", optional = true }
+
 [dev-dependencies]
 serial_test = "3"
 proptest = "1"
@@ -89,7 +97,7 @@ wiremock = "0.6"
 tracing-subscriber = { workspace = true }
 
 [features]
-default = ["media", "browser", "docker-sandbox"]
+default = ["media", "browser", "docker-sandbox", "seccomp-sandbox", "landlock-sandbox"]
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
 # Remote SSH tool-execution backend (#3332).
