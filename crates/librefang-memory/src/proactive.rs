@@ -906,26 +906,9 @@ impl ProactiveMemoryStore {
             .await?;
 
         // Strip all of `add_with_decision`'s private stash keys from
-        // the enriched clone the moment they stop being useful. Today
-        // both ADD and UPDATE branches build their stored metadata
-        // from the original `item.metadata` (NOT
-        // `enriched_item.metadata`), so the stash keys never reach
-        // the `metadata` column. The strip is defensive insurance
-        // for the next refactorer: if someone repoints either branch
-        // at `enriched_item.metadata` (e.g. to pass extraction
-        // metadata through), the pollution gets caught at the strip
-        // site, not silently persisted.
-        //
-        // Review-followup #2: `_embedding` is stripped alongside the
-        // M14 threshold keys for consistency. The prior commit only
-        // removed the threshold keys; with an embedding driver
-        // configured, a future refactor pointing at
-        // `enriched_item.metadata` would have leaked the full
-        // embedding vector (~4 KB per memory at f32 × 1024 dims) into
-        // the JSON metadata column.
-        enriched_item.metadata.remove("_update_threshold_same_cat");
-        enriched_item.metadata.remove("_update_threshold_cross_cat");
-        enriched_item.metadata.remove("_embedding");
+        // the enriched clone the moment they stop being useful. See
+        // `strip_private_stash_keys` for the full rationale.
+        strip_private_stash_keys(&mut enriched_item.metadata);
 
         match action {
             MemoryAction::Noop => {
@@ -2152,6 +2135,43 @@ impl ProactiveMemory for ProactiveMemoryStore {
     }
 }
 
+/// Private-stash keys that `add_with_decision` writes onto the
+/// `enriched_item` clone for the duration of one `decide_action`
+/// call. NOT a public extension surface — operators MUST NOT set
+/// these on memories they pass to `add()`.
+const ADD_WITH_DECISION_PRIVATE_STASH_KEYS: &[&str] = &[
+    "_update_threshold_same_cat",
+    "_update_threshold_cross_cat",
+    "_embedding",
+];
+
+/// Strip every key in [`ADD_WITH_DECISION_PRIVATE_STASH_KEYS`] from
+/// the given metadata map.
+///
+/// Used by `add_with_decision` after `decide_action` returns, so the
+/// enriched clone goes back to looking like the caller's original
+/// input. Today both ADD and UPDATE branches build their stored
+/// metadata from `item.metadata` (the caller's input, NOT
+/// `enriched_item.metadata`), so the stash keys never reach the
+/// `metadata` column with or without this strip. The strip is
+/// defensive insurance for the next refactorer: if someone repoints
+/// either branch at `enriched_item.metadata` to thread extraction
+/// metadata through, the pollution gets caught at the strip site
+/// rather than silently persisted.
+///
+/// Extracted into a standalone function (review-followup B) so the
+/// strip behaviour itself is directly unit-testable — the
+/// integration test
+/// `add_with_decision_does_not_leak_private_stash_keys_to_stored_metadata`
+/// only catches a coordinated two-step regression (strip removed
+/// AND branch repointed at enriched), because the current ADD path
+/// bypasses `enriched_item.metadata` entirely.
+fn strip_private_stash_keys(metadata: &mut HashMap<String, serde_json::Value>) {
+    for key in ADD_WITH_DECISION_PRIVATE_STASH_KEYS {
+        metadata.remove(*key);
+    }
+}
+
 /// Extract entity-like candidates from a query for knowledge graph lookup.
 ///
 /// Looks for capitalized words (likely proper nouns), normalized entity IDs,
@@ -2277,7 +2297,7 @@ const AUTO_CONSOLIDATE_EVERY: u32 = 10;
 /// Idle window (in hours) before a `consolidation_counters` entry is
 /// considered stale and reclaimed by the maintenance sweep (M11). Any
 /// entry whose `last_touched` is older than this gets dropped on the
-/// next tick, regardless of its count value.
+/// next prune tick.
 ///
 /// Set to 2 hours, which is `> 2× the rate-limit window` of the
 /// maintenance ticks themselves (decay + cleanup + counter prune are
@@ -2285,20 +2305,25 @@ const AUTO_CONSOLIDATE_EVERY: u32 = 10;
 /// `maybe_decay_confidence` / `maybe_cleanup_expired` /
 /// `maybe_prune_counters`). The double-window margin guarantees a
 /// slow-burn agent that fires `auto_memorize` once between two
-/// consecutive maintenance ticks keeps its slot, while a truly idle
-/// agent's slot is reclaimed within ~2 hours of going quiet
-/// (review-followup #4 — phrased relative to the maintenance
-/// rate-limit window, not "consecutive prune passes" which is what
-/// the prior comment said but only happened to be true because the
-/// prune wasn't rate-limited yet).
+/// consecutive maintenance ticks keeps its slot.
 ///
-/// The previous fix (round-1 followup #2) used a *count threshold*
-/// (`AUTO_CONSOLIDATE_EVERY / 4`), which mitigated but did not solve
-/// the slow-burn case: any agent firing ≤ 1× per maintenance window
-/// would still be reset before climbing past the floor. Using the
-/// last-touched timestamp instead — round-2 followup B — closes the
-/// last gap by making "active" the real condition for keeping the
-/// slot, decoupled from how fast the counter climbs.
+/// Effective reclaim latency for a truly idle slot: **~2–3 hours**.
+/// The lower bound is the configured idle window. The upper bound
+/// adds up to one prune rate-limit period (1 hour) because the prune
+/// itself only runs ≤ once per hour — so an entry that goes quiet
+/// just after a prune fires has to wait the full hour for the next
+/// prune chance before its idle window can be evaluated
+/// (review-followup A — the round-3 commit added the prune
+/// rate-limit but kept the "reclaimed within ~2 hours" phrasing,
+/// which was accurate only before the rate-limit landed).
+///
+/// Round-2 followup B history: the previous fix (round-1 followup
+/// #2) used a *count threshold* (`AUTO_CONSOLIDATE_EVERY / 4`),
+/// which mitigated but did not solve the slow-burn case: any agent
+/// firing ≤ 1× per maintenance window would still be reset before
+/// climbing past the floor. Using the last-touched timestamp
+/// instead closes the gap by making "active" the real condition
+/// for keeping the slot, decoupled from how fast the counter climbs.
 ///
 /// Stored as `i64` rather than a `chrono::Duration` constant
 /// (review-followup #6): `chrono::Duration::hours` is a `const fn`
@@ -3659,20 +3684,33 @@ mod tests {
     /// M14 strip regression (review-followup C + #2): a memory created
     /// via `add()` (which goes through `add_with_decision`) must NOT
     /// have any of the private `_update_threshold_*` / `_embedding`
-    /// keys in its stored metadata column. Without this test, a
-    /// future refactor that repoints the ADD branch at
-    /// `enriched_item.metadata` (instead of the original
-    /// `item.metadata`) would silently leak both the threshold values
-    /// AND the embedding vector into the persisted row, and only the
-    /// `decide_action_honors_config_update_thresholds` direct-trait
-    /// test above would still pass — neither catches the persistence
-    /// path.
+    /// keys in its stored metadata column.
     ///
-    /// Crucially: we attach a mock embedding driver so the `_embedding`
-    /// stash path actually fires. Without it the assertion on
-    /// `_embedding` would be trivially true (the stash never happens →
-    /// nothing to strip → not in metadata). Mock returns a tiny fixed
-    /// vector so the round-trip is observable but cheap.
+    /// Scope this test actually covers (review-followup B — the
+    /// prior docstring overclaimed): a **coordinated two-step
+    /// regression** where (a) the `strip_private_stash_keys` call is
+    /// removed AND (b) the ADD or UPDATE branch is repointed at
+    /// `enriched_item.metadata` (instead of the caller-supplied
+    /// `item.metadata`). Single-step regressions of either kind pass
+    /// this test:
+    ///   - Strip removed alone → the current ADD/UPDATE branches
+    ///     still build their stored metadata from `item.metadata`,
+    ///     which never had the stash keys, so stored metadata is
+    ///     still clean.
+    ///   - Branch repointed alone → `strip_private_stash_keys` has
+    ///     already wiped the stash keys from `enriched_item.metadata`
+    ///     by the time the branch runs, so stored metadata is still
+    ///     clean.
+    ///
+    /// The strip code itself is unit-tested directly by
+    /// [`strip_private_stash_keys_removes_all_private_keys`] further
+    /// down, which catches single-step regressions of the strip.
+    ///
+    /// We attach a mock embedding driver so the `_embedding` stash
+    /// path actually fires. Without it the assertion on `_embedding`
+    /// would be trivially true (the stash never happens → nothing to
+    /// strip → not in metadata). Mock returns a tiny fixed vector so
+    /// the round-trip is observable but cheap.
     #[tokio::test]
     async fn add_with_decision_does_not_leak_private_stash_keys_to_stored_metadata() {
         struct MockEmbedding;
@@ -3727,6 +3765,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Direct unit test of `strip_private_stash_keys` (review-followup
+    /// B). Catches a single-step regression of the strip itself —
+    /// e.g. someone deletes one of the `metadata.remove(...)` calls,
+    /// drops a key from `ADD_WITH_DECISION_PRIVATE_STASH_KEYS`, or
+    /// renames the strip site to a no-op. Complements the
+    /// integration test above, which only catches a coordinated
+    /// two-step regression (strip removed AND branch repointed at
+    /// enriched).
+    #[test]
+    fn strip_private_stash_keys_removes_all_private_keys() {
+        let mut meta = HashMap::new();
+        // All three private stash keys are pre-populated, plus a
+        // sentinel public key that the strip must NOT touch.
+        meta.insert(
+            "_update_threshold_same_cat".to_string(),
+            serde_json::json!(0.42),
+        );
+        meta.insert(
+            "_update_threshold_cross_cat".to_string(),
+            serde_json::json!(0.84),
+        );
+        meta.insert("_embedding".to_string(), serde_json::json!([1.0, 2.0]));
+        meta.insert(
+            "category".to_string(),
+            serde_json::json!("operator-supplied"),
+        );
+
+        strip_private_stash_keys(&mut meta);
+
+        for private_key in ADD_WITH_DECISION_PRIVATE_STASH_KEYS {
+            assert!(
+                !meta.contains_key(*private_key),
+                "strip_private_stash_keys must remove `{private_key}`"
+            );
+        }
+        // Public keys MUST survive — the strip is targeted, not a
+        // metadata wipe.
+        assert_eq!(
+            meta.get("category"),
+            Some(&serde_json::json!("operator-supplied")),
+            "strip_private_stash_keys must not touch non-private keys"
+        );
+        // The const drives the strip exhaustively — adding a new
+        // key to the const must extend the strip, not require a
+        // matching code change in two places. Pin that here.
+        assert_eq!(
+            ADD_WITH_DECISION_PRIVATE_STASH_KEYS.len(),
+            3,
+            "ADD_WITH_DECISION_PRIVATE_STASH_KEYS contents drift — \
+             update this test alongside the const to ensure new private \
+             keys also get stripped"
+        );
     }
 
     #[tokio::test]

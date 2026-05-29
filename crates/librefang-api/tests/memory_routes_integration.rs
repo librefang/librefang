@@ -403,10 +403,17 @@ async fn patch_memory_config_hot_reloads_and_reports_applied() {
         );
     } else {
         // Partial: reload_error must carry the validator output so
-        // the operator knows what's wrong on disk.
+        // the operator knows what's wrong on disk. Review-followup
+        // C: assert non-empty after trimming — an empty string,
+        // whitespace, or any other zero-info value would be just as
+        // useless as the field being absent.
+        let err = body["reload_error"].as_str().unwrap_or_else(|| {
+            panic!("reload_error must be a string when status is partial; got body: {body}")
+        });
         assert!(
-            body["reload_error"].is_string(),
-            "reload_error must be a string when status is partial; got body: {body}"
+            !err.trim().is_empty(),
+            "reload_error must carry an actionable message when status is partial; \
+             got {err:?} in body: {body}"
         );
     }
     // The PATCHed value round-trips into the response body sourced
