@@ -51,7 +51,7 @@
 //! construction, owned by exactly one task — so the lock is effectively
 //! free at runtime.
 
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 
@@ -71,6 +71,19 @@ tokio::task_local! {
     /// reference across an unrelated `.await` cannot panic — see the
     /// module docs.
     static HELD_AGENT_LOCKS: Mutex<HashSet<AgentId>>;
+
+    /// Set of `SessionId`s whose `session_msg_locks` entry the current task
+    /// currently holds — the session-scoped sibling of `HELD_AGENT_LOCKS`.
+    ///
+    /// When `send_message_full` resolves a `session_id_override` (e.g.
+    /// `agent_send` with a `conversation_key`, which derives
+    /// `SessionId::for_channel(agent, "agent_send:<key>")`), it locks
+    /// `session_msg_locks[sid]` rather than the per-agent lock. A transitive
+    /// `A -> B -> A` cycle reusing the same key re-acquires the *same*
+    /// non-reentrant session mutex on the same task and deadlocks. Tracking
+    /// held sessions lets that path detect the cycle (the keyed variant of
+    /// #5125) instead of parking the worker thread.
+    static HELD_SESSION_LOCKS: Mutex<HashSet<SessionId>>;
 }
 
 /// Run `fut` with the held-locks registry available for the current task.
@@ -84,12 +97,24 @@ pub async fn scope<F>(fut: F) -> F::Output
 where
     F: std::future::Future,
 {
+    // Establish the session registry (idempotent), then the agent registry,
+    // so both are available for this task's whole turn.
+    async fn with_session_scope<F: std::future::Future>(fut: F) -> F::Output {
+        if HELD_SESSION_LOCKS.try_with(|_| ()).is_ok() {
+            fut.await
+        } else {
+            HELD_SESSION_LOCKS
+                .scope(Mutex::new(HashSet::new()), fut)
+                .await
+        }
+    }
+
     if HELD_AGENT_LOCKS.try_with(|_| ()).is_ok() {
         // Registry already established by an outer frame on this task.
-        fut.await
+        with_session_scope(fut).await
     } else {
         HELD_AGENT_LOCKS
-            .scope(Mutex::new(HashSet::new()), fut)
+            .scope(Mutex::new(HashSet::new()), with_session_scope(fut))
             .await
     }
 }
@@ -113,6 +138,25 @@ pub fn held_snapshot() -> Vec<AgentId> {
         .try_with(|set| set.lock().iter().copied().collect())
         .unwrap_or_default();
     v.sort_by_key(|a| a.0);
+    v
+}
+
+/// Is `session_id`'s `session_msg_locks` entry already held by the current
+/// task? The session-scoped sibling of [`is_held`]. Returns `false`
+/// outside any [`scope`].
+pub fn is_session_held(session_id: SessionId) -> bool {
+    HELD_SESSION_LOCKS
+        .try_with(|set| set.lock().contains(&session_id))
+        .unwrap_or(false)
+}
+
+/// Snapshot the currently-held session set for diagnostics. Sorted by the
+/// inner `Uuid` for a stable error message. Empty outside a [`scope`].
+pub fn held_sessions_snapshot() -> Vec<SessionId> {
+    let mut v: Vec<SessionId> = HELD_SESSION_LOCKS
+        .try_with(|set| set.lock().iter().copied().collect())
+        .unwrap_or_default();
+    v.sort_by_key(|s| s.0);
     v
 }
 
@@ -163,6 +207,39 @@ impl Drop for HeldLockGuard {
     }
 }
 
+/// RAII guard: records that the current task holds `session_msg_locks[sid]`
+/// for its lifetime. Session-scoped sibling of [`HeldLockGuard`]; same
+/// construct-after-lock / drop-before-lock discipline and same no-op-safe
+/// behaviour outside a [`scope`].
+#[must_use = "dropping the guard immediately would clear the held-lock record before the locked region ends"]
+pub struct HeldSessionLockGuard {
+    session_id: SessionId,
+    inserted: bool,
+}
+
+impl HeldSessionLockGuard {
+    /// Register `session_id` as held by the current task.
+    pub fn register(session_id: SessionId) -> Self {
+        let inserted = HELD_SESSION_LOCKS
+            .try_with(|set| set.lock().insert(session_id))
+            .unwrap_or(false);
+        Self {
+            session_id,
+            inserted,
+        }
+    }
+}
+
+impl Drop for HeldSessionLockGuard {
+    fn drop(&mut self) {
+        if self.inserted {
+            let _ = HELD_SESSION_LOCKS.try_with(|set| {
+                set.lock().remove(&self.session_id);
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +250,45 @@ mod tests {
         // safe default so their behaviour is unchanged.
         assert!(!is_held(AgentId::new()));
         assert!(held_snapshot().is_empty());
+        // Session sibling: same safe default outside a scope.
+        assert!(!is_session_held(SessionId::new()));
+        assert!(held_sessions_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_register_then_drop_clears_the_entry() {
+        let sid = SessionId::new();
+        scope(async move {
+            assert!(!is_session_held(sid));
+            {
+                let _g = HeldSessionLockGuard::register(sid);
+                assert!(is_session_held(sid), "registered while guard alive");
+                assert_eq!(held_sessions_snapshot(), vec![sid]);
+            }
+            assert!(
+                !is_session_held(sid),
+                "session entry must be cleared after guard drop"
+            );
+            assert!(held_sessions_snapshot().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn session_and_agent_registries_are_independent() {
+        let a = AgentId::new();
+        let sid = SessionId::new();
+        scope(async move {
+            let _ga = HeldLockGuard::register(a);
+            let _gs = HeldSessionLockGuard::register(sid);
+            // Holding the agent lock does not imply the session is held, and
+            // vice versa — they are separate key spaces.
+            assert!(is_held(a));
+            assert!(is_session_held(sid));
+            assert!(!is_session_held(SessionId::new()));
+            assert!(!is_held(AgentId::new()));
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -903,25 +903,54 @@ impl LibreFangKernel {
         // 1-hop case. Detect it *before* the lock acquisition (the only
         // place that cannot itself deadlock) and fail loudly with the held
         // chain so operators can see which agents form the cycle, instead
-        // of silently parking the worker thread. The session-scoped
-        // (`session_id_override`) path is a different key space that the
-        // re-entrant tool paths never take, so it is exempt.
-        if session_id_override.is_none() && librefang_runtime::held_agent_locks::is_held(agent_id) {
-            let mut chain: Vec<String> = librefang_runtime::held_agent_locks::held_snapshot()
-                .into_iter()
-                .map(|a| a.to_string())
-                .collect();
-            chain.push(agent_id.to_string());
-            return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
-                format!(
-                    "agent_send: re-entrant message to agent {} would deadlock its \
-                     per-agent message lock (transitive A->B->A cycle). Currently-held \
-                     agent locks on this task: [{}]. Break the cycle or use the task \
-                     queue for the callback.",
-                    agent_id,
-                    chain.join(" -> "),
-                ),
-            )));
+        // of silently parking the worker thread.
+        //
+        // The session-scoped (`session_id_override`) path has the SAME
+        // hazard: `agent_send` with a `conversation_key` derives
+        // `SessionId::for_channel(agent, "agent_send:<key>")` and passes it as
+        // the override, so a transitive `A -> B -> A` cycle reusing the same
+        // key re-acquires `session_msg_locks[sid]` — also non-reentrant — on
+        // the same task. Check the held-session registry for that path rather
+        // than exempting it.
+        match session_id_override {
+            None => {
+                if librefang_runtime::held_agent_locks::is_held(agent_id) {
+                    let mut chain: Vec<String> =
+                        librefang_runtime::held_agent_locks::held_snapshot()
+                            .into_iter()
+                            .map(|a| a.to_string())
+                            .collect();
+                    chain.push(agent_id.to_string());
+                    return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                        format!(
+                            "agent_send: re-entrant message to agent {} would deadlock its \
+                             per-agent message lock (transitive A->B->A cycle). Currently-held \
+                             agent locks on this task: [{}]. Break the cycle or use the task \
+                             queue for the callback.",
+                            agent_id,
+                            chain.join(" -> "),
+                        ),
+                    )));
+                }
+            }
+            Some(sid) if librefang_runtime::held_agent_locks::is_session_held(sid) => {
+                let mut chain: Vec<String> =
+                    librefang_runtime::held_agent_locks::held_sessions_snapshot()
+                        .into_iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                chain.push(sid.to_string());
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "agent_send: re-entrant message on session {sid} would deadlock its \
+                         per-session message lock (transitive A->B->A cycle reusing the same \
+                         conversation_key). Currently-held session locks on this task: [{}]. \
+                         Break the cycle or use a different conversation_key for the callback.",
+                        chain.join(" -> "),
+                    ),
+                )));
+            }
+            Some(_) => {}
         }
 
         // When the caller supplies an explicit session_id, scope the lock to that
@@ -964,6 +993,16 @@ impl LibreFangKernel {
             Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
         } else {
             None
+        };
+        // Session-scoped sibling of `_held_guard`: record the held session so
+        // a re-entrant keyed `agent_send` (same conversation_key, transitive
+        // A->B->A) is rejected above instead of deadlocking on the
+        // non-reentrant `session_msg_locks[sid]` mutex.
+        let _held_session_guard = match session_id_override {
+            Some(sid) if !agent_scoped => {
+                Some(librefang_runtime::held_agent_locks::HeldSessionLockGuard::register(sid))
+            }
+            _ => None,
         };
 
         // Pre-call global budget reservation (#3616). Estimate cost from
