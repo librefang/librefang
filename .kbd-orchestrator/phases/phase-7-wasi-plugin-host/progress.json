@@ -72,8 +72,11 @@
     "wit-component / wac composition",
     "AOT cache invalidation deep-dive"
   ],
+  "reflect_complete": true,
+  "reflection_completed_at": "2026-05-29T00:00:00Z",
+  "reflected_by": "claude-code /kbd-reflect",
   "next_action": {
-    "command": "/kbd-reflect phase-7-wasi-plugin-host",
-    "description": "All 8 changes DONE; push PR then run reflection"
+    "command": "/kbd-new-phase",
+    "description": "Phase-7 fully closed. Next: merge PR #59, then Phase-8 (go-env-greet adapter swap + js-kv-counter jco rebuild + surrealdb-core pin + KernelHandleStub promotion)"
   }
 }

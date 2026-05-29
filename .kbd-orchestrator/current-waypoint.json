@@ -1,14 +1,13 @@
 {
-  "active_phase": "phase-7-wasi-plugin-host",
-  "previous_phase": "phase-6-plugin-examples",
+  "active_phase": null,
+  "previous_phase": "phase-7-wasi-plugin-host",
   "active_change": null,
-  "last_updated": "2026-05-28T00:00:00Z",
-  "last_updated_by": "kbd-plan",
+  "last_updated": "2026-05-29T00:00:00Z",
+  "last_updated_by": "kbd-reflect",
   "backend": "native-tool",
-  "phase_progress": "Phase 7 planned: D1..D7 + scope decisions baked in plan.md; 8 changes ordered with C-001 as a verify-first guard for D4 (WASI 0.2.0->0.2.6 version aliasing). Critical path: C-001 -> C-003 -> C-004 -> C-005 -> C-006 -> C-008. C-002 and C-007 sit off the critical path.",
-  "scope_note": "Narrow scope per user selection: WASI linker wiring + store.limiter finish. Acceptance = 5/5 plugin_example_*.rs tests green (currently 1 pass + 4 ignored). Items 3-6 from phase-6 reflection (surrealdb-core pin, net+agent examples, KernelHandleStub promotion, dlmalloc) deferred to subsequent phases or out-of-band PRs.",
+  "phase_progress": "Phase 7 closed: 8/8 changes DONE; reflection.md written. 3/5 plugin_example tests active-green; 2 Phase-8 fixture rebuilds needed (go-env-greet: wasmtime v45 reactor adapter; js-kv-counter: jco WASI 0.2.6-compatible rebuild). PR #59 open.",
   "next_action": {
-    "command": "/kbd-execute C-001",
-    "description": "Add wasmtime-wasi workspace dep + run the version-alias verify-first smoke (D4 risk gate)"
+    "command": "/kbd-new-phase",
+    "description": "Merge PR #59. Phase-8 priority list: (1) wasmtime v45 reactor adapter for go-env-greet, (2) jco rebuild for js-kv-counter, (3) surrealdb-core =3.0.5 workspace pin, (4) KernelHandleStub promotion, (5) net+agent examples."
   }
 }
