@@ -25,6 +25,8 @@ use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::AgentId;
+use librefang_types::config::McpServerConfigEntry;
+use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -85,6 +87,48 @@ async fn get_json(h: &Harness, path: &str) -> (StatusCode, serde_json::Value) {
 }
 
 // ---------------------------------------------------------------------------
+// MCP tool seeding helpers (shared by MCP-fixture tests below)
+// ---------------------------------------------------------------------------
+
+/// Insert a synthetic `ToolDefinition` directly into the kernel's MCP tool
+/// snapshot.  Mirrors the same pattern used in `mcp_tools_list_allowlist_test`.
+fn seed_mcp_tool(state: &AppState, name: &str) {
+    let mut guard = state
+        .kernel
+        .mcp_tools_ref()
+        .lock()
+        .expect("mcp_tools mutex not poisoned");
+    guard.push(ToolDefinition {
+        name: name.to_string(),
+        description: format!("synthetic MCP tool {name}"),
+        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+    });
+}
+
+/// Register a server name in `effective_mcp_servers_ref` so that
+/// `resolve_mcp_server_from_known` can map the namespaced tool name back to
+/// its originating server (required for `mcp_server` field resolution).
+fn seed_mcp_server(state: &AppState, server_name: &str) {
+    let entry = McpServerConfigEntry {
+        name: server_name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    };
+    state
+        .kernel
+        .effective_mcp_servers_ref()
+        .write()
+        .expect("effective_mcp_servers write lock not poisoned")
+        .push(entry);
+}
+
+// ---------------------------------------------------------------------------
 // /api/tools
 // ---------------------------------------------------------------------------
 
@@ -128,6 +172,20 @@ async fn list_tools_returns_builtins_with_total() {
         names.contains(&"file_read"),
         "expected `file_read` in builtin tools, got: {names:?}"
     );
+
+    // Every tool returned in the no-MCP boot has source="builtin" and must
+    // NOT carry an mcp_server field (that field is MCP-only).
+    for t in tools {
+        assert_eq!(
+            t["source"].as_str(),
+            Some("builtin"),
+            "builtin tool must have source=builtin: {t:?}"
+        );
+        assert!(
+            t.get("mcp_server").is_none() || t["mcp_server"].is_null(),
+            "builtin tool must not carry mcp_server: {t:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -517,5 +575,123 @@ async fn patch_session_model_accepts_qualified_model_id_with_multiple_slashes() 
     assert_eq!(
         stored.model_override.as_deref(),
         Some("meta-llama/Llama-3.3-70B")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /api/tools — MCP source attribution with hyphenated server name
+// ---------------------------------------------------------------------------
+
+/// GET /api/tools with an MCP server whose name contains a hyphen (`my-server`).
+///
+/// Covers the `resolve_mcp_server_from_known` path in the list handler:
+/// hyphens are normalized to underscores when building the tool namespace
+/// prefix, so the tool is stored as `mcp_my_server_ping` but must round-trip
+/// back to `mcp_server: "my-server"`.
+///
+/// Also verifies the existing builtin entries continue to carry
+/// `source: "builtin"` and no `mcp_server` field when MCP tools are present.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_tools_mcp_hyphenated_server_carries_source_and_mcp_server() {
+    let h = boot().await;
+
+    // Seed the server name so resolve_mcp_server_from_known can match it.
+    seed_mcp_server(&h.state, "my-server");
+    // Tool name follows the mcp_{normalized_server}_{tool} convention:
+    // "my-server" normalizes to "my_server", so the tool is "mcp_my_server_ping".
+    seed_mcp_tool(&h.state, "mcp_my_server_ping");
+
+    let (status, body) = get_json(&h, "/api/tools").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let tools = body["tools"].as_array().expect("tools array");
+
+    // Locate the MCP tool entry.
+    let mcp_entry = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("mcp_my_server_ping"))
+        .expect("mcp_my_server_ping must appear in the tools list");
+
+    assert_eq!(
+        mcp_entry["source"].as_str(),
+        Some("mcp"),
+        "MCP tool must carry source=mcp: {mcp_entry:?}"
+    );
+    assert_eq!(
+        mcp_entry["mcp_server"].as_str(),
+        Some("my-server"),
+        "MCP tool must carry mcp_server=my-server (original hyphenated name): {mcp_entry:?}"
+    );
+
+    // Builtin entries must still carry source="builtin" and no mcp_server.
+    let builtin_entries: Vec<_> = tools
+        .iter()
+        .filter(|t| t["name"].as_str() != Some("mcp_my_server_ping"))
+        .collect();
+    assert!(
+        !builtin_entries.is_empty(),
+        "builtin tools must still be present alongside MCP tools"
+    );
+    for t in &builtin_entries {
+        assert_eq!(
+            t["source"].as_str(),
+            Some("builtin"),
+            "builtin tool must carry source=builtin: {t:?}"
+        );
+        assert!(
+            t.get("mcp_server").is_none() || t["mcp_server"].is_null(),
+            "builtin tool must not carry mcp_server: {t:?}"
+        );
+    }
+}
+
+/// GET /api/tools/{name} for an MCP tool with a hyphenated server name.
+///
+/// The detail endpoint must match the list endpoint's wire shape: both
+/// `source: "mcp"` and `mcp_server: "my-server"` must be present.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_tool_mcp_hyphenated_server_carries_source_and_mcp_server() {
+    let h = boot().await;
+
+    seed_mcp_server(&h.state, "my-server");
+    seed_mcp_tool(&h.state, "mcp_my_server_ping");
+
+    let (status, body) = get_json(&h, "/api/tools/mcp_my_server_ping").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    assert_eq!(
+        body["name"].as_str(),
+        Some("mcp_my_server_ping"),
+        "{body:?}"
+    );
+    assert_eq!(
+        body["source"].as_str(),
+        Some("mcp"),
+        "detail endpoint must carry source=mcp: {body:?}"
+    );
+    assert_eq!(
+        body["mcp_server"].as_str(),
+        Some("my-server"),
+        "detail endpoint must carry mcp_server=my-server: {body:?}"
+    );
+}
+
+/// GET /api/tools/{name} for a builtin tool must carry `source: "builtin"`.
+///
+/// This is the regression guard for the fix that added `source` to the
+/// builtin branch of the detail handler (it was missing before the PR).
+#[tokio::test(flavor = "multi_thread")]
+async fn get_tool_builtin_carries_source_field() {
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/tools/file_read").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["source"].as_str(),
+        Some("builtin"),
+        "builtin detail endpoint must carry source=builtin: {body:?}"
+    );
+    assert!(
+        body.get("mcp_server").is_none() || body["mcp_server"].is_null(),
+        "builtin detail endpoint must not carry mcp_server: {body:?}"
     );
 }
