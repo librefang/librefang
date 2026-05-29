@@ -284,18 +284,22 @@ impl SubprocessTransport {
     }
 }
 
-/// Outcome of a bounded line read.
-enum Line {
+/// Outcome of a [`read_capped_line`] call.
+pub enum Line {
+    /// A `\n`-terminated line (terminator stripped), decoded lossily as UTF-8.
     Data(String),
+    /// The stream reached EOF with no pending bytes.
     Eof,
+    /// The line exceeded the cap before a `\n` was seen; the caller should
+    /// treat the stream as untrustworthy and stop reading it.
     TooLong,
 }
 
 /// Read one `\n`-terminated line, capping accumulation at `max`.
-/// `reader` is a `BufReader`, so per-byte reads are served from its buffer (no
-/// syscall per byte); this bounds memory without the unbounded-line risk of
-/// `AsyncBufReadExt::lines()` / `read_until`.
-async fn read_capped_line<R: AsyncReadExt + Unpin>(
+/// `reader` is typically a `BufReader`, so per-byte reads are served from its
+/// buffer (no syscall per byte); this bounds memory without the unbounded-line
+/// risk of `AsyncBufReadExt::lines()` / `read_until`.
+pub async fn read_capped_line<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
@@ -317,6 +321,31 @@ async fn read_capped_line<R: AsyncReadExt + Unpin>(
             return Ok(Line::TooLong);
         }
         buf.push(byte[0]);
+    }
+}
+
+/// Write `line` to `stdin` and flush, bounded by `timeout`.
+///
+/// Bounds the write itself, not just a later reply wait: a child that stops
+/// reading its stdin fills the pipe buffer and an unbounded `write_all` would
+/// block forever. On timeout this returns a `TimedOut` error so the caller can
+/// treat the transport as dead. `line` should already include any trailing
+/// `\n`.
+pub async fn write_line_timeout(
+    stdin: &mut ChildStdin,
+    line: &[u8],
+    timeout: Duration,
+) -> std::io::Result<()> {
+    let write = async {
+        stdin.write_all(line).await?;
+        stdin.flush().await
+    };
+    match tokio::time::timeout(timeout, write).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "subprocess stdin write timed out",
+        )),
     }
 }
 
