@@ -1520,3 +1520,141 @@ fn audit_chain_holds_under_concurrent_record() {
         );
     }
 }
+
+#[test]
+fn delimited_hash_distinguishes_field_boundary_shifts() {
+    // The core fix: shifting bytes across the detail/outcome boundary (two
+    // adjacent free-form fields) must change the digest. Pre-fix (v1) these
+    // two decompositions collided — `detail="ab", outcome="c"` and
+    // `detail="a", outcome="bc"` both hashed "...abc..." — letting an
+    // attacker with audit_entries write access move text across the field
+    // boundary while keeping the stored hash (and thus the Merkle link) valid.
+    let v2_ab_c = compute_entry_hash(
+        1,
+        "2026-01-01T00:00:00Z",
+        "agent-1",
+        &AuditAction::ToolInvoke,
+        "ab",
+        "c",
+        None,
+        None,
+        "0",
+    );
+    let v2_a_bc = compute_entry_hash(
+        1,
+        "2026-01-01T00:00:00Z",
+        "agent-1",
+        &AuditAction::ToolInvoke,
+        "a",
+        "bc",
+        None,
+        None,
+        "0",
+    );
+    assert_ne!(
+        v2_ab_c, v2_a_bc,
+        "v2 must not collide across the detail/outcome split"
+    );
+
+    // Document the v1 weakness the fix addresses: legacy hashing DID collide.
+    let v1_ab_c = compute_entry_hash_legacy(
+        1,
+        "2026-01-01T00:00:00Z",
+        "agent-1",
+        &AuditAction::ToolInvoke,
+        "ab",
+        "c",
+        None,
+        None,
+        "0",
+    );
+    let v1_a_bc = compute_entry_hash_legacy(
+        1,
+        "2026-01-01T00:00:00Z",
+        "agent-1",
+        &AuditAction::ToolInvoke,
+        "a",
+        "bc",
+        None,
+        None,
+        "0",
+    );
+    assert_eq!(
+        v1_ab_c, v1_a_bc,
+        "legacy layout collided (this is the bug being fixed)"
+    );
+    // And v2 must differ from v1 for the same inputs (format actually changed).
+    assert_ne!(
+        v2_ab_c, v1_ab_c,
+        "v2 layout must differ from v1 for identical fields"
+    );
+}
+
+#[test]
+fn verify_integrity_accepts_legacy_hashed_entries() {
+    // An audit log written before the delimiter fix (rows hashed with the v1
+    // layout) must still verify after upgrade — no false tamper alarms.
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+
+        // Two chained entries hashed with the LEGACY (v1) algorithm.
+        let genesis = "0".repeat(64);
+        let h0 = compute_entry_hash_legacy(
+            0,
+            "2026-01-01T00:00:00Z",
+            "agent-1",
+            &AuditAction::AgentSpawn,
+            "boot",
+            "ok",
+            None,
+            None,
+            &genesis,
+        );
+        let h1 = compute_entry_hash_legacy(
+            1,
+            "2026-01-01T00:00:01Z",
+            "agent-1",
+            &AuditAction::ShellExec,
+            "ls",
+            "ok",
+            None,
+            None,
+            &h0,
+        );
+        conn.execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (0,'2026-01-01T00:00:00Z','agent-1','AgentSpawn','boot','ok',NULL,NULL,?1,?2)",
+            rusqlite::params![genesis, h0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (1,'2026-01-01T00:00:01Z','agent-1','ShellExec','ls','ok',NULL,NULL,?1,?2)",
+            rusqlite::params![h0, h1],
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool.clone());
+    assert!(
+        log.verify_integrity().is_ok(),
+        "legacy-hashed entries must verify via the v1 fallback"
+    );
+}

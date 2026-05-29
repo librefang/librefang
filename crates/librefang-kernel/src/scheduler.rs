@@ -158,9 +158,11 @@ impl AgentScheduler {
             // Hourly absolute quota counts every token (cache hits included)
             // because the operator-facing knob `max_llm_tokens_per_hour` is
             // historically "raw tokens per hour" — keep that contract.
-            tracker.total_tokens += usage.total();
-            tracker.input_tokens += usage.input_tokens;
-            tracker.output_tokens += usage.output_tokens;
+            // Saturating: `usage.*` is provider-supplied wire data, which the
+            // metering crate treats as untrusted and clamps the same way.
+            tracker.total_tokens = tracker.total_tokens.saturating_add(usage.total());
+            tracker.input_tokens = tracker.input_tokens.saturating_add(usage.input_tokens);
+            tracker.output_tokens = tracker.output_tokens.saturating_add(usage.output_tokens);
             tracker.llm_calls += 1;
             // Per-minute sliding window for burst detection (#4943): use
             // burst_tokens(), which excludes cache-read hits — they're
@@ -369,12 +371,14 @@ impl AgentScheduler {
                     .saturating_add(actual_tokens);
             } else {
                 // No reservation was made (no quota) — behave like record_usage
-                tracker.total_tokens += actual_tokens;
+                tracker.total_tokens = tracker.total_tokens.saturating_add(actual_tokens);
             }
 
-            // Per-dimension counters (never pre-charged)
-            tracker.input_tokens += usage.input_tokens;
-            tracker.output_tokens += usage.output_tokens;
+            // Per-dimension counters (never pre-charged). Saturating because
+            // `usage.*` is untrusted provider wire data (matches the metering
+            // crate's clamping of the same fields).
+            tracker.input_tokens = tracker.input_tokens.saturating_add(usage.input_tokens);
+            tracker.output_tokens = tracker.output_tokens.saturating_add(usage.output_tokens);
             tracker.llm_calls += 1;
 
             // Sliding-window for burst detection (#4943): see record_usage

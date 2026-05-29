@@ -29,7 +29,7 @@ require_approval = ["shell_exec", "file_write", "file_delete", "apply_patch"]
 timeout_secs = 60                      # 10..=300
 auto_approve_autonomous = false        # auto-approve when agent runs unattended
 auto_approve = false                   # clears the require list at boot
-trusted_senders = []                   # user IDs that bypass the gate
+trusted_senders = []                   # user IDs that skip the gate for low-risk tools (high-risk tools still gated)
 
 # Second factor
 second_factor = "none"                 # "none" | "totp" | "login" | "both"
@@ -220,6 +220,9 @@ re-enroll — this regenerates a fresh set.
    to disk, executes shell, or hits a mutating API.
 3. Configure `trusted_senders` only for first-party automation, never for
    shared webhook IDs.
+   A trusted sender skips the prompt only for low-risk tools.
+   High-risk tools — `shell_exec`, `file_write`, `file_delete`, `apply_patch`, and the control-plane tools `agent_spawn` / `agent_kill` / `config_set` / `kernel_reload` — always require explicit approval and remain subject to channel deny rules, even from a trusted sender.
+   The list is a convenience exemption, not a blanket waiver on code execution or destructive mutations.
 4. Use `totp_tools` to require the second factor on `shell_exec`,
    `file_delete`, and `apply_patch` even when the broader approval list is
    wider — a compromised first factor then still cannot run destructive tools.
