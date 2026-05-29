@@ -296,6 +296,15 @@ impl LibreFangKernel {
         )
         .map_err(|e| LibreFangError::BootFailed(format!("Memory init failed: {e}")))?;
 
+        // H5: sync the global consolidation engine's merge threshold with
+        // the configured proactive-memory threshold so the periodic kernel
+        // sweep and the per-agent on-demand consolidate (in
+        // `ProactiveMemoryStore::consolidate`) agree on what counts as a
+        // near-duplicate. Without this the global sweep stays at its
+        // hardcoded default while operators tune the on-demand path.
+        substrate
+            .set_consolidation_duplicate_threshold(config.proactive_memory.duplicate_threshold);
+
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {

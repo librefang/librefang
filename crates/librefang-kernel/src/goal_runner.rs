@@ -24,7 +24,7 @@
 //! (case-insensitive, last marker wins) so an agent that forgets the marker
 //! simply keeps iterating to the cap rather than failing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -162,6 +162,9 @@ struct RunHandle {
     task: JoinHandle<()>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
+    /// Monotonic id for this run, used by the task's self-cleanup so it only
+    /// removes its OWN registry entry — never a newer run that replaced it.
+    generation: u64,
 }
 
 /// Registry + driver for autonomous goal runs. One [`GoalRunner`] lives on the
@@ -169,6 +172,8 @@ struct RunHandle {
 pub struct GoalRunner {
     runs: Arc<DashMap<GoalId, RunHandle>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Source of monotonic run generations (see [`RunHandle::generation`]).
+    next_gen: Arc<AtomicU64>,
 }
 
 impl GoalRunner {
@@ -177,14 +182,8 @@ impl GoalRunner {
         Self {
             runs: Arc::new(DashMap::new()),
             shutdown_rx,
+            next_gen: Arc::new(AtomicU64::new(0)),
         }
-    }
-
-    /// Whether a run is currently active for `goal_id`.
-    pub fn is_running(&self, goal_id: GoalId) -> bool {
-        self.runs
-            .get(&goal_id)
-            .is_some_and(|h| !h.task.is_finished())
     }
 
     /// Snapshot the observable state of a goal's run, if one exists.
@@ -240,6 +239,7 @@ impl GoalRunner {
             updated_at: now,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
 
         let runs = self.runs.clone();
         let shutdown_rx = self.shutdown_rx.clone();
@@ -260,10 +260,23 @@ impl GoalRunner {
             .await;
             // Self-cleanup: drop the registry entry once the loop ends so a
             // stale handle does not linger (mirrors the background executor).
-            runs.remove(&goal_id);
+            // Guard on generation: if a concurrent `start()` already replaced
+            // this run, the entry now belongs to the NEW run — removing it
+            // unconditionally would orphan a live loop (unstoppable + invisible
+            // until it self-terminates at the iteration cap). `remove_if` only
+            // drops the entry when it is still ours.
+            runs.remove_if(&goal_id, |_, h| h.generation == generation);
         });
 
-        self.runs.insert(goal_id, RunHandle { task, state, stop });
+        self.runs.insert(
+            goal_id,
+            RunHandle {
+                task,
+                state,
+                stop,
+                generation,
+            },
+        );
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
     }
 }
@@ -525,5 +538,103 @@ mod tests {
         // Goal stays in progress, not completed.
         let stored = load_goal(&substrate, goal_id).unwrap();
         assert_eq!(stored.status, GoalStatus::InProgress);
+    }
+
+    fn mk_state(goal_id: GoalId, agent_id: AgentId, max_iterations: u32) -> Arc<Mutex<GoalRunState>> {
+        Arc::new(Mutex::new(GoalRunState {
+            goal_id,
+            agent_id,
+            phase: GoalRunPhase::Running,
+            iteration: 0,
+            max_iterations,
+            last_progress: 0,
+            last_error: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn run_loop_stops_when_agent_reports_blocked() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 10);
+
+        let send = |_a: AgentId, _p: String| async move { Ok("stuck\nGOAL_BLOCKED: need a key".to_string()) };
+        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        // Blocked must NOT mark the goal completed.
+        assert_eq!(load_goal(&substrate, goal.id).unwrap().status, GoalStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn run_loop_stops_immediately_when_stop_flag_preset() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 10);
+
+        // Operator stop is observed at the top of the loop before any tick.
+        let send = |_a: AgentId, _p: String| async move {
+            panic!("send_message must not be called once the stop flag is set");
+            #[allow(unreachable_code)]
+            Ok(String::new())
+        };
+        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(true)), rx).await;
+
+        let s = state.lock().await;
+        assert_eq!(s.phase, GoalRunPhase::Stopped);
+        assert_eq!(s.iteration, 0, "no tick should run");
+    }
+
+    #[tokio::test]
+    async fn run_loop_stops_immediately_on_shutdown_signal() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        // Shutdown already signalled.
+        let (_tx, rx) = watch::channel(true);
+        let state = mk_state(goal.id, agent_id, 10);
+
+        let send = |_a: AgentId, _p: String| async move {
+            panic!("send_message must not be called during shutdown");
+            #[allow(unreachable_code)]
+            Ok(String::new())
+        };
+        run_loop(goal.id, agent_id, 10, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_loop_breaks_after_consecutive_rate_limits() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 100);
+
+        // Every tick fails with the rate-limit marker; the circuit breaker must
+        // trip at MAX_RATE_LIMIT_STREAK rather than burning all 100 iterations.
+        // start_paused auto-advances the inter-tick sleeps so this is instant.
+        let send = |_a: AgentId, _p: String| async move {
+            Err(format!(
+                "provider quota exhausted {}",
+                librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER
+            ))
+        };
+        run_loop(goal.id, agent_id, 100, substrate.clone(), send, state.clone(), Arc::new(AtomicBool::new(false)), rx).await;
+
+        let s = state.lock().await;
+        assert_eq!(s.phase, GoalRunPhase::RateLimited);
+        assert!(s.iteration < 100, "must trip the breaker, not run to the cap");
     }
 }

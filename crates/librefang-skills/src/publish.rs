@@ -253,6 +253,28 @@ fn validate_manifest(manifest: &SkillManifest, source_dir: &Path) -> Result<(), 
                     entry_path.display()
                 )));
             }
+            // A `.wasm` entry must be a real WebAssembly binary — catches an
+            // unbuilt placeholder or a wrong path (e.g. pointing at the Rust
+            // source) before it is published or executed. A `.wat` (text)
+            // entry is accepted as-is; the sandbox compiles it.
+            if manifest.runtime.runtime_type == SkillRuntime::Wasm
+                && entry_path.extension().and_then(|e| e.to_str()) == Some("wasm")
+            {
+                use std::io::Read;
+                let is_wasm = std::fs::File::open(&entry_path)
+                    .and_then(|mut f| {
+                        let mut magic = [0u8; 4];
+                        f.read_exact(&mut magic).map(|_| magic)
+                    })
+                    .map(|magic| magic == *b"\0asm")
+                    .unwrap_or(false);
+                if !is_wasm {
+                    return Err(SkillError::InvalidManifest(format!(
+                        "WASM entry is not a valid WebAssembly module (missing \\0asm magic): {}",
+                        entry_path.display()
+                    )));
+                }
+            }
         }
         SkillRuntime::Builtin | SkillRuntime::PromptOnly => {}
     }
