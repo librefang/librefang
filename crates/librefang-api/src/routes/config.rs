@@ -323,11 +323,14 @@ api_key_env = "{api_key_env}"
     );
 
     if let Err(e) = crate::atomic_write(&config_path, config_content.as_bytes()) {
+        // Scrub the io error (audit: rusqlite-errors-leak) — path /
+        // permission detail stays in the log, generic body to client.
+        tracing::error!(error = %e, "failed to write config during init");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "status": "error",
-                "message": format!("Failed to write config: {e}")
+                "message": "Internal server error"
             })),
         )
             .into_response();
@@ -337,11 +340,16 @@ api_key_env = "{api_key_env}"
     // before this fix the result was swallowed and the handler reported success
     // even though the running daemon kept the stale config.
     if let Err(e) = state.kernel.reload_config().await {
+        // Scrub the reload error (audit: rusqlite-errors-leak) — the
+        // detail goes to the log; the client keeps the actionable
+        // status ("init succeeded but reload failed") without the raw
+        // chain.
+        tracing::error!(error = %e, "config reload failed after init");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "status": "reload_failed",
-                "message": format!("init succeeded but reload failed: {e}"),
+                "message": "init succeeded but reload failed",
                 "provider": provider,
                 "model": model,
             })),
@@ -2050,11 +2058,13 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
         match std::fs::read_to_string(&config_path) {
             Ok(content) => content,
             Err(e) => {
+                // Scrub the io error (audit: rusqlite-errors-leak).
+                tracing::error!(error = %e, "failed to read config for export");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(axum::http::header::CONTENT_TYPE, "application/json")],
                     Body::from(
-                        serde_json::json!({"status": "error", "error": format!("failed to read config: {e}")})
+                        serde_json::json!({"status": "error", "error": "Internal server error"})
                             .to_string(),
                     ),
                 )
@@ -2066,11 +2076,13 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
         match toml::to_string_pretty(&**state.kernel.config_ref()) {
             Ok(s) => s,
             Err(e) => {
+                // Scrub the serialize error (audit: rusqlite-errors-leak).
+                tracing::error!(error = %e, "failed to serialize config for export");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(axum::http::header::CONTENT_TYPE, "application/json")],
                     Body::from(
-                        serde_json::json!({"status": "error", "error": format!("failed to serialize config: {e}")})
+                        serde_json::json!({"status": "error", "error": "Internal server error"})
                             .to_string(),
                     ),
                 )
@@ -2530,11 +2542,14 @@ pub async fn config_set(
         match std::fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(e) => {
+                // Scrub the io error (audit: rusqlite-errors-leak) —
+                // path / permission detail stays in the log.
+                tracing::error!(error = %e, "could not read existing config.toml");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
                         "status": "error",
-                        "error": format!("could not read existing config.toml: {e}")
+                        "error": "Internal server error"
                     })),
                 );
             }
@@ -2667,9 +2682,11 @@ pub async fn config_set(
 
     // Write back — preserves comments, whitespace, and key ordering
     if let Err(e) = crate::atomic_write(&config_path, new_toml_str.as_bytes()) {
+        // Scrub the io error (audit: rusqlite-errors-leak).
+        tracing::error!(error = %e, "failed to write config.toml");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"status": "error", "error": format!("write failed: {e}")})),
+            Json(serde_json::json!({"status": "error", "error": "Internal server error"})),
         );
     }
 
