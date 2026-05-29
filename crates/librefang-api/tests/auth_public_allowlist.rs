@@ -65,7 +65,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -108,7 +108,7 @@ async fn boot_router_strict_reads() -> RouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()
@@ -677,7 +677,7 @@ async fn auth_providers_open_mode_returns_names_only() {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         ..KernelConfig::default()

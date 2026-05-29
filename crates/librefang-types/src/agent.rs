@@ -857,8 +857,12 @@ pub struct ModelConfig {
     /// API request body via `#[serde(flatten)]`. If a key conflicts with a
     /// standard field (e.g. `temperature`), the `extra_params` value takes
     /// precedence because it is serialized last.
+    ///
+    /// `BTreeMap` (not `HashMap`) so the flattened key order is deterministic
+    /// across processes — this map reaches the LLM wire request, and unstable
+    /// key order silently invalidates provider prompt caches (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ModelConfig {
@@ -873,7 +877,7 @@ impl Default for ModelConfig {
             base_url: None,
             context_window: None,
             max_output_tokens: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -889,9 +893,10 @@ pub struct FallbackModel {
     #[serde(default)]
     pub base_url: Option<String>,
     /// Provider-specific extension parameters that are flattened directly
-    /// into the API request body.
+    /// into the API request body. `BTreeMap` keeps the flattened key order
+    /// deterministic for prompt-cache stability (#3298).
     #[serde(default, flatten)]
-    pub extra_params: std::collections::HashMap<String, serde_json::Value>,
+    pub extra_params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Tool configuration within an agent manifest.
@@ -2427,7 +2432,7 @@ mod tests {
             model: "llama-3.3-70b".to_string(),
             api_key_env: Some("GROQ_API_KEY".to_string()),
             base_url: None,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackModel = serde_json::from_str(&json).unwrap();
@@ -2445,7 +2450,7 @@ mod tests {
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
-                extra_params: std::collections::HashMap::new(),
+                extra_params: std::collections::BTreeMap::new(),
             }]),
             ..Default::default()
         };
@@ -2920,7 +2925,7 @@ model = "llama-3.3-70b-versatile"
 
     #[test]
     fn test_model_config_extra_params_roundtrip() {
-        let mut extra = std::collections::HashMap::new();
+        let mut extra = std::collections::BTreeMap::new();
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
         extra.insert("memory_max_window".to_string(), serde_json::json!(50));
 

@@ -7554,7 +7554,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
@@ -7563,7 +7563,7 @@ mod tests {
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
 
@@ -7582,7 +7582,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
 
