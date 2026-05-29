@@ -117,7 +117,7 @@ pub struct ProactiveMemoryStore {
     /// both the running count (consolidate fires at
     /// `AUTO_CONSOLIDATE_EVERY = 10`) and the last-touched timestamp,
     /// so the maintenance sweep can evict slots that have been idle
-    /// for longer than `STALE_COUNTER_IDLE_WINDOW` regardless of
+    /// for longer than `STALE_COUNTER_IDLE_WINDOW_HOURS` regardless of
     /// their count. Pre-fix this was `HashMap<String, u32>`, which
     /// forced the sweep to use a count threshold and starved
     /// slow-burn agents (1 call per maintenance window or less)
@@ -127,6 +127,16 @@ pub struct ProactiveMemoryStore {
     last_decay_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
     /// Timestamp of the last session TTL cleanup run (at most once per hour).
     last_cleanup_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
+    /// Timestamp of the last `consolidation_counters` idle-window
+    /// prune (at most once per hour — review-followup #3). Without
+    /// this gate the prune ran on every `maybe_run_maintenance`
+    /// call, which is reachable from `search` / `auto_retrieve` /
+    /// `consolidate` and fires many times per second on a busy
+    /// daemon. The `HashMap::retain` itself is microseconds on
+    /// thousand-entry maps, but rate-limiting matches the existing
+    /// `last_decay_run` / `last_cleanup_run` pattern so all three
+    /// maintenance sub-tasks consume the same scheduling budget.
+    last_counter_prune: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
 }
 
 impl Clone for ProactiveMemoryStore {
@@ -142,6 +152,7 @@ impl Clone for ProactiveMemoryStore {
             consolidation_counters: Arc::clone(&self.consolidation_counters),
             last_decay_run: Arc::clone(&self.last_decay_run),
             last_cleanup_run: Arc::clone(&self.last_cleanup_run),
+            last_counter_prune: Arc::clone(&self.last_counter_prune),
         }
     }
 }
@@ -162,6 +173,7 @@ impl ProactiveMemoryStore {
             consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
             last_decay_run: Arc::new(Mutex::new(None)),
             last_cleanup_run: Arc::new(Mutex::new(None)),
+            last_counter_prune: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -184,6 +196,7 @@ impl ProactiveMemoryStore {
             consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
             last_decay_run: Arc::new(Mutex::new(None)),
             last_cleanup_run: Arc::new(Mutex::new(None)),
+            last_counter_prune: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -428,6 +441,36 @@ impl ProactiveMemoryStore {
     fn maybe_run_maintenance(&self) {
         self.maybe_decay_confidence();
         self.maybe_cleanup_expired();
+        self.maybe_prune_counters();
+    }
+
+    /// Prune idle entries from `consolidation_counters` if at least
+    /// one hour has elapsed since the last sweep.
+    ///
+    /// The pre-fix sweep ran on every `maybe_run_maintenance` call,
+    /// which is reachable from `search` / `auto_retrieve` /
+    /// `consolidate` and can fire many times per second on a busy
+    /// daemon. The `HashMap::retain` itself is microseconds on
+    /// thousand-entry maps, but rate-limiting matches the existing
+    /// `last_decay_run` / `last_cleanup_run` pattern so all three
+    /// maintenance sub-tasks consume the same scheduling budget
+    /// (review-followup #3).
+    fn maybe_prune_counters(&self) {
+        let now = Utc::now();
+        let mut guard = self
+            .last_counter_prune
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let should_run = match *guard {
+            Some(last) => (now - last) >= chrono::Duration::hours(1),
+            None => true,
+        };
+        if !should_run {
+            return;
+        }
+        *guard = Some(now);
+        drop(guard);
 
         // M11: keep `consolidation_counters` from holding stale entries.
         //
@@ -444,7 +487,7 @@ impl ProactiveMemoryStore {
         // entries — exactly the agents about to fire a real consolidate.
         //
         // Review-followup B: the sweep uses an *idle-window* check
-        // (`last_touched` older than `STALE_COUNTER_IDLE_WINDOW`)
+        // (`last_touched` older than `STALE_COUNTER_IDLE_WINDOW_HOURS`)
         // rather than a count threshold. A count threshold (followup
         // #2's `count >= STALE_COUNTER_FLOOR`) mitigated the original
         // wholesale reset but still starved slow-burn agents whose
@@ -455,8 +498,7 @@ impl ProactiveMemoryStore {
         // been touched within the window; a truly idle slot is
         // reclaimed within ~2 hours of going quiet.
         if let Ok(mut counters) = self.consolidation_counters.lock() {
-            let now = Utc::now();
-            let cutoff = now - STALE_COUNTER_IDLE_WINDOW;
+            let cutoff = now - chrono::Duration::hours(STALE_COUNTER_IDLE_WINDOW_HOURS);
             let before = counters.len();
             counters.retain(|_, entry| entry.last_touched >= cutoff);
             let dropped = before - counters.len();
@@ -464,7 +506,7 @@ impl ProactiveMemoryStore {
                 tracing::debug!(
                     dropped,
                     remaining = counters.len(),
-                    idle_window_hours = STALE_COUNTER_IDLE_WINDOW.num_hours(),
+                    idle_window_hours = STALE_COUNTER_IDLE_WINDOW_HOURS,
                     "Pruned idle consolidation counters"
                 );
             }
@@ -863,17 +905,27 @@ impl ProactiveMemoryStore {
             .decide_action(decision_item, &existing)
             .await?;
 
-        // Review-followup #5: strip the per-call threshold keys from the
-        // enriched clone the moment they stop being useful. Today both
-        // ADD and UPDATE branches build their stored metadata from the
-        // original `item.metadata` (NOT `enriched_item.metadata`), so
-        // the threshold keys never reach the `metadata` column. The
-        // strip is defensive insurance for the next refactorer: if
-        // someone repoints either branch at `enriched_item` (e.g. to
-        // pass extraction metadata through), the threshold pollution
-        // gets caught at the strip site, not silently persisted.
+        // Strip all of `add_with_decision`'s private stash keys from
+        // the enriched clone the moment they stop being useful. Today
+        // both ADD and UPDATE branches build their stored metadata
+        // from the original `item.metadata` (NOT
+        // `enriched_item.metadata`), so the stash keys never reach
+        // the `metadata` column. The strip is defensive insurance
+        // for the next refactorer: if someone repoints either branch
+        // at `enriched_item.metadata` (e.g. to pass extraction
+        // metadata through), the pollution gets caught at the strip
+        // site, not silently persisted.
+        //
+        // Review-followup #2: `_embedding` is stripped alongside the
+        // M14 threshold keys for consistency. The prior commit only
+        // removed the threshold keys; with an embedding driver
+        // configured, a future refactor pointing at
+        // `enriched_item.metadata` would have leaked the full
+        // embedding vector (~4 KB per memory at f32 × 1024 dims) into
+        // the JSON metadata column.
         enriched_item.metadata.remove("_update_threshold_same_cat");
         enriched_item.metadata.remove("_update_threshold_cross_cat");
+        enriched_item.metadata.remove("_embedding");
 
         match action {
             MemoryAction::Noop => {
@@ -2222,28 +2274,40 @@ fn parse_relation_type(s: &str) -> RelationType {
 /// entry is removed.
 const AUTO_CONSOLIDATE_EVERY: u32 = 10;
 
-/// Idle window before a `consolidation_counters` entry is considered
-/// stale and reclaimed by the maintenance sweep (M11). Any entry whose
-/// `last_touched` is older than this gets dropped on the next tick,
-/// regardless of its count value.
+/// Idle window (in hours) before a `consolidation_counters` entry is
+/// considered stale and reclaimed by the maintenance sweep (M11). Any
+/// entry whose `last_touched` is older than this gets dropped on the
+/// next tick, regardless of its count value.
 ///
 /// Set to 2 hours, which is `> 2× the rate-limit window` of the
-/// maintenance ticks themselves (decay + cleanup are gated at
-/// "at most once per hour" via `maybe_decay_confidence` /
-/// `maybe_cleanup_expired`). The double-window margin guarantees a
-/// slow-burn agent that fires `auto_memorize` once every maintenance
-/// window keeps its slot — its counter gets touched between every
-/// two consecutive prune passes — while a truly idle agent's slot
-/// is reclaimed within ~2 hours of going quiet.
+/// maintenance ticks themselves (decay + cleanup + counter prune are
+/// each gated at "at most once per hour" — see
+/// `maybe_decay_confidence` / `maybe_cleanup_expired` /
+/// `maybe_prune_counters`). The double-window margin guarantees a
+/// slow-burn agent that fires `auto_memorize` once between two
+/// consecutive maintenance ticks keeps its slot, while a truly idle
+/// agent's slot is reclaimed within ~2 hours of going quiet
+/// (review-followup #4 — phrased relative to the maintenance
+/// rate-limit window, not "consecutive prune passes" which is what
+/// the prior comment said but only happened to be true because the
+/// prune wasn't rate-limited yet).
 ///
-/// The previous fix (followup #2) used a *count threshold*
+/// The previous fix (round-1 followup #2) used a *count threshold*
 /// (`AUTO_CONSOLIDATE_EVERY / 4`), which mitigated but did not solve
 /// the slow-burn case: any agent firing ≤ 1× per maintenance window
 /// would still be reset before climbing past the floor. Using the
-/// last-touched timestamp instead — review followup B — closes the
+/// last-touched timestamp instead — round-2 followup B — closes the
 /// last gap by making "active" the real condition for keeping the
 /// slot, decoupled from how fast the counter climbs.
-const STALE_COUNTER_IDLE_WINDOW: chrono::Duration = chrono::Duration::hours(2);
+///
+/// Stored as `i64` rather than a `chrono::Duration` constant
+/// (review-followup #6): `chrono::Duration::hours` is a `const fn`
+/// at the currently pinned `chrono` version but the const-ness is
+/// not part of the stable API across `0.4.x` minors, so a future
+/// lockfile bump could silently break the build. `i64` hours +
+/// `chrono::Duration::hours(...)` at the call site stays valid
+/// regardless.
+const STALE_COUNTER_IDLE_WINDOW_HOURS: i64 = 2;
 
 /// Per-agent auto-consolidation state. `count` ticks up to
 /// `AUTO_CONSOLIDATE_EVERY`; `last_touched` records when the counter
@@ -3592,26 +3656,48 @@ mod tests {
         );
     }
 
-    /// M14 strip regression (review-followup C): a memory created via
-    /// `add()` (which goes through `add_with_decision`) must NOT have
-    /// the private `_update_threshold_*` keys in its stored metadata
-    /// column. Without this test, a future refactor that repoints the
-    /// ADD branch at `enriched_item.metadata` (instead of the original
-    /// `item.metadata`) would silently leak the threshold values into
-    /// the persisted row, and only the
+    /// M14 strip regression (review-followup C + #2): a memory created
+    /// via `add()` (which goes through `add_with_decision`) must NOT
+    /// have any of the private `_update_threshold_*` / `_embedding`
+    /// keys in its stored metadata column. Without this test, a
+    /// future refactor that repoints the ADD branch at
+    /// `enriched_item.metadata` (instead of the original
+    /// `item.metadata`) would silently leak both the threshold values
+    /// AND the embedding vector into the persisted row, and only the
     /// `decide_action_honors_config_update_thresholds` direct-trait
     /// test above would still pass — neither catches the persistence
     /// path.
+    ///
+    /// Crucially: we attach a mock embedding driver so the `_embedding`
+    /// stash path actually fires. Without it the assertion on
+    /// `_embedding` would be trivially true (the stash never happens →
+    /// nothing to strip → not in metadata). Mock returns a tiny fixed
+    /// vector so the round-trip is observable but cheap.
     #[tokio::test]
-    async fn add_with_decision_does_not_leak_threshold_keys_to_stored_metadata() {
+    async fn add_with_decision_does_not_leak_private_stash_keys_to_stored_metadata() {
+        struct MockEmbedding;
+        #[async_trait]
+        impl EmbeddingFn for MockEmbedding {
+            async fn embed_one(
+                &self,
+                _text: &str,
+            ) -> librefang_types::error::LibreFangResult<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+        }
+
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate))
+            .with_embedding(Arc::new(MockEmbedding));
         let agent_id = AgentId::new().to_string();
 
         // Drive the full `add_with_decision` path. "I prefer X" is a
         // canonical pattern the DefaultMemoryExtractor will pick up,
         // so this goes through the ADD branch (no existing candidate
-        // → no UPDATE possible).
+        // → no UPDATE possible). The mock embedding driver causes
+        // `_embedding` to land in `enriched_item.metadata` before
+        // `decide_action`, so the strip code on the post-decide path
+        // is the only thing keeping it out of the stored column.
         let added = store
             .add(
                 &[serde_json::json!({"role": "user", "content": "I prefer dark mode editors"})],
@@ -3629,21 +3715,17 @@ mod tests {
             "the row we just added must surface in list()"
         );
         for item in &listed {
-            assert!(
-                !item.metadata.contains_key("_update_threshold_same_cat"),
-                "_update_threshold_same_cat leaked into stored metadata: {:?}",
-                item.metadata
-            );
-            assert!(
-                !item.metadata.contains_key("_update_threshold_cross_cat"),
-                "_update_threshold_cross_cat leaked into stored metadata: {:?}",
-                item.metadata
-            );
-            assert!(
-                !item.metadata.contains_key("_embedding"),
-                "_embedding (sibling private key) leaked too: {:?}",
-                item.metadata
-            );
+            for private_key in [
+                "_update_threshold_same_cat",
+                "_update_threshold_cross_cat",
+                "_embedding",
+            ] {
+                assert!(
+                    !item.metadata.contains_key(private_key),
+                    "private stash key `{private_key}` leaked into stored metadata: {:?}",
+                    item.metadata
+                );
+            }
         }
     }
 
