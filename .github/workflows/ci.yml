@@ -50,6 +50,7 @@ jobs:
       full_run: ${{ steps.diff.outputs.full_run }}
       full_test: ${{ steps.diff.outputs.full_test }}
       crates: ${{ steps.diff.outputs.crates }}
+      skill_sdk: ${{ steps.diff.outputs.skill_sdk }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -88,6 +89,13 @@ jobs:
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
           CI=false;      has '^\.github/workflows/'                                   && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
+          # The WASM-skill guest SDK and its example are independent
+          # workspaces (own `[workspace]` roots), so the main RUST lane —
+          # which only builds the kernel workspace — never compiles them.
+          # Route their changes to a dedicated job that builds/tests the SDK
+          # and compiles the example for wasm32, guarding against drift from
+          # the sandbox guest ABI.
+          SKILL_SDK=false; has '^(sdk/rust/librefang-skill/|examples/custom-skill-wasm/)' && SKILL_SDK=true
           # Workspace-level Cargo manifest ≠ xtask source. A workspace
           # `Cargo.toml` change can shift dep versions, profile flags,
           # workspace lints, or membership — anything in the tree may
@@ -145,6 +153,7 @@ jobs:
             echo "install=$INSTALL"
             echo "full_run=$FULL"
             echo "full_test=$FULL_TEST"
+            echo "skill_sdk=$SKILL_SDK"
           } >> "$GITHUB_OUTPUT"
           echo "Route: full_run=$FULL ($REASON), full_test=$FULL_TEST ($TREASON)"
 
@@ -269,6 +278,39 @@ jobs:
       # flipped to --strict. See docs/architecture/api-conventions.md.
       - name: Sentinel-pattern lint (warn-only)
         run: scripts/check-no-empty-string-sentinels.sh
+
+  # ── WASM skill guest SDK + example ──────────────────────────────────────────────
+  # `sdk/rust/librefang-skill` and `examples/custom-skill-wasm` are independent
+  # Cargo workspaces (own `[workspace]` roots) so the kernel-workspace lanes
+  # never touch them. This job fmt/clippy/tests the SDK and compiles the example
+  # for wasm32-unknown-unknown — the target the sandbox actually loads — so the
+  # SDK can't silently drift from the sandbox guest ABI. Gated to the relevant
+  # paths so unrelated PRs don't pay for it.
+  skills-wasm-sdk:
+    name: WASM Skill SDK
+    needs: changes
+    if: needs.changes.outputs.skill_sdk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            sdk/rust/librefang-skill
+            examples/custom-skill-wasm
+      - name: SDK — fmt, clippy, test
+        working-directory: sdk/rust/librefang-skill
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: Example — build for wasm32
+        working-directory: examples/custom-skill-wasm
+        run: cargo build --release --target wasm32-unknown-unknown
 
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]

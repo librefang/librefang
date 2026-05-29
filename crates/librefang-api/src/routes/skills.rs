@@ -6366,6 +6366,95 @@ mod tests {
         }
     }
 
+    /// Regression for #5799: patching taint_scanning=false on one server must
+    /// not affect the taint_scanning value of any other server in the file.
+    ///
+    /// The upsert reads the whole config.toml, replaces the matching entry,
+    /// and re-serialises. This test confirms the round-trip preserves each
+    /// server's independent taint_scanning field so the two-server scenario
+    /// reported in #5799 (one disabled, one still enabled) survives a write.
+    #[test]
+    fn upsert_mcp_server_taint_scanning_false_does_not_affect_other_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        // Add server A (taint enabled, the default).
+        let server_a = McpServerConfigEntry {
+            name: "server-a".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec!["mcp-a".to_string()],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+        upsert_mcp_server_config(&config_path, &server_a).unwrap();
+
+        // Add server B (taint also enabled initially).
+        let server_b = McpServerConfigEntry {
+            name: "server-b".to_string(),
+            template_id: None,
+            transport: Some(McpTransportEntry::Stdio {
+                command: "npx".to_string(),
+                args: vec!["mcp-b".to_string()],
+            }),
+            timeout_secs: 30,
+            env: vec![],
+            headers: vec![],
+            oauth: None,
+            taint_scanning: true,
+            taint_policy: None,
+        };
+        upsert_mcp_server_config(&config_path, &server_b).unwrap();
+
+        // Simulate the PATCH /api/mcp/servers/server-a/taint disabling scanning on A.
+        let server_a_patched = McpServerConfigEntry {
+            name: "server-a".to_string(),
+            taint_scanning: false,
+            ..server_a.clone()
+        };
+        upsert_mcp_server_config(&config_path, &server_a_patched).unwrap();
+
+        // Deserialise and assert per-server independence.
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            mcp_servers: Vec<McpServerConfigEntry>,
+        }
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: Wrapper = toml::from_str(&raw).expect("round-tripped TOML must parse cleanly");
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            2,
+            "must still have exactly 2 servers"
+        );
+
+        let a = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-a")
+            .expect("server-a missing");
+        let b = parsed
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "server-b")
+            .expect("server-b missing");
+
+        assert!(
+            !a.taint_scanning,
+            "server-a must have taint_scanning=false after patch"
+        );
+        assert!(
+            b.taint_scanning,
+            "server-b must retain taint_scanning=true — patching server-a must not affect it"
+        );
+    }
+
     // 16 channel-config tests (upsert / remove / append / update /
     // remove_channel_instance, AoT-conflict guards, legacy-table
     // promotion) retired alongside the helper functions they
