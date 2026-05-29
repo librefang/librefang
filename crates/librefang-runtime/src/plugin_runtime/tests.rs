@@ -11,6 +11,23 @@ fn version_args_are_runtime_specific() {
     assert_eq!(PluginRuntime::Ruby.version_args(), &["--version"]);
 }
 
+/// Secure-by-default (#2): a `HookConfig` built without explicit overrides
+/// must deny both network and filesystem. A plugin that needs either must
+/// opt in. Regression guard against silently reverting to the old
+/// allow-by-default sandbox-bypass posture.
+#[test]
+fn hook_config_default_denies_network_and_filesystem() {
+    let c = HookConfig::default();
+    assert!(
+        !c.allow_network,
+        "HookConfig::default() must deny network (secure-by-default)"
+    );
+    assert!(
+        !c.allow_filesystem,
+        "HookConfig::default() must deny filesystem (secure-by-default)"
+    );
+}
+
 #[test]
 fn plugin_stderr_target_is_stable() {
     // Operator log filters and journalctl pipelines key off this
@@ -196,10 +213,59 @@ async fn native_runtime_round_trip() {
         hook.to_str().unwrap(),
         PluginRuntime::Native,
         &input,
-        &HookConfig::default(),
+        // This test pins the spawn / JSON round-trip path with the sandbox
+        // explicitly opened. The locked-down (deny-by-default) path is
+        // covered separately by `locked_down_default_hook_completes_round_trip`.
+        &HookConfig {
+            allow_network: true,
+            allow_filesystem: true,
+            ..Default::default()
+        },
     )
     .await
     .expect("native hook ran");
+    assert_eq!(out["type"], "ingest_result");
+    assert!(out["memories"].is_array());
+}
+
+/// Secure-by-default end-to-end (#2): a hook run under the *default* config
+/// — deny network, deny filesystem, with `seccomp-sandbox` now in the
+/// default feature set — must still complete a normal JSON round-trip.
+/// On Linux the child runs behind the unconditional seccomp `KillProcess`
+/// allowlist; this is the regression guard for the allowlist being complete
+/// enough to launch a plain `/bin/sh` interpreter. A too-narrow allowlist
+/// SIGSYS-kills the child before it reads stdin, surfacing as "Broken pipe"
+/// (the failure mode that originally blocked enabling seccomp by default).
+#[cfg(unix)]
+#[tokio::test]
+async fn locked_down_default_hook_completes_round_trip() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let hook = tmp.path().join("locked_hook");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nread _input\nprintf '{\"type\":\"ingest_result\",\"memories\":[]}\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let input = serde_json::json!({
+        "type": "ingest",
+        "agent_id": "agent-7",
+        "message": "locked down",
+    });
+    // `HookConfig::default()` is now deny-network + deny-filesystem. With the
+    // default feature set, the seccomp filter is applied unconditionally on
+    // Linux — the round trip must still succeed.
+    let out = run_hook_json(
+        "ingest",
+        hook.to_str().unwrap(),
+        PluginRuntime::Native,
+        &input,
+        &HookConfig::default(),
+    )
+    .await
+    .expect("locked-down hook ran under default sandbox");
     assert_eq!(out["type"], "ingest_result");
     assert!(out["memories"].is_array());
 }
@@ -243,7 +309,13 @@ async fn python_runtime_round_trip() {
         hook.to_str().unwrap(),
         PluginRuntime::Python,
         &input,
-        &HookConfig::default(),
+        // Spawn / round-trip path with the sandbox explicitly opened (see
+        // native_runtime_round_trip).
+        &HookConfig {
+            allow_network: true,
+            allow_filesystem: true,
+            ..Default::default()
+        },
     )
     .await
     .expect("python hook ran");
@@ -263,6 +335,10 @@ async fn native_runtime_timeout_is_enforced() {
 
     let config = HookConfig {
         timeout_secs: 1,
+        // Exercises the timeout path; sandbox opened so the child reaches the
+        // `sleep` (the locked-down path is covered separately).
+        allow_network: true,
+        allow_filesystem: true,
         ..Default::default()
     };
     let err = run_hook_json(
@@ -305,6 +381,10 @@ async fn overflow_kills_child_without_waiting_for_timeout() {
 
     let config = HookConfig {
         timeout_secs: 30,
+        // Exercises the stream-overflow kill path; sandbox opened (see
+        // native_runtime_round_trip).
+        allow_network: true,
+        allow_filesystem: true,
         ..Default::default()
     };
     let started = std::time::Instant::now();

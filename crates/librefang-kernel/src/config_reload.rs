@@ -650,6 +650,10 @@ pub fn build_reload_plan_with_caps(
             "provider_request_timeout_secs",
         );
         restart_if_changed(
+            field_changed(&old.provider_max_retries, &new.provider_max_retries),
+            "provider_max_retries",
+        );
+        restart_if_changed(
             field_changed(&old.provider_proxy_urls, &new.provider_proxy_urls),
             "provider_proxy_urls",
         );
@@ -946,6 +950,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "azure_openai",
         "oauth",
         "provider_request_timeout_secs",
+        "provider_max_retries",
         "provider_proxy_urls",
         "local_probe_interval_secs",
         "health_check",
