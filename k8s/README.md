@@ -147,10 +147,28 @@ canonical list. At minimum:
   Basic Auth credentials. Created separately from `bossfang-secrets`; see
   the "Edge auth" section above for the generation recipe.
 
+## CI/CD
+
+`.github/workflows/docker-publish.yml` builds + pushes the image to GCR on
+every push to `main` (paths: `Dockerfile`, `Cargo.*`, `crates/**`,
+`deploy/**`, dashboard, the workflow itself) and then **auto-deploys**: the
+`Deploy to GKE` step rolls the running Deployment to the freshly-built
+`:${git_sha}` via `kubectl set image` + `kubectl rollout status`. The CI
+service account (`github-actions@prometheus-461323`) already holds
+`roles/container.developer`, so no extra IAM is needed.
+
+This auto-deploy is **image-only**. Changes to config, the SecurityPolicy,
+the StatefulSet, etc. are NOT pushed by CI — apply those manually with
+`kubectl apply -k k8s/overlays/production-gke` when they change. The
+overlay's committed `newTag` is the fresh-cluster bootstrap value and may
+lag the live image (which tracks the latest `main` build); that drift is
+cosmetic.
+
 ## What this does NOT cover
 
-- **CI/CD image build & push pipeline.** Follow-up; for now build & push
-  manually before each deploy.
+- **GitOps reconciliation (ArgoCD).** Image deploys are imperative
+  (`kubectl set image` from CI). A pull-based ArgoCD Application watching
+  this repo would also close source↔cluster drift on config changes.
 - **Sealed Secrets / External Secrets Operator / Secret Manager wiring.**
   This ships a raw `Secret` template; secrets management migration is a
   separate concern.
