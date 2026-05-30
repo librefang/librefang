@@ -210,6 +210,44 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
     false
 }
 
+/// Build the 403 response for an RBAC denial and record it in the audit log.
+///
+/// Shared by the session-token and per-user-API-key auth branches so both
+/// enforce `user_role_allows_request` identically — previously only the
+/// per-user-key branch gated, while a session token was trusted with no
+/// role check (latent: all sessions are Owner today, but a future
+/// SSO-mapped non-Owner session would have bypassed Owner-only writes).
+fn rbac_denied_response(
+    auth_state: &AuthState,
+    method: &axum::http::Method,
+    path: &str,
+    role: UserRole,
+    user_id: UserId,
+    lang: &'static str,
+) -> Response<Body> {
+    if let Some(ref audit) = auth_state.audit_log {
+        audit.record_with_context(
+            "system",
+            librefang_kernel::audit::AuditAction::PermissionDenied,
+            format!("{method} {path}"),
+            format!("role={role}"),
+            Some(user_id),
+            Some("api".to_string()),
+        );
+    }
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .header("content-language", lang)
+        .body(Body::from(
+            serde_json::json!({
+                "error": format!("Role '{role}' is not allowed to access this endpoint")
+            })
+            .to_string(),
+        ))
+        .unwrap_or_default()
+}
+
 /// Pull a caller-provided token from the standard locations the auth path
 /// understands. Precedence (matches the non-loopback flow at `auth(...)`):
 ///   1. `Authorization: Bearer <x>`
@@ -1449,6 +1487,16 @@ pub async fn auth(
             if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
                 let role = UserRole::from_str_role(&role_str);
                 let user_id = UserId::from_name(&name);
+                // Enforce the same RBAC gate as the per-user-API-key branch:
+                // a session's role must be allowed to reach this endpoint.
+                if !user_role_allows_request(role, &method, path) {
+                    let lang = request
+                        .extensions()
+                        .get::<RequestLanguage>()
+                        .map(|rl| rl.0)
+                        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+                    return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
+                }
                 request.extensions_mut().insert(AuthenticatedApiUser {
                     name,
                     role,
@@ -1465,41 +1513,23 @@ pub async fn auth(
             .cloned()
         {
             if !user_role_allows_request(user.role, &method, path) {
-                // RBAC M5: surface the denial in the hash-chained audit
-                // log so an operator can correlate 403s with the user
-                // who tripped them. Best-effort — we do not have a
-                // direct kernel handle in the middleware extension so
-                // we read it back via the `audit_log_handle` injected
-                // into AuthState at server build time.
-                if let Some(ref audit) = auth_state.audit_log {
-                    audit.record_with_context(
-                        "system",
-                        librefang_kernel::audit::AuditAction::PermissionDenied,
-                        format!("{} {}", method, path),
-                        format!("role={}", user.role),
-                        Some(user.user_id),
-                        Some("api".to_string()),
-                    );
-                }
+                // RBAC M5: `rbac_denied_response` surfaces the denial in the
+                // hash-chained audit log (best-effort via the `audit_log`
+                // handle injected into AuthState at server build time) and
+                // returns the localized 403. Shared with the session branch.
                 let lang = request
                     .extensions()
                     .get::<RequestLanguage>()
                     .map(|rl| rl.0)
                     .unwrap_or(i18n::DEFAULT_LANGUAGE);
-                return Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .header("content-type", "application/json")
-                    .header("content-language", lang)
-                    .body(Body::from(
-                        serde_json::json!({
-                            "error": format!(
-                                "Role '{}' is not allowed to access this endpoint",
-                                user.role
-                            )
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap_or_default();
+                return rbac_denied_response(
+                    &auth_state,
+                    &method,
+                    path,
+                    user.role,
+                    user.user_id,
+                    lang,
+                );
             }
 
             request.extensions_mut().insert(AuthenticatedApiUser {

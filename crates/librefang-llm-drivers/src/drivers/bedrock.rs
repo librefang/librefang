@@ -258,6 +258,13 @@ struct BedrockResponseToolUse {
 struct BedrockUsage {
     input_tokens: u64,
     output_tokens: u64,
+    // Prompt-cache counters from the Converse API. Like Anthropic native,
+    // `input_tokens` reports NEW input only with these as separate buckets;
+    // absent for models / requests without caching, so default to 0.
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_write_input_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -721,13 +728,16 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
         stop_reason,
         tool_calls,
         usage: TokenUsage {
-            input_tokens: resp.usage.input_tokens,
+            // Normalize to the workspace convention (see TokenUsage docs and
+            // anthropic.rs): `input_tokens` = TOTAL prompt including cached.
+            // Bedrock Converse reports `inputTokens` as NEW input only with
+            // cacheRead / cacheWrite as separate buckets, so fold them in.
+            input_tokens: resp.usage.input_tokens
+                + resp.usage.cache_read_input_tokens
+                + resp.usage.cache_write_input_tokens,
             output_tokens: resp.usage.output_tokens,
-            // Bedrock Converse API does not yet expose prompt-cache token
-            // counters separately, so report zero — the agent loop treats
-            // missing cache stats the same as no caching.
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: resp.usage.cache_write_input_tokens,
+            cache_read_input_tokens: resp.usage.cache_read_input_tokens,
         },
         actual_provider: None,
     })
@@ -1011,6 +1021,8 @@ mod tests {
             usage: BedrockUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         };
         let result = convert_response(resp).unwrap();
@@ -1018,6 +1030,35 @@ mod tests {
         assert_eq!(result.usage.input_tokens, 10);
         assert_eq!(result.usage.output_tokens, 5);
         assert!(matches!(result.stop_reason, StopReason::EndTurn));
+    }
+
+    #[test]
+    fn test_convert_response_folds_cache_tokens_into_input() {
+        // Converse reports inputTokens as NEW input only; cacheRead/cacheWrite
+        // are separate. Normalize input_tokens to the total prompt and surface
+        // the buckets so metering applies cache pricing.
+        let resp = ConverseResponse {
+            output: ConverseOutput {
+                message: BedrockResponseMessage {
+                    role: "assistant".to_string(),
+                    content: vec![BedrockResponseContent::Text {
+                        text: "Hi".to_string(),
+                    }],
+                },
+            },
+            stop_reason: "end_turn".to_string(),
+            usage: BedrockUsage {
+                input_tokens: 20,
+                output_tokens: 5,
+                cache_read_input_tokens: 70,
+                cache_write_input_tokens: 10,
+            },
+        };
+        let result = convert_response(resp).unwrap();
+        // 20 new + 70 read + 10 write = 100 total prompt.
+        assert_eq!(result.usage.input_tokens, 100);
+        assert_eq!(result.usage.cache_read_input_tokens, 70);
+        assert_eq!(result.usage.cache_creation_input_tokens, 10);
     }
 
     #[test]
@@ -1039,6 +1080,8 @@ mod tests {
             usage: BedrockUsage {
                 input_tokens: 15,
                 output_tokens: 8,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         };
         let result = convert_response(resp).unwrap();

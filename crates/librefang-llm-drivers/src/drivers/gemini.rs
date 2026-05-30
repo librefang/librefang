@@ -252,6 +252,11 @@ struct GeminiUsageMetadata {
     // models — `#[serde(default)]` keeps it at 0 there.
     #[serde(default)]
     thoughts_token_count: u64,
+    // Prompt tokens served from Gemini context cache. A subset of
+    // `prompt_token_count` (which is the total), re-priced at the cache-read
+    // rate. Absent when caching is inactive — `#[serde(default)]` keeps it 0.
+    #[serde(default)]
+    cached_content_token_count: u64,
 }
 
 /// Gemini API error response.
@@ -596,6 +601,9 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
             // Thinking models bill thoughts as output (#3479); fold them in
             // so metering doesn't undercount by 5-25x on reasoning runs.
             output_tokens: u.candidates_token_count + u.thoughts_token_count,
+            // Cached prompt tokens (subset of input_tokens) so metering can
+            // apply the reduced cache-read rate (#5870-cluster).
+            cache_read_input_tokens: u.cached_content_token_count,
             ..Default::default()
         })
         .unwrap_or_default();
@@ -650,7 +658,7 @@ pub(crate) async fn stream_gemini_sse(
     let mut thinking_content = String::new();
     let mut text_thought_sig: Option<String> = None;
     let mut thinking_thought_sig: Option<String> = None;
-    let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
+    let mut fn_calls: Vec<(String, serde_json::Value, Option<String>, String)> = Vec::new();
     let mut finish_reason: Option<String> = None;
     let mut usage = TokenUsage::default();
     // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
@@ -701,6 +709,9 @@ pub(crate) async fn stream_gemini_sse(
                 // #3479: include thinking tokens in output (Gemini bills them
                 // as output but reports them separately).
                 usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
+                // Cached prompt tokens (subset of input_tokens) for cache-read
+                // pricing.
+                usage.cache_read_input_tokens = u.cached_content_token_count;
             }
 
             for candidate in &json.candidates {
@@ -771,15 +782,19 @@ pub(crate) async fn stream_gemini_sse(
                                     receiver_dropped,
                                     tx,
                                     StreamEvent::ToolUseEnd {
-                                        id,
+                                        id: id.clone(),
                                         name: function_call.name.clone(),
                                         input: function_call.args.clone(),
                                     }
                                 );
+                                // Carry the streamed id into the final response so
+                                // the ToolUse block / ToolCall match the
+                                // ToolUseStart/End events (#5870-cluster).
                                 fn_calls.push((
                                     function_call.name.clone(),
                                     function_call.args.clone(),
                                     thought_signature.clone(),
+                                    id,
                                 ));
                             }
                             GeminiPart::InlineData { .. } | GeminiPart::FunctionResponse { .. } => {
@@ -819,8 +834,7 @@ pub(crate) async fn stream_gemini_sse(
         });
     }
 
-    for (name, args, thought_sig) in fn_calls {
-        let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+    for (name, args, thought_sig, id) in fn_calls {
         let provider_metadata = thought_sig
             .as_ref()
             .map(|sig| serde_json::json!({ "thought_signature": sig }));
@@ -903,11 +917,12 @@ impl LlmDriver for GeminiDriver {
         // Configurable in-driver retry cap (#10); default 3.
         let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
+            // Authenticate via the `x-goog-api-key` header only (set below).
+            // The `?key=` query param is redundant with the header and would
+            // leak the raw key into the `debug!(url = ...)` log line.
             let url = format!(
-                "{}/v1beta/models/{}:generateContent?key={}",
-                self.base_url,
-                request.model,
-                self.api_key.as_str()
+                "{}/v1beta/models/{}:generateContent",
+                self.base_url, request.model
             );
             debug!(url = %url, attempt, "Sending Gemini API request");
 
@@ -1056,11 +1071,12 @@ impl LlmDriver for GeminiDriver {
         // Configurable in-driver retry cap (#10); default 3.
         let max_retries = self.max_retries;
         for attempt in 0..=max_retries {
+            // Authenticate via the `x-goog-api-key` header only (set below).
+            // The `?key=` query param is redundant with the header and would
+            // leak the raw key into the `debug!(url = ...)` log line.
             let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-                self.base_url,
-                request.model,
-                self.api_key.as_str()
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                self.base_url, request.model
             );
             debug!(url = %url, attempt, "Sending Gemini streaming request");
 
@@ -1167,7 +1183,7 @@ impl LlmDriver for GeminiDriver {
             // Thought signature for accumulated thinking content (last one wins)
             let mut thinking_thought_sig: Option<String> = None;
             // Track function calls: (name, args_json, thought_signature)
-            let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
+            let mut fn_calls: Vec<(String, serde_json::Value, Option<String>, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
             let mut receiver_dropped = false;
@@ -1298,7 +1314,7 @@ impl LlmDriver for GeminiDriver {
                                         }
                                         if tx
                                             .send(StreamEvent::ToolUseEnd {
-                                                id,
+                                                id: id.clone(),
                                                 name: function_call.name.clone(),
                                                 input: function_call.args.clone(),
                                             })
@@ -1307,10 +1323,14 @@ impl LlmDriver for GeminiDriver {
                                         {
                                             receiver_dropped = true;
                                         }
+                                        // Carry the streamed id into the final
+                                        // response so the ToolUse block / ToolCall
+                                        // match the emitted events (#5870-cluster).
                                         fn_calls.push((
                                             function_call.name.clone(),
                                             function_call.args.clone(),
                                             thought_signature.clone(),
+                                            id,
                                         ));
                                     }
                                     GeminiPart::InlineData { .. }
@@ -1350,8 +1370,7 @@ impl LlmDriver for GeminiDriver {
                 });
             }
 
-            for (name, args, thought_sig) in fn_calls {
-                let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+            for (name, args, thought_sig, id) in fn_calls {
                 let provider_metadata = thought_sig
                     .as_ref()
                     .map(|sig| serde_json::json!({ "thought_signature": sig }));
@@ -1657,6 +1676,7 @@ mod tests {
                 prompt_token_count: 5,
                 candidates_token_count: 3,
                 thoughts_token_count: 0,
+                cached_content_token_count: 0,
             }),
         };
 
@@ -1667,6 +1687,36 @@ mod tests {
         assert_eq!(completion.usage.input_tokens, 5);
         assert_eq!(completion.usage.output_tokens, 3);
         assert_eq!(completion.usage.total(), 8);
+    }
+
+    #[test]
+    fn test_convert_response_maps_cached_content_tokens() {
+        // cachedContentTokenCount is a subset of promptTokenCount, surfaced as
+        // cache_read_input_tokens so metering can apply the cache-read rate.
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: Some(GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart::Text {
+                        text: "Hi".to_string(),
+                        thought: false,
+                        thought_signature: None,
+                    }],
+                }),
+                finish_reason: Some("STOP".to_string()),
+            }],
+            usage_metadata: Some(GeminiUsageMetadata {
+                prompt_token_count: 100,
+                candidates_token_count: 10,
+                thoughts_token_count: 0,
+                cached_content_token_count: 80,
+            }),
+        };
+
+        let completion = convert_response(resp).unwrap();
+        // input_tokens stays the TOTAL prompt (cache read is a subset of it).
+        assert_eq!(completion.usage.input_tokens, 100);
+        assert_eq!(completion.usage.cache_read_input_tokens, 80);
     }
 
     #[test]
@@ -2301,6 +2351,7 @@ mod tests {
                 prompt_token_count: 10,
                 candidates_token_count: 8,
                 thoughts_token_count: 0,
+                cached_content_token_count: 0,
             }),
         };
 
