@@ -2222,6 +2222,36 @@ pub enum SidecarOverflowPolicy {
     DropNewest,
 }
 
+/// Built-in slash-command policy for a sidecar channel.
+///
+/// Ports the in-process `[channels.<name>.overrides]` command gating
+/// (`disable_commands` / `allowed_commands` / `blocked_commands`, #2063)
+/// to the sidecar architecture (#5841). A command that the policy
+/// rejects is **not** answered with an error — it is forwarded to the
+/// agent as plain text, so public-facing bots never reveal the
+/// existence of an internal command system to end users.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarCommandPolicy {
+    /// All built-in slash commands are honoured (current default
+    /// behaviour — preserves backward compatibility).
+    #[default]
+    Allow,
+    /// All built-in slash commands are disabled; any leading-slash text
+    /// is forwarded to the agent as normal content. Use for
+    /// public-facing bots where end users must not be able to switch
+    /// agents or reset sessions.
+    Disable,
+    /// Only the commands in `allowed_commands` are honoured; everything
+    /// else is forwarded as plain text.
+    Allowlist,
+    /// Every command except those in `blocked_commands` is honoured; the
+    /// blocked ones are forwarded as plain text.
+    Blocklist,
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -2290,6 +2320,32 @@ pub struct SidecarChannelConfig {
     /// What to do when `message_buffer` is full.
     #[serde(default)]
     pub overflow: SidecarOverflowPolicy,
+    /// Built-in slash-command policy for this channel (#5841). Ports the
+    /// in-process `disable_commands` / `allowed_commands` /
+    /// `blocked_commands` gating to sidecars. Defaults to `allow` so
+    /// existing configs keep honouring every command. A rejected command
+    /// is forwarded to the agent as plain text, never answered with an
+    /// "unknown command" error.
+    #[serde(default)]
+    pub command_policy: SidecarCommandPolicy,
+    /// Whitelist of built-in command names (without the leading `/`)
+    /// consulted when `command_policy = "allowlist"`. Entries may be
+    /// written with or without a leading slash.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Blacklist of built-in command names (without the leading `/`)
+    /// consulted when `command_policy = "blocklist"`. Entries may be
+    /// written with or without a leading slash.
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
+    /// Inbound message-coalescing window in milliseconds (#5841 / #4441).
+    /// When > 0, messages from the same sender arriving within the window
+    /// are buffered and dispatched as a single batched context, so a user
+    /// who forwards several messages in rapid succession produces one
+    /// agent invocation instead of racing concurrent ones on the same
+    /// session. Default `0` (disabled).
+    #[serde(default)]
+    pub message_coalesce_window_ms: u64,
 }
 
 fn default_sidecar_restart() -> bool {
@@ -7008,6 +7064,58 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_command_policy_and_coalesce_defaults_are_backward_compatible() {
+        // A minimal sidecar block (no command-policy / coalescing keys)
+        // must deserialize to the permissive defaults so existing configs
+        // keep honouring every command and run with coalescing off.
+        let toml_str = r#"
+            name = "telegram"
+            command = "python3"
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Allow);
+        assert!(cfg.allowed_commands.is_empty());
+        assert!(cfg.blocked_commands.is_empty());
+        assert_eq!(cfg.message_coalesce_window_ms, 0);
+    }
+
+    #[test]
+    fn sidecar_command_policy_disable_parses() {
+        let toml_str = r#"
+            name = "afina-sales-bot"
+            command = "python3"
+            command_policy = "disable"
+            message_coalesce_window_ms = 3000
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Disable);
+        assert_eq!(cfg.message_coalesce_window_ms, 3000);
+    }
+
+    #[test]
+    fn sidecar_command_policy_allowlist_and_blocklist_parse() {
+        let allow = r#"
+            name = "bot"
+            command = "python3"
+            command_policy = "allowlist"
+            allowed_commands = ["start", "/help"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(allow).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Allowlist);
+        assert_eq!(cfg.allowed_commands, vec!["start", "/help"]);
+
+        let block = r#"
+            name = "bot"
+            command = "python3"
+            command_policy = "blocklist"
+            blocked_commands = ["new", "reboot", "agent"]
+        "#;
+        let cfg: SidecarChannelConfig = toml::from_str(block).unwrap();
+        assert_eq!(cfg.command_policy, SidecarCommandPolicy::Blocklist);
+        assert_eq!(cfg.blocked_commands, vec!["new", "reboot", "agent"]);
+    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {

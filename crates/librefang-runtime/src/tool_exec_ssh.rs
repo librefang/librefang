@@ -19,7 +19,7 @@
 //! ## Auth
 //!
 //! - `key_path` set → public-key auth from the file (PEM / OpenSSH
-//!   formats supported by `russh-keys`). When the key file is encrypted,
+//!   formats supported by `russh::keys`). When the key file is encrypted,
 //!   set `key_passphrase_env` to the env var holding the passphrase.
 //! - `password_env` set → password auth from the named env var.
 //! - Neither set → falls back to `authenticate_none` ("none" auth
@@ -189,12 +189,12 @@ mod transport {
     use super::*;
     use russh::client;
     use russh::client::Handler;
-    use russh_keys::key::PublicKey;
-    // Imported anonymously: brings `public_key_bytes()` into scope on
-    // `russh_keys::key::PublicKey` for the host-key fingerprint hash
-    // below. `as _` signals to future maintainers that the symbol is
-    // not referenced by name and shouldn't be "cleaned up" as unused.
-    use russh_keys::PublicKeyBase64 as _;
+    // russh-keys was merged into `russh::keys` after 0.50; `ssh_key` is
+    // re-exported there. `load_secret_key` parses PEM / OpenSSH private
+    // keys; `PrivateKeyWithHashAlg` carries the negotiated RSA signature
+    // hash into publickey auth.
+    use russh::keys::ssh_key;
+    use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -223,17 +223,35 @@ mod transport {
         pub(super) verdict: Arc<Mutex<Option<HostKeyVerdict>>>,
     }
 
-    #[async_trait]
+    // russh 0.61's `client::Handler` is a native async trait
+    // (`-> impl Future + Send`), not an `#[async_trait]` one, so the impl
+    // uses a plain `async fn` rather than the macro.
     impl Handler for PinningHandler {
         type Error = russh::Error;
 
-        async fn check_server_key(&mut self, server_key: &PublicKey) -> Result<bool, Self::Error> {
-            // russh_keys 0.45 exposes a base64-style fingerprint via
-            // `PublicKey::fingerprint()`, e.g. `"AAAAB3...."`. Hash the
-            // wire-form public-key bytes ourselves so we control the
-            // pin format (hex SHA-256 of the SSH wire blob).
+        async fn check_server_key(
+            &mut self,
+            server_key: &ssh_key::PublicKey,
+        ) -> Result<bool, Self::Error> {
+            // Hash the wire-form public-key bytes ourselves so we control
+            // the pin format (hex SHA-256 of the SSH wire blob) — the same
+            // bytes `ssh-keygen -l` fingerprints. `to_bytes()` yields the
+            // binary key blob (not the OpenSSH text line), identical to the
+            // blob russh-keys 0.45 `public_key_bytes()` returned, so existing
+            // pins / known-hosts entries keep matching across the upgrade.
             use sha2::{Digest, Sha256};
-            let blob = server_key.public_key_bytes();
+            let blob = match server_key.to_bytes() {
+                Ok(b) => b,
+                Err(e) => {
+                    // A host key we can't even encode is one we can't verify
+                    // — fail closed rather than accept it.
+                    tracing::error!(
+                        error = %e,
+                        "tool_exec.ssh: cannot encode server host key for fingerprinting"
+                    );
+                    return Ok(false);
+                }
+            };
             let mut hasher = Sha256::new();
             hasher.update(&blob);
             let digest = hasher.finalize();
@@ -319,12 +337,13 @@ mod transport {
             .await
             .map_err(|e| ExecError::Connect(format!("ssh connect: {e}")))?;
 
-        // Authenticate. russh 0.45 returns `bool` directly from each
-        // authenticate_* call; no wrapper.
+        // Authenticate. russh 0.61's authenticate_* calls return an
+        // `AuthResult`; `.success()` reports whether the server accepted
+        // the method.
         let user = cfg.user.clone();
-        let auth_ok = if let Some(path) = &cfg.key_path {
+        let auth_res = if let Some(path) = &cfg.key_path {
             // Honor optional `key_passphrase_env` for encrypted keys.
-            // russh-keys 0.45 accepts an `Option<&str>` passphrase.
+            // `load_secret_key` accepts an `Option<&str>` passphrase.
             let passphrase: Option<String> = match &cfg.key_passphrase_env {
                 Some(env_name) if !env_name.is_empty() => {
                     Some(std::env::var(env_name).map_err(|_| {
@@ -335,10 +354,18 @@ mod transport {
                 }
                 _ => None,
             };
-            let key = russh_keys::load_secret_key(path, passphrase.as_deref())
+            let key = load_secret_key(path, passphrase.as_deref())
                 .map_err(|e| ExecError::AuthFailure(format!("ssh key {path:?}: {e}")))?;
+            // Negotiate the strongest RSA signature hash the server
+            // advertises (rsa-sha2-512/256 over legacy ssh-rsa/SHA-1).
+            // `None` for non-RSA keys, where the wrapper is a no-op.
+            let rsa_hash = session
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|e| ExecError::AuthFailure(format!("ssh rsa-hash negotiation: {e}")))?
+                .flatten();
             session
-                .authenticate_publickey(user, std::sync::Arc::new(key))
+                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash))
                 .await
                 .map_err(|e| ExecError::AuthFailure(format!("ssh publickey: {e}")))?
         } else if let Some(env_name) = &cfg.password_env {
@@ -356,7 +383,7 @@ mod transport {
                 .map_err(|e| ExecError::AuthFailure(format!("ssh none-auth: {e}")))?
         };
 
-        if !auth_ok {
+        if !auth_res.success() {
             return Err(ExecError::AuthFailure("ssh authentication failed".into()));
         }
 
@@ -433,7 +460,7 @@ mod transport {
                     // 128 + signum. Use `-2` for unknown signal names so
                     // the value is recognisably "not a real exit code".
                     //
-                    // russh 0.45's `Sig` is an enum without `Display` —
+                    // russh's `Sig` is an enum without `Display` —
                     // we render via `Debug` and accept either the
                     // `SIGTERM` form (some hosts) or the bare `TERM`
                     // form (russh's `Sig::TERM` variant) interchangeably.
@@ -483,7 +510,7 @@ mod transport {
         })
     }
 
-    /// `russh` 0.45 surfaces `signal_name` as the [`russh::Sig`] enum
+    /// `russh` surfaces `signal_name` as the [`russh::Sig`] enum
     /// without `Display`; callers render it via `Debug` first. We
     /// accept the `SIGTERM` and `TERM` forms interchangeably and also
     /// strip any `Sig::` / `Custom("...")` wrapper that `Debug` adds

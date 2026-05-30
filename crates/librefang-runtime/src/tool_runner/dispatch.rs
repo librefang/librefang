@@ -1320,9 +1320,12 @@ pub async fn execute_tool_raw(
 
         // Artifact retrieval tool — recovers content spilled to disk by the
         // artifact store when a tool result exceeded `spill_threshold_bytes`.
+        // (#3576: returns Result<String, ToolError>)
         "read_artifact" => {
             let artifact_dir = crate::artifact_store::default_artifact_storage_dir();
-            tool_read_artifact(input, &artifact_dir).await
+            tool_read_artifact(input, &artifact_dir)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Canvas / A2UI tool (#3576: returns Result<String, ToolError>)

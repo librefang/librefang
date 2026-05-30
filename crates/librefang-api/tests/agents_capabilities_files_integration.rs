@@ -115,6 +115,34 @@ fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
         .expect("spawn_agent")
 }
 
+/// Drop a minimal `skill.toml` into `<home>/skills/<name>/` so the kernel's
+/// registry picks it up on the next `reload_skills()`. Mirrors the helper in
+/// `skills_routes_test.rs` / `librefang_skills::registry::tests::create_test_skill`
+/// so the schema matches what `SkillRegistry::load_all` accepts. Used by the
+/// valid-allowlist round-trip below — the empty / rejection cases need no real
+/// skill on disk, but exercising a successful non-empty assignment does.
+fn install_skill(home: &std::path::Path, name: &str) {
+    let skill_dir = home.join("skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
+    let manifest = format!(
+        r#"[skill]
+name = "{name}"
+version = "0.1.0"
+description = "Test skill {name}"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "{name}_tool"
+description = "A test tool"
+input_schema = {{ type = "object" }}
+"#
+    );
+    std::fs::write(skill_dir.join("skill.toml"), manifest).expect("write skill.toml");
+}
+
 async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
     let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
@@ -505,6 +533,78 @@ async fn test_skills_set_empty_then_read_round_trip() {
         body["available"].is_array(),
         "GET should advertise available skills: {body:?}"
     );
+}
+
+/// Skills (#4917): assigning a *valid* non-empty allowlist persists and reads
+/// back, and `mode` flips from "all" to "allowlist". This is the happy path
+/// the dashboard's inline assignment UI drives — the empty round-trip above
+/// only proves the clear/all path, not that a concrete skill survives a PUT.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_skills_set_valid_allowlist_round_trip() {
+    let h = boot().await;
+    // Seed a real skill so the kernel's registry validation accepts it.
+    install_skill(h._tmp.path(), "round_trip_skill");
+    h.state.kernel.reload_skills();
+
+    let id = spawn_named(&h.state, "skills-allowlist");
+
+    // Before assignment the agent uses every registry skill → mode "all".
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["mode"], "all",
+        "fresh agent should default to all: {body:?}"
+    );
+    assert!(
+        body["available"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == "round_trip_skill")),
+        "seeded skill must surface in available: {body:?}"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["round_trip_skill"] }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "valid allowlist must succeed: {body:?}"
+    );
+    assert_eq!(body["skills"], serde_json::json!(["round_trip_skill"]));
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["assigned"],
+        serde_json::json!(["round_trip_skill"]),
+        "GET must reflect the assigned allowlist: {body:?}"
+    );
+    assert_eq!(
+        body["mode"], "allowlist",
+        "a non-empty allowlist flips mode to allowlist: {body:?}"
+    );
+
+    // Clearing it returns to all-mode — the dashboard's "Reset to all".
+    let (status, _body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": [] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(
+        body["mode"], "all",
+        "empty PUT returns to all-mode: {body:?}"
+    );
+    assert_eq!(body["assigned"], serde_json::json!([]));
 }
 
 /// Skills: an unknown skill name in a non-empty allowlist is rejected by the
