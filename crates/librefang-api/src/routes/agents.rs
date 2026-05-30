@@ -2893,6 +2893,7 @@ pub async fn get_agent(
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
+            "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
@@ -4838,6 +4839,13 @@ pub async fn patch_agent(
                 );
             }
         }
+    }
+
+    if let Some(auto_evolve) = body.get("auto_evolve").and_then(|v| v.as_bool()) {
+        let _ = state
+            .kernel
+            .agent_registry()
+            .update_auto_evolve(agent_id, auto_evolve);
     }
 
     // Persist updated entry to SQLite (skipped when the schedule branch

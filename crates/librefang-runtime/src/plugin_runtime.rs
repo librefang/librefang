@@ -912,6 +912,9 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_fstat,
         libc::SYS_newfstatat,
         libc::SYS_faccessat,
+        // glibc 2.33+ resolves library access through faccessat2 when the
+        // dynamic linker locates shared libraries for a freshly exec'd binary.
+        libc::SYS_faccessat2,
         libc::SYS_lseek,
         libc::SYS_dup,
         libc::SYS_dup3,
@@ -935,6 +938,10 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_getppid,
         libc::SYS_gettid,
         libc::SYS_set_tid_address,
+        // glibc registers the robust-mutex list and (2.35+) the restartable
+        // sequence area during process/thread init.
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
         libc::SYS_futex,
         libc::SYS_nanosleep,
         libc::SYS_clock_gettime,
@@ -957,6 +964,15 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_execveat,
         libc::SYS_wait4,
         libc::SYS_waitid,
+        // Job control: /bin/sh (dash) puts a spawned external command in its
+        // own process group via setpgid when a hook shells out (e.g. `sleep`).
+        // A hook that only uses shell builtins never trips this, which is why
+        // it slipped past the locked-down round-trip test.
+        libc::SYS_setpgid,
+        libc::SYS_getpgid,
+        libc::SYS_getpgrp,
+        libc::SYS_getsid,
+        libc::SYS_setsid,
         // I/O multiplexing — universal variants
         libc::SYS_pselect6,
         libc::SYS_ppoll,
@@ -1040,6 +1056,11 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_symlink,
         libc::SYS_readlink,
         libc::SYS_fork,
+        // Debian/Ubuntu `dash` (/bin/sh) is built with USE_VFORK, so it spawns
+        // external commands (e.g. a hook running `sleep`) via the x86_64 vfork
+        // syscall — absent on aarch64, which is why it was missing here and the
+        // spawn was SIGSYS-killed only on x86_64 CI.
+        libc::SYS_vfork,
         libc::SYS_arch_prctl,
         // Legacy resource-limit syscalls replaced by prlimit64 on aarch64
         libc::SYS_getrlimit,
