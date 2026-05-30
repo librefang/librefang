@@ -113,12 +113,21 @@ mod tests {
 
     #[tokio::test]
     async fn read_artifact_missing_artifact_surfaces_as_upstream() {
-        // A well-formed but nonexistent handle: the lookup failure inside
-        // `artifact_store::read` (still `Result<_, String>`) is lifted onto the
-        // `Upstream` variant verbatim, not flattened into `Internal`.
+        // A well-formed but nonexistent handle (passes `ArtifactHandle::parse`'s
+        // `sha256:` + 64-hex check, then misses `path.exists()`): the not-found
+        // lookup failure inside `artifact_store::read` (still `Result<_, String>`)
+        // is lifted onto the `Upstream` variant verbatim, not flattened into
+        // `Internal`. Asserting the message keeps this on the not-found path —
+        // a bare-prefix handle would short-circuit in `parse` and exercise a
+        // different error entirely while still matching `Upstream`.
         let dir = std::env::temp_dir();
-        let r =
-            tool_read_artifact(&json!({"handle": "art_0000000000000000000000000000"}), &dir).await;
-        assert!(matches!(r, Err(ToolError::Upstream { .. })));
+        let handle = "sha256:".to_string() + &"0".repeat(64);
+        let r = tool_read_artifact(&json!({ "handle": handle }), &dir).await;
+        match r {
+            Err(ToolError::Upstream { message, .. }) => {
+                assert!(message.contains("not found"), "got: {message}");
+            }
+            other => panic!("expected ToolError::Upstream, got: {other:?}"),
+        }
     }
 }
