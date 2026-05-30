@@ -132,6 +132,8 @@ export {
   // tools
   listTools,
   getAgentTools,
+  // per-agent skill assignment — read (#4917)
+  getAgentSkills,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -194,6 +196,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // per-agent skill assignment — write (#4917)
+  setAgentSkills,
   createAgentSession,
   switchAgentSession,
   deleteSession,

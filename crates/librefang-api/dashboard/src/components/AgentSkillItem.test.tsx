@@ -78,4 +78,50 @@ describe("AgentSkillItem", () => {
     await userEvent.click(screen.getByTestId("agent-skill-item"));
     expect(onClick).toHaveBeenCalledTimes(1);
   });
+
+  // Issue #4917 — inline assignment. The same row now renders a trailing
+  // ✕ (remove) for assigned skills and a ＋ (add) for available ones.
+
+  it("renders a remove button and fires onRemove without bubbling to the row", async () => {
+    const onClick = vi.fn();
+    const onRemove = vi.fn();
+    render(
+      <AgentSkillItem
+        name="web-search"
+        action="remove"
+        onClick={onClick}
+        onRemove={onRemove}
+      />,
+    );
+    await userEvent.click(screen.getByTestId("agent-skill-item-remove"));
+    expect(onRemove).toHaveBeenCalledTimes(1);
+    // stopPropagation must keep the row's onClick from also firing.
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("renders an add affordance and assigns via the row click", async () => {
+    const onClick = vi.fn();
+    render(
+      <AgentSkillItem name="writing-coach" action="add" onClick={onClick} />,
+    );
+    expect(screen.getByTestId("agent-skill-item-add")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("agent-skill-item"));
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the remove button while busy", async () => {
+    const onRemove = vi.fn();
+    render(
+      <AgentSkillItem
+        name="web-search"
+        action="remove"
+        onRemove={onRemove}
+        busy
+      />,
+    );
+    const btn = screen.getByTestId("agent-skill-item-remove") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    await userEvent.click(btn);
+    expect(onRemove).not.toHaveBeenCalled();
+  });
 });

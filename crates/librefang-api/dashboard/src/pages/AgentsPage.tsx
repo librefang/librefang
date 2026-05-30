@@ -60,6 +60,7 @@ import {
   useAgentStats,
   useAgentTemplates,
   useAgentTools,
+  useAgentSkills,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -74,6 +75,7 @@ import {
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
+  useSetAgentSkills,
 } from "../lib/mutations/agents";
 
 /**
@@ -503,6 +505,14 @@ export function AgentsPage() {
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
+  // Per-agent skill assignment (#4917) — backs the inline assign/unassign
+  // UI on the Skills tab. Returns { assigned, available, mode, disabled };
+  // gated on the tab being open so we don't fetch the registry pool at
+  // page load.
+  const tabAgentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "skills",
+  });
+  const setAgentSkillsMutation = useSetAgentSkills();
 
   useEffect(() => {
     if (agentTab !== "tools") {
@@ -1259,29 +1269,98 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — 2-col card grid per design canvas
+  // ---------- Skills tab — inline assign/unassign per agent (#4917)
   const renderSkillsTab = (agent: AgentDetail) => {
+    // Source of truth is GET /api/agents/{id}/skills (tabAgentSkillsQuery),
+    // which returns { assigned, available, mode, disabled }. While it loads
+    // we fall back to the manifest fields echoed on the detail payload so the
+    // header/empty-state don't flash. Skill names are slug-shape ASCII IDs,
+    // so plain codepoint sort is stable across locales (#4940).
     const view = agent as AgentView;
-    // Sort alphabetically (#4940) — the backend returns the manifest's
-    // allowlist order, which is meaningless to humans scanning the tab.
-    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
-    // stable across locales (localeCompare would flip in tr-TR etc).
-    const skills: string[] = (
-      Array.isArray(view.skills)
-        ? view.skills
-        : Array.isArray(view.capabilities?.skills)
-          ? view.capabilities!.skills!
-          : []
-    )
+    const skillsData = tabAgentSkillsQuery.data;
+    const manifestSkills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
+        : [];
+    const assigned: string[] = (skillsData?.assigned ?? manifestSkills)
       .slice()
       .sort();
-    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
-    // every skill in the registry, the default), or 'allowlist' (manifest
-    // pinned a list). Each needs a different empty-state copy; the
-    // previous code collapsed them all to "0 installed".
-    const skillsMode = (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all" && skills.length === 0;
-    const skillsDisabled = skillsMode === "none";
+    const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
+    // registry skill usable, the default), or 'allowlist' (manifest pins a
+    // set). Prefer the live query's mode; fall back to the detail payload.
+    const skillsMode =
+      skillsData?.mode ?? (agent as AgentDetail).skills_mode;
+    const usesAllSkills = skillsMode === "all";
+    const skillsDisabled =
+      skillsData?.disabled ?? skillsMode === "none";
+    // Available skills not yet on the allowlist — the add pool in allowlist
+    // mode. Built from the registry list minus what's already assigned.
+    const assignedSet = new Set(assigned);
+    const addable = available.filter((s) => !assignedSet.has(s));
+    const mutating = setAgentSkillsMutation.isPending;
+    const skillsLoading =
+      tabAgentSkillsQuery.isLoading && !skillsData;
+
+    // Apply a new allowlist. Empty array clears it back to "all" mode.
+    const applySkills = (next: string[], toast: string) => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate(
+        { agentId: agent.id, skills: next },
+        {
+          onSuccess: async () => {
+            await refreshDetailAgent(agent.id, agent.is_hand);
+            addToast(toast, "success");
+          },
+          onError: (e) => {
+            addToast(
+              toastErr(
+                e,
+                t("agents.detail.skill_update_failed", {
+                  defaultValue: "Failed to update skills",
+                }),
+              ),
+              "error",
+            );
+          },
+        },
+      );
+    };
+    const addSkill = (name: string) =>
+      applySkills(
+        [...assigned, name],
+        t("agents.detail.skill_added", {
+          defaultValue: "Skill assigned",
+        }),
+      );
+    const removeSkill = (name: string) =>
+      applySkills(
+        assigned.filter((s) => s !== name),
+        t("agents.detail.skill_removed", {
+          defaultValue: "Skill removed",
+        }),
+      );
+    // "Customize" from all-mode: seed the allowlist with every available
+    // skill so the operator gets a concrete list to prune (an empty PUT
+    // would just stay in all-mode). Done with the assign mutation so the
+    // skill-registry validation runs server-side.
+    const customizeFromAll = () =>
+      applySkills(
+        available,
+        t("agents.detail.skill_customized", {
+          defaultValue: "Switched to a per-agent allowlist",
+        }),
+      );
+    // "Reset to all": clear the allowlist (empty PUT → all-mode).
+    const resetToAll = () =>
+      applySkills(
+        [],
+        t("agents.detail.skill_reset_all", {
+          defaultValue: "Reset to all available skills",
+        }),
+      );
+
     const autoEvolve = agent.auto_evolve !== false;
     const handleToggleAutoEvolve = () => {
       if (!agent.id) return;
@@ -1307,7 +1386,7 @@ export function AgentsPage() {
             {" · "}
             {usesAllSkills
               ? t("agents.detail.skills_all", { defaultValue: "all" })
-              : skills.length}
+              : assigned.length}
           </div>
           <Button
             variant="ghost"
@@ -1345,7 +1424,12 @@ export function AgentsPage() {
           </button>
         </div>
 
-        {skillsDisabled ? (
+        {skillsLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center gap-2 text-[12px] text-text-dim">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {t("agents.detail.skills_loading", { defaultValue: "Loading skills…" })}
+          </div>
+        ) : skillsDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
@@ -1360,36 +1444,103 @@ export function AgentsPage() {
             </div>
           </div>
         ) : usesAllSkills ? (
-          <div
-            onClick={() => navigate({ to: "/skills" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+          <div className="flex flex-col gap-2.5">
+            <div className="rounded-md border border-border-subtle bg-main/40 p-3 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {t("agents.detail.skills_all_desc", {
+                      defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
+                    })}
+                  </div>
+                </div>
               </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.skills_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
-                })}
-              </div>
+              {available.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={customizeFromAll}
+                  disabled={mutating}
+                  data-testid="skills-customize-btn"
+                >
+                  {t("agents.detail.skills_customize", { defaultValue: "Customize" })}
+                </Button>
+              )}
             </div>
-          </div>
-        ) : skills.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
+            {available.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-available-grid">
+                {available.map((s) => (
+                  <AgentSkillItem
+                    key={s}
+                    name={s}
+                    description={skillDescriptionByName.get(s)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {skills.map((s) => (
-              <AgentSkillItem
-                key={s}
-                name={s}
-                description={skillDescriptionByName.get(s)}
-                onClick={() => navigate({ to: "/skills" })}
-              />
-            ))}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_assigned", { defaultValue: "Assigned" })}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={resetToAll}
+                  disabled={mutating}
+                  data-testid="skills-reset-all-btn"
+                >
+                  {t("agents.detail.skills_reset_all", { defaultValue: "Reset to all" })}
+                </Button>
+              </div>
+              {assigned.length === 0 ? (
+                <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+                  {t("agents.detail.no_skills_assigned", {
+                    defaultValue: "No skills assigned — add from the list below, or reset to all.",
+                  })}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-assigned-grid">
+                  {assigned.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="remove"
+                      onRemove={() => removeSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {addable.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim/80">
+                  {t("agents.detail.skills_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" data-testid="skills-addable-grid">
+                  {addable.map((s) => (
+                    <AgentSkillItem
+                      key={s}
+                      name={s}
+                      description={skillDescriptionByName.get(s)}
+                      action="add"
+                      onClick={() => addSkill(s)}
+                      busy={mutating}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

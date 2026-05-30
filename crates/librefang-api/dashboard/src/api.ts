@@ -1437,6 +1437,45 @@ export async function updateAgentTools(agentId: string, payload: { capabilities_
   return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
+/**
+ * Per-agent skill assignment, returned by `GET /api/agents/{id}/skills`.
+ *
+ * - `assigned`: the manifest allowlist (empty when `mode === "all"`).
+ * - `available`: every skill name in the daemon's registry — the pool the
+ *   inline assignment UI lets the operator add from.
+ * - `mode`: `"all"` (no allowlist; every registry skill is usable),
+ *   `"allowlist"` (manifest pins a specific set), or `"none"`
+ *   (`skills_disabled = true`; dispatch is off entirely).
+ * - `disabled`: mirrors the `none` mode as a boolean for convenience.
+ */
+export interface AgentSkillsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  disabled: boolean;
+}
+
+export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
+  return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/**
+ * PUT /api/agents/{id}/skills — replace the agent's skill allowlist.
+ *
+ * An empty array clears the allowlist, switching the agent back to "all"
+ * mode (every registry skill available). A non-empty list is validated
+ * against the registry server-side; unknown names are rejected with a 4xx.
+ */
+export async function setAgentSkills(
+  agentId: string,
+  skills: string[],
+): Promise<{ status: string; skills: string[] }> {
+  return put<{ status: string; skills: string[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/skills`,
+    { skills },
+  );
+}
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
