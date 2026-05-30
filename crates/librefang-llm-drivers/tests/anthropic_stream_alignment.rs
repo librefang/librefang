@@ -117,10 +117,7 @@ fn anthropic_sse_with_unknown_leading_block() -> ResponseTemplate {
             "usage": {"output_tokens": 7}
         }),
     );
-    push(
-        "message_stop",
-        serde_json::json!({"type": "message_stop"}),
-    );
+    push("message_stop", serde_json::json!({"type": "message_stop"}));
 
     ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
@@ -165,7 +162,11 @@ async fn unknown_leading_block_preserves_index_alignment() {
     // The tool_use block (API index 2) must capture its full streamed input.
     // Pre-fix, the misalignment routed its input_json_deltas to the wrong
     // slot, yielding empty/garbled arguments.
-    assert_eq!(response.tool_calls.len(), 1, "expected exactly one tool call");
+    assert_eq!(
+        response.tool_calls.len(),
+        1,
+        "expected exactly one tool call"
+    );
     let call = &response.tool_calls[0];
     assert_eq!(call.id, "tool_abc");
     assert_eq!(call.name, "search");
@@ -193,7 +194,10 @@ async fn unknown_leading_block_preserves_index_alignment() {
             _ => None,
         })
         .collect();
-    assert_eq!(streamed_text, "Hello world", "streamed text deltas, got {events:?}");
+    assert_eq!(
+        streamed_text, "Hello world",
+        "streamed text deltas, got {events:?}"
+    );
 
     // The tool_use start/end must reference the index-2 block, not a shifted
     // slot.
