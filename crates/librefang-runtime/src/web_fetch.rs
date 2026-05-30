@@ -77,6 +77,13 @@ impl WebFetchEngine {
         let mut current_url = url.to_string();
         let mut current_method = method.to_uppercase();
         let mut current_body = body.map(|s| s.to_string());
+        // Latches true once any hop crosses origin (scheme / host / port).
+        // Mirrors reqwest's `remove_sensitive_headers`: once a redirect leaves
+        // the original origin, the caller's credential-bearing headers
+        // (Authorization / Cookie / Proxy-Authorization) must never be
+        // re-attached — including on any further same-origin hops on the new
+        // host — or they leak to an attacker-controlled redirect target.
+        let mut credentials_stripped = false;
 
         for _ in 0..=MAX_REDIRECTS {
             // SSRF check + DNS pin happen together per hop so the IP we
@@ -98,6 +105,9 @@ impl WebFetchEngine {
             if let Some(hdrs) = headers {
                 for (k, v) in hdrs {
                     if let Some(val) = v.as_str() {
+                        if credentials_stripped && is_sensitive_redirect_header(k) {
+                            continue;
+                        }
                         req = req.header(k.as_str(), val);
                     }
                 }
@@ -133,6 +143,15 @@ impl WebFetchEngine {
             let next = base
                 .join(location)
                 .map_err(|e| format!("invalid redirect Location '{location}': {e}"))?;
+            // Strip credential-bearing headers on any cross-origin hop, exactly
+            // like reqwest's built-in `remove_sensitive_headers` (which the
+            // manual `Policy::none` loop bypasses). Compare against the hop we
+            // just made (`base`); the flag latches so the headers stay gone for
+            // the remainder of the chain even if a later hop returns to the
+            // original origin.
+            if crosses_origin(&base, &next) {
+                credentials_stripped = true;
+            }
             // 301/302/303 downgrade to GET and drop the body (browser
             // behaviour); 307/308 preserve method and body.
             if (301..=303).contains(&status.as_u16()) {
@@ -257,6 +276,33 @@ fn is_html(content_type: &str, body: &str) -> bool {
     trimmed.starts_with("<!DOCTYPE")
         || trimmed.starts_with("<!doctype")
         || trimmed.starts_with("<html")
+}
+
+/// Whether following `from` → `to` leaves the original origin.
+///
+/// "Origin" is scheme + host + port, matching reqwest's
+/// `remove_sensitive_headers` cross-host test. A change in any of the three
+/// means caller-supplied credential headers must not be replayed to `to`.
+fn crosses_origin(from: &url::Url, to: &url::Url) -> bool {
+    from.host_str() != to.host_str()
+        || from.port_or_known_default() != to.port_or_known_default()
+        || from.scheme() != to.scheme()
+}
+
+/// Whether `name` is a credential-bearing header reqwest strips on a
+/// cross-origin redirect (case-insensitive). Mirrors the set removed by
+/// reqwest's `remove_sensitive_headers`.
+fn is_sensitive_redirect_header(name: &str) -> bool {
+    const SENSITIVE: [&str; 5] = [
+        "authorization",
+        "cookie",
+        "cookie2",
+        "proxy-authorization",
+        "www-authenticate",
+    ];
+    SENSITIVE
+        .iter()
+        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +710,222 @@ mod tests {
             out.contains("FINAL-OK"),
             "expected final body after redirect, got: {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cross_host_redirect_strips_credentials() {
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Two distinct origins (different loopback ports). origin_a issues a
+        // 302 to origin_b; origin_b must NOT see the caller's credential
+        // headers — they would otherwise leak across the origin boundary.
+        let origin_b = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("FINAL-OK"))
+            .mount(&origin_b)
+            .await;
+
+        let origin_a = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final", origin_b.uri())),
+            )
+            .mount(&origin_a)
+            .await;
+
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            ..Default::default()
+        };
+        let engine = WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        );
+
+        let mut hdrs = serde_json::Map::new();
+        hdrs.insert(
+            "Authorization".to_string(),
+            serde_json::json!("Bearer secret-token"),
+        );
+        hdrs.insert("Cookie".to_string(), serde_json::json!("session=abc123"));
+        hdrs.insert(
+            "Proxy-Authorization".to_string(),
+            serde_json::json!("Basic xyz"),
+        );
+        hdrs.insert("X-Custom".to_string(), serde_json::json!("keepme"));
+
+        let out = engine
+            .fetch_with_options(
+                &format!("{}/redirect", origin_a.uri()),
+                "GET",
+                Some(&hdrs),
+                None,
+            )
+            .await
+            .expect("cross-host redirect should still succeed");
+        assert!(out.contains("FINAL-OK"), "got: {out}");
+
+        let received = origin_b
+            .received_requests()
+            .await
+            .expect("origin_b should record the request");
+        assert_eq!(received.len(), 1, "origin_b hit exactly once");
+        let h = &received[0].headers;
+        assert!(
+            !h.contains_key("authorization"),
+            "Authorization must be stripped on cross-host redirect"
+        );
+        assert!(
+            !h.contains_key("cookie"),
+            "Cookie must be stripped on cross-host redirect"
+        );
+        assert!(
+            !h.contains_key("proxy-authorization"),
+            "Proxy-Authorization must be stripped on cross-host redirect"
+        );
+        // Non-sensitive caller headers are still forwarded.
+        assert_eq!(
+            h.get("x-custom").map(|v| v.to_str().unwrap()),
+            Some("keepme"),
+            "non-sensitive headers must survive the redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_same_host_redirect_preserves_credentials() {
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A same-origin redirect (relative Location → same host:port) must keep
+        // the caller's credentials — only cross-origin hops strip them.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("FINAL-OK"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/final"))
+            .mount(&server)
+            .await;
+
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            ..Default::default()
+        };
+        let engine = WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        );
+
+        let mut hdrs = serde_json::Map::new();
+        hdrs.insert(
+            "Authorization".to_string(),
+            serde_json::json!("Bearer secret-token"),
+        );
+        hdrs.insert("Cookie".to_string(), serde_json::json!("session=abc123"));
+
+        let out = engine
+            .fetch_with_options(
+                &format!("{}/redirect", server.uri()),
+                "GET",
+                Some(&hdrs),
+                None,
+            )
+            .await
+            .expect("same-host redirect should succeed");
+        assert!(out.contains("FINAL-OK"), "got: {out}");
+
+        let received = server
+            .received_requests()
+            .await
+            .expect("server should record requests");
+        // Find the request to /final (the redirect target).
+        let final_req = received
+            .iter()
+            .find(|r| r.url.path() == "/final")
+            .expect("the /final hop must have been made");
+        assert_eq!(
+            final_req
+                .headers
+                .get("authorization")
+                .map(|v| v.to_str().unwrap()),
+            Some("Bearer secret-token"),
+            "Authorization must survive a same-host redirect"
+        );
+        assert_eq!(
+            final_req.headers.get("cookie").map(|v| v.to_str().unwrap()),
+            Some("session=abc123"),
+            "Cookie must survive a same-host redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redirect_to_metadata_ip_blocked_on_later_hop() {
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // ATTACK: a public host 302s to the cloud-metadata endpoint. The
+        // per-hop check_ssrf must block the redirect target on hop 2, even
+        // though hop 1 (the wiremock loopback) was allowlisted.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            ))
+            .mount(&server)
+            .await;
+
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            ..Default::default()
+        };
+        let engine = WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(60))),
+        );
+
+        let err = engine
+            .fetch(&format!("{}/redirect", server.uri()))
+            .await
+            .expect_err("redirect to metadata IP must be blocked");
+        assert!(
+            err.contains("169.254.169.254") || err.to_lowercase().contains("restricted"),
+            "expected SSRF block on the metadata hop, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_crosses_origin_helper() {
+        let a = url::Url::parse("http://example.com/a").unwrap();
+        let same = url::Url::parse("http://example.com/b").unwrap();
+        let other_host = url::Url::parse("http://evil.com/a").unwrap();
+        let other_port = url::Url::parse("http://example.com:8443/a").unwrap();
+        let other_scheme = url::Url::parse("https://example.com/a").unwrap();
+        assert!(!crosses_origin(&a, &same));
+        assert!(crosses_origin(&a, &other_host));
+        assert!(crosses_origin(&a, &other_port));
+        assert!(crosses_origin(&a, &other_scheme));
+    }
+
+    #[test]
+    fn test_is_sensitive_redirect_header() {
+        assert!(is_sensitive_redirect_header("Authorization"));
+        assert!(is_sensitive_redirect_header("authorization"));
+        assert!(is_sensitive_redirect_header("COOKIE"));
+        assert!(is_sensitive_redirect_header("Proxy-Authorization"));
+        assert!(!is_sensitive_redirect_header("X-Custom"));
+        assert!(!is_sensitive_redirect_header("Content-Type"));
     }
 
     #[test]

@@ -55,7 +55,7 @@ async fn boot_with_tool_invoke(tool_invoke: ToolInvokeConfig) -> Harness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
+            extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         },
         tool_invoke,

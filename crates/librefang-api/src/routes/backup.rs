@@ -467,103 +467,57 @@ pub async fn delete_backup(
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
-/// POST /api/restore — Restore kernel state from a backup archive.
-///
-/// Accepts a JSON body with `{"filename": "librefang_backup_20260315_120000.zip"}`.
-/// The file must exist in `<home_dir>/backups/`.
-///
-/// **Warning**: This overwrites existing state files. The daemon should be
-/// restarted after a restore for all changes to take effect.
-#[utoipa::path(post, path = "/api/restore", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Backup restored", body = crate::types::JsonObject)))]
-pub async fn restore_backup(
-    State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let filename = match req.get("filename").and_then(|v| v.as_str()) {
-        Some(f) => f.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename"))
-                .into_json_tuple();
-        }
-    };
+/// Categorised failure mode for `restore_backup_blocking`, mapped 1:1 onto
+/// the original handler's distinct ApiErrorResponse branches so the
+/// translated client-facing message stays identical after the
+/// spawn_blocking refactor.
+enum RestoreError {
+    Open(String),
+    InvalidArchive(String),
+    MissingManifest,
+}
 
-    // Sanitize
-    if is_invalid_backup_filename(&filename) {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
-            .into_json_tuple();
-    }
-    if !filename.ends_with(".zip") {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
-            .into_json_tuple();
-    }
+/// Result of a successful restore extraction.
+struct RestoreOutcome {
+    restored: Vec<String>,
+    errors: Vec<String>,
+    manifest: Option<BackupManifest>,
+}
 
-    let home_dir = &state.kernel.home_dir();
-    let backups_dir = home_dir.join("backups");
-    let backup_path = match find_backup_path(&backups_dir, &filename) {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
-                .into_json_tuple();
-        }
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
-    };
+/// Sync, blocking implementation of `restore_backup`: opens the zip,
+/// validates the manifest, and extracts every entry into `home_dir`.
+/// Must be dispatched via `tokio::task::spawn_blocking` — the
+/// decompress-and-write loop otherwise stalls the axum/tokio worker for
+/// the full archive (each entry is buffered into a `Vec<u8>` then written),
+/// matching the `create_backup_blocking` contract above.
+fn restore_backup_blocking(
+    backup_path: std::path::PathBuf,
+    home_dir: std::path::PathBuf,
+) -> Result<RestoreOutcome, RestoreError> {
+    let file = std::fs::File::open(&backup_path).map_err(|e| RestoreError::Open(e.to_string()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| RestoreError::InvalidArchive(e.to_string()))?;
 
-    // Open zip
-    let file = match std::fs::File::open(&backup_path) {
-        Ok(f) => f,
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
-    };
-    let mut archive = match zip::ZipArchive::new(file) {
-        Ok(a) => a,
-        Err(e) => {
-            return ApiErrorResponse::bad_request(t.t_args(
-                "api-error-backup-invalid-archive",
-                &[("error", &e.to_string())],
-            ))
-            .into_json_tuple();
-        }
-    };
-
-    // Validate manifest
-    let manifest: Option<BackupManifest> = {
-        match archive.by_name("manifest.json") {
-            Ok(mut entry) => {
-                let mut buf = String::new();
-                if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
-                    serde_json::from_str(&buf).ok()
-                } else {
-                    None
-                }
+    // Validate manifest before touching the filesystem.
+    let manifest: Option<BackupManifest> = match archive.by_name("manifest.json") {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
+                serde_json::from_str(&buf).ok()
+            } else {
+                None
             }
-            Err(_) => None,
         }
+        Err(_) => None,
     };
-
     if manifest.is_none() {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
-            .into_json_tuple();
+        return Err(RestoreError::MissingManifest);
     }
 
     let mut restored: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Extract all files to home_dir, skipping manifest.json itself
+    // Extract all files to home_dir, skipping manifest.json itself.
     for i in 0..archive.len() {
         let mut entry = match archive.by_index(i) {
             Ok(e) => e,
@@ -613,6 +567,110 @@ pub async fn restore_backup(
         }
         restored.push(entry_name.to_string_lossy().to_string());
     }
+
+    Ok(RestoreOutcome {
+        restored,
+        errors,
+        manifest,
+    })
+}
+
+/// POST /api/restore — Restore kernel state from a backup archive.
+///
+/// Accepts a JSON body with `{"filename": "librefang_backup_20260315_120000.zip"}`.
+/// The file must exist in `<home_dir>/backups/`.
+///
+/// **Warning**: This overwrites existing state files. The daemon should be
+/// restarted after a restore for all changes to take effect.
+#[utoipa::path(post, path = "/api/restore", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Backup restored", body = crate::types::JsonObject)))]
+pub async fn restore_backup(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let filename = match req.get("filename").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename"))
+                .into_json_tuple();
+        }
+    };
+
+    // Sanitize
+    if is_invalid_backup_filename(&filename) {
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
+            .into_json_tuple();
+    }
+    if !filename.ends_with(".zip") {
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
+            .into_json_tuple();
+    }
+
+    let home_dir = state.kernel.home_dir().to_path_buf();
+    let backups_dir = home_dir.join("backups");
+    let backup_path = match find_backup_path(&backups_dir, &filename) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
+        }
+        Err(e) => {
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
+        }
+    };
+
+    // Drop the `!Send` ErrorTranslator before the spawn_blocking `.await`
+    // (the axum Handler bound rejects a non-Send future). Each error branch
+    // below reconstructs it after the await, like `create_backup`.
+    drop(t);
+
+    // Dispatch the blocking open + decompress + write loop onto a blocking
+    // thread so it does not stall the axum/tokio worker (refs
+    // blocking-fs-on-executor).
+    let result =
+        tokio::task::spawn_blocking(move || restore_backup_blocking(backup_path, home_dir)).await;
+
+    let outcome = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(RestoreError::Open(msg))) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &msg)]),
+            )
+            .into_json_tuple();
+        }
+        Ok(Err(RestoreError::InvalidArchive(msg))) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-backup-invalid-archive", &[("error", &msg)]),
+            )
+            .into_json_tuple();
+        }
+        Ok(Err(RestoreError::MissingManifest)) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
+                .into_json_tuple();
+        }
+        Err(join_err) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-open-failed",
+                &[("error", &format!("restore task join: {join_err}"))],
+            ))
+            .into_json_tuple();
+        }
+    };
+    let restored = outcome.restored;
+    let errors = outcome.errors;
+    let manifest = outcome.manifest;
 
     let total_restored = restored.len();
     tracing::info!(

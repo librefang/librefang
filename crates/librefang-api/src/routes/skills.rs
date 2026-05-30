@@ -562,10 +562,7 @@ pub async fn list_pending_candidates(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("invalid agent id (must be a UUID): {id}")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to read pending dir: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -602,10 +599,7 @@ pub async fn show_pending_candidate(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to load candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -701,14 +695,11 @@ pub async fn approve_pending_candidate(
                 Ok(c) => Some(c),
                 Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => None,
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists; failed to read candidate to disambiguate phantom vs collision: {e}"
-                            ),
-                        })),
-                    );
+                    // Scrub the raw storage error (audit:
+                    // rusqlite-errors-leak) — keep the operator-useful
+                    // context in the log, return a generic body.
+                    tracing::error!(error = %e, %skill_name, "failed to read candidate to disambiguate phantom vs collision");
+                    return ApiErrorResponse::internal_scrub(e).into_json_tuple();
                 }
             };
             let bodies_match = match &candidate {
@@ -741,14 +732,13 @@ pub async fn approve_pending_candidate(
                             ),
                         })),
                     ),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
-                            ),
-                        })),
-                    ),
+                    Err(e) => {
+                        // Scrub the raw storage error (audit:
+                        // rusqlite-errors-leak); operator context in
+                        // the log, generic body to the client.
+                        tracing::error!(error = %e, %skill_name, "failed to clear pending entry after phantom recovery");
+                        ApiErrorResponse::internal_scrub(e).into_json_tuple()
+                    }
                 }
             } else {
                 // Real name collision. Pending file is intentionally
@@ -773,10 +763,7 @@ pub async fn approve_pending_candidate(
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to approve candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -814,10 +801,7 @@ pub async fn reject_pending_candidate(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to reject candidate: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
 
@@ -1505,7 +1489,16 @@ pub async fn clawhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // 4xx / 502 echo the actionable SkillError (security
+            // block, rate limit, network); the 500 catch-all scrubs to
+            // a generic body (audit: rusqlite-errors-leak). Full error
+            // already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -1872,7 +1865,15 @@ pub async fn clawhub_cn_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub CN install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // See ClawHub install above: 500 catch-all scrubbed
+            // (audit: rusqlite-errors-leak), actionable 4xx / 502
+            // echoed. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -2170,7 +2171,15 @@ pub async fn skillhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("Skillhub install failed: {msg}");
-            (status, Json(serde_json::json!({"error": msg})))
+            // See ClawHub install above: 500 catch-all scrubbed
+            // (audit: rusqlite-errors-leak), actionable 4xx / 502
+            // echoed. Full error already logged above.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "Internal server error".to_string()
+            } else {
+                msg
+            };
+            (status, Json(serde_json::json!({"error": body})))
         }
     }
 }
@@ -2587,11 +2596,11 @@ pub async fn get_hand_manifest(
         match toml::to_string_pretty(&definition) {
             Ok(s) => toml_content = Some(s),
             Err(e) => {
-                return ApiErrorResponse::internal(format!(
-                    "Failed to serialize hand definition: {e}"
-                ))
-                .into_json_tuple()
-                .into_response();
+                // Scrub the serialize error (audit: rusqlite-errors-leak).
+                tracing::error!(error = %e, "failed to serialize hand definition");
+                return ApiErrorResponse::internal_scrub(e)
+                    .into_json_tuple()
+                    .into_response();
             }
         }
     }
@@ -4524,11 +4533,10 @@ pub async fn update_mcp_server(
     // Persist — upsert replaces an existing entry with the same name
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -4643,11 +4651,10 @@ pub async fn patch_mcp_server_taint(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
     // be held across an async suspension point.
@@ -4738,11 +4745,10 @@ pub async fn delete_mcp_server(
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        return ApiErrorResponse::internal(t.t_args(
-            "api-error-config-write-failed",
-            &[("error", &e.to_string())],
-        ))
-        .into_json_tuple();
+        // Scrub the config-write error (audit: rusqlite-errors-leak):
+        // the helper string carries io / TOML-parse detail. Full error
+        // logged; client sees the generic body.
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
     drop(t);
 
@@ -5146,7 +5152,10 @@ fn evolution_err_to_response(
         E::InvalidManifest(_) | E::SecurityBlocked(_) | E::YamlParse(_) | E::TomlParse(_) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
         }
-        _ => ApiErrorResponse::internal(msg).into_json_tuple(),
+        // 4xx arms above echo the actionable SkillError; the catch-all
+        // 500 scrubs (audit: rusqlite-errors-leak) — `internal_scrub`
+        // logs `msg` and returns the generic body.
+        _ => ApiErrorResponse::internal_scrub(msg).into_json_tuple(),
     }
 }
 
@@ -5853,14 +5862,21 @@ pub async fn reconnect_mcp_server_handler(
                 "tool_count": tool_count,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "id": name,
-                "status": "error",
-                "error": e,
-            })),
-        ),
+        Err(e) => {
+            // Scrub the raw reconnect error (audit:
+            // rusqlite-errors-leak); operators keep the detail in the
+            // log, the client sees the generic body alongside the
+            // structured status fields.
+            tracing::error!(error = %e, server = %name, "MCP reconnect failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "id": name,
+                    "status": "error",
+                    "error": "Internal server error",
+                })),
+            )
+        }
     }
 }
 
@@ -6125,18 +6141,26 @@ pub async fn install_extension(
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            return (status, Json(serde_json::json!({"error": err_str})));
+            // 404 echoes the "not found" message (caller-useful); the
+            // 500 catch-all scrubs (audit: rusqlite-errors-leak) and
+            // logs the full error for operators.
+            let body = if status == StatusCode::INTERNAL_SERVER_ERROR {
+                tracing::error!(error = %err_str, extension = %name, "extension install failed");
+                "Internal server error".to_string()
+            } else {
+                err_str
+            };
+            return (status, Json(serde_json::json!({"error": body})));
         }
     };
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("Failed to write config: {e}"),
-            })),
-        );
+        // Scrub the config-write io error (audit:
+        // rusqlite-errors-leak) — path / permission detail stays in
+        // the log, the client sees a generic body.
+        tracing::error!(error = %e, "failed to write config after extension install");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     // Sync the in-memory config with the freshly-written config.toml before
