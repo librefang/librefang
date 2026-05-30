@@ -912,13 +912,9 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_fstat,
         libc::SYS_newfstatat,
         libc::SYS_faccessat,
-        // glibc 2.33+ resolves these in place of the older variants when the
-        // dynamic linker locates shared libraries for a freshly exec'd binary
-        // (e.g. a hook that runs `sleep` execs /usr/bin/sleep, whose ld.so
-        // startup uses faccessat2/statx). Without them the second exec is
-        // SIGSYS-killed at startup on modern Ubuntu glibc.
+        // glibc 2.33+ resolves library access through faccessat2 when the
+        // dynamic linker locates shared libraries for a freshly exec'd binary.
         libc::SYS_faccessat2,
-        libc::SYS_statx,
         libc::SYS_lseek,
         libc::SYS_dup,
         libc::SYS_dup3,
@@ -943,13 +939,9 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_gettid,
         libc::SYS_set_tid_address,
         // glibc registers the robust-mutex list and (2.35+) the restartable
-        // sequence area during process/thread init; coreutils binaries also
-        // query CPU affinity. A second exec from a hook trips these even
-        // though the first (sh) startup did not.
+        // sequence area during process/thread init.
         libc::SYS_set_robust_list,
         libc::SYS_rseq,
-        libc::SYS_sched_getaffinity,
-        libc::SYS_sched_yield,
         libc::SYS_futex,
         libc::SYS_nanosleep,
         libc::SYS_clock_gettime,
@@ -1064,6 +1056,11 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
         libc::SYS_symlink,
         libc::SYS_readlink,
         libc::SYS_fork,
+        // Debian/Ubuntu `dash` (/bin/sh) is built with USE_VFORK, so it spawns
+        // external commands (e.g. a hook running `sleep`) via the x86_64 vfork
+        // syscall — absent on aarch64, which is why it was missing here and the
+        // spawn was SIGSYS-killed only on x86_64 CI.
+        libc::SYS_vfork,
         libc::SYS_arch_prctl,
         // Legacy resource-limit syscalls replaced by prlimit64 on aarch64
         libc::SYS_getrlimit,
