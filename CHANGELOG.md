@@ -5,6 +5,101 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.30] - 2026-05-30
+
+_68 PRs from 5 contributors since v2026.5.28-beta.14._
+
+### Added
+
+- Add source attribution to GET /api/tools response (#5679) (@DaBlitzStein)
+- Tools tab in agent detail with grouped view (closes #5677) (#5680) (@DaBlitzStein)
+- Expose auto_evolve toggle in Skills tab (#5741) (@DaBlitzStein)
+- Kanban task board page (#5745) (#5805) (@houko)
+- Support custom-URL self-hosted STT/TTS providers (fixes #5740) (#5814) (@houko)
+- Rust Telegram sidecar adapter (parity with Python) (#5831) (@houko)
+- Just dev --docker + TELEGRAM_LOG tracing (#5833) (@houko)
+- Run WASM skill runtime via the runtime WasmSandbox (#5835) (@houko)
+- Autonomous long-horizon goal runner (#5840) (@houko)
+- Out-of-process `engine = "sidecar"` (#5849) (@houko)
+- Scan tool-result content for indirect prompt injection (#5859) (@houko)
+
+### Fixed
+
+- Strip ANTHROPIC_API_KEY when OAuth credentials present (#5292) (@f-liva)
+- Reconcile cascade-leak THEMATIC_HEADERS with post-#5053 prompt builder (#5351) (@f-liva)
+- Tool_runner sandbox — RAII cleanup, TOCTOU removed, container_id redacted (#5757) (@leszek3737)
+- Tool_runner workflow — artifact type check, deterministic sort, recursion limit (#5758) (@leszek3737)
+- Tool_runner schedule — AM/PM parsing, minute precision, owner verification, cron validation (#5759) (@leszek3737)
+- Tool_runner system — URL const, client reuse, error diagnostics (#5760) (@leszek3737)
+- Tool_runner media — size limits, async fs, UUID filenames, ffmpeg deadlock, extension allowlist (#5761) (@leszek3737)
+- Tool_runner web_legacy — SSRF protection, streaming body limit, unified UA, status check (#5764) (@leszek3737)
+- Tool_runner canvas — XSS escape, whitelist parser, data: URI block, size limit (#5766) (@leszek3737)
+- Tool_runner memory — truncation, pagination, key validation (#5770) (@leszek3737)
+- Tool_runner agent — taint all inputs, narrow capabilities, deny None, network strict (#5775) (@leszek3737)
+- Tool_runner process — output cap, strict caller_id, arg logging, serde_json (#5778) (@leszek3737)
+- Tool_runner fs — backslash rejection, canonicalize, TOCTOU fix, read limit, dir pagination, atomic write (#5783) (@leszek3737)
+- Route auto_evolve creates through skill_workshop pending queue (#5800) (@DaBlitzStein)
+- Reset taint editor state when server prop changes (#5803) (@houko)
+- Use catalog api_key_env for custom provider key resolution (#5807) (@houko)
+- Regenerate stale openapi schema baseline to repair main red (#5834) (@houko)
+- Make DAG-path step timeout error actionable (#5836) (@houko)
+- Finish Option::zip migration in kernel tests (clippy 1.96.0) (#5837) (@houko)
+- Keep custom providers across restarts, tolerate unknown tier (#5838) (@houko)
+- Audit sweep — 5 CRITICAL + 7 HIGH (split-brain, RBAC, decay, dedup, prompt budget, async consolidate) (#5839) (@houko)
+- Apply search filter to FangHub skills grid (#5843) (@DaBlitzStein)
+- Use Option::zip for hand timestamp pairing (clippy) (#5845) (@houko)
+- Close goal-run self-cleanup race + termination test coverage (follow-up #5840) (#5848) (@houko)
+- MEDIUM follow-ups — counter map sweep, hot-reload on PATCH, multi-keyword search, configurable UPDATE thresholds (#5850) (@houko)
+- Make extra_params / extra_body BTreeMap for deterministic wire-body key order (#5860) (@houko)
+- Close trusted_senders all-or-nothing approval bypass for high-risk tools (#5861) (@houko)
+- Make subprocess plugin sandbox secure-by-default (#2) (#5862) (@houko)
+- Scrub internal errors from 5xx responses to prevent detail leakage (#5863) (@houko)
+- Validate hand id as a safe path component to block traversal (#5865) (@houko)
+- Apply config hot-reload for read-live fields, not only hot actions (#5867) (@houko)
+- Reserve the global USD budget on the streaming dispatch path (#5869) (@houko)
+- Bound consolidation candidate load with a per-agent LIMIT (#5871) (@houko)
+- Stop logging API key, account cache tokens, keep stream tool ids (#5875) (@houko)
+- Cover all per-agent override keys with a drift-guarded detector (#6) (#5876) (@houko)
+- Guard agent_msg_locks GC with Arc::strong_count (symmetry with session_msg_locks) (#5877) (@houko)
+- Account prompt-cache tokens in usage normalization (#5879) (@houko)
+- Handle no-arg tool calls and UTF-8-safe thinking summary (#5882) (@houko)
+- Route attachment download through the redirect-revalidating client (#5884) (@houko)
+- Pin every redirect hop in web_fetch to close DNS-rebinding window (#5886) (@houko)
+- Clean up per-flow OAuth vault entries on all callback exits (#5895) (@houko)
+- Scan prompt context for injection at the load/reload boundary (#5897) (@houko)
+- Retry transport-layer errors and make retry count configurable (#10) (#5898) (@houko)
+- Detect re-entrant keyed agent_send to prevent session-lock deadlock (#5900) (@houko)
+- Delimit all fields in the Merkle entry hash to close ambiguity (#5903) (@houko)
+- Enforce RBAC on session auth path; offload workflow template write (#5906) (@houko)
+- Low-severity correctness — workshop cap race, token saturating, ephemeral comment (#5910) (@houko)
+- Keep anthropic stream block alignment; report effective claude_code timeout (#5913) (@houko)
+- Gate media link URLs through safeUrl; share urlTransform with streaming view (#5916) (@houko)
+- Allowlist glibc-startup syscalls for exec'd plugin binaries (fixes native_runtime_timeout CI failure) (#5920) (@houko)
+
+### Changed
+
+- Unify the three sidecar bridges onto a shared transport crate (#5852) (@houko)
+
+### Performance
+
+- Offload blocking filesystem/zip IO off the tokio runtime (#5892) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Fix three agent-facing architecture drift points (#5901) (@houko)
+
+### Maintenance
+
+- Bump the docs-minor-patch group in /docs with 2 updates (#5847) (@app/dependabot)
+- Cargo fmt recently-merged code (repair main Quality fmt) (#5853) (@houko)
+- Fix Windows-only red in shell capability test (path-not-found wording) (#5854) (@houko)
+- Raise Test / Windows shard timeout 45 → 60 min to match macOS (#5856) (@houko)
+
+</details>
+
 ## [2026.5.28] - 2026-05-28
 
 _46 PRs from 5 contributors since v2026.5.25-beta.13._
