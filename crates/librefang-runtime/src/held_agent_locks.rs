@@ -92,30 +92,58 @@ tokio::task_local! {
 /// outer `send_message_full` frame set it up), the future is awaited
 /// directly so the *same* cell is shared with the outer frame — that
 /// sharing is what makes same-task re-entry observable. Only the
-/// outermost frame allocates the `BTreeSet`.
+/// outermost frame allocates the `HashSet`s.
+///
+/// ## Stack discipline (why `Box::pin`)
+///
+/// `scope` wraps the *whole* agent turn — the `send_message_full_inner`
+/// future, which is enormous (10+ args, the entire agent loop body). The
+/// re-entrant cycle this module detects (`A -> B -> A` keyed `agent_send`,
+/// #5125) re-enters `send_message_full` — and therefore `scope` — one more
+/// level deep *before* the detection rejects it. If `scope` inlined `fut`
+/// into its own future, every such re-entry would stack another full copy
+/// of that giant future, blowing the stack (SIGABRT) before the rejection
+/// path runs. `Box::pin(fut)` moves the inner future to the heap so each
+/// nesting level adds only a pointer-sized frame, capping stack growth at
+/// the recursion depth the detector permits. The two task-locals are
+/// established as siblings in a single frame here (no extra wrapper async
+/// fn), so the idempotent re-entrant path adds no async frame of its own.
 pub async fn scope<F>(fut: F) -> F::Output
 where
     F: std::future::Future,
 {
-    // Establish the session registry (idempotent), then the agent registry,
-    // so both are available for this task's whole turn.
-    async fn with_session_scope<F: std::future::Future>(fut: F) -> F::Output {
-        if HELD_SESSION_LOCKS.try_with(|_| ()).is_ok() {
-            fut.await
-        } else {
+    // Box the giant inner future once so neither task-local `scope` frame
+    // below holds an inlined copy — each re-entrant level adds a heap
+    // pointer, not another multi-KB future, keeping the stack bounded.
+    let fut = Box::pin(fut);
+
+    let session_established = HELD_SESSION_LOCKS.try_with(|_| ()).is_ok();
+    let agent_established = HELD_AGENT_LOCKS.try_with(|_| ()).is_ok();
+
+    // Establish whichever registries are not yet present for this task as
+    // siblings, so both span the turn. Idempotent re-entrant frames take
+    // the bare `fut.await` arm and share the outer frame's cells — that
+    // sharing is what makes same-task re-entry observable.
+    match (agent_established, session_established) {
+        (true, true) => fut.await,
+        (true, false) => {
             HELD_SESSION_LOCKS
                 .scope(Mutex::new(HashSet::new()), fut)
                 .await
         }
-    }
-
-    if HELD_AGENT_LOCKS.try_with(|_| ()).is_ok() {
-        // Registry already established by an outer frame on this task.
-        with_session_scope(fut).await
-    } else {
-        HELD_AGENT_LOCKS
-            .scope(Mutex::new(HashSet::new()), with_session_scope(fut))
-            .await
+        (false, true) => {
+            HELD_AGENT_LOCKS
+                .scope(Mutex::new(HashSet::new()), fut)
+                .await
+        }
+        (false, false) => {
+            HELD_AGENT_LOCKS
+                .scope(
+                    Mutex::new(HashSet::new()),
+                    HELD_SESSION_LOCKS.scope(Mutex::new(HashSet::new()), fut),
+                )
+                .await
+        }
     }
 }
 
