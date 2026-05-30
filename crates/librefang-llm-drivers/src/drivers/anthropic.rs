@@ -291,6 +291,14 @@ enum ContentBlockAccum {
         name: String,
         input_json: String,
     },
+    /// Placeholder for a `content_block` type this driver does not yet
+    /// recognise (e.g. a future `server_tool_use` / `redacted_thinking`).
+    /// Anthropic's `index` is the absolute position in the content array,
+    /// so an unrecognized block MUST still occupy a slot — otherwise every
+    /// later block's vec position drifts from its API index and subsequent
+    /// `content_block_delta` events land on the wrong accumulator. Carries
+    /// no data and is dropped when the final response is assembled.
+    Unknown,
 }
 
 /// Build an `ApiRequest` from a `CompletionRequest`.
@@ -854,7 +862,15 @@ impl LlmDriver for AnthropicDriver {
                                 "thinking" => {
                                     blocks.push(ContentBlockAccum::Thinking(String::new()));
                                 }
-                                _ => {}
+                                other => {
+                                    // Keep index alignment for unknown block
+                                    // types (see ContentBlockAccum::Unknown).
+                                    tracing::debug!(
+                                        block_type = other,
+                                        "anthropic stream: unrecognized content_block type; pushing placeholder to preserve index alignment"
+                                    );
+                                    blocks.push(ContentBlockAccum::Unknown);
+                                }
                             }
                         }
                         "content_block_delta" => {
@@ -1016,6 +1032,8 @@ impl LlmDriver for AnthropicDriver {
                         });
                         tool_calls.push(ToolCall { id, name, input });
                     }
+                    // Index-alignment placeholder — no content to emit.
+                    ContentBlockAccum::Unknown => {}
                 }
             }
 
