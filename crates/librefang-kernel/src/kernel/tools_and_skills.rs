@@ -189,12 +189,6 @@ impl LibreFangKernel {
         // there is nothing to add and no need to lock the global MCP tool map.
         if !mcp_disabled && !mcp_allowlist.is_empty() {
             if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
-                let configured_servers: Vec<String> = self
-                    .mcp
-                    .effective_mcp_servers
-                    .read()
-                    .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
-                    .unwrap_or_default();
                 // MCP allowlist semantics (#5855): the empty case is handled by
                 // the early `!mcp_allowlist.is_empty()` guard above (zero tools),
                 // so here the list is non-empty.
@@ -203,33 +197,30 @@ impl LibreFangKernel {
                 // `mcp_tools` is a single global Vec populated by every connected
                 // server, so the previous "empty == wildcard" reading leaked one
                 // agent's servers into every other agent's prompt.
-                let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist
-                    .iter()
-                    .any(|s| s == "*")
-                {
-                    mcp_tools.iter().cloned().collect()
-                } else {
-                    let normalized: Vec<String> = mcp_allowlist
-                        .iter()
-                        .map(|s| librefang_runtime::mcp::normalize_name(s))
-                        .collect();
-                    mcp_tools
-                        .iter()
-                        .filter(|t| {
-                            librefang_runtime::mcp::resolve_mcp_server_from_known(
-                                &t.name,
-                                configured_servers.iter().map(String::as_str),
-                            )
-                            .map(|server| {
-                                let normalized_server =
-                                    librefang_runtime::mcp::normalize_name(server);
-                                normalized.iter().any(|n| n == &normalized_server)
+                let mut mcp_candidates: Vec<ToolDefinition> =
+                    if mcp_allowlist.iter().any(|s| s == "*") {
+                        mcp_tools.iter().cloned().collect()
+                    } else {
+                        // Resolve each tool's owning server against the agent's
+                        // own allowlist (not the global `effective_mcp_servers`
+                        // list). The allowlist is the authority for which servers
+                        // this agent may see, so filtering off it stays correct
+                        // even before/while server registration syncs — and
+                        // `resolve_mcp_server_from_known` longest-prefix matching
+                        // keeps `["server"]` from swallowing `server_x`'s tools.
+                        let allow: Vec<&str> = mcp_allowlist.iter().map(String::as_str).collect();
+                        mcp_tools
+                            .iter()
+                            .filter(|t| {
+                                librefang_runtime::mcp::resolve_mcp_server_from_known(
+                                    &t.name,
+                                    allow.iter().copied(),
+                                )
+                                .is_some()
                             })
-                            .unwrap_or(false)
-                        })
-                        .cloned()
-                        .collect()
-                };
+                            .cloned()
+                            .collect()
+                    };
                 // Sort MCP tools by name so connect / hot-reload order does not
                 // mutate the prompt prefix and invalidate provider cache (#3765).
                 mcp_candidates.sort_by(|a, b| a.name.cmp(&b.name));
