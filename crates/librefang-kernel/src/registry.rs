@@ -559,6 +559,16 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's `auto_evolve` flag.
+    pub fn update_auto_evolve(&self, id: AgentId, auto_evolve: bool) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.auto_evolve = auto_evolve;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's declared tools and/or allowlist/blocklist in a
     /// single registry lock. Fields left as `None` are not modified.
     pub fn update_tool_config(

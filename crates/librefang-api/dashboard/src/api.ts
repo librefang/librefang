@@ -1247,6 +1247,7 @@ export interface AgentDetail {
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
+  auto_evolve?: boolean;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
